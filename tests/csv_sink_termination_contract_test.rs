@@ -15,9 +15,10 @@ use obzenflow_adapters::middleware::{
     SourcePollOutcome,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
-use obzenflow_core::{EventId, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -241,39 +242,50 @@ fn receipt_summary(
     source: &[JournalRecord<ChainPayload>],
     sink: &[JournalRecord<ChainPayload>],
 ) -> ReceiptSummary {
-    let source_ids = source
+    let inputs = source
         .iter()
         .filter(|envelope| CsvRecord::from_event(&envelope.authored()).is_some())
-        .map(|envelope| envelope.envelope.provenance.event.id)
-        .collect::<HashSet<EventId>>();
+        .collect::<Vec<_>>();
     let mut summary = ReceiptSummary::default();
-    let mut committed_parents = HashSet::new();
+    let mut committed_inputs = HashSet::new();
 
     for envelope in sink {
-        let ChainPayload::Delivery(payload) = &envelope.payload else {
-            continue;
+        let payload = match &envelope.payload {
+            ChainPayload::Delivery(payload) => payload,
+            ChainPayload::Execution(ExecutionPayload::SinkAudit(audit)) => {
+                assert_eq!(audit.outcome.destination, "csv_out");
+                assert!(matches!(
+                    audit.outcome.result,
+                    DeliveryResult::Success { .. }
+                ));
+                summary.audits += 1;
+                continue;
+            }
+            _ => continue,
         };
         assert_eq!(payload.destination, "csv_out");
-        let parent = envelope
+        let input = inputs
+            .iter()
+            .find(|input| payload.subject.matches_record(input))
+            .expect("a receipt must settle an exact committed CSV input");
+        assert!(envelope
             .envelope
             .provenance
             .event
             .causality
             .parent_ids
-            .first()
-            .copied();
-        match (&payload.result, parent) {
-            (DeliveryResult::Buffered { .. }, Some(parent)) if source_ids.contains(&parent) => {
+            .contains(&input.envelope.provenance.event.id));
+        match &payload.result {
+            DeliveryResult::Buffered { .. } => {
                 summary.buffered += 1;
             }
-            (DeliveryResult::Success { .. }, Some(parent)) if source_ids.contains(&parent) => {
+            DeliveryResult::Success { .. } => {
                 assert!(
-                    committed_parents.insert(parent),
+                    committed_inputs.insert(payload.subject.input),
                     "each input receives one terminal CSV receipt"
                 );
                 summary.committed += 1;
             }
-            (DeliveryResult::Success { .. }, None) => summary.audits += 1,
             other => panic!("unexpected CSV delivery evidence: {other:?}"),
         }
     }

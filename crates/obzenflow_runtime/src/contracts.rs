@@ -245,7 +245,8 @@ mod tests {
         let reader = StageId::new();
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            "test.forwarded.v1",
+            "test.forwarded",
+            std::num::NonZeroU32::MIN,
             json!({"value": 1}),
         );
 

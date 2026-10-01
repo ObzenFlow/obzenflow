@@ -10,7 +10,25 @@ use crate::{StageId, WriterId};
 
 impl ChainEventFactory {
     pub fn execution_event(writer_id: WriterId, payload: ExecutionPayload) -> ChainEvent {
-        Self::create_event(writer_id, ChainPayload::Execution(payload))
+        Self::framework_event(writer_id, ChainPayload::Execution(payload))
+    }
+
+    pub fn derived_execution_event(
+        writer_id: WriterId,
+        parent: &ChainEvent,
+        payload: ExecutionPayload,
+        lineage: crate::config::LineagePolicy,
+    ) -> ChainEvent {
+        let event_type = payload.event_type();
+        let version = payload.payload_schema_version();
+        Self::derived_event(
+            writer_id,
+            parent,
+            ChainPayload::Execution(payload),
+            event_type,
+            version,
+            lineage,
+        )
     }
 
     pub fn stage_running(writer_id: WriterId, stage_id: StageId) -> ChainEvent {

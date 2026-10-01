@@ -16,7 +16,7 @@ use obzenflow_core::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, PipelineStopAdmission, SystemFeedRole,
 };
 use obzenflow_core::event::provenance::ExecutionAccounting;
-use obzenflow_core::event::types::{Count, DurationMs, EventType, SeqNo, ViolationCause};
+use obzenflow_core::event::types::{Count, DurationMs, SeqNo, ViolationCause};
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
     CommandDiscardDisposition, PipelineLifecycleEvent, ReplayLifecycleEvent,
@@ -244,7 +244,7 @@ pub(super) struct ContractEdge<'a> {
     #[serde(serialize_with = "display")]
     pub reader_stage_id: StageId,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_event_type: Option<&'a EventType>,
+    pub selected_event_type: Option<&'a obzenflow_core::EventDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed_role: Option<SystemFeedRole>,
     #[serde(skip_serializing_if = "Option::is_none")]

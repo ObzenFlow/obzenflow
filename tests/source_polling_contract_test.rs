@@ -74,15 +74,13 @@ impl InlineSink for NoopSink {
 // A closed factual control report exercises the source outbox without a
 // retired generic metrics payload.
 fn policy_report(writer_id: WriterId, reason: impl Into<String>) -> ChainEvent {
-    ChainEventFactory::create_event(
+    ChainEventFactory::execution_event(
         writer_id,
-        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
-            StageLifecycleFact::Draining {
-                accounting: None,
-                stage_id: *writer_id.as_stage().expect("stage writer"),
-                reason: Some(reason.into()),
-            },
-        )),
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Draining {
+            accounting: None,
+            stage_id: *writer_id.as_stage().expect("stage writer"),
+            reason: Some(reason.into()),
+        }),
     )
 }
 

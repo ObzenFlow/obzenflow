@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::event::payloads::effect_payload::{
-    EffectCursor, EffectDescriptor, EFFECT_RECORD_EVENT_TYPE,
+    EffectCursor, EffectDescriptor, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 use crate::event::payloads::execution_payload::ExecutionPayload;
 use crate::event::types::CorrelationId;
@@ -16,7 +16,12 @@ use serde_json::json;
 #[test]
 fn test_factory_creation() {
     let writer_id = WriterId::from(StageId::new());
-    let event = ChainEventFactory::data_event(writer_id, "test.event", json!({"key": "value"}));
+    let event = ChainEventFactory::data_event(
+        writer_id,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        json!({"key": "value"}),
+    );
 
     assert_eq!(event.writer_id, writer_id);
     assert!(event.consumes_data_credit());
@@ -26,20 +31,25 @@ fn test_factory_creation() {
 #[test]
 fn test_derived_event() {
     let writer_id = WriterId::from(StageId::new());
-    let parent =
-        ChainEventFactory::data_event(writer_id, "parent.event", json!({"data": "parent"}))
-            .with_new_correlation()
-            .with_ingress_context(IngressContext {
-                accepted_at_ns: 42,
-                ingress_key: "test".into(),
-                batch_index: Some(1),
-                attempt_seq: IngressAttemptSeq(0),
-            });
+    let parent = ChainEventFactory::data_event(
+        writer_id,
+        "parent.event",
+        std::num::NonZeroU32::MIN,
+        json!({"data": "parent"}),
+    )
+    .with_new_correlation()
+    .with_ingress_context(IngressContext {
+        accepted_at_ns: 42,
+        ingress_key: "test".into(),
+        batch_index: Some(1),
+        attempt_seq: IngressAttemptSeq(0),
+    });
 
     let child = ChainEventFactory::derived_data_event(
         writer_id,
         &parent,
         "child.event",
+        std::num::NonZeroU32::MIN,
         json!({"data": "child"}),
         crate::config::LineagePolicy::default(),
     );
@@ -54,18 +64,22 @@ fn framework_effect_data_is_not_source_replayable() {
     let writer_id = WriterId::from(StageId::new());
     use crate::event::payloads::effect_payload::{EffectOutcomePayload, EffectRecord};
     let record = EffectRecord {
+        observation: crate::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: EffectCursor::new("flow", "stage", 1, 0),
         descriptor_hash: "hash".into(),
         descriptor: EffectDescriptor::new("test.effect", "test", 1, "v1", "input"),
         outcome: EffectOutcomePayload::Succeeded { output: json!({}) },
         origin: None,
     };
-    let event = ChainEventFactory::create_event(
-        writer_id,
-        ChainPayload::Execution(ExecutionPayload::EffectRecord(record)),
-    );
+    let event =
+        ChainEventFactory::execution_event(writer_id, ExecutionPayload::EffectRecord(record));
     // Application descriptors cannot impersonate execution records.
-    let fact = ChainEventFactory::data_event(writer_id, EFFECT_RECORD_EVENT_TYPE, json!({}));
+    let fact = ChainEventFactory::data_event(
+        writer_id,
+        EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
     assert!(fact.is_source_replayable());
     assert!(!event.is_source_replayable());
 }
@@ -74,7 +88,12 @@ fn framework_effect_data_is_not_source_replayable() {
 fn correlation_serializes_as_single_context_field() {
     let writer_id = WriterId::from(StageId::new());
     let correlation_id = CorrelationId::new();
-    let mut event = ChainEventFactory::data_event(writer_id, "test.event", json!({"key": "value"}));
+    let mut event = ChainEventFactory::data_event(
+        writer_id,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        json!({"key": "value"}),
+    );
 
     event.set_single_correlation(correlation_id, None);
 
@@ -120,13 +139,14 @@ fn catch_up_complete_round_trips_and_classifies_re_admit() {
     }
 
     let writer_id = WriterId::from(StageId::new());
-    let event = ChainEventFactory::source_event(
+    let event = ChainEventFactory::flow_signal_event(
         writer_id,
-        ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
+        FlowControlPayload::CatchUpComplete {
             generation: ReaderGeneration(1),
             stage_key: StageKey("tx_source".into()),
-        }),
-    );
+        },
+    )
+    .with_new_correlation();
     assert_eq!(event.event_type(), "control.catch_up_complete");
     assert_eq!(event.replay_disposition(), ReplayDisposition::ReAdmit);
     assert!(event.is_source_replayable());

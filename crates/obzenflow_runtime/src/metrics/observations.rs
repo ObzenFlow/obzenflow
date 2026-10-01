@@ -779,6 +779,7 @@ mod tests {
         instrumentation.record_output_event(&ChainEventFactory::data_event(
             stage.into(),
             "business.fact",
+            std::num::NonZeroU32::MIN,
             serde_json::Value::Null,
         ));
         let before = instrumentation.snapshot();

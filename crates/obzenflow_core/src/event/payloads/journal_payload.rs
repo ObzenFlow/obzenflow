@@ -123,11 +123,29 @@ impl JournalPayload for ChainPayload {
     }
 
     fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error> {
-        ChainPayload::decode(provenance.event_kind, &provenance.event_type, payload)
+        ChainPayload::decode(
+            provenance.event_kind,
+            &provenance.event_type,
+            provenance.payload_schema_version,
+            payload,
+        )
     }
 
     fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error> {
+        self.validate_semantics()?;
+        if let ChainPayload::Delivery(payload) = self {
+            if !provenance
+                .causality
+                .parent_ids
+                .contains(&payload.subject.input.event_id)
+            {
+                return Err(descriptor_mismatch());
+            }
+        }
         if self.kind() != provenance.event_kind
+            || self
+                .framework_schema_version()
+                .is_some_and(|expected| expected != provenance.payload_schema_version)
             || self
                 .framework_event_type()
                 .is_some_and(|expected| expected != provenance.event_type)
@@ -175,14 +193,18 @@ impl JournalPayload for SystemPayload {
     }
 
     fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error> {
-        if provenance.event_kind != EventKind::System {
+        if provenance.event_kind != EventKind::System
+            || provenance.payload_schema_version != SystemPayload::SCHEMA_VERSION
+        {
             return Err(descriptor_mismatch());
         }
         serde_json::from_value(payload)
     }
 
     fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error> {
-        if provenance.event_kind != EventKind::System || self.event_type() != provenance.event_type
+        if provenance.event_kind != EventKind::System
+            || self.event_type() != provenance.event_type
+            || provenance.payload_schema_version != SystemPayload::SCHEMA_VERSION
         {
             return Err(descriptor_mismatch());
         }

@@ -61,7 +61,7 @@ pub(crate) fn stage_commands(
         let context = context.clone();
         Box::pin(async move {
             use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-            use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+            use obzenflow_core::event::ChainEventFactory;
             let DiscardedCommand {
                 supervisor,
                 terminal_state,
@@ -69,17 +69,17 @@ pub(crate) fn stage_commands(
                 disposition,
                 error,
             } = discarded;
-            let event = ChainEventFactory::create_with_context(
+            let event = ChainEventFactory::execution_event(
                 context.stage_id.into(),
-                ChainPayload::Execution(ExecutionPayload::SupervisorCommandDiscarded {
+                ExecutionPayload::SupervisorCommandDiscarded {
                     supervisor,
                     terminal_state,
                     command,
                     disposition,
                     error,
-                }),
-                context,
-            );
+                },
+            )
+            .with_flow_context(context);
             publication::append_inline(&journal, event, Default::default()).await?;
             Ok(())
         })

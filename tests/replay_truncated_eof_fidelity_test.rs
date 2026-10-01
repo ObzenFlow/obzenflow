@@ -252,7 +252,7 @@ async fn record_cancelled_linear(journal_base: &Path) -> std::path::PathBuf {
         .await
         .expect("baseline flow should build");
     let run_dir = replay_testkit::latest_run_dir(journal_base);
-    let tick_event_type = Tick::versioned_event_type();
+    let tick_event_type = Tick::event_type_name();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         assert!(
@@ -304,12 +304,7 @@ async fn truncated_replay_suppresses_finalization_and_records_the_kind() {
     // End-of-input finalization is suppressed: no final aggregate, and the
     // stateful stage's authored EOF carries the folded Truncated kind.
     assert_eq!(
-        data_rows(
-            &candidate,
-            "summer",
-            SumResult::versioned_event_type().as_str(),
-        )
-        .await,
+        data_rows(&candidate, "summer", SumResult::event_type_name().as_str(),).await,
         0,
         "the killed original never finalized, so the replay must not"
     );
@@ -418,12 +413,7 @@ async fn clean_archive_replay_still_finalizes_naturally() {
     let baseline = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(eof_kinds(&baseline, "ticks").await, vec![EofKind::Natural]);
     assert_eq!(
-        data_rows(
-            &baseline,
-            "summer",
-            SumResult::versioned_event_type().as_str(),
-        )
-        .await,
+        data_rows(&baseline, "summer", SumResult::event_type_name().as_str(),).await,
         1
     );
     assert_eq!(delivered.load(Ordering::SeqCst), 1);
@@ -434,12 +424,7 @@ async fn clean_archive_replay_still_finalizes_naturally() {
     let candidate = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(eof_kinds(&candidate, "ticks").await, vec![EofKind::Natural]);
     assert_eq!(
-        data_rows(
-            &candidate,
-            "summer",
-            SumResult::versioned_event_type().as_str(),
-        )
-        .await,
+        data_rows(&candidate, "summer", SumResult::event_type_name().as_str(),).await,
         1,
         "a clean archive's replay still finalizes"
     );
@@ -504,7 +489,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     let baseline = replay_testkit::latest_run_dir(&journal_base);
 
     // Wait until A's Natural EOF is committed and B is mid-stream, then kill.
-    let tick_event_type = Tick::versioned_event_type();
+    let tick_event_type = Tick::event_type_name();
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         assert!(
@@ -605,12 +590,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
 
     // Finalization suppressed below the mixed-kind fan-in.
     assert_eq!(
-        data_rows(
-            &candidate,
-            "summer",
-            SumResult::versioned_event_type().as_str(),
-        )
-        .await,
+        data_rows(&candidate, "summer", SumResult::event_type_name().as_str(),).await,
         0
     );
     assert_eq!(replay_delivered.load(Ordering::SeqCst), 0);

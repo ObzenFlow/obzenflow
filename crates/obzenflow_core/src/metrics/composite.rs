@@ -214,7 +214,7 @@ pub struct CompositeContract {
     pub peer: StageId,
     pub direction: BoundaryDirection,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_event_type: Option<EventType>,
+    pub selected_event_type: Option<crate::EventDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed_role: Option<SystemFeedRole>,
     pub results: Vec<(ContractName, ContractResultStatusLabel, u64)>,
@@ -227,7 +227,7 @@ type ContractProjectionKey = (
     StageId,
     BoundaryDirection,
     String,
-    Option<EventType>,
+    Option<crate::EventDescriptor>,
     Option<SystemFeedRole>,
 );
 
@@ -240,7 +240,7 @@ impl CompositeContract {
         port: impl Into<String>,
         peer: StageId,
         direction: BoundaryDirection,
-        selected_event_type: Option<EventType>,
+        selected_event_type: Option<crate::EventDescriptor>,
         feed_role: Option<SystemFeedRole>,
     ) -> Self {
         Self {
@@ -774,19 +774,19 @@ mod tests {
                         name: "commands".into(),
                         direction: BoundaryDirection::Inbound,
                         member: input,
-                        payload_event_types: vec![EventType::from("checkout.command.v1")],
+                        payload_event_types: vec![EventType::from("checkout.command")],
                     },
                     CompositeBoundaryPort {
                         name: "completed".into(),
                         direction: BoundaryDirection::Outbound,
                         member: success,
-                        payload_event_types: vec![EventType::from("checkout.completed.v1")],
+                        payload_event_types: vec![EventType::from("checkout.completed")],
                     },
                     CompositeBoundaryPort {
                         name: "failed".into(),
                         direction: BoundaryDirection::Outbound,
                         member: failed,
-                        payload_event_types: vec![EventType::from("checkout.failed.v1")],
+                        payload_event_types: vec![EventType::from("checkout.failed")],
                     },
                 ],
                 edges: vec![
@@ -828,19 +828,18 @@ mod tests {
     fn named_ports_use_exact_cut_counters_and_distinct_output_members() {
         let (boundary, input, success, failed, producer, _) = boundary();
         let mut metrics = FakeMetrics::default();
-        metrics.inputs.insert(
-            (input, producer, EventType::from("checkout.command.v1")),
-            11,
-        );
         metrics
             .inputs
-            .insert((input, success, EventType::from("checkout.command.v1")), 99);
+            .insert((input, producer, EventType::from("checkout.command")), 11);
+        metrics
+            .inputs
+            .insert((input, success, EventType::from("checkout.command")), 99);
         metrics
             .outputs
-            .insert((success, EventType::from("checkout.completed.v1")), 7);
+            .insert((success, EventType::from("checkout.completed")), 7);
         metrics
             .outputs
-            .insert((failed, EventType::from("checkout.failed.v1")), 4);
+            .insert((failed, EventType::from("checkout.failed")), 4);
 
         let projected = CompositePortTraffic::project(&boundary, &metrics);
         assert_eq!(projected.len(), 3);
@@ -867,7 +866,7 @@ mod tests {
         let mut metrics = FakeMetrics::default();
         metrics
             .outputs
-            .insert((success, EventType::from("checkout.completed.v1")), 7);
+            .insert((success, EventType::from("checkout.completed")), 7);
         let completed = CompositePortTraffic::project(&boundary, &metrics)
             .into_iter()
             .find(|metric| metric.port == "completed")
@@ -888,14 +887,18 @@ mod tests {
             upstream: second_producer,
             downstream: input,
         });
-        let event_type = EventType::from("checkout.command.v1");
+        let event_type = crate::EventDescriptor {
+            event_kind: crate::event::payloads::chain_payload::EventKind::Fact,
+            event_type: "checkout.command".into(),
+            payload_schema_version: std::num::NonZeroU32::MIN,
+        };
         let mut metrics = FakeMetrics::default();
         metrics
             .inputs
-            .insert((input, producer, event_type.clone()), 4);
+            .insert((input, producer, event_type.event_type.clone()), 4);
         metrics
             .inputs
-            .insert((input, second_producer, event_type), 6);
+            .insert((input, second_producer, event_type.event_type), 6);
 
         let commands = CompositePortTraffic::project(&boundary, &metrics)
             .into_iter()
@@ -912,7 +915,11 @@ mod tests {
             upstream: producer,
             downstream: input,
             contract: ContractName::new("TransportContract"),
-            selected_event_type: Some(EventType::from("checkout.command.v1")),
+            selected_event_type: Some(crate::EventDescriptor {
+                event_kind: crate::event::payloads::chain_payload::EventKind::Fact,
+                event_type: "checkout.command".into(),
+                payload_schema_version: std::num::NonZeroU32::MIN,
+            }),
             feed_role: Some(SystemFeedRole::Input),
         };
         contracts.results_total.insert(
@@ -942,7 +949,11 @@ mod tests {
         assert_eq!(projected[0].peer, producer);
         assert_eq!(
             projected[0].selected_event_type,
-            Some(EventType::from("checkout.command.v1"))
+            Some(crate::EventDescriptor {
+                event_kind: crate::event::payloads::chain_payload::EventKind::Fact,
+                event_type: "checkout.command".into(),
+                payload_schema_version: std::num::NonZeroU32::MIN
+            })
         );
         assert_eq!(projected[0].feed_role, Some(SystemFeedRole::Input));
         assert_eq!(projected[0].results[0].2, 3);
@@ -958,7 +969,8 @@ mod tests {
     ) -> ChainEvent {
         let mut entry = ChainEventFactory::data_event(
             WriterId::Stage(StageId::new()),
-            "checkout.command.v1",
+            "checkout.command",
+            std::num::NonZeroU32::MIN,
             json!({}),
         );
         entry.processing.event_time = entered_at_ms;
@@ -971,8 +983,12 @@ mod tests {
                 entered_at_ms,
             )])
             .unwrap();
-        let mut exit =
-            ChainEventFactory::data_event(WriterId::Stage(exit_member), event_type, json!({}));
+        let mut exit = ChainEventFactory::data_event(
+            WriterId::Stage(exit_member),
+            event_type,
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        );
         exit.processing.event_time = exited_at_ms;
         exit.try_with_composite_activations(entry.composite_activations().to_vec())
             .unwrap()
@@ -981,11 +997,11 @@ mod tests {
     #[test]
     fn duration_is_exact_replay_idempotent_and_negative_time_is_invalid() {
         let (boundary, _, success, failed, _, _) = boundary();
-        let valid = exit_event(&boundary, success, "checkout.completed.v1", 1_000, 1_250);
+        let valid = exit_event(&boundary, success, "checkout.completed", 1_000, 1_250);
         let mut second_exit = valid.clone();
         second_exit.id = EventId::new();
         second_exit.processing.event_time = 1_300;
-        let invalid = exit_event(&boundary, failed, "checkout.failed.v1", 2_000, 1_900);
+        let invalid = exit_event(&boundary, failed, "checkout.failed", 2_000, 1_900);
         let mut accumulator = CompositeDurationAccumulator::new(vec![0.1, 0.25, 1.0]);
         accumulator.observe_event(std::slice::from_ref(&boundary), success, &valid);
         accumulator.observe_event(std::slice::from_ref(&boundary), success, &valid);
@@ -1017,7 +1033,7 @@ mod tests {
     #[test]
     fn default_duration_buckets_are_the_stable_prometheus_contract() {
         let (boundary, _, success, _, _, _) = boundary();
-        let valid = exit_event(&boundary, success, "checkout.completed.v1", 1_000, 1_250);
+        let valid = exit_event(&boundary, success, "checkout.completed", 1_000, 1_250);
         let mut accumulator = CompositeDurationAccumulator::default();
         accumulator.observe_event(std::slice::from_ref(&boundary), success, &valid);
 
@@ -1039,14 +1055,16 @@ mod tests {
     #[test]
     fn duration_excludes_signals_unmatched_data_and_internal_member_output() {
         let (boundary, input, success, _, _, _) = boundary();
-        let mut unmatched = exit_event(&boundary, success, "internal.fact.v1", 10, 20);
-        unmatched.payload = ChainPayload::Delivery(
-            crate::event::payloads::delivery_payload::DeliveryPayload::success(
-                crate::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                None,
-            ),
-        );
-        let internal = exit_event(&boundary, input, "checkout.command.v1", 10, 20);
+        let mut unmatched = exit_event(&boundary, success, "internal.fact", 10, 20);
+        unmatched.payload =
+            ChainPayload::Delivery(crate::event::payloads::delivery_payload::test_receipt(
+                unmatched.id,
+                crate::event::payloads::delivery_payload::DeliveryOutcome::success(
+                    crate::event::payloads::delivery_payload::DeliveryMethod::Noop,
+                    None,
+                ),
+            ));
+        let internal = exit_event(&boundary, input, "checkout.command", 10, 20);
         let mut accumulator = CompositeDurationAccumulator::default();
         accumulator.observe_event(std::slice::from_ref(&boundary), success, &unmatched);
         accumulator.observe_event(std::slice::from_ref(&boundary), input, &internal);

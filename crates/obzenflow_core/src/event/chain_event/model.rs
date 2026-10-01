@@ -102,6 +102,7 @@ impl<'de> Deserialize<'de> for ChainEvent {
         let payload = ChainPayload::decode(
             raw.envelope.provenance.event.event_kind,
             &raw.envelope.provenance.event.event_type,
+            raw.envelope.provenance.event.payload_schema_version,
             raw.payload,
         )
         .map_err(D::Error::custom)?;
@@ -129,6 +130,14 @@ pub enum ReplayDisposition {
 }
 
 impl ChainEvent {
+    pub fn descriptor(&self) -> crate::event::types::EventDescriptor {
+        crate::event::types::EventDescriptor {
+            event_kind: self.event_kind,
+            event_type: self.event_type.clone().into(),
+            payload_schema_version: self.payload_schema_version,
+        }
+    }
+
     /// Attach observability context to any event (wide events pattern)
     pub fn with_observability_context(mut self, observability: ObservabilityContext) -> Self {
         self.envelope.observability = Some(observability);
@@ -205,6 +214,7 @@ impl ChainEvent {
         matches!(
             self.payload,
             ChainPayload::Fact(_) | ChainPayload::CompositeData(_)
+                | ChainPayload::Execution(crate::event::payloads::execution_payload::ExecutionPayload::StageFatalRecorded(_) | crate::event::payloads::execution_payload::ExecutionPayload::SinkOperationFailed(_))
         )
     }
 
@@ -218,6 +228,10 @@ impl ChainEvent {
         match &self.payload {
             ChainPayload::Fact(value) => Some(value.clone()),
             ChainPayload::CompositeData(value) => serde_json::to_value(value).ok(),
+            ChainPayload::Execution(
+                crate::event::payloads::execution_payload::ExecutionPayload::StageFatalRecorded(_)
+                | crate::event::payloads::execution_payload::ExecutionPayload::SinkOperationFailed(_),
+            ) => self.payload.contract_body().ok(),
             ChainPayload::Execution(_)
             | ChainPayload::FlowControl(_)
             | ChainPayload::Delivery(_) => None,
@@ -277,14 +291,22 @@ impl ChainEvent {
     pub fn derive_error_event(
         &self,
         event_type: impl Into<String>,
+        payload_schema_version: std::num::NonZeroU32,
         payload: Value,
         reason: impl Into<String>,
         kind: ErrorKind,
         lineage: crate::config::LineagePolicy,
     ) -> ChainEvent {
         let reason_str = reason.into();
-        ChainEventFactory::derived_data_event(self.writer_id, self, event_type, payload, lineage)
-            .mark_as_error(reason_str, kind)
+        ChainEventFactory::derived_data_event(
+            self.writer_id,
+            self,
+            event_type,
+            payload_schema_version,
+            payload,
+            lineage,
+        )
+        .mark_as_error(reason_str, kind)
     }
 
     /// Declared application label or descriptor derived from the typed payload.

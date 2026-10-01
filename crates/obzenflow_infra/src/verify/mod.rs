@@ -490,7 +490,7 @@ mod tests {
     }
 
     fn data(event_type: &str, payload: serde_json::Value) -> ChainEvent {
-        ChainEventFactory::data_event(writer(), event_type, payload)
+        ChainEventFactory::data_event(writer(), event_type, std::num::NonZeroU32::MIN, payload)
     }
 
     fn effect_row(namespace: &str, payload: serde_json::Value) -> ChainEvent {

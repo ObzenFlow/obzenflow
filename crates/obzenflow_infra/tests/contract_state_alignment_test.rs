@@ -19,7 +19,7 @@ use ulid::Ulid;
 /// Helper to create a simple data event for a given writer and seq
 fn make_data_event(writer: WriterId, seq: u64) -> ChainEvent {
     let payload = serde_json::json!({ "seq": seq });
-    ChainEventFactory::data_event(writer, "test_event", payload)
+    ChainEventFactory::data_event(writer, "test_event", std::num::NonZeroU32::MIN, payload)
 }
 
 /// Helper to create a simple EOF event for a given writer

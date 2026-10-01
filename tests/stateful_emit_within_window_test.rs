@@ -422,8 +422,7 @@ async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Resul
         .await
         .map_err(|e| anyhow!("flow run failed: {e}"))?;
 
-    let input_ids =
-        data_event_ids_of_type(&src_journal, &WindowInput::versioned_event_type()).await?;
+    let input_ids = data_event_ids_of_type(&src_journal, &WindowInput::event_type_name()).await?;
     assert_eq!(input_ids.len(), 3, "expected three input events");
 
     let aggregate = last_window_aggregate_event(&win_journal)
@@ -710,7 +709,7 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
         let ChainPayload::Fact(payload) = &env.payload else {
             continue;
         };
-        if !GroupInput::event_type_matches(&event_type) {
+        if !GroupInput::matches_event_type(&event_type) {
             continue;
         }
         let group = payload
@@ -735,7 +734,7 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
         let ChainPayload::Fact(payload) = &env.payload else {
             continue;
         };
-        if !GroupAggOutput::event_type_matches(&event_type) {
+        if !GroupAggOutput::matches_event_type(&event_type) {
             continue;
         }
         let output: GroupAggOutput = serde_json::from_value(payload.clone())

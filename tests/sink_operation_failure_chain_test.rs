@@ -769,7 +769,7 @@ fn failure_chain(
         route.id,
         operation.causal_event_id.expect("current input id")
     );
-    assert_eq!(route.event_type(), ProbeInput::versioned_event_type());
+    assert_eq!(route.event_type(), ProbeInput::event_type_name());
     assert!(matches!(
         route.processing.status,
         ProcessingStatus::Error { .. }

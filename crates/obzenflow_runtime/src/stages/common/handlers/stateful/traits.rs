@@ -692,7 +692,8 @@ mod tests {
     fn effectful_stateful_fact_decoder_accepts_scalar_fact() {
         let event = obzenflow_core::event::ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
-            FirstOutput::versioned_event_type(),
+            FirstOutput::event_type_name(),
+            FirstOutput::payload_schema_version(),
             serde_json::json!({ "value": 1 }),
         );
 
@@ -701,14 +702,15 @@ mod tests {
 
         assert_eq!(fact, FirstOutput { value: 1 });
         assert!(event.is_fact());
-        assert_eq!(event.event_type(), "stateful.first.v1");
+        assert_eq!(event.event_type(), "stateful.first");
     }
 
     #[test]
     fn effectful_stateful_fact_decoder_rejects_false_one_fact_assertion() {
         let event = obzenflow_core::event::ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
-            FirstOutput::versioned_event_type(),
+            FirstOutput::event_type_name(),
+            FirstOutput::payload_schema_version(),
             serde_json::json!({ "value": 1 }),
         );
 
@@ -718,8 +720,8 @@ mod tests {
         assert!(error.is_contract_violation());
         let message = error.to_string();
         assert!(message.contains("one_fact_stage_output"));
-        assert!(message.contains("stateful.first.v1"));
-        assert!(message.contains("stateful.second.v1"));
+        assert!(message.contains("stateful.first"));
+        assert!(message.contains("stateful.second"));
     }
 
     #[derive(Clone, Debug)]

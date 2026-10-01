@@ -1377,18 +1377,21 @@ pub(crate) mod tests {
             .record_output_event(&ChainEventFactory::data_event(
                 source_writer_id,
                 "test.a",
+                std::num::NonZeroU32::MIN,
                 json!({}),
             ));
         ctx.instrumentation
             .record_output_event(&ChainEventFactory::data_event(
                 source_writer_id,
                 "test.a",
+                std::num::NonZeroU32::MIN,
                 json!({}),
             ));
         ctx.instrumentation
             .record_output_event(&ChainEventFactory::data_event(
                 source_writer_id,
                 "test.b",
+                std::num::NonZeroU32::MIN,
                 json!({}),
             ));
 
@@ -1420,8 +1423,18 @@ pub(crate) mod tests {
                 _ => None,
             })
             .expect("expected EOF writer seq map");
-        assert_eq!(eof_writer_seq_by_event_type.get("test.a"), Some(&SeqNo(2)));
-        assert_eq!(eof_writer_seq_by_event_type.get("test.b"), Some(&SeqNo(1)));
+        assert_eq!(
+            eof_writer_seq_by_event_type.get(&crate::testing::causal_fixture::fact_descriptor(
+                "test.a", 1
+            )),
+            Some(&SeqNo(2))
+        );
+        assert_eq!(
+            eof_writer_seq_by_event_type.get(&crate::testing::causal_fixture::fact_descriptor(
+                "test.b", 1
+            )),
+            Some(&SeqNo(1))
+        );
 
         // Case 2: breaker open -> poison EOF
         let state_open = Arc::new(AtomicU8::new(1)); // Open

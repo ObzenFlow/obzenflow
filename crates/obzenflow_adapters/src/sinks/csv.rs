@@ -1041,6 +1041,49 @@ impl CsvSinkInner {
 
 #[cfg(test)]
 mod tests {
+    #[async_trait::async_trait]
+    trait TestDispatch {
+        async fn report_test(
+            &mut self,
+            event: obzenflow_core::ChainEvent,
+        ) -> Result<
+            obzenflow_runtime::stages::common::handlers::SinkConsumeReport,
+            obzenflow_runtime::stages::common::HandlerError,
+        >;
+        async fn consume_test(
+            &mut self,
+            event: obzenflow_core::ChainEvent,
+        ) -> Result<
+            obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome,
+            obzenflow_runtime::stages::common::HandlerError,
+        > {
+            Ok(self.report_test(event).await?.primary)
+        }
+    }
+    #[async_trait::async_trait]
+    impl<W: obzenflow_runtime::stages::common::handlers::SinkWriter> TestDispatch
+        for obzenflow_runtime::stages::common::handlers::SinkWriterAdapter<W>
+    {
+        async fn report_test(
+            &mut self,
+            event: obzenflow_core::ChainEvent,
+        ) -> Result<
+            obzenflow_runtime::stages::common::handlers::SinkConsumeReport,
+            obzenflow_runtime::stages::common::HandlerError,
+        > {
+            let input = obzenflow_core::event::JournalRecord::new(
+                obzenflow_core::JournalWriterId::new(),
+                event,
+            );
+            obzenflow_runtime::stages::common::handlers::SinkHandler::consume_committed_report(
+                self,
+                input.into(),
+                Default::default(),
+            )
+            .await
+        }
+    }
+
     use super::*;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
     use obzenflow_core::event::ChainEventFactory;
@@ -1147,7 +1190,8 @@ mod tests {
     fn event(a: i32, b: i32) -> obzenflow_core::ChainEvent {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            TestRow::versioned_event_type(),
+            TestRow::event_type_name(),
+            TestRow::payload_schema_version(),
             json!({ "a": a, "b": b }),
         )
     }
@@ -1209,7 +1253,7 @@ mod tests {
             .build()
             .unwrap();
         let mut sink = adapted(sink).await;
-        sink.consume(event(1, 2)).await.unwrap();
+        sink.consume_test(event(1, 2)).await.unwrap();
         sink.flush().await.unwrap();
 
         let mut out = String::new();
@@ -1229,7 +1273,7 @@ mod tests {
             .expect("projected connector");
         let mut sink = adapted(sink).await;
 
-        sink.consume(event(4, 5)).await.expect("project input");
+        sink.consume_test(event(4, 5)).await.expect("project input");
         sink.flush().await.expect("flush projection");
 
         let mut out = String::new();
@@ -1244,7 +1288,7 @@ mod tests {
         let mut sink = adapted(sink).await;
 
         let error = sink
-            .consume_report(event(1, 2))
+            .report_test(event(1, 2))
             .await
             .expect_err("projection rejection follows the sink error path");
 
@@ -1271,14 +1315,14 @@ mod tests {
         let first = event(1, 2);
         let second = event(3, 4);
 
-        let report = sink.consume_report(first.clone()).await.unwrap();
+        let report = sink.report_test(first.clone()).await.unwrap();
         assert!(matches!(
             report.primary.result,
             DeliveryResult::Buffered { .. }
         ));
         assert!(report.commit_receipts.is_empty());
 
-        let report = sink.consume_report(second.clone()).await.unwrap();
+        let report = sink.report_test(second.clone()).await.unwrap();
         assert!(matches!(
             report.primary.result,
             DeliveryResult::Buffered { .. }
@@ -1287,8 +1331,14 @@ mod tests {
 
         let lifecycle = sink.flush_report().await.unwrap();
         assert_eq!(lifecycle.commit_receipts.len(), 2);
-        assert_eq!(lifecycle.commit_receipts[0].parent_event_id, first.id);
-        assert_eq!(lifecycle.commit_receipts[1].parent_event_id, second.id);
+        assert_eq!(
+            lifecycle.commit_receipts[0].subject.input.event_id,
+            first.id
+        );
+        assert_eq!(
+            lifecycle.commit_receipts[1].subject.input.event_id,
+            second.id
+        );
         assert!(matches!(
             lifecycle.audit_payload.expect("audit payload").result,
             DeliveryResult::Success { .. }
@@ -1315,7 +1365,7 @@ mod tests {
         let mut sink = adapted(sink).await;
         let input = event(5, 6);
 
-        let consume = sink.consume_report(input.clone()).await.unwrap();
+        let consume = sink.report_test(input.clone()).await.unwrap();
         assert!(matches!(
             consume.primary.result,
             DeliveryResult::Buffered { .. }
@@ -1323,7 +1373,10 @@ mod tests {
 
         let lifecycle = sink.drain_report().await.unwrap();
         assert_eq!(lifecycle.commit_receipts.len(), 1);
-        assert_eq!(lifecycle.commit_receipts[0].parent_event_id, input.id);
+        assert_eq!(
+            lifecycle.commit_receipts[0].subject.input.event_id,
+            input.id
+        );
         assert!(matches!(
             lifecycle.commit_receipts[0].payload.result,
             DeliveryResult::Success { .. }
@@ -1349,21 +1402,27 @@ mod tests {
         let first = event(1, 2);
         let second = event(3, 4);
 
-        let first_report = sink.consume_report(first.clone()).await.unwrap();
+        let first_report = sink.report_test(first.clone()).await.unwrap();
         assert!(matches!(
             first_report.primary.result,
             DeliveryResult::Buffered { .. }
         ));
         assert!(first_report.commit_receipts.is_empty());
 
-        let second_report = sink.consume_report(second.clone()).await.unwrap();
+        let second_report = sink.report_test(second.clone()).await.unwrap();
         assert!(matches!(
             second_report.primary.result,
             DeliveryResult::Buffered { .. }
         ));
         assert_eq!(second_report.commit_receipts.len(), 2);
-        assert_eq!(second_report.commit_receipts[0].parent_event_id, first.id);
-        assert_eq!(second_report.commit_receipts[1].parent_event_id, second.id);
+        assert_eq!(
+            second_report.commit_receipts[0].subject.input.event_id,
+            first.id
+        );
+        assert_eq!(
+            second_report.commit_receipts[1].subject.input.event_id,
+            second.id
+        );
 
         let mut out = String::new();
         File::open(&path).unwrap().read_to_string(&mut out).unwrap();
@@ -1404,11 +1463,11 @@ mod tests {
         let first = event(1, 2);
         let failed = event(3, 4);
 
-        sink.consume_report(first.clone())
+        sink.report_test(first.clone())
             .await
             .expect("first row buffers");
         let error = sink
-            .consume_report(failed)
+            .report_test(failed)
             .await
             .expect_err("threshold flush is forced to fail");
         assert!(matches!(
@@ -1423,7 +1482,10 @@ mod tests {
             .await
             .expect("the earlier buffered row remains settleable");
         assert_eq!(lifecycle.commit_receipts.len(), 1);
-        assert_eq!(lifecycle.commit_receipts[0].parent_event_id, first.id);
+        assert_eq!(
+            lifecycle.commit_receipts[0].subject.input.event_id,
+            first.id
+        );
     }
 
     #[cfg(feature = "test-support")]
@@ -1445,12 +1507,12 @@ mod tests {
         let deferred = event(1, 2);
         let current = event(3, 4);
 
-        sink.consume_report(deferred.clone())
+        sink.report_test(deferred.clone())
             .await
             .expect("first row buffers");
         probe.arm(SinkFault::MidBatchMutation);
         let error = sink
-            .consume_report(current.clone())
+            .report_test(current.clone())
             .await
             .expect_err("deferred CSV row fails during threshold flush");
         match error {
@@ -1487,7 +1549,7 @@ mod tests {
         let mut sink = adapted(connector).await;
         let deferred = event(5, 6);
 
-        sink.consume_report(deferred.clone())
+        sink.report_test(deferred.clone())
             .await
             .expect("row buffers before lifecycle flush");
         probe.arm(SinkFault::MidBatchMutation);
@@ -1516,7 +1578,7 @@ mod tests {
             .build()
             .unwrap();
         let mut first = adapted(first).await;
-        first.consume(event(1, 2)).await.unwrap();
+        first.consume_test(event(1, 2)).await.unwrap();
         first.flush().await.unwrap();
         drop(first);
 
@@ -1528,7 +1590,7 @@ mod tests {
             .build()
             .unwrap();
         let mut second = adapted(second).await;
-        second.consume(event(3, 4)).await.unwrap();
+        second.consume_test(event(3, 4)).await.unwrap();
         second.flush().await.unwrap();
 
         let mut out = String::new();
@@ -1625,7 +1687,7 @@ mod tests {
             SinkWriterAdapter::with_default_method(second_writer, second_stage, method);
 
         first
-            .consume_report(event(1, 2))
+            .report_test(event(1, 2))
             .await
             .expect("first writer buffers one input");
         let second_flush = second.flush_report().await.expect("second writer flushes");
@@ -1649,7 +1711,7 @@ mod tests {
             .build()
             .unwrap();
         let mut sink = adapted(sink).await;
-        sink.consume(event(1, 2)).await.unwrap();
+        sink.consume_test(event(1, 2)).await.unwrap();
         sink.flush().await.unwrap();
 
         let mut out = String::new();
@@ -1666,12 +1728,13 @@ mod tests {
         let mut sink = adapted(sink).await;
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            SerializationFails::versioned_event_type(),
+            SerializationFails::event_type_name(),
+            SerializationFails::payload_schema_version(),
             json!({ "value": 7 }),
         );
 
         let error = sink
-            .consume_report(input)
+            .report_test(input)
             .await
             .expect_err("serialization failure must use the handler error path");
         assert!(matches!(
@@ -1689,12 +1752,13 @@ mod tests {
         let mut sink = adapted(sink).await;
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            ScalarRow::versioned_event_type(),
+            ScalarRow::event_type_name(),
+            ScalarRow::payload_schema_version(),
             json!(7),
         );
 
         let error = sink
-            .consume_report(input)
+            .report_test(input)
             .await
             .expect_err("CSV requires an object-shaped typed payload");
         assert!(matches!(

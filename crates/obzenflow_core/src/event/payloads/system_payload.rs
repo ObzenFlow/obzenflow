@@ -272,6 +272,8 @@ pub enum MetricsCoordinationEvent {
 }
 
 impl SystemPayload {
+    pub const SCHEMA_VERSION: std::num::NonZeroU32 = std::num::NonZeroU32::MIN;
+
     pub fn event_type(&self) -> &'static str {
         match self {
             SystemPayload::SupervisorRegistered { .. } => "system.supervisor.registered",

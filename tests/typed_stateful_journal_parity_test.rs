@@ -357,10 +357,10 @@ fn assert_canonical_fact_and_eof<T: TypedPayload>(
     events: &[JournalRecord<ChainPayload>],
     expected_rows: usize,
 ) {
-    let canonical = T::versioned_event_type();
+    let canonical = T::event_type_name();
     let rows = events
         .iter()
-        .filter(|envelope| T::event_type_matches(&envelope.event_type()))
+        .filter(|envelope| T::matches_event_type(&envelope.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), expected_rows);
     assert!(rows
@@ -380,12 +380,15 @@ fn assert_canonical_fact_and_eof<T: TypedPayload>(
         .expect("stateful journal contains EOF evidence");
     let matching = eof_keys
         .iter()
-        .filter(|(key, _)| T::event_type_matches(key.as_str()))
+        .filter(|(key, _)| **key == T::descriptor())
         .collect::<Vec<_>>();
     assert_eq!(matching.len(), 1, "one canonical EOF bucket: {eof_keys:?}");
-    assert_eq!(matching[0].0.as_str(), canonical);
+    assert_eq!(*matching[0].0, T::descriptor());
     assert_eq!(matching[0].1 .0, expected_rows as u64);
-    assert!(eof_keys.keys().all(|key| key.as_str() != T::EVENT_TYPE));
+    assert!(eof_keys.keys().all(|key| !key
+        .event_type
+        .as_str()
+        .ends_with(&format!(".v{}", T::SCHEMA_VERSION))));
 }
 
 fn parent_values(output: &ChainEvent, inputs_by_id: &HashMap<EventId, Input>) -> Vec<u64> {
@@ -471,14 +474,14 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
     );
 
     assert!(fold.iter().all(|envelope| {
-        !Input::event_type_matches(&envelope.event_type())
+        !Input::matches_event_type(&envelope.event_type())
             && !matches!(
                 envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
             )
     }));
     assert!(grouped.iter().all(|envelope| {
-        !Input::event_type_matches(&envelope.event_type())
+        !Input::matches_event_type(&envelope.event_type())
             && !matches!(
                 envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }

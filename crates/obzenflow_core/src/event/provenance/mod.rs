@@ -31,6 +31,7 @@ pub struct ChainEventProvenance {
     pub writer_id: WriterId,
     pub event_kind: EventKind,
     pub event_type: String,
+    pub payload_schema_version: std::num::NonZeroU32,
     pub causality: CausalityContext,
     pub flow_context: FlowContext,
     pub processing: ProcessingProvenance,
@@ -60,6 +61,7 @@ pub struct SystemEventProvenance {
     pub writer_id: WriterId,
     pub event_kind: EventKind,
     pub event_type: String,
+    pub payload_schema_version: std::num::NonZeroU32,
     /// Creation time in milliseconds; independent of journal append time.
     pub timestamp: u64,
 }

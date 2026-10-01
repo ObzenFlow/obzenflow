@@ -117,8 +117,12 @@ mod tests {
     #[test]
     fn attach_and_read_llm_observability_round_trips() {
         let writer_id = WriterId::from(StageId::new());
-        let mut event =
-            ChainEventFactory::data_event(writer_id, "ticket.created", json!({"id": 1}));
+        let mut event = ChainEventFactory::data_event(
+            writer_id,
+            "ticket.created",
+            std::num::NonZeroU32::MIN,
+            json!({"id": 1}),
+        );
 
         let mut llm = LlmObservability::new(
             AiProvider::new("ollama"),

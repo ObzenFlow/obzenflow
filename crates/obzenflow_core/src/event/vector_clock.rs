@@ -323,8 +323,12 @@ mod tests {
     ) -> JournalRecord<ChainPayload> {
         let coordinate = *vector_clock.clocks.keys().next().unwrap();
         let writer_id = WriterId::from(StageId::new());
-        let mut event =
-            ChainEventFactory::data_event(writer_id, "test.vector_clock", json!({ "ok": true }));
+        let mut event = ChainEventFactory::data_event(
+            writer_id,
+            "test.vector_clock",
+            std::num::NonZeroU32::MIN,
+            json!({ "ok": true }),
+        );
         event.id = event_id;
 
         JournalRecord::commit_event(

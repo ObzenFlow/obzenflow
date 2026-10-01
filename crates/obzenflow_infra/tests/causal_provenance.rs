@@ -42,7 +42,12 @@ async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
             Arc::new(MemoryJournal::with_owner(owner))
         };
         let event = || {
-            ChainEventFactory::data_event(author.into(), "admission.fact", serde_json::json!({}))
+            ChainEventFactory::data_event(
+                author.into(),
+                "admission.fact",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            )
         };
         let uncommitted = JournalRecord::new((*journal.id()).into(), event());
         rejects_unadmitted(&uncommitted);
@@ -121,8 +126,14 @@ async fn storage_data_becomes_evidence_only_through_successful_journal_operation
         } else {
             Box::new(MemoryJournal::with_owner(owner))
         };
-        let event =
-            || ChainEventFactory::data_event(author.into(), "stored.fact", serde_json::json!({}));
+        let event = || {
+            ChainEventFactory::data_event(
+                author.into(),
+                "stored.fact",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            )
+        };
         let raw = storage
             .storage_append(event(), Default::default())
             .await
@@ -202,8 +213,14 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
         } else {
             Arc::new(MemoryJournal::with_owner_in_run(owner, run))
         };
-        let event =
-            || ChainEventFactory::data_event(author.into(), "causal.fact", serde_json::json!({}));
+        let event = || {
+            ChainEventFactory::data_event(
+                author.into(),
+                "causal.fact",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            )
+        };
         let source = chains[0].append(event(), Default::default()).await.unwrap();
         let left = chains[1]
             .append(
@@ -277,6 +294,7 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
                     ChainEventFactory::data_event(
                         other_author.into(),
                         "causal.other",
+                        std::num::NonZeroU32::MIN,
                         serde_json::json!({}),
                     ),
                     event(),
@@ -332,7 +350,12 @@ async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
     assert_eq!(reopened.id(), &id);
     let first = reopened
         .append(
-            ChainEventFactory::data_event(author.into(), "root", serde_json::json!({})),
+            ChainEventFactory::data_event(
+                author.into(),
+                "root",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            ),
             Default::default(),
         )
         .await
@@ -362,8 +385,14 @@ async fn missing_committed_frames_cannot_advance_a_journal_prefix() {
             let owner = JournalOwner::stage(author);
             let journal =
                 DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
-            let event =
-                || ChainEventFactory::data_event(author.into(), "prefix", serde_json::json!({}));
+            let event = || {
+                ChainEventFactory::data_event(
+                    author.into(),
+                    "prefix",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                )
+            };
             journal.append(event(), Default::default()).await.unwrap();
             let first_end = std::fs::metadata(&path).unwrap().len() as usize;
             if remove_group {

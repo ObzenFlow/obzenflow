@@ -746,14 +746,24 @@ mod tests {
 
         journal
             .append(
-                ChainEventFactory::data_event(writer, "a", serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    writer,
+                    "a",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
                 Default::default(),
             )
             .await
             .expect("append a");
         journal
             .append(
-                ChainEventFactory::data_event(writer, "b", serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    writer,
+                    "b",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
                 Default::default(),
             )
             .await
@@ -765,7 +775,12 @@ mod tests {
 
         journal
             .append(
-                ChainEventFactory::data_event(writer, "c", serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    writer,
+                    "c",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
                 Default::default(),
             )
             .await
@@ -814,7 +829,12 @@ mod tests {
         let mk = |ty: &str| {
             JournalRecord::new(
                 JournalWriterId::new(),
-                ChainEventFactory::data_event(writer, ty, serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    writer,
+                    ty,
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
             )
         };
 
@@ -859,8 +879,12 @@ mod tests {
         let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(journal);
 
         let corr = CorrelationId::new();
-        let mut parent =
-            ChainEventFactory::data_event(writer, "parent", serde_json::json!({ "k": "v" }));
+        let mut parent = ChainEventFactory::data_event(
+            writer,
+            "parent",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({ "k": "v" }),
+        );
         parent.set_single_correlation(corr, None);
         let parent_env = journal
             .append(parent, Default::default())
@@ -871,6 +895,7 @@ mod tests {
             writer,
             &parent_env.authored(),
             "child.a",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({ "i": 1 }),
             obzenflow_core::config::LineagePolicy::default(),
         );
@@ -878,6 +903,7 @@ mod tests {
             writer,
             &parent_env.authored(),
             "child.b",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({ "i": 2 }),
             obzenflow_core::config::LineagePolicy::default(),
         );

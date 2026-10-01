@@ -42,6 +42,7 @@ fn placeholder_transform_drops_data_events() {
     let event = ChainEventFactory::data_event(
         WriterId::from(StageId::new()),
         "test.event",
+        std::num::NonZeroU32::MIN,
         json!({"hello": "world"}),
     );
     let outputs = TransformHandler::process(&handler, event).expect("transform process");
@@ -109,9 +110,14 @@ async fn placeholder_sink_acks_and_flushes_safely() {
     let mut handler = SinkWriterAdapter::new(handler, StageId::new());
     let event = PlaceholderInput.to_event(WriterId::from(StageId::new()));
 
-    let payload = SinkHandler::consume(&mut handler, event)
-        .await
-        .expect("sink consume");
+    let report = SinkHandler::consume_committed_report(
+        &mut handler,
+        obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event).into(),
+        Default::default(),
+    )
+    .await
+    .expect("sink consume");
+    let payload = report.primary;
 
     assert!(matches!(payload.delivery_method, DeliveryMethod::Noop));
     assert!(matches!(payload.result, DeliveryResult::Success { .. }));

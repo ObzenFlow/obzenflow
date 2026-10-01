@@ -624,7 +624,12 @@ mod tests {
             .expect("append eof");
         stage_journal
             .append(
-                ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    writer_id,
+                    "data",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
                 Default::default(),
             )
             .await
@@ -638,7 +643,12 @@ mod tests {
             .expect("append drain");
         stage_journal
             .append(
-                ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    writer_id,
+                    "data",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
                 Default::default(),
             )
             .await
@@ -670,7 +680,12 @@ mod tests {
         let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
 
-        let event = ChainEventFactory::data_event(writer_id, "data", serde_json::json!({}));
+        let event = ChainEventFactory::data_event(
+            writer_id,
+            "data",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
         let mut envelope = JournalRecord::new(stage_journal_impl.id.into(), event);
         // Corruption must fail at admission, before the probe exposes data.
         envelope.envelope.provenance.journal.vector_clock = VectorClock::new();
@@ -697,7 +712,12 @@ mod tests {
         let probe = JournalProbe::on_journal("siblings", stage, journal.clone());
         let first = journal
             .append(
-                ChainEventFactory::data_event(stage.into(), "first", serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    stage.into(),
+                    "first",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
                 Default::default(),
             )
             .await
@@ -711,7 +731,12 @@ mod tests {
                 released.await.unwrap();
                 journal
                     .append(
-                        ChainEventFactory::data_event(stage.into(), "late", serde_json::json!({})),
+                        ChainEventFactory::data_event(
+                            stage.into(),
+                            "late",
+                            std::num::NonZeroU32::MIN,
+                            serde_json::json!({}),
+                        ),
                         Default::default(),
                     )
                     .await
@@ -767,7 +792,12 @@ mod tests {
             1,
         );
         let env_a = JournalRecord::commit_event(
-            ChainEventFactory::data_event(stage_writer_id, "data.a", serde_json::json!({})),
+            ChainEventFactory::data_event(
+                stage_writer_id,
+                "data.a",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            ),
             JournalProvenance {
                 run_id: obzenflow_core::FlowId::new(),
                 previous: None,
@@ -789,7 +819,12 @@ mod tests {
             1,
         );
         let env_b = JournalRecord::commit_event(
-            ChainEventFactory::data_event(stage_writer_id, "data.b", serde_json::json!({})),
+            ChainEventFactory::data_event(
+                stage_writer_id,
+                "data.b",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            ),
             JournalProvenance {
                 run_id: obzenflow_core::FlowId::new(),
                 previous: None,
@@ -851,7 +886,12 @@ mod tests {
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
 
         // One non-matching depth.
-        let mut other = ChainEventFactory::data_event(writer_id, "other", serde_json::json!({}));
+        let mut other = ChainEventFactory::data_event(
+            writer_id,
+            "other",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
         other.cycle_scc_id = Some(scc);
         other.cycle_depth = Some(CycleDepth::new(3));
         stage_journal
@@ -861,7 +901,12 @@ mod tests {
 
         // Two matching envelopes at the same (scc, depth).
         for label in ["match.1", "match.2"] {
-            let mut ev = ChainEventFactory::data_event(writer_id, label, serde_json::json!({}));
+            let mut ev = ChainEventFactory::data_event(
+                writer_id,
+                label,
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            );
             ev.cycle_scc_id = Some(scc);
             ev.cycle_depth = Some(depth);
             stage_journal
@@ -905,8 +950,12 @@ mod tests {
         let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
 
-        let mut parent =
-            ChainEventFactory::data_event(writer_id, "parent", serde_json::json!({"k": 1}));
+        let mut parent = ChainEventFactory::data_event(
+            writer_id,
+            "parent",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({"k": 1}),
+        );
         parent.cycle_scc_id = Some(scc);
         parent.cycle_depth = Some(depth);
 
@@ -914,6 +963,7 @@ mod tests {
             writer_id,
             &parent,
             "child.1",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"k": 2}),
             obzenflow_core::config::LineagePolicy::default(),
         );
@@ -921,6 +971,7 @@ mod tests {
             writer_id,
             &parent,
             "child.2",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"k": 3}),
             obzenflow_core::config::LineagePolicy::default(),
         );
@@ -974,14 +1025,24 @@ mod tests {
         let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
 
-        let mut ok = ChainEventFactory::data_event(writer_id, "ok", serde_json::json!({}));
+        let mut ok = ChainEventFactory::data_event(
+            writer_id,
+            "ok",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
         ok.processing.status = ProcessingStatus::Success;
         stage_journal
             .append(ok, Default::default())
             .await
             .expect("append ok");
 
-        let mut err = ChainEventFactory::data_event(writer_id, "err", serde_json::json!({}));
+        let mut err = ChainEventFactory::data_event(
+            writer_id,
+            "err",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
         err.processing.status = ProcessingStatus::error("boom");
         stage_journal
             .append(err.clone(), Default::default())
@@ -1039,6 +1100,7 @@ mod tests {
                         ChainEventFactory::data_event(
                             writer_id,
                             "data",
+                            std::num::NonZeroU32::MIN,
                             serde_json::json!({"payload": payload}),
                         ),
                         Default::default(),

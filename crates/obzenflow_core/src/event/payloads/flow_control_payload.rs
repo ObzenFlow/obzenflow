@@ -7,8 +7,7 @@
 use std::fmt;
 
 use crate::event::types::{
-    Count, DurationMs, EventType, JournalIndex, JournalPath, ReaderGeneration, RouteKey, SeqNo,
-    ViolationCause,
+    Count, DurationMs, JournalIndex, JournalPath, ReaderGeneration, RouteKey, SeqNo, ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
 use crate::id::StageKey;
@@ -187,8 +186,12 @@ pub enum FlowControlPayload {
         writer_id: Option<WriterId>,
         #[serde(skip_serializing_if = "Option::is_none")]
         writer_seq: Option<SeqNo>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        writer_seq_by_event_type: BTreeMap<EventType, SeqNo>,
+        #[serde(
+            default,
+            skip_serializing_if = "BTreeMap::is_empty",
+            with = "crate::event::types::descriptor_counts"
+        )]
+        writer_seq_by_event_type: BTreeMap<crate::EventDescriptor, SeqNo>,
         #[serde(skip_serializing_if = "Option::is_none")]
         vector_clock: Option<VectorClock>,
         #[serde(skip_serializing_if = "Option::is_none")]

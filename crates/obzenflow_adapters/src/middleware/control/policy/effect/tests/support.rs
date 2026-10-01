@@ -53,7 +53,12 @@ pub(super) fn identity_for(effect_type: &'static str) -> EffectIdentity {
 }
 
 pub(super) fn data_event() -> ChainEvent {
-    ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}))
+    ChainEventFactory::data_event(
+        WriterId::from(StageId::new()),
+        "test.input",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    )
 }
 
 pub(super) fn ok_execute() -> RepeatableEffectOperation {

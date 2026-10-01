@@ -13,7 +13,12 @@ use obzenflow_core::{
 };
 
 fn make_data_event(writer: WriterId) -> ChainEvent {
-    ChainEventFactory::data_event(writer, "test.event", serde_json::json!({ "k": 1 }))
+    ChainEventFactory::data_event(
+        writer,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({ "k": 1 }),
+    )
 }
 
 fn make_eof_with_seq(writer: WriterId, seq: u64) -> ChainEvent {

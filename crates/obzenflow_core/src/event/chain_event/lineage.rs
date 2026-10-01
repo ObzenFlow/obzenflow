@@ -143,7 +143,12 @@ mod composite_activation_tests {
     #[test]
     fn derived_events_preserve_exact_activation_identity() {
         let writer = WriterId::from(StageId::new());
-        let mut entry = ChainEventFactory::data_event(writer, "test.input.v1", json!({}));
+        let mut entry = ChainEventFactory::data_event(
+            writer,
+            "test.input",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        );
         entry.processing.event_time = 100;
         let entry_id = entry.id;
         let entered_at_ms = entry.processing.event_time;
@@ -159,7 +164,8 @@ mod composite_activation_tests {
         let child = ChainEventFactory::derived_data_event(
             writer,
             &entry,
-            "test.output.v1",
+            "test.output",
+            std::num::NonZeroU32::MIN,
             json!({}),
             LineagePolicy::default(),
         );
@@ -203,7 +209,8 @@ mod composite_activation_tests {
     #[test]
     fn activation_merge_is_idempotent_and_deterministic() {
         let writer = WriterId::from(StageId::new());
-        let mut event = ChainEventFactory::data_event(writer, "test.v1", json!({}));
+        let mut event =
+            ChainEventFactory::data_event(writer, "test", std::num::NonZeroU32::MIN, json!({}));
         let activation =
             CompositeActivationContext::new(CompositeId::new("test:composite"), event.id, "in", 10);
         assert!(event
@@ -216,7 +223,8 @@ mod composite_activation_tests {
     #[test]
     fn activation_merge_rejects_conflicting_entry_timestamps() {
         let writer = WriterId::from(StageId::new());
-        let mut event = ChainEventFactory::data_event(writer, "test.v1", json!({}));
+        let mut event =
+            ChainEventFactory::data_event(writer, "test", std::num::NonZeroU32::MIN, json!({}));
         let activation =
             CompositeActivationContext::new(CompositeId::new("test:composite"), event.id, "in", 10);
         event

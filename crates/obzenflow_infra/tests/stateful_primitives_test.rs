@@ -195,7 +195,7 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
     let results = events.lock().unwrap();
     let aggregates: Vec<_> = results
         .iter()
-        .filter(|e| e.event_type() == ProductStatsUpdate::versioned_event_type())
+        .filter(|e| e.event_type() == ProductStatsUpdate::event_type_name())
         .collect();
     // Two product ids -> one aggregate per key.
     assert_eq!(aggregates.len(), 2);
@@ -259,7 +259,7 @@ async fn reduce_with_on_eof_emits_single_total() {
     let results = events.lock().unwrap();
     let reduced: Vec<_> = results
         .iter()
-        .filter(|e| e.event_type() == TotalStats::versioned_event_type())
+        .filter(|e| e.event_type() == TotalStats::event_type_name())
         .collect();
     assert_eq!(reduced.len(), 1);
 }

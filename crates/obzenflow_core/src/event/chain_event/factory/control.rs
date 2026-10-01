@@ -22,7 +22,7 @@ impl ChainEventFactory {
 
     /// Create an EOF signal with explicit EOF kind.
     pub fn eof_event_with_kind(writer_id: WriterId, kind: EofKind) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::Eof {
                 kind,
@@ -43,7 +43,7 @@ impl ChainEventFactory {
         generation: crate::ReaderGeneration,
         stage_key: crate::StageKey,
     ) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
@@ -58,7 +58,7 @@ impl ChainEventFactory {
         timestamp: u64,
         stage_id: Option<String>,
     ) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::Watermark {
                 timestamp,
@@ -73,7 +73,7 @@ impl ChainEventFactory {
         id: String,
         metadata: Option<Value>,
     ) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::Checkpoint {
                 id: CheckpointId::from(id),
@@ -84,7 +84,7 @@ impl ChainEventFactory {
 
     /// Create a drain signal
     pub fn drain_event(writer_id: WriterId) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::Drain),
         )
@@ -96,7 +96,7 @@ impl ChainEventFactory {
         reason: ViolationCause,
         upstream: Option<crate::StageId>,
     ) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::PipelineAbort { reason, upstream }),
         )
@@ -116,7 +116,7 @@ impl ChainEventFactory {
             writer_seq,
             vector_clock,
         } = params;
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::SourceContract {
                 expected_count,
@@ -146,7 +146,7 @@ impl ChainEventFactory {
             advertised_vector_clock,
             stalled_since,
         } = params;
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
                 reader_seq,
@@ -169,7 +169,7 @@ impl ChainEventFactory {
         to_seq: SeqNo,
         upstream: StageId,
     ) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionGap {
                 from_seq,
@@ -195,7 +195,7 @@ impl ChainEventFactory {
             advertised_vector_clock,
             failure_reason,
         } = params;
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
                 pass,
@@ -217,7 +217,7 @@ impl ChainEventFactory {
         upstream: crate::StageId,
         stalled_since: crate::event::types::DurationMs,
     ) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::ReaderStalled {
                 upstream,
@@ -234,7 +234,7 @@ impl ChainEventFactory {
         reader_seq: crate::event::types::SeqNo,
         advertised_writer_seq: Option<crate::event::types::SeqNo>,
     ) -> ChainEvent {
-        Self::create_event(
+        Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::AtLeastOnceViolation {
                 upstream,

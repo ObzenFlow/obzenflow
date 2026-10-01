@@ -264,14 +264,28 @@ async fn consume<B>(
     adapter: &mut SinkWriterAdapter<PostgresWriter<B>>,
     writer_id: WriterId,
     input: DriverInput,
-) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>
+) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome, HandlerError>
 where
     B: PostgresBind<Input = DriverInput>,
 {
-    let event =
-        ChainEventFactory::data_event_from(writer_id, DriverInput::versioned_event_type(), &input)
-            .expect("driver input serialises");
-    adapter.consume(event).await
+    let event = ChainEventFactory::data_event_from(
+        writer_id,
+        DriverInput::event_type_name(),
+        DriverInput::payload_schema_version(),
+        &input,
+    )
+    .expect("driver input serialises");
+    adapter
+        .consume_committed_report(
+            obzenflow_core::event::JournalRecord::new(
+                obzenflow_core::JournalWriterId::new(),
+                event,
+            )
+            .into(),
+            Default::default(),
+        )
+        .await
+        .map(|report| report.primary)
 }
 
 async fn consume_with_event_id<B>(
@@ -280,16 +294,33 @@ async fn consume_with_event_id<B>(
     input: DriverInput,
 ) -> (
     EventId,
-    Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>,
+    Result<obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome, HandlerError>,
 )
 where
     B: PostgresBind<Input = DriverInput>,
 {
-    let event =
-        ChainEventFactory::data_event_from(writer_id, DriverInput::versioned_event_type(), &input)
-            .expect("driver input serialises");
+    let event = ChainEventFactory::data_event_from(
+        writer_id,
+        DriverInput::event_type_name(),
+        DriverInput::payload_schema_version(),
+        &input,
+    )
+    .expect("driver input serialises");
     let event_id = event.id;
-    (event_id, adapter.consume(event).await)
+    (
+        event_id,
+        adapter
+            .consume_committed_report(
+                obzenflow_core::event::JournalRecord::new(
+                    obzenflow_core::JournalWriterId::new(),
+                    event,
+                )
+                .into(),
+                Default::default(),
+            )
+            .await
+            .map(|report| report.primary),
+    )
 }
 
 fn sink<B>(

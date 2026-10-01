@@ -1163,7 +1163,6 @@ mod tests {
             ExecutionPayload, StageLifecycleFact,
         };
         use obzenflow_core::event::provenance::FlowContext;
-        use obzenflow_core::event::ChainPayload;
         use std::time::Duration;
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1182,13 +1181,13 @@ mod tests {
                 .unwrap();
                 let mut reader = journal.reader_from(0).await.unwrap();
                 let make_report = || {
-                    ChainEventFactory::create_with_context(
+                    ChainEventFactory::execution_event(
                         stage.into(),
-                        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
-                            StageLifecycleFact::Running { stage_id: stage },
-                        )),
-                        FlowContext::new("child", stage),
+                        ExecutionPayload::StageLifecycle(StageLifecycleFact::Running {
+                            stage_id: stage,
+                        }),
                     )
+                    .with_flow_context(FlowContext::new("child", stage))
                 };
                 // Pause the actual append after it acquires the journal write
                 // lock, before it can prepare/submit its physical write. Calling
@@ -1560,6 +1559,7 @@ mod tests {
         let event = ChainEventFactory::data_event(
             writer_id,
             "test.event",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"data": "test value"}),
         );
 
@@ -1601,6 +1601,7 @@ mod tests {
                 ChainEventFactory::data_event(
                     writer_id,
                     "atomic.member",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({ "index": index }),
                 )
             })
@@ -1661,6 +1662,7 @@ mod tests {
                 let event = ChainEventFactory::data_event(
                     writer_id,
                     "atomic.member",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({ "index": index }),
                 );
                 let mut record =
@@ -1707,13 +1709,21 @@ mod tests {
         let writer2 = WriterId::from(StageId::new());
 
         // First event from writer1
-        let event1 =
-            ChainEventFactory::data_event(writer1, "event.1", serde_json::json!({"seq": 1}));
+        let event1 = ChainEventFactory::data_event(
+            writer1,
+            "event.1",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({"seq": 1}),
+        );
         let envelope1 = log.append(event1, Default::default()).await.unwrap();
 
         // Second event from writer2, causally dependent on event1
-        let event2 =
-            ChainEventFactory::data_event(writer2, "event.2", serde_json::json!({"seq": 2}));
+        let event2 = ChainEventFactory::data_event(
+            writer2,
+            "event.2",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({"seq": 2}),
+        );
         let envelope2 = log
             .append(
                 event2,
@@ -1769,6 +1779,7 @@ mod tests {
                 let event = ChainEventFactory::data_event(
                     writer_id,
                     "concurrent.event",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"writer": i}),
                 );
                 log_clone.append(event, Default::default()).await
@@ -1823,6 +1834,7 @@ mod tests {
                 let event = ChainEventFactory::data_event(
                     writer_id,
                     "concurrent.same_writer",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({ "i": i }),
                 );
                 log_clone.append(event, Default::default()).await
@@ -1875,9 +1887,19 @@ mod tests {
                 obzenflow_core::JournalOwner::stage(StageId::new()),
             )
             .unwrap();
-            let e1 = ChainEventFactory::data_event(writer_id, "a", serde_json::json!({"n": 1}));
+            let e1 = ChainEventFactory::data_event(
+                writer_id,
+                "a",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({"n": 1}),
+            );
             let env1 = log.append(e1, Default::default()).await.unwrap();
-            let e2 = ChainEventFactory::data_event(writer_id, "b", serde_json::json!({"n": 2}));
+            let e2 = ChainEventFactory::data_event(
+                writer_id,
+                "b",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({"n": 2}),
+            );
             log.append(e2, AppendOptions::from_record(Some(&env1)).unwrap())
                 .await
                 .unwrap();
@@ -1896,7 +1918,12 @@ mod tests {
         );
         assert_eq!(reopened.read_causally_ordered().await.unwrap().len(), 2);
 
-        let e3 = ChainEventFactory::data_event(writer_id, "c", serde_json::json!({"n": 3}));
+        let e3 = ChainEventFactory::data_event(
+            writer_id,
+            "c",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({"n": 3}),
+        );
         let env3 = reopened.append(e3, Default::default()).await.unwrap();
         assert!(
             env3.envelope
@@ -1928,7 +1955,12 @@ mod tests {
         )
         .unwrap();
         for i in 0..3 {
-            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            let e = ChainEventFactory::data_event(
+                writer_id,
+                "e",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({"i": i}),
+            );
             log.append(e, Default::default()).await.unwrap();
         }
 
@@ -1972,6 +2004,7 @@ mod tests {
                 let e = ChainEventFactory::data_event(
                     writer_id,
                     "tail.event",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"i": i}),
                 );
                 writer_log.append(e, Default::default()).await.unwrap();
@@ -2017,7 +2050,12 @@ mod tests {
         )
         .unwrap();
         for i in 0..3 {
-            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            let e = ChainEventFactory::data_event(
+                writer_id,
+                "e",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({"i": i}),
+            );
             log.append(e, Default::default()).await.unwrap();
         }
 
@@ -2085,7 +2123,12 @@ mod tests {
         .unwrap();
         let env = log
             .append(
-                ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 1})),
+                ChainEventFactory::data_event(
+                    writer_id,
+                    "e",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({"i": 1}),
+                ),
                 Default::default(),
             )
             .await
@@ -2123,7 +2166,12 @@ mod tests {
         )
         .unwrap();
         for i in 0..4 {
-            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            let e = ChainEventFactory::data_event(
+                writer_id,
+                "e",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({"i": i}),
+            );
             log.append(e, Default::default()).await.unwrap();
         }
 
@@ -2162,7 +2210,12 @@ mod tests {
         )
         .unwrap();
         for i in 0..3 {
-            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            let e = ChainEventFactory::data_event(
+                writer_id,
+                "e",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({"i": i}),
+            );
             log.append(e, Default::default()).await.unwrap();
         }
 
@@ -2288,6 +2341,7 @@ mod tests {
                 let event = ChainEventFactory::data_event(
                     writer_id,
                     "atomic.member",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({ "index": index }),
                 );
                 let mut record =
@@ -2351,7 +2405,12 @@ mod tests {
         )
         .unwrap();
         log.append(
-            ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 0})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "e",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({"i": 0}),
+            ),
             Default::default(),
         )
         .await
@@ -2362,7 +2421,12 @@ mod tests {
 
         assert!(
             log.append(
-                ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 1})),
+                ChainEventFactory::data_event(
+                    writer_id,
+                    "e",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({"i": 1})
+                ),
                 Default::default(),
             )
             .await

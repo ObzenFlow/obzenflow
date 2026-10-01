@@ -334,6 +334,7 @@ mod tests {
         let mut data_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.data",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"k": "v"}),
         );
         data_event.flow_context.stage_id = stage_id;
@@ -347,6 +348,7 @@ mod tests {
         let mut error_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.error",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"k": "v2"}),
         );
         error_event.flow_context.stage_id = stage_id;
@@ -383,6 +385,7 @@ mod tests {
         let mut upstream_event = ChainEventFactory::data_event(
             WriterId::from(upstream_stage_id),
             "upstream.data",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"k": "v_upstream"}),
         );
         upstream_event.flow_context.stage_id = upstream_stage_id;
@@ -394,6 +397,7 @@ mod tests {
         let mut local_event = ChainEventFactory::data_event(
             WriterId::from(local_stage_id),
             "local.data",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"k": "v_local"}),
         );
         local_event.flow_context.stage_id = local_stage_id;
@@ -428,6 +432,7 @@ mod tests {
         let mut seeded_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "seeded.data",
+            std::num::NonZeroU32::MIN,
             json!({"k": "v"}),
         );
         seeded_event.flow_context.stage_id = stage_id;
@@ -440,6 +445,7 @@ mod tests {
             let mut forwarded = ChainEventFactory::data_event(
                 WriterId::from(stage_id),
                 "forwarded.control",
+                std::num::NonZeroU32::MIN,
                 json!({"i": i}),
             );
             forwarded.flow_context.stage_id = stage_id;

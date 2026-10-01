@@ -286,6 +286,7 @@ pub enum TypeHint {
         type_id: TypeId,
         display_name: String,
         event_type: Option<String>,
+        event_kind: Option<obzenflow_core::event::EventKind>,
         schema_version: Option<u32>,
     },
 }
@@ -300,6 +301,7 @@ impl TypeHint {
             type_id: TypeId::of::<T>(),
             display_name: type_name::<T>().to_string(),
             event_type: None,
+            event_kind: None,
             schema_version: None,
         }
     }
@@ -308,8 +310,9 @@ impl TypeHint {
         Self::Exact {
             type_id: TypeId::of::<T>(),
             display_name: type_name::<T>().to_string(),
-            event_type: Some(T::versioned_event_type()),
-            schema_version: Some(T::SCHEMA_VERSION),
+            event_type: Some(T::event_type_name()),
+            event_kind: Some(T::EVENT_KIND),
+            schema_version: Some(T::payload_schema_version().get()),
         }
     }
 
@@ -318,6 +321,7 @@ impl TypeHint {
             type_id: fact.type_id,
             display_name: fact.display_name,
             event_type: Some(fact.event_type.to_string()),
+            event_kind: Some(fact.event_kind),
             schema_version: Some(fact.schema_version),
         }
     }
@@ -1963,11 +1967,13 @@ fn payload_descriptor_from_type_hint(
         PayloadTypeDescriptor::from_type_hint(TypeHintInfo::from(output_type), visibility);
     if let TypeHint::Exact {
         event_type,
+        event_kind,
         schema_version,
         ..
     } = output_type
     {
         descriptor.event_type = event_type.clone();
+        descriptor.event_kind = *event_kind;
         descriptor.schema_version = *schema_version;
     }
     descriptor

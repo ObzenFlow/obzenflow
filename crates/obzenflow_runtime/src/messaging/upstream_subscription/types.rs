@@ -72,7 +72,7 @@ impl std::fmt::Display for StageKey {
 /// `SelectedFeedRole`'s variant order is part of the total order and is
 /// code-defined, so it is stable across runs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FeedIdentity(Vec<(SelectedFeedRole, EventType)>);
+pub struct FeedIdentity(Vec<(SelectedFeedRole, obzenflow_core::EventDescriptor)>);
 
 impl FeedIdentity {
     /// Identity of an unfiltered reader (compares before every filtered one).
@@ -81,9 +81,9 @@ impl FeedIdentity {
     }
 
     pub fn from_feeds(feeds: &[SelectedFeedMetadata]) -> Self {
-        let mut entries: Vec<(SelectedFeedRole, EventType)> = feeds
+        let mut entries: Vec<(SelectedFeedRole, obzenflow_core::EventDescriptor)> = feeds
             .iter()
-            .map(|feed| (feed.role(), feed.event_type().clone()))
+            .map(|feed| (feed.role(), feed.descriptor().clone()))
             .collect();
         entries.sort_unstable();
         Self(entries)
@@ -96,7 +96,7 @@ impl std::fmt::Display for FeedIdentity {
             if index > 0 {
                 f.write_str(",")?;
             }
-            write!(f, "{role:?}:{}", event_type.as_str())?;
+            write!(f, "{role:?}:{event_type}")?;
         }
         Ok(())
     }
@@ -396,21 +396,25 @@ impl From<crate::feed_plan::FeedRole> for SelectedFeedRole {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectedFeedMetadata {
-    event_type: EventType,
+    descriptor: obzenflow_core::EventDescriptor,
     role: SelectedFeedRole,
 }
 
 impl SelectedFeedMetadata {
-    pub fn new(event_type: EventType, role: SelectedFeedRole) -> Self {
-        Self { event_type, role }
+    pub fn new(descriptor: obzenflow_core::EventDescriptor, role: SelectedFeedRole) -> Self {
+        Self { descriptor, role }
     }
 
-    pub fn unscoped(event_type: EventType) -> Self {
-        Self::new(event_type, SelectedFeedRole::Unspecified)
+    pub fn unscoped(descriptor: obzenflow_core::EventDescriptor) -> Self {
+        Self::new(descriptor, SelectedFeedRole::Unspecified)
     }
 
     pub fn event_type(&self) -> &EventType {
-        &self.event_type
+        &self.descriptor.event_type
+    }
+
+    pub fn descriptor(&self) -> &obzenflow_core::EventDescriptor {
+        &self.descriptor
     }
 
     pub fn role(&self) -> SelectedFeedRole {
@@ -421,29 +425,26 @@ impl SelectedFeedMetadata {
         self.role.as_system_feed_role()
     }
 
-    pub(super) fn matches_event_type(&self, event_type: &str) -> bool {
-        crate::feed_plan::declared_event_type_matches(self.event_type.as_str(), event_type, None)
+    pub(super) fn matches_descriptor(&self, descriptor: &obzenflow_core::EventDescriptor) -> bool {
+        &self.descriptor == descriptor
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct SelectedDataSeqByEventType {
-    by_event_type: HashMap<EventType, SeqNo>,
+    by_event_type: HashMap<obzenflow_core::EventDescriptor, SeqNo>,
 }
 
 impl SelectedDataSeqByEventType {
-    pub(super) fn increment(&mut self, event_type: impl Into<EventType>) {
-        let seq = self
-            .by_event_type
-            .entry(event_type.into())
-            .or_insert(SeqNo(0));
+    pub(super) fn increment(&mut self, event_type: obzenflow_core::EventDescriptor) {
+        let seq = self.by_event_type.entry(event_type).or_insert(SeqNo(0));
         seq.0 = seq.0.saturating_add(1);
     }
 
     pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> SeqNo {
         self.by_event_type
             .iter()
-            .filter(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .filter(|(event_type, _)| feed.matches_descriptor(event_type))
             .fold(SeqNo(0), |total, (_, seq)| {
                 SeqNo(total.0.saturating_add(seq.0))
             })
@@ -452,7 +453,7 @@ impl SelectedDataSeqByEventType {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct AdvertisedWriterSeqByEventType {
-    by_event_type: BTreeMap<EventType, SeqNo>,
+    by_event_type: BTreeMap<obzenflow_core::EventDescriptor, SeqNo>,
 }
 
 impl AdvertisedWriterSeqByEventType {
@@ -462,7 +463,7 @@ impl AdvertisedWriterSeqByEventType {
 
     pub(super) fn replace_from_eof(
         &mut self,
-        writer_seq_by_event_type: &BTreeMap<EventType, SeqNo>,
+        writer_seq_by_event_type: &BTreeMap<obzenflow_core::EventDescriptor, SeqNo>,
     ) {
         self.by_event_type = writer_seq_by_event_type.clone();
     }
@@ -471,7 +472,7 @@ impl AdvertisedWriterSeqByEventType {
         let mut matches = self
             .by_event_type
             .iter()
-            .filter(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .filter(|(event_type, _)| feed.matches_descriptor(event_type))
             .peekable();
         matches.peek()?;
         Some(matches.fold(SeqNo(0), |total, (_, seq)| {
@@ -483,58 +484,37 @@ impl AdvertisedWriterSeqByEventType {
 #[cfg(test)]
 mod selected_feed_sequence_tests {
     use super::*;
-
+    fn descriptor(name: &str, version: u32) -> obzenflow_core::EventDescriptor {
+        obzenflow_core::EventDescriptor {
+            event_kind: obzenflow_core::event::payloads::chain_payload::EventKind::Fact,
+            event_type: name.into(),
+            payload_schema_version: std::num::NonZeroU32::new(version).unwrap(),
+        }
+    }
     #[test]
-    fn canonical_versioned_spelling_uses_one_feed_sequence() {
-        let feed =
-            SelectedFeedMetadata::new(EventType::from("typed.fact.v1"), SelectedFeedRole::Input);
-
+    fn feed_sequence_requires_exact_kind_name_and_version() {
+        let v1 = descriptor("typed.fact", 1);
+        let v2 = descriptor("typed.fact", 2);
+        let feed = SelectedFeedMetadata::new(v1.clone(), SelectedFeedRole::Input);
+        let mut other_kind = v1.clone();
+        other_kind.event_kind =
+            obzenflow_core::event::payloads::chain_payload::EventKind::Execution;
         let mut reader = SelectedDataSeqByEventType::default();
-        reader.increment("typed.fact.v1");
-        reader.increment("typed.fact.v1");
-        reader.increment("typed.fact.v2");
+        reader.increment(v1.clone());
+        reader.increment(v1.clone());
+        reader.increment(v2.clone());
+        reader.increment(other_kind.clone());
         assert_eq!(reader.seq_for_feed(&feed), SeqNo(2));
-
         let mut advertised = AdvertisedWriterSeqByEventType::default();
         advertised.replace_from_eof(&BTreeMap::from([
-            (EventType::from("typed.fact.v1"), SeqNo(2)),
-            (EventType::from("typed.fact.v2"), SeqNo(99)),
+            (v1, SeqNo(2)),
+            (v2, SeqNo(99)),
+            (other_kind, SeqNo(8)),
         ]));
         assert_eq!(advertised.seq_for_feed(&feed), Some(SeqNo(2)));
-    }
-
-    #[test]
-    fn absent_compatible_spelling_has_no_advertised_sequence() {
-        let feed =
-            SelectedFeedMetadata::new(EventType::from("typed.fact.v1"), SelectedFeedRole::Input);
-        let mut advertised = AdvertisedWriterSeqByEventType::default();
-        advertised.replace_from_eof(&BTreeMap::from([(
-            EventType::from("other.fact.v1"),
-            SeqNo(7),
-        )]));
-
-        assert_eq!(advertised.seq_for_feed(&feed), None);
-    }
-
-    #[test]
-    fn compatible_legacy_and_versioned_spellings_are_summed() {
-        let feed =
-            SelectedFeedMetadata::new(EventType::from("typed.fact.v1"), SelectedFeedRole::Input);
-
-        let mut reader = SelectedDataSeqByEventType::default();
-        reader.increment("typed.fact");
-        reader.increment("typed.fact.v1");
-        reader.increment("typed.fact.v1");
-        reader.increment("typed.fact.v2");
-        assert_eq!(reader.seq_for_feed(&feed), SeqNo(3));
-
-        let mut advertised = AdvertisedWriterSeqByEventType::default();
-        advertised.replace_from_eof(&BTreeMap::from([
-            (EventType::from("typed.fact"), SeqNo(1)),
-            (EventType::from("typed.fact.v1"), SeqNo(2)),
-            (EventType::from("typed.fact.v2"), SeqNo(99)),
-        ]));
-        assert_eq!(advertised.seq_for_feed(&feed), Some(SeqNo(3)));
+        let absent =
+            SelectedFeedMetadata::new(descriptor("typed.fact", 3), SelectedFeedRole::Input);
+        assert_eq!(advertised.seq_for_feed(&absent), None);
     }
 }
 
@@ -569,8 +549,10 @@ pub struct ReaderProgress {
     pub last_vector_clock: Option<VectorClock>,
     pub last_receipted_event_id: Option<EventId>,
     pub last_receipted_vector_clock: Option<VectorClock>,
-    pub(crate) pending_delivery_inputs: HashMap<EventId, PendingDeliveryInput>,
-    pub(crate) pending_receipts: HashMap<EventId, PendingReceiptMeta>,
+    pub(crate) pending_delivery_inputs:
+        HashMap<obzenflow_core::event::JournalCommitRef, PendingDeliveryInput>,
+    pub(crate) pending_receipts:
+        HashMap<obzenflow_core::event::JournalCommitRef, PendingReceiptMeta>,
     pub(crate) committed_out_of_order: BTreeMap<SeqNo, PendingReceiptMeta>,
 
     /// Progress timing
@@ -623,20 +605,25 @@ impl ReaderProgress {
 
     /// Retain the exact parent of any delivered data input until terminal settlement.
     pub(crate) fn track_pending_delivery_input(&mut self, record: PendingDeliveryInput) {
-        self.pending_delivery_inputs.insert(*record.id(), record);
+        self.pending_delivery_inputs
+            .insert(record.commitment(), record);
     }
 
     /// Stores watermark metadata for an accounted just-read event.
     ///
     /// `reader_seq` at the time of tracking is used as the receipt-ordering key for advancing
     /// the contiguous receipt watermark (`receipted_seq`).
-    pub(crate) fn track_pending_receipt(&mut self, event_id: EventId, vector_clock: VectorClock) {
+    pub(crate) fn track_pending_receipt(
+        &mut self,
+        input: obzenflow_core::event::JournalCommitRef,
+        vector_clock: VectorClock,
+    ) {
         let meta = PendingReceiptMeta {
             seq: self.reader_seq,
-            event_id,
+            event_id: input.event_id,
             vector_clock,
         };
-        self.pending_receipts.insert(event_id, meta);
+        self.pending_receipts.insert(input, meta);
     }
 
     /// Mark a pending event as durably receipted.
@@ -644,8 +631,11 @@ impl ReaderProgress {
     /// Returns `false` if the event is not pending (duplicate receipt or missing read-side
     /// bookkeeping). When receipts arrive out-of-order, this buffers them until the receipt
     /// watermark can advance contiguously.
-    pub(crate) fn mark_receipted(&mut self, event_id: EventId) -> bool {
-        let Some(meta) = self.pending_receipts.remove(&event_id) else {
+    pub(crate) fn mark_receipted(
+        &mut self,
+        input: obzenflow_core::event::JournalCommitRef,
+    ) -> bool {
+        let Some(meta) = self.pending_receipts.remove(&input) else {
             return false;
         };
 

@@ -6,20 +6,18 @@ pub use obzenflow_benchmarks::support::{runtime, DEADLINE};
 use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{CausalFrontier, ChainEventFactory, ChainPayload};
+use obzenflow_core::event::{CausalFrontier, ChainEventFactory};
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub fn running_fact(stage: StageId) -> ChainEvent {
-    ChainEventFactory::create_with_context(
+    ChainEventFactory::execution_event(
         stage.into(),
-        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
-            StageLifecycleFact::Running { stage_id: stage },
-        )),
-        FlowContext::new("benchmark_child", stage),
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: stage }),
     )
+    .with_flow_context(FlowContext::new("benchmark_child", stage))
 }
 
 pub struct History {
@@ -60,6 +58,7 @@ impl History {
                 events.push(ChainEventFactory::data_event(
                     (*stage).into(),
                     "bench.business",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"index": index, "body": "x".repeat(payload_bytes)}),
                 ));
             }
@@ -111,7 +110,12 @@ pub async fn causal_record(
         let journal = MemoryJournal::with_owner_in_run(JournalOwner::stage(stage), run);
         let record = journal
             .append(
-                ChainEventFactory::data_event(stage.into(), "bench.parent", Default::default()),
+                ChainEventFactory::data_event(
+                    stage.into(),
+                    "bench.parent",
+                    std::num::NonZeroU32::MIN,
+                    Default::default(),
+                ),
                 Default::default(),
             )
             .await
@@ -131,6 +135,7 @@ pub async fn causal_record(
             ChainEventFactory::data_event(
                 stage.into(),
                 "bench.record",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({"body": "x".repeat(payload_bytes)}),
             ),
             obzenflow_core::journal::AppendOptions::new(frontier.clone()),

@@ -270,7 +270,7 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
     let source_events = read_stage_events(&run_dir, "src").await;
     let source_payload_indices: Vec<u64> = source_events
         .iter()
-        .filter(|event| event.event_type() == DripEvent::versioned_event_type())
+        .filter(|event| event.event_type() == DripEvent::event_type_name())
         .filter_map(|event| event.payload()["index"].as_u64())
         .collect();
     assert_eq!(

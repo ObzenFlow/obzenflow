@@ -230,7 +230,8 @@ mod tests {
     fn reading_event(sensor: &str, value: u32) -> obzenflow_core::ChainEvent {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            Reading::versioned_event_type(),
+            Reading::event_type_name(),
+            Reading::payload_schema_version(),
             serde_json::json!(Reading {
                 sensor: sensor.to_string(),
                 value,

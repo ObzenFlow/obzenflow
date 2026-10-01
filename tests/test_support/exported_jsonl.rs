@@ -12,12 +12,20 @@ use obzenflow_infra::journal::disk::log_record::LogRecord;
 /// disappear from an acceptance oracle. System rows are validated and skipped;
 /// every other row must be a complete chain-event log record.
 pub fn chain_events(jsonl: &str) -> Vec<ChainEvent> {
+    chain_records(jsonl)
+        .into_iter()
+        .map(|record| record.authored())
+        .collect()
+}
+
+/// Retain commitment evidence when an oracle checks exact delivery subjects.
+pub fn chain_records(jsonl: &str) -> Vec<LogRecord<ChainEvent>> {
     jsonl
         .lines()
         .enumerate()
         .filter_map(
             |(index, line)| match serde_json::from_str::<LogRecord<ChainEvent>>(line) {
-                Ok(record) => Some(record.authored()),
+                Ok(record) => Some(record),
                 Err(chain_error) => {
                     serde_json::from_str::<LogRecord<SystemEvent>>(line).unwrap_or_else(
                         |system_error| {

@@ -8,7 +8,7 @@ use crate::stages::common::stage_handle::{
 };
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, Journal};
 use std::future::Future;
 use std::sync::Arc;
@@ -18,11 +18,11 @@ async fn publish(
     context: FlowContext,
     fact: StageLifecycleFact,
 ) -> Result<(), obzenflow_fsm::FsmError> {
-    let event = ChainEventFactory::create_with_context(
+    let event = ChainEventFactory::execution_event(
         context.stage_id.into(),
-        ChainPayload::Execution(ExecutionPayload::StageLifecycle(fact)),
-        context,
-    );
+        ExecutionPayload::StageLifecycle(fact),
+    )
+    .with_flow_context(context);
     crate::supervised_base::publication::append(journal, event, Default::default())
         .await
         .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;

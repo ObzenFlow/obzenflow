@@ -70,7 +70,7 @@ fn inspect_is_a_direct_verb_and_the_journal_command_group_is_removed() {
         "--stage",
         "ticks",
         "--event-type",
-        "cli_verify.tick.v1",
+        "cli_verify.tick",
     ])
     .unwrap();
     let Command::Inspect(args) = cli.command else {
@@ -78,7 +78,7 @@ fn inspect_is_a_direct_verb_and_the_journal_command_group_is_removed() {
     };
     assert_eq!(args.run_dir, PathBuf::from("run"));
     assert_eq!(args.stage.as_deref(), Some("ticks"));
-    assert_eq!(args.event_type.as_deref(), Some("cli_verify.tick.v1"));
+    assert_eq!(args.event_type.as_deref(), Some("cli_verify.tick"));
 
     for subcommand in ["inspect", "export-jsonl"] {
         let error = Cli::try_parse_from(["obzenflow", "journal", subcommand, "run"])

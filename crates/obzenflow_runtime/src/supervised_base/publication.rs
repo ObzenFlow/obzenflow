@@ -756,6 +756,7 @@ mod tests {
             obzenflow_core::event::ChainEventFactory::data_event(
                 obzenflow_core::StageId::new().into(),
                 "publication.input",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({}),
             ),
         )

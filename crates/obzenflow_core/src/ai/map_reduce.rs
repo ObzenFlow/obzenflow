@@ -71,8 +71,11 @@ impl TypedPayload for AiMapReducePlanningManifest {
     const EVENT_TYPE: &'static str = "ai.map_reduce.planning_manifest";
     const SCHEMA_VERSION: u32 = 1;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 
@@ -103,8 +106,11 @@ where
     const EVENT_TYPE: &'static str = "ai.map_reduce.map_input";
     const SCHEMA_VERSION: u32 = 1;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 
@@ -137,8 +143,11 @@ where
     const EVENT_TYPE: &'static str = "ai.map_reduce.reduce_input";
     const SCHEMA_VERSION: u32 = 2;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 
@@ -165,8 +174,11 @@ where
     const EVENT_TYPE: &'static str = "ai.map_reduce.tagged_partial";
     const SCHEMA_VERSION: u32 = 1;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 
@@ -190,8 +202,11 @@ impl TypedPayload for AiMapReduceChunkFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.chunk_failed";
     const SCHEMA_VERSION: u32 = 2;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 
@@ -322,8 +337,11 @@ impl TypedPayload for AiMapReducePlanningFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.planning_failed";
     const SCHEMA_VERSION: u32 = 1;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 
@@ -345,8 +363,11 @@ impl TypedPayload for AiMapReduceFinaliseFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.finalise_failed";
     const SCHEMA_VERSION: u32 = 1;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 
@@ -369,8 +390,11 @@ impl TypedPayload for AiMapReduceJobFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.job_failed";
     const SCHEMA_VERSION: u32 = 1;
 
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::CompositeData;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::versioned_event_type(), serde_json::to_value(self)?)
+        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
             .map(ChainPayload::CompositeData)
     }
 

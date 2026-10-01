@@ -89,13 +89,13 @@ pub(crate) fn register_stage(
     descriptor: SupervisorDescriptor,
 ) -> Registration {
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-    use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+    use obzenflow_core::event::ChainEventFactory;
     Box::pin(async move {
-        let event = ChainEventFactory::create_with_context(
+        let event = ChainEventFactory::execution_event(
             context.stage_id.into(),
-            ChainPayload::Execution(ExecutionPayload::SupervisorRegistered { descriptor }),
-            context,
-        );
+            ExecutionPayload::SupervisorRegistered { descriptor },
+        )
+        .with_flow_context(context);
         super::publication::append(&journal, event, Default::default()).await?;
         Ok(())
     })

@@ -580,7 +580,14 @@ interval_ms = 250
         let mut outputs = BTreeSet::new();
         let mut failed_inputs = BTreeSet::new();
         let mut summaries = Vec::new();
-        for event in exported_jsonl::chain_events(&jsonl) {
+        let records = exported_jsonl::chain_records(&jsonl);
+        let committed_inputs: BTreeMap<_, _> = records
+            .iter()
+            .filter(|record| matches!(record.payload, ChainPayload::Fact(_)))
+            .map(|record| (record.commitment(), record))
+            .collect();
+        for record in &records {
+            let event = record.authored();
             if let ChainPayload::Fact(payload) = &event.payload {
                 if !event.processing.status.is_success() {
                     failed_inputs.insert(payload["id"].as_u64().unwrap());
@@ -654,9 +661,21 @@ interval_ms = 250
                         .entry(event.event_type().to_string())
                         .or_default() += 1;
                 }
-                ChainPayload::Delivery(_) => {
+                ChainPayload::Delivery(receipt) => {
                     deliveries += 1;
                     content.as_object_mut().unwrap().remove("processed_at");
+                    let input = committed_inputs
+                        .get(&receipt.subject.input)
+                        .expect("every receipt identifies a committed input in this run");
+                    assert!(receipt.subject.matches_record(input));
+                    assert!(event.causality.parent_ids.contains(input.id()));
+                    // Separate runs mint different commitment coordinates.
+                    // Compare the input's business identity only after proving
+                    // the original exact reference and full descriptor above.
+                    content["subject"]["input"] = json!({
+                        "stage": input.envelope.provenance.event.flow_context.stage_name,
+                        "payload": input.payload,
+                    });
                 }
                 _ => continue,
             }
@@ -666,6 +685,7 @@ interval_ms = 250
                 .or_default()
                 .push(
                     json!({
+                        "descriptor": event.descriptor(),
                         "content": content,
                         "status": event.processing.status,
                     })

@@ -546,7 +546,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     assert_eq!(
         data_event_count(
             &read_stage_events(&live_run, "inputs").await,
-            &CompInput::versioned_event_type(),
+            &CompInput::event_type_name(),
         ),
         3,
         "the finite source should journal exactly three inputs"
@@ -554,7 +554,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     assert_eq!(
         data_event_count(
             &read_stage_events(&live_run, "fan_out").await,
-            &CompInput::versioned_event_type(),
+            &CompInput::event_type_name(),
         ),
         6,
         "fan-out should journal exactly two derived siblings per source input"

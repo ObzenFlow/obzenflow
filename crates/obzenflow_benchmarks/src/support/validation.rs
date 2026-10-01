@@ -254,11 +254,8 @@ impl ObserverJournals {
             .await
             .unwrap();
         let lifecycle = |fact| {
-            ChainEventFactory::create_with_context(
-                stage.into(),
-                ChainPayload::Execution(ExecutionPayload::StageLifecycle(fact)),
-                FlowContext::new("observed", stage),
-            )
+            ChainEventFactory::execution_event(stage.into(), ExecutionPayload::StageLifecycle(fact))
+                .with_flow_context(FlowContext::new("observed", stage))
         };
         data.append(
             lifecycle(StageLifecycleFact::Running { stage_id: stage }),
@@ -271,6 +268,7 @@ impl ObserverJournals {
                 ChainEventFactory::data_event(
                     stage.into(),
                     "observer.business",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"n":n,"body":"x".repeat(256)}),
                 ),
                 Default::default(),
@@ -300,6 +298,7 @@ impl ObserverJournals {
         let mut error_event = ChainEventFactory::data_event(
             stage.into(),
             "observer.error",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"kind":"fixture"}),
         )
         .with_runtime_provenance(RuntimeProvenance {

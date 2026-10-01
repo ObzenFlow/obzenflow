@@ -179,6 +179,7 @@ mod tests {
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             "test.event",
+            std::num::NonZeroU32::MIN,
             json!({ "k": "v\n\u{0}🙂" }),
         );
         JournalRecord::new(JournalWriterId::new(), event)

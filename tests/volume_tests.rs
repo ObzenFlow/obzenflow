@@ -60,6 +60,7 @@ impl TypedFiniteSourceHandler for EventGenerator {
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 &self.event_type,
+                std::num::NonZeroU32::MIN,
                 json!({
                     "index": index,
                     "timestamp": std::time::SystemTime::now()

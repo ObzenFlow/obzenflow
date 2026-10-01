@@ -32,7 +32,7 @@ use crate::supervised_base::EventLoopDirective;
 use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{
-    DeliveryMethod, DeliveryPayload, DeliveryResult,
+    DeliveryMethod, DeliveryOutcome, DeliveryResult,
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
@@ -551,7 +551,7 @@ fn write_failure_receipt_type(disposition: SinkWriteFailureDisposition) -> &'sta
 
 async fn invoke_sink_once<H: UnifiedSinkHandler + Send + Sync>(
     handler: &mut H,
-    event: ChainEvent,
+    event: DeliveredRecord<ChainPayload>,
     effect_context: Option<EffectInvocationContext>,
     scope: MiddlewareExecutionScope,
 ) -> SinkInvocationOutcome {
@@ -577,12 +577,9 @@ fn prepare_receipt_plan(
     contract_state: &[crate::messaging::upstream_subscription::ReaderProgress],
     current_envelope: &DeliveredRecord<ChainPayload>,
     report: &mut SinkConsumeReport,
-) -> Result<Vec<(DeliveredRecord<ChainPayload>, DeliveryPayload)>, StageFatal> {
+) -> Result<Vec<(DeliveredRecord<ChainPayload>, DeliveryOutcome)>, StageFatal> {
     if subscription
-        .pending_receipt_envelope(
-            current_envelope.envelope.provenance.event.id,
-            contract_state,
-        )
+        .pending_receipt_envelope(current_envelope.commitment(), contract_state)
         .is_none()
     {
         return Err(protocol_fatal(
@@ -590,31 +587,44 @@ fn prepare_receipt_plan(
         ));
     }
 
+    report.primary.validate().map_err(protocol_fatal)?;
     let primary_is_buffered = matches!(report.primary.result, DeliveryResult::Buffered { .. });
     let mut seen = HashSet::with_capacity(report.commit_receipts.len());
     let mut plan = Vec::with_capacity(report.commit_receipts.len() + 1);
     plan.push((current_envelope.clone(), report.primary.clone()));
     for commit in &report.commit_receipts {
-        if !seen.insert(commit.parent_event_id) {
+        if !seen.insert(commit.subject.input) {
             return Err(protocol_fatal(
                 "sink report contains a duplicate commit receipt",
             ));
         }
-        if commit.parent_event_id == current_envelope.envelope.provenance.event.id
-            && !primary_is_buffered
-        {
+        if commit.subject.input == current_envelope.commitment() && !primary_is_buffered {
             return Err(protocol_fatal(
                 "terminal sink primary also returned a current-input commit receipt",
             ));
         }
         let Some((_upstream, parent)) =
-            subscription.pending_receipt_envelope(commit.parent_event_id, contract_state)
+            subscription.pending_receipt_envelope(commit.subject.input, contract_state)
         else {
             return Err(protocol_fatal(format!(
-                "sink commit receipt parent {} is not pending",
-                commit.parent_event_id
+                "sink commit receipt parent {:?} is not pending",
+                commit.subject.input
             )));
         };
+        if !commit.subject.matches_record(parent.record()) {
+            return Err(protocol_fatal(
+                "sink receipt subject descriptor does not match retained input",
+            ));
+        }
+        commit.payload.validate().map_err(protocol_fatal)?;
+        if matches!(
+            commit.payload.result,
+            DeliveryResult::Buffered { .. } | DeliveryResult::Rejected { .. }
+        ) {
+            return Err(protocol_fatal(
+                "commit receipt requires a terminal attempted delivery",
+            ));
+        }
         plan.push((parent, commit.payload.clone()));
     }
     report.commit_settlements().map_err(|error| {
@@ -682,24 +692,21 @@ async fn journal_sink_operation_failure<
         destination_error_code: error.destination_error_code().cloned(),
         detail: error.detail(),
     };
-    let mut event = ChainEventFactory::data_event(
-        writer_id,
-        SinkOperationFailed::versioned_event_type(),
-        serde_json::to_value(payload)?,
-    )
-    .with_flow_context(make_flow_context(
-        &ctx.flow_name,
-        &ctx.flow_id.to_string(),
-        &ctx.stage_name,
-        ctx.stage_id,
-        StageType::Sink,
-    ))
-    .with_causality(CausalityContext::with_parent(
-        failed_receipt.envelope.provenance.event.id,
-    ))
-    .with_correlation_from(input)
-    .with_cycle_state_from(input)
-    .mark_as_error(error.detail(), error.kind());
+    let mut event = payload
+        .to_event(writer_id)
+        .with_flow_context(make_flow_context(
+            &ctx.flow_name,
+            &ctx.flow_id.to_string(),
+            &ctx.stage_name,
+            ctx.stage_id,
+            StageType::Sink,
+        ))
+        .with_causality(CausalityContext::with_parent(
+            failed_receipt.envelope.provenance.event.id,
+        ))
+        .with_correlation_from(input)
+        .with_cycle_state_from(input)
+        .mark_as_error(error.detail(), error.kind());
     event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
     event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
     crate::stages::common::supervision::output_committer::commit_error_output(
@@ -729,7 +736,9 @@ async fn journal_fresh_error_route<
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
-    let mut event = ChainEventFactory::create_event(writer_id, input.payload.clone())
+    let mut event = obzenflow_core::event::schema::TypedFact::from_event(input)
+        .ok_or("sink error route requires a typed input")?
+        .into_event(writer_id)
         .with_flow_context(make_flow_context(
             &ctx.flow_name,
             &ctx.flow_id.to_string(),
@@ -743,7 +752,6 @@ async fn journal_fresh_error_route<
         .with_correlation_from(input)
         .with_cycle_state_from(input)
         .mark_as_error(detail, kind);
-    event.envelope.provenance.event.event_type = input.event_type();
     event.replay_context = input.replay_context.clone();
     event.ingress_context = input.ingress_context.clone();
     event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
@@ -798,20 +806,19 @@ async fn journal_policy_evidence<
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
     for evidence in batch.into_entries() {
         let execution = evidence.into_lifecycle();
-        let mut event =
-            ChainEventFactory::create_event(writer_id, ChainPayload::Execution(execution))
-                .with_flow_context(make_flow_context(
-                    &ctx.flow_name,
-                    &ctx.flow_id.to_string(),
-                    &ctx.stage_name,
-                    ctx.stage_id,
-                    StageType::Sink,
-                ))
-                .with_causality(CausalityContext::with_parent(
-                    parent.envelope.provenance.event.id,
-                ))
-                .with_correlation_from(&parent.authored())
-                .with_cycle_state_from(&parent.authored());
+        let mut event = ChainEventFactory::execution_event(writer_id, execution)
+            .with_flow_context(make_flow_context(
+                &ctx.flow_name,
+                &ctx.flow_id.to_string(),
+                &ctx.stage_name,
+                ctx.stage_id,
+                StageType::Sink,
+            ))
+            .with_causality(CausalityContext::with_parent(
+                parent.envelope.provenance.event.id,
+            ))
+            .with_correlation_from(&parent.authored())
+            .with_cycle_state_from(&parent.authored());
         event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
         event = ctx.instrumentation.capture_accounting().attach_to(event);
         crate::supervised_base::publication::append(
@@ -912,7 +919,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         subscription.last_delivered_generation(),
     );
     let boundary = ctx.sink_delivery_boundary.clone();
-    let input = envelope.authored();
+    let input = envelope.clone();
 
     let execution = process_with_instrumentation(&ctx.instrumentation, || async {
         let _processing = heartbeat_state
@@ -1028,7 +1035,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         }
         (Some(SinkInvocationOutcome::Delivered(Err(HandlerError::SinkWrite(failure)))), None) => {
             let failure = (*failure).clone();
-            let report = SinkConsumeReport::new(DeliveryPayload::failed(
+            let report = SinkConsumeReport::new(DeliveryOutcome::failed(
                 ctx.default_delivery_method
                     .clone()
                     .unwrap_or(DeliveryMethod::Noop),
@@ -1045,7 +1052,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             )
         }
         (Some(SinkInvocationOutcome::Delivered(Err(error))), None) => {
-            let report = SinkConsumeReport::new(DeliveryPayload::failed(
+            let report = SinkConsumeReport::new(DeliveryOutcome::failed(
                 ctx.default_delivery_method
                     .clone()
                     .unwrap_or(DeliveryMethod::Noop),
@@ -1059,7 +1066,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             )
         }
         (Some(SinkInvocationOutcome::Panicked), None) => (
-            SinkConsumeReport::new(DeliveryPayload::failed(
+            SinkConsumeReport::new(DeliveryOutcome::failed(
                 ctx.default_delivery_method
                     .clone()
                     .unwrap_or(DeliveryMethod::Noop),
@@ -1073,12 +1080,12 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         ),
         (None, Some(rejection)) => (
             SinkConsumeReport::new(
-                DeliveryPayload::failed(
+                DeliveryOutcome::rejected(
                     ctx.default_delivery_method
                         .clone()
                         .unwrap_or(DeliveryMethod::Noop),
-                    "sink_policy_rejected",
-                    format!("{}: {}", rejection.policy(), rejection.reason()),
+                    rejection.policy(),
+                    rejection.reason(),
                 )
                 .with_middleware_context(json!({
                     "kind": "middleware_rejection",
@@ -1197,7 +1204,9 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                         DeliveryResult::Buffered { .. } => {
                             SinkDeliveryAttemptResult::ReportedBuffered
                         }
-                        DeliveryResult::Failed { .. } => SinkDeliveryAttemptResult::ReportedFailure,
+                        DeliveryResult::Failed { .. } | DeliveryResult::Rejected { .. } => {
+                            SinkDeliveryAttemptResult::ReportedFailure
+                        }
                     },
                 }
             }
@@ -1291,7 +1300,7 @@ async fn journal_delivery_receipt<
     ctx: &mut JournalSinkResources<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     parent_envelope: &DeliveredRecord<ChainPayload>,
-    payload: DeliveryPayload,
+    payload: DeliveryOutcome,
     scope: MiddlewareExecutionScope,
 ) -> Result<DeliveredRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
     let flow_id = ctx.flow_id.to_string();
@@ -1304,13 +1313,18 @@ async fn journal_delivery_receipt<
     );
 
     let writer_id = WriterId::from(ctx.stage_id);
-    let delivery_event = journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
-        .with_flow_context(flow_context)
-        .with_causality(CausalityContext::with_parent(
-            parent_envelope.envelope.provenance.event.id,
-        ))
-        .with_correlation_from(&parent_envelope.authored())
-        .with_cycle_state_from(&parent_envelope.authored());
+    let delivery_event = journalled_delivery_event(
+        writer_id,
+        &ctx.receipt_destination,
+        parent_envelope,
+        payload,
+    )
+    .with_flow_context(flow_context)
+    .with_causality(CausalityContext::with_parent(
+        parent_envelope.envelope.provenance.event.id,
+    ))
+    .with_correlation_from(&parent_envelope.authored())
+    .with_cycle_state_from(&parent_envelope.authored());
     let delivery_event = delivery_event
         .try_with_composite_activations(parent_envelope.composite_activations().to_vec())?;
 

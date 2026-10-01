@@ -515,13 +515,16 @@ async fn rejection_makes_zero_writer_calls_and_authors_no_operation_failure() {
         data.iter()
             .filter_map(|envelope| match &envelope.payload {
                 ChainPayload::Delivery(payload) => match &payload.result {
-                    DeliveryResult::Failed { error_type, .. } => Some(error_type.as_str()),
+                    DeliveryResult::Rejected { policy, reason } => {
+                        assert_eq!(envelope.event_type(), "delivery.rejected");
+                        Some((policy.as_str(), reason.as_str()))
+                    }
                     _ => None,
                 },
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        ["sink_policy_rejected", "sink_policy_rejected"]
+        [("flowip_122a_test_policy", "intentional rejection"); 2]
     );
     let errors = read_stage(&run, "output", "error_journal_file").await;
     assert!(errors

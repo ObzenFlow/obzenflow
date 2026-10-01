@@ -35,6 +35,9 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
         writer_id: WriterId::from(stage_id),
         event_kind: payload.kind(),
         event_type: event_type.to_string(),
+        payload_schema_version: payload
+            .framework_schema_version()
+            .unwrap_or(std::num::NonZeroU32::MIN),
         causality: CausalityContext::new(),
         flow_context: FlowContext::default(),
         processing: ProcessingProvenance {
@@ -107,7 +110,7 @@ fn application_json_is_selected_by_descriptor_including_null_and_framework_keys(
         Value::Null,
         json!({"execution_type":"source_poll_error","system_event_type":"stage_lifecycle"}),
     ] {
-        let record = chain_record(ChainPayload::Fact(value.clone()), "application.value.v1");
+        let record = chain_record(ChainPayload::Fact(value.clone()), "application.value");
         let json = serde_json::to_value(record).unwrap();
         assert_eq!(json.as_object().unwrap().len(), 2);
         assert_eq!(json["payload"], value);
@@ -118,7 +121,7 @@ fn application_json_is_selected_by_descriptor_including_null_and_framework_keys(
 
 #[test]
 fn required_record_roots_do_not_confuse_absence_with_business_null() {
-    let record = chain_record(ChainPayload::Fact(Value::Null), "business.null.v1");
+    let record = chain_record(ChainPayload::Fact(Value::Null), "business.null");
     let authored = record.authored();
     for root in ["envelope", "payload"] {
         let mut committed = serde_json::to_value(&record).unwrap();
@@ -131,10 +134,52 @@ fn required_record_roots_do_not_confuse_absence_with_business_null() {
 }
 
 #[test]
+fn payload_versions_are_mandatory_positive_and_opaque_for_application_facts() {
+    let mut record = chain_record(ChainPayload::Fact(json!({"value": 7})), "application.value");
+    record.envelope.provenance.event.payload_schema_version =
+        std::num::NonZeroU32::new(37).unwrap();
+    let original = serde_json::to_value(&record).unwrap();
+    let decoded: JournalRecord<ChainPayload> = serde_json::from_value(original.clone()).unwrap();
+    assert_eq!(
+        decoded
+            .envelope
+            .provenance
+            .event
+            .payload_schema_version
+            .get(),
+        37
+    );
+    for version in [Value::Null, json!(0), json!(-1), json!(1.5), json!("1")] {
+        let mut invalid = original.clone();
+        invalid["envelope"]["provenance"]["event"]["payload_schema_version"] = version;
+        assert!(serde_json::from_value::<JournalRecord<ChainPayload>>(invalid).is_err());
+    }
+    let mut absent = original;
+    absent["envelope"]["provenance"]["event"]
+        .as_object_mut()
+        .unwrap()
+        .remove("payload_schema_version");
+    assert!(serde_json::from_value::<JournalRecord<ChainPayload>>(absent).is_err());
+}
+
+#[test]
+fn framework_version_is_checked_before_its_payload() {
+    let event = crate::event::ChainEventFactory::stage_running(
+        WriterId::from(StageId::new()),
+        StageId::new(),
+    );
+    let mut value = serde_json::to_value(event).unwrap();
+    value["envelope"]["provenance"]["event"]["payload_schema_version"] = json!(99);
+    value["payload"] = json!("undecodable");
+    let error = serde_json::from_value::<ChainEvent>(value).unwrap_err();
+    assert!(error.to_string().contains("version"), "{error}");
+}
+
+#[test]
 fn malformed_records_report_the_boundary_and_field_path() {
     let original = serde_json::to_value(chain_record(
         ChainPayload::Fact(Value::Null),
-        "business.null.v1",
+        "business.null",
     ))
     .unwrap();
     for (path, value, diagnostic) in [
@@ -192,7 +237,7 @@ fn malformed_records_report_the_boundary_and_field_path() {
 fn removing_observations_preserves_complete_provenance_and_atomic_membership() {
     let original = serde_json::to_value(chain_record(
         ChainPayload::Fact(json!({"ok":true})),
-        "application.result.v1",
+        "application.result",
     ))
     .unwrap();
     assert_eq!(
@@ -244,7 +289,7 @@ fn execution_descriptor_mismatch_and_unknown_family_are_rejected() {
 fn authored_records_and_old_roots_cannot_decode_as_committed_records() {
     let mut record = serde_json::to_value(chain_record(
         ChainPayload::Fact(Value::Null),
-        "application.null.v1",
+        "application.null",
     ))
     .unwrap();
     record["envelope"]["provenance"]
@@ -263,6 +308,7 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
         AuthoredEnvelope {
             provenance: AuthoredProvenance {
                 event: SystemEventProvenance {
+                    payload_schema_version: SystemPayload::SCHEMA_VERSION,
                     id: EventId::new(),
                     writer_id,
                     event_kind: EventKind::System,
@@ -309,7 +355,7 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
 fn unknown_observation_fields_do_not_become_unrestricted_json() {
     let mut record = serde_json::to_value(chain_record(
         ChainPayload::Fact(Value::Null),
-        "application.null.v1",
+        "application.null",
     ))
     .unwrap();
     record["envelope"]["observability"]["custom"] = json!({"anything": true});

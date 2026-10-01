@@ -6,15 +6,15 @@
 
 use async_trait::async_trait;
 pub use obzenflow_core::event::payloads::effect_payload::{
-    effect_escape_controls_group_id, effect_outcome_group_id, framework_effect_event_type,
-    is_framework_effect_event_type, CanonicalInputHash, EffectAttemptOrdinal, EffectAttemptStarted,
-    EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin, EffectFactOwner,
-    EffectFailureCause, EffectFailureCode, EffectFailureDetail, EffectFailureKind,
-    EffectFailureSource, EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId,
-    EffectOutcomePayload, EffectProvenance, EffectRecord, EffectRecoveryAbandoned,
-    EffectSchemaVersion, EffectStageKey, EffectType, OutcomeFactCount, OutcomeFactOrdinal,
+    effect_escape_controls_group_id, effect_outcome_group_id, is_framework_effect_event_type,
+    CanonicalInputHash, EffectAttemptOrdinal, EffectAttemptStarted, EffectCursor, EffectDescriptor,
+    EffectDescriptorHash, EffectFactOrigin, EffectFactOwner, EffectFailureCause, EffectFailureCode,
+    EffectFailureDetail, EffectFailureKind, EffectFailureSource, EffectInputPosition, EffectLabel,
+    EffectObservation, EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload, EffectPortReturn,
+    EffectProvenance, EffectRecord, EffectRecoveryAbandoned, EffectSchemaVersion, EffectStageKey,
+    EffectType, EffectUnresolvedReason, ExternalCompletion, OutcomeFactCount, OutcomeFactOrdinal,
     RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
-    EFFECT_ATTEMPT_STARTED_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
+    EFFECT_ATTEMPT_STARTED_EVENT_TYPE, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
     EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
 };
 use obzenflow_core::event::provenance::FlowContext;
@@ -107,8 +107,8 @@ pub(crate) use history::{
 pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};
 pub use identity::{
     deterministic_effect_record_event_id, deterministic_effect_record_event_time,
-    deterministic_event_id, deterministic_event_time, deterministic_typed_output_event,
-    EffectOutputOrdinal,
+    deterministic_event_id, deterministic_event_time, deterministic_payload_event_id,
+    deterministic_typed_output_event, EffectOutputOrdinal,
 };
 pub use ports::{
     EffectBindingBuildError, EffectPortRegistry, EffectPortResolutionError, EffectPortResolver,

@@ -173,6 +173,13 @@ impl<'a> EventView<'a> {
         BodyView::from_record(self.record, self.context)
     }
 
+    pub fn payload_schema_version(&self) -> std::num::NonZeroU32 {
+        match &self.record.record {
+            RunRecordData::Chain(row) => row.envelope.provenance.event.payload_schema_version,
+            RunRecordData::System(row) => row.envelope.provenance.event.payload_schema_version,
+        }
+    }
+
     pub fn explanation(&self) -> &'static str {
         gloss(self.record)
     }
@@ -314,6 +321,7 @@ fn gloss(record: &RunRecord) -> &'static str {
             ChainPayload::Delivery(delivery) => match &delivery.result {
                 DeliveryResult::Buffered { .. } => "The sink buffered this input; durable delivery is not yet confirmed.",
                 DeliveryResult::Success { .. } => "The sink recorded a successful delivery outcome.",
+                DeliveryResult::Rejected { .. } => "The runtime rejected this delivery before invoking the writer.",
                 DeliveryResult::Failed { .. } => "The sink recorded a failed delivery outcome.",
                 DeliveryResult::Partial { .. } => "The sink recorded a mixture of successful and failed deliveries.",
             },

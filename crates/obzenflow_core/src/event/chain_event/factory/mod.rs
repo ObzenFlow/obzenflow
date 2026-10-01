@@ -11,52 +11,96 @@ mod lifecycle;
 mod middleware;
 
 use super::{ChainEvent, ChainPayload};
-use crate::event::observability::ObservabilityContext;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
 use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::provenance::FlowContext;
 use crate::event::types::{EventId, WriterId};
+use std::num::NonZeroU32;
 
 /// Stateless factory for creating ChainEvents with consistent patterns.
+/// Raw authoring requires an explicit positive version. Generic construction
+/// stays inside Core so external callers choose a typed or family constructor.
+///
+/// ```compile_fail
+/// use obzenflow_core::{StageId, WriterId};
+/// use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+/// let _ = ChainEventFactory::create_event(
+///     WriterId::from(StageId::new()), ChainPayload::Fact(serde_json::json!({})),
+///     "example", std::num::NonZeroU32::MIN,
+/// );
+/// ```
+///
+/// ```compile_fail
+/// use obzenflow_core::{StageId, WriterId};
+/// use obzenflow_core::event::ChainEventFactory;
+/// let _ = ChainEventFactory::data_event(
+///     WriterId::from(StageId::new()), "example", 0, serde_json::json!({}),
+/// );
+/// ```
 pub struct ChainEventFactory;
 
 impl ChainEventFactory {
+    pub fn composite_event(
+        writer_id: WriterId,
+        payload: crate::event::payloads::composite_data_payload::CompositeDataPayload,
+    ) -> ChainEvent {
+        Self::framework_event(writer_id, ChainPayload::CompositeData(payload))
+    }
+
+    pub fn derived_composite_event(
+        writer_id: WriterId,
+        parent: &ChainEvent,
+        payload: crate::event::payloads::composite_data_payload::CompositeDataPayload,
+        lineage: crate::config::LineagePolicy,
+    ) -> ChainEvent {
+        let name = payload.event_type();
+        let version = payload.payload_schema_version();
+        Self::derived_event(
+            writer_id,
+            parent,
+            ChainPayload::CompositeData(payload),
+            name,
+            version,
+            lineage,
+        )
+    }
+
+    pub fn flow_signal_event(
+        writer_id: WriterId,
+        payload: crate::event::payloads::flow_control_payload::FlowControlPayload,
+    ) -> ChainEvent {
+        Self::framework_event(writer_id, ChainPayload::FlowControl(payload))
+    }
+
     /// Create a delivery event
     pub fn delivery_event(writer_id: WriterId, payload: DeliveryPayload) -> ChainEvent {
-        Self::create_event(writer_id, ChainPayload::Delivery(payload))
+        let parent = payload.subject.input.event_id;
+        Self::framework_event(writer_id, ChainPayload::Delivery(payload))
+            .with_causality(CausalityContext::with_parent(parent))
     }
 
-    /// Create an event with flow context
-    pub fn create_with_context(
+    pub(crate) fn framework_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {
+        let event_type = content
+            .framework_event_type()
+            .expect("closed framework payload");
+        let version = content
+            .framework_schema_version()
+            .expect("closed framework payload");
+        Self::create_event(writer_id, content, event_type, version)
+    }
+
+    pub(crate) fn create_event(
         writer_id: WriterId,
         content: ChainPayload,
-        flow_context: FlowContext,
+        event_type: impl Into<String>,
+        payload_schema_version: NonZeroU32,
     ) -> ChainEvent {
-        let mut event = Self::create_event(writer_id, content);
-        event.flow_context = flow_context;
-        event
-    }
-
-    /// Create an event with observability context
-    pub fn create_with_observability(
-        writer_id: WriterId,
-        content: ChainPayload,
-        observability: ObservabilityContext,
-    ) -> ChainEvent {
-        let mut event = Self::create_event(writer_id, content);
-        event.envelope.observability = Some(observability);
-        event
-    }
-
-    pub fn create_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {
         let provenance = ChainEventProvenance {
             id: EventId::new(),
             writer_id,
             event_kind: content.kind(),
-            event_type: content
-                .framework_event_type()
-                .unwrap_or("application.fact")
-                .to_string(),
+            event_type: event_type.into(),
+            payload_schema_version,
             causality: CausalityContext::new(),
             flow_context: FlowContext::default(),
             processing: ProcessingProvenance {

@@ -42,6 +42,56 @@ pub struct AdmissionSeq(pub u64);
 #[serde(transparent)]
 pub struct EventType(pub String);
 
+/// Complete payload identity used by selected feeds, accounting and replay.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventDescriptor {
+    pub event_kind: crate::event::EventKind,
+    pub event_type: EventType,
+    pub payload_schema_version: std::num::NonZeroU32,
+}
+
+impl fmt::Display for EventDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}@{}",
+            self.event_kind.as_str(),
+            self.event_type,
+            self.payload_schema_version
+        )
+    }
+}
+
+/// Structured descriptor keys on the wire, with duplicate entries rejected.
+pub(crate) mod descriptor_counts {
+    use super::{EventDescriptor, SeqNo};
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: serde::Serializer>(
+        values: &BTreeMap<EventDescriptor, SeqNo>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        values.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<EventDescriptor, SeqNo>, D::Error> {
+        let entries = Vec::<(EventDescriptor, SeqNo)>::deserialize(deserializer)?;
+        let mut result = BTreeMap::new();
+        for (descriptor, count) in entries {
+            if result.insert(descriptor, count).is_some() {
+                return Err(serde::de::Error::custom(
+                    "duplicate event descriptor in EOF accounting",
+                ));
+            }
+        }
+        Ok(result)
+    }
+}
+
 impl EventType {
     pub fn as_str(&self) -> &str {
         &self.0

@@ -20,9 +20,7 @@ use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{
-    DeliveryContract, EventType, JournalRecord, Result, StageId, TransportContract,
-};
+use obzenflow_core::{DeliveryContract, JournalRecord, Result, StageId, TransportContract};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -289,7 +287,7 @@ where
     /// Configure selected Data event types per upstream reader.
     pub fn with_selected_event_types(
         mut self,
-        selected_event_types_by_stage: HashMap<StageId, HashSet<EventType>>,
+        selected_event_types_by_stage: HashMap<StageId, HashSet<obzenflow_core::EventDescriptor>>,
     ) -> Self {
         self.selected_feeds_by_stage = selected_event_types_by_stage
             .iter()
@@ -319,7 +317,7 @@ where
                     *stage_id,
                     feeds
                         .iter()
-                        .map(|feed| feed.event_type().clone())
+                        .map(|feed| feed.descriptor().clone())
                         .collect::<HashSet<_>>(),
                 )
             })

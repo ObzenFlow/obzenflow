@@ -122,7 +122,8 @@ mod tests {
 
     fn unknown_fact() -> TypedFact {
         TypedFact {
-            event_type: EventType::from("carrier.unknown.v1"),
+            payload_schema_version: std::num::NonZeroU32::MIN,
+            event_type: EventType::from("carrier.unknown"),
             payload: ChainPayload::Fact(serde_json::json!({})),
         }
     }
@@ -190,8 +191,8 @@ mod tests {
 
         let facts = carrier.clone().into_facts().expect("product serializes");
         assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].event_type.as_str(), "carrier.approved.v1");
-        assert_eq!(facts[1].event_type.as_str(), "carrier.refused.v1");
+        assert_eq!(facts[0].event_type.as_str(), "carrier.approved");
+        assert_eq!(facts[1].event_type.as_str(), "carrier.refused");
 
         // Reconstruction is order-insensitive; the ordinal regime owns order.
         let reversed = vec![facts[1].clone(), facts[0].clone()];

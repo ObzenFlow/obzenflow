@@ -675,13 +675,18 @@ where
     ) -> Result<crate::stages::common::handlers::sink::SinkConsumeReport, DriverFailure> {
         let event = ChainEventFactory::data_event_from(
             self.writer_id,
-            W::Input::versioned_event_type(),
+            W::Input::event_type_name(),
+            W::Input::payload_schema_version(),
             &input,
         )
         .map_err(|error| DriverFailure::Protocol(error.to_string()))?;
         let mut report = self
             .adapter
-            .consume_report(event)
+            .consume_committed_report(
+                obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event)
+                    .into(),
+                Default::default(),
+            )
             .await
             .map_err(map_handler_error)?;
         report.commit_settlements().map_err(map_handler_error)?;

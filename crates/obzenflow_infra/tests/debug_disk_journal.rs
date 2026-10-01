@@ -25,7 +25,12 @@ async fn debug_flight_delays_issue() {
 
     println!("Testing single journal append...");
     let writer_id = WriterId::from(StageId::new());
-    let event = ChainEventFactory::data_event(writer_id, "test.event", json!({"test": "data"}));
+    let event = ChainEventFactory::data_event(
+        writer_id,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        json!({"test": "data"}),
+    );
 
     match journal.append(event, Default::default()).await {
         Ok(_) => println!("✅ Journal append successful!"),
@@ -47,6 +52,7 @@ async fn debug_flight_delays_issue() {
             let event = ChainEventFactory::data_event(
                 writer,
                 "FlightRecord",
+                std::num::NonZeroU32::MIN,
                 json!({
                     "carrier": "AA",
                     "batch": i,

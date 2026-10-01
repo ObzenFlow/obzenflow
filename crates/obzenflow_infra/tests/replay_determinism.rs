@@ -82,6 +82,7 @@ impl SimpleStateful for CountingHandler {
             vec![ChainEventFactory::data_event(
                 self.writer_id,
                 "test.stateful.count",
+                std::num::NonZeroU32::MIN,
                 json!({ "count": *state }),
             )]
         }
@@ -152,8 +153,12 @@ async fn stateful_replay_produces_identical_aggregates() {
 
     // Write a small deterministic input stream: 3 data events + EOF.
     for i in 0..3 {
-        let event =
-            ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": i }));
+        let event = ChainEventFactory::data_event(
+            upstream_writer,
+            "test.input",
+            std::num::NonZeroU32::MIN,
+            json!({ "seq": i }),
+        );
         upstream_journal
             .append(event, Default::default())
             .await
@@ -187,10 +192,20 @@ async fn replay_determinism_preserves_physical_order_across_event_authors() {
 
     // Force EventId ordering to be independent of append timing:
     // ensure `low` has the smaller EventId, but append `high` first (earlier timestamp).
-    let mut low = ChainEventFactory::data_event(writer_a, "test.concurrent", json!({ "seq": 0 }));
+    let mut low = ChainEventFactory::data_event(
+        writer_a,
+        "test.concurrent",
+        std::num::NonZeroU32::MIN,
+        json!({ "seq": 0 }),
+    );
     low.id = obzenflow_core::event::types::EventId::new();
 
-    let mut high = ChainEventFactory::data_event(writer_b, "test.concurrent", json!({ "seq": 1 }));
+    let mut high = ChainEventFactory::data_event(
+        writer_b,
+        "test.concurrent",
+        std::num::NonZeroU32::MIN,
+        json!({ "seq": 1 }),
+    );
     high.id = obzenflow_core::event::types::EventId::new();
 
     if low.id > high.id {
@@ -374,6 +389,7 @@ impl StatefulHandler for SupervisorCountingHandler {
             Ok(vec![ChainEventFactory::data_event(
                 self.writer_id,
                 "test.stateful.count.supervisor",
+                std::num::NonZeroU32::MIN,
                 json!({ "count": *state }),
             )])
         }
@@ -448,8 +464,12 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
     // Write deterministic upstream events into src journal.
     let upstream_writer = WriterId::from(src);
     for i in 0..3 {
-        let event =
-            ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": i }));
+        let event = ChainEventFactory::data_event(
+            upstream_writer,
+            "test.input",
+            std::num::NonZeroU32::MIN,
+            json!({ "seq": i }),
+        );
         src_journal
             .append(event, Default::default())
             .await

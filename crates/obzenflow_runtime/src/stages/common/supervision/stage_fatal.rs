@@ -4,9 +4,7 @@
 
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::StageFatal;
-use obzenflow_core::event::{
-    ChainEventFactory, ChainPayload, JournalRecord, StageFatalRecorded, StageFatalSeverity,
-};
+use obzenflow_core::event::{ChainPayload, JournalRecord, StageFatalRecorded, StageFatalSeverity};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
@@ -43,20 +41,10 @@ pub(crate) async fn record_stage_fatal(
         reason: fatal.reason,
         detail: fatal.detail.clone(),
     };
-    let payload = serde_json::to_value(payload)?;
     let event = match commit.parent {
-        Some(parent) => ChainEventFactory::derived_data_event(
-            commit.writer_id,
-            &parent.authored(),
-            StageFatalRecorded::versioned_event_type(),
-            payload,
-            commit.lineage,
-        ),
-        None => ChainEventFactory::data_event(
-            commit.writer_id,
-            StageFatalRecorded::versioned_event_type(),
-            payload,
-        ),
+        Some(parent) => obzenflow_core::event::schema::TypedFact::from_payload(payload)?
+            .into_derived_event(commit.writer_id, &parent.authored(), commit.lineage),
+        None => payload.to_event(commit.writer_id),
     };
     crate::supervised_base::publication::append(
         commit.error_journal,

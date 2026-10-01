@@ -474,7 +474,12 @@ fn bench_causal_record_costs(c: &mut Criterion) {
     for incoming_journals in [1, 32, 1024] {
         let record = rt.block_on(async {
             let event = |stage| {
-                ChainEventFactory::data_event(stage, "bench.causal_record", Default::default())
+                ChainEventFactory::data_event(
+                    stage,
+                    "bench.causal_record",
+                    std::num::NonZeroU32::MIN,
+                    Default::default(),
+                )
             };
             let mut frontier = CausalFrontier::default();
             for _ in 0..incoming_journals {

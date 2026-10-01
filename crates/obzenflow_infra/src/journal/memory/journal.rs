@@ -517,13 +517,21 @@ mod tests {
         let writer2 = WriterId::from(StageId::new());
 
         // First event from writer1
-        let event1 =
-            ChainEventFactory::data_event(writer1, "test.event.1", json!({"data": "first"}));
+        let event1 = ChainEventFactory::data_event(
+            writer1,
+            "test.event.1",
+            std::num::NonZeroU32::MIN,
+            json!({"data": "first"}),
+        );
         let envelope1 = journal.append(event1, Default::default()).await.unwrap();
 
         // Second event from writer2, with parent
-        let event2 =
-            ChainEventFactory::data_event(writer2, "test.event.2", json!({"data": "second"}));
+        let event2 = ChainEventFactory::data_event(
+            writer2,
+            "test.event.2",
+            std::num::NonZeroU32::MIN,
+            json!({"data": "second"}),
+        );
         let envelope2 = journal
             .append(
                 event2,
@@ -588,10 +596,20 @@ mod tests {
         let writer = WriterId::from(StageId::new());
 
         // Create a chain of events
-        let event1 = ChainEventFactory::data_event(writer, "event.1", json!({"seq": 1}));
+        let event1 = ChainEventFactory::data_event(
+            writer,
+            "event.1",
+            std::num::NonZeroU32::MIN,
+            json!({"seq": 1}),
+        );
         let envelope1 = journal.append(event1, Default::default()).await.unwrap();
 
-        let event2 = ChainEventFactory::data_event(writer, "event.2", json!({"seq": 2}));
+        let event2 = ChainEventFactory::data_event(
+            writer,
+            "event.2",
+            std::num::NonZeroU32::MIN,
+            json!({"seq": 2}),
+        );
         let envelope2 = journal
             .append(
                 event2,
@@ -600,7 +618,12 @@ mod tests {
             .await
             .unwrap();
 
-        let event3 = ChainEventFactory::data_event(writer, "event.3", json!({"seq": 3}));
+        let event3 = ChainEventFactory::data_event(
+            writer,
+            "event.3",
+            std::num::NonZeroU32::MIN,
+            json!({"seq": 3}),
+        );
         journal
             .append(
                 event3,
@@ -626,8 +649,18 @@ mod tests {
         let writer = WriterId::from(StageId::new());
 
         // Append a small sequence of events
-        let e1 = ChainEventFactory::data_event(writer, "reader.test.1", json!({"seq": 1}));
-        let e2 = ChainEventFactory::data_event(writer, "reader.test.2", json!({"seq": 2}));
+        let e1 = ChainEventFactory::data_event(
+            writer,
+            "reader.test.1",
+            std::num::NonZeroU32::MIN,
+            json!({"seq": 1}),
+        );
+        let e2 = ChainEventFactory::data_event(
+            writer,
+            "reader.test.2",
+            std::num::NonZeroU32::MIN,
+            json!({"seq": 2}),
+        );
         journal.append(e1, Default::default()).await.unwrap();
         journal.append(e2, Default::default()).await.unwrap();
 

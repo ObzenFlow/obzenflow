@@ -91,21 +91,21 @@ fn runtime_boundary_is_the_named_multi_port_cut_even_when_not_collapsible() {
             "commands",
             PortDirection::Input,
             entry,
-            vec!["checkout.command.v1".into()],
+            vec!["checkout.command".into()],
             true,
         ),
         BoundaryPortSpec::new(
             "completed",
             PortDirection::Output,
             completed,
-            vec!["checkout.completed.v1".into()],
+            vec!["checkout.completed".into()],
             true,
         ),
         BoundaryPortSpec::new(
             "failed",
             PortDirection::Output,
             failed,
-            vec!["checkout.failed.v1".into()],
+            vec!["checkout.failed".into()],
             false,
         ),
     ]);
@@ -377,6 +377,7 @@ pub async fn late_metrics_bootstrap_selects_current_values_without_stage_eof(
             let mut event = ChainEventFactory::data_event(
                 stage.into(),
                 "test.fact",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({"n":count}),
             );
             event.flow_context.stage_id = stage;

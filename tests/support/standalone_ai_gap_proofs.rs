@@ -690,7 +690,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     assert_eq!(
         in_doubt_events
             .iter()
-            .filter(|event| EffectAttemptStarted::event_type_matches(&event.event_type()))
+            .filter(|event| EffectAttemptStarted::matches_event_type(&event.event_type()))
             .count(),
         1
     );
@@ -702,7 +702,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     assert!(
         in_doubt_events
             .iter()
-            .all(|event| event.event_type() != EFFECT_RECORD_EVENT_TYPE),
+            .all(|event| event.event_type() != EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE),
         "the process cut leaves durable attempt evidence but no terminal reply"
     );
 
@@ -950,13 +950,13 @@ async fn empty_embedding_inputs_fail_validation_before_resolver_attempt_or_effec
     assert_eq!(
         embedding_events
             .iter()
-            .filter(|event| EffectAttemptStarted::event_type_matches(&event.event_type()))
+            .filter(|event| EffectAttemptStarted::matches_event_type(&event.event_type()))
             .count(),
         0
     );
     assert!(embedding_events
         .iter()
-        .all(|event| event.event_type() != EFFECT_RECORD_EVENT_TYPE));
+        .all(|event| event.event_type() != EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE));
     let errors = stage_processing_errors(&archive, "embedding").await;
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].0, Some(ErrorKind::Validation));
@@ -1061,12 +1061,12 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
         .iter()
         .enumerate()
         .filter_map(|(position, event)| {
-            TicketSummarised::event_type_matches(&event.event_type()).then_some(position)
+            TicketSummarised::matches_event_type(&event.event_type()).then_some(position)
         })
         .collect::<Vec<_>>();
     let chat_writer = chat_events
         .iter()
-        .find(|event| TicketSummarised::event_type_matches(&event.event_type()))
+        .find(|event| TicketSummarised::matches_event_type(&event.event_type()))
         .map(|event| event.writer_id)
         .expect("chat authors typed output");
     let eof_position = chat_events
@@ -1142,7 +1142,7 @@ async fn maximum_release_fixture_measures_one_normalised_reply_and_one_domain_ve
 
     let output_events = events
         .iter()
-        .filter(|event| TicketEmbedded::event_type_matches(&event.event_type()))
+        .filter(|event| TicketEmbedded::matches_event_type(&event.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(output_events.len(), 1);
     let all_rows = serde_json::to_value(&events).unwrap();

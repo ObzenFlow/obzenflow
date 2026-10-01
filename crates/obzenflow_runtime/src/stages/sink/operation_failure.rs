@@ -53,20 +53,17 @@ pub async fn record_sink_lifecycle_operation_failure(
         destination_error_code: commit.error.destination_error_code().cloned(),
         detail: commit.error.detail(),
     };
-    let event = ChainEventFactory::data_event(
-        WriterId::from(commit.stage_id),
-        SinkOperationFailed::versioned_event_type(),
-        serde_json::to_value(payload)?,
-    )
-    .with_flow_context(FlowContext {
-        flow_name: commit.flow_name.to_string(),
-        flow_id: commit.flow_id.to_string(),
-        stage_name: commit.stage_key.to_string(),
-        stage_id: commit.stage_id,
-        stage_type: StageType::Sink,
-    })
-    .mark_as_error(commit.error.detail(), commit.error.kind())
-    .with_runtime_provenance(commit.instrumentation.snapshot());
+    let event = payload
+        .to_event(WriterId::from(commit.stage_id))
+        .with_flow_context(FlowContext {
+            flow_name: commit.flow_name.to_string(),
+            flow_id: commit.flow_id.to_string(),
+            stage_name: commit.stage_key.to_string(),
+            stage_id: commit.stage_id,
+            stage_type: StageType::Sink,
+        })
+        .mark_as_error(commit.error.detail(), commit.error.kind())
+        .with_runtime_provenance(commit.instrumentation.snapshot());
     let error_journal = commit.error_journal.clone();
     let data_journal = commit.data_journal.clone();
     let flow_context = event.flow_context.clone();

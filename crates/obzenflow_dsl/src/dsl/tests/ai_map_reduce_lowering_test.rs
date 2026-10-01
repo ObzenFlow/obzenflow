@@ -267,7 +267,7 @@ mod tests {
         let direct_plan = inference
             .direct_fact_plan()
             .expect("inference uses the generated direct-fact continuation");
-        let input_event_type = TestSeed::versioned_event_type();
+        let input_event_type = TestSeed::event_type_name();
         assert_eq!(
             direct_plan.manifest_entries().collect::<Vec<_>>(),
             vec![(input_event_type.as_str(), 3)]
@@ -1097,22 +1097,22 @@ mod tests {
         plan_text.push_str(&contract_lines.join("\n"));
         plan_text.push('\n');
         insta::assert_snapshot!(plan_text, @r###"
-        feed digest__chunk -> digest__map role=input key=ai.map_reduce.map_input.v1 visibility=routable
-        feed digest__chunk -> digest__map role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
-        feed digest__collect -> digest__finalize role=input key=ai.map_reduce.reduce_input.v2 visibility=routable
-        feed digest__map -> digest__collect role=input key=ai.map_reduce.chunk_failed.v2 visibility=routable
-        feed digest__map -> digest__collect role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
-        feed digest__map -> digest__collect role=input key=ai.map_reduce.tagged_partial.v1 visibility=routable
-        contract digest__chunk key=ai.map_reduce.map_input.v1 visibility=routable
-        contract digest__chunk key=ai.map_reduce.planning_failed.v1 visibility=unrouted
-        contract digest__chunk key=ai.map_reduce.planning_manifest.v1 visibility=routable
-        contract digest__collect key=ai.map_reduce.job_failed.v1 visibility=unrouted
-        contract digest__collect key=ai.map_reduce.reduce_input.v2 visibility=routable
-        contract digest__finalize key=ai.map_reduce.finalise_failed.v1 visibility=unrouted
-        contract digest__finalize key=test.ai_map_reduce.out.v1 visibility=unrouted
-        contract digest__map key=ai.map_reduce.chunk_failed.v2 visibility=routable
-        contract digest__map key=ai.map_reduce.planning_manifest.v1 visibility=routable
-        contract digest__map key=ai.map_reduce.tagged_partial.v1 visibility=routable
+        feed digest__chunk -> digest__map role=input key=composite_data/ai.map_reduce.map_input@1 visibility=routable
+        feed digest__chunk -> digest__map role=input key=composite_data/ai.map_reduce.planning_manifest@1 visibility=routable
+        feed digest__collect -> digest__finalize role=input key=composite_data/ai.map_reduce.reduce_input@2 visibility=routable
+        feed digest__map -> digest__collect role=input key=composite_data/ai.map_reduce.chunk_failed@2 visibility=routable
+        feed digest__map -> digest__collect role=input key=composite_data/ai.map_reduce.planning_manifest@1 visibility=routable
+        feed digest__map -> digest__collect role=input key=composite_data/ai.map_reduce.tagged_partial@1 visibility=routable
+        contract digest__chunk key=composite_data/ai.map_reduce.map_input@1 visibility=routable
+        contract digest__chunk key=composite_data/ai.map_reduce.planning_failed@1 visibility=unrouted
+        contract digest__chunk key=composite_data/ai.map_reduce.planning_manifest@1 visibility=routable
+        contract digest__collect key=composite_data/ai.map_reduce.job_failed@1 visibility=unrouted
+        contract digest__collect key=composite_data/ai.map_reduce.reduce_input@2 visibility=routable
+        contract digest__finalize key=composite_data/ai.map_reduce.finalise_failed@1 visibility=unrouted
+        contract digest__finalize key=fact/test.ai_map_reduce.out@1 visibility=unrouted
+        contract digest__map key=composite_data/ai.map_reduce.chunk_failed@2 visibility=routable
+        contract digest__map key=composite_data/ai.map_reduce.planning_manifest@1 visibility=routable
+        contract digest__map key=composite_data/ai.map_reduce.tagged_partial@1 visibility=routable
         "###);
     }
 }

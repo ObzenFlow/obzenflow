@@ -197,8 +197,12 @@ mod tests {
     use ulid::Ulid;
 
     fn event_with_correlation(correlation_id: CorrelationId) -> ChainEvent {
-        let mut event =
-            ChainEventFactory::data_event(WriterId::from(StageId::new()), "in", json!({}));
+        let mut event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "in",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        );
         event.set_single_correlation(correlation_id, None);
         event
     }
@@ -329,8 +333,12 @@ mod tests {
 
     #[test]
     fn carries_truncation_from_upstream_mixed_correlation_event() {
-        let mut event =
-            ChainEventFactory::data_event(WriterId::from(StageId::new()), "aggregate", json!({}));
+        let mut event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "aggregate",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        );
         event.set_correlation_sample(vec![deterministic_correlation_id(1)], true);
 
         let mut trace = TraceState::default();
@@ -348,7 +356,12 @@ mod tests {
         let writer = WriterId::from(StageId::new());
         let mut trace = TraceState::default();
         for index in 0..3 {
-            let input = ChainEventFactory::data_event(writer, "input", json!({}));
+            let input = ChainEventFactory::data_event(
+                writer,
+                "input",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            );
             let input_id = input.id;
             let input = input
                 .try_with_composite_activations(vec![CompositeActivationContext::new(
@@ -368,7 +381,8 @@ mod tests {
 
         let encoded = serde_json::to_vec(&trace).unwrap();
         let replayed: TraceState = serde_json::from_slice(&encoded).unwrap();
-        let mut output = ChainEventFactory::data_event(writer, "output", json!({}));
+        let mut output =
+            ChainEventFactory::data_event(writer, "output", std::num::NonZeroU32::MIN, json!({}));
         replayed.apply_correlation_to_event(&mut output);
         assert_eq!(output.composite_activations().len(), 3);
         let mut ports: Vec<_> = output

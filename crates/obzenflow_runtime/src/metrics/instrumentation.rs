@@ -23,7 +23,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, JournalEvent};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{
-    EventId, EventType, FlowId, JournalPayload, MiddlewareExecutionScope, StageId, WriterId,
+    EventId, FlowId, JournalPayload, MiddlewareExecutionScope, StageId, WriterId,
 };
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
@@ -67,7 +67,7 @@ pub enum ControlBindError {
 #[derive(Debug, Default)]
 struct AuthoredDataFrontier {
     writer_seq: u64,
-    writer_seq_by_event_type: HashMap<EventType, u64>,
+    writer_seq_by_event_type: HashMap<obzenflow_core::EventDescriptor, u64>,
     last_event_id: Option<EventId>,
 }
 
@@ -126,7 +126,8 @@ pub struct StageInstrumentation {
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
     authored_data_frontier: RwLock<AuthoredDataFrontier>,
-    pub data_reader_seq_by_upstream_event_type: RwLock<HashMap<(StageId, EventType), u64>>,
+    pub data_reader_seq_by_upstream_event_type:
+        RwLock<HashMap<(StageId, obzenflow_core::EventDescriptor), u64>>,
 
     /// Error breakdown by kind
     pub errors_by_kind: RwLock<
@@ -303,11 +304,24 @@ impl StageInstrumentation {
                         .writer_seq_by_event_type
                         .iter()
                         .map(|(event_type, total)| EventTypeCountContext {
-                            event_type: event_type.clone(),
+                            event_type: event_type.event_type.clone(),
+                            event_kind: event_type.event_kind,
+                            payload_schema_version: event_type.payload_schema_version,
                             total: *total,
                         })
                         .collect();
-                    counts.sort_by(|left, right| left.event_type.cmp(&right.event_type));
+                    counts.sort_by(|left, right| {
+                        (
+                            left.event_kind,
+                            &left.event_type,
+                            left.payload_schema_version,
+                        )
+                            .cmp(&(
+                                right.event_kind,
+                                &right.event_type,
+                                right.payload_schema_version,
+                            ))
+                    });
                     counts
                 },
                 data_inputs_by_upstream_event_type: {
@@ -319,14 +333,26 @@ impl StageInstrumentation {
                         .map(
                             |((upstream, event_type), total)| UpstreamEventTypeCountContext {
                                 upstream: *upstream,
-                                event_type: event_type.clone(),
+                                event_type: event_type.event_type.clone(),
+                                event_kind: event_type.event_kind,
+                                payload_schema_version: event_type.payload_schema_version,
                                 total: *total,
                             },
                         )
                         .collect();
                     counts.sort_by(|left, right| {
-                        (left.upstream, left.event_type.as_str())
-                            .cmp(&(right.upstream, right.event_type.as_str()))
+                        (
+                            left.upstream,
+                            left.event_kind,
+                            left.event_type.as_str(),
+                            left.payload_schema_version,
+                        )
+                            .cmp(&(
+                                right.upstream,
+                                right.event_kind,
+                                right.event_type.as_str(),
+                                right.payload_schema_version,
+                            ))
                     });
                     counts
                 },
@@ -570,10 +596,10 @@ impl StageInstrumentation {
             Some(envelope.envelope.provenance.journal.vector_clock.clone());
         if let Some(event) = (&envelope.authored() as &dyn Any).downcast_ref::<ChainEvent>() {
             if event.consumes_data_credit() {
-                let event_type = &event.envelope.provenance.event.event_type;
+                let event_type = event.descriptor();
                 let mut counts = self.data_reader_seq_by_upstream_event_type.write().unwrap();
                 *counts
-                    .entry((upstream_stage, EventType::from(event_type.clone())))
+                    .entry((upstream_stage, event_type.clone()))
                     .or_insert(0) += 1;
             }
         }
@@ -605,12 +631,12 @@ impl StageInstrumentation {
     pub fn record_output_event(&self, event: &ChainEvent) {
         self.record_emitted(event);
         if event.consumes_data_credit() {
-            let event_type = &event.envelope.provenance.event.event_type;
+            let event_type = event.descriptor();
             let mut frontier = self.authored_data_frontier.write().unwrap();
             frontier.writer_seq = frontier.writer_seq.saturating_add(1);
             *frontier
                 .writer_seq_by_event_type
-                .entry(event_type.clone().into())
+                .entry(event_type)
                 .or_insert(0) += 1;
             frontier.last_event_id = Some(event.id);
         }
@@ -635,7 +661,7 @@ impl StageInstrumentation {
 
     pub fn data_writer_seq_by_event_type(
         &self,
-    ) -> BTreeMap<EventType, obzenflow_core::event::types::SeqNo> {
+    ) -> BTreeMap<obzenflow_core::EventDescriptor, obzenflow_core::event::types::SeqNo> {
         self.authored_data_frontier
             .read()
             .unwrap()
@@ -655,7 +681,13 @@ impl StageInstrumentation {
     /// All three coordinates come from one lock acquisition so a terminal can
     /// never combine a count, per-type map, and last event from different
     /// frontiers.
-    pub fn authored_data_frontier(&self) -> (SeqNo, BTreeMap<EventType, SeqNo>, Option<EventId>) {
+    pub fn authored_data_frontier(
+        &self,
+    ) -> (
+        SeqNo,
+        BTreeMap<obzenflow_core::EventDescriptor, SeqNo>,
+        Option<EventId>,
+    ) {
         let frontier = self.authored_data_frontier.read().unwrap();
         (
             SeqNo(frontier.writer_seq),
@@ -971,7 +1003,8 @@ mod tests {
         let physical_upstream = StageId::new();
         let event = ChainEventFactory::data_event(
             WriterId::from(author),
-            "checkout.command.v1",
+            "checkout.command",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
         let envelope =
@@ -986,8 +1019,10 @@ mod tests {
                 .data_inputs_by_upstream_event_type,
             vec![
                 obzenflow_core::event::provenance::UpstreamEventTypeCountContext {
+                    event_kind: obzenflow_core::event::payloads::chain_payload::EventKind::Fact,
+                    payload_schema_version: std::num::NonZeroU32::MIN,
                     upstream: physical_upstream,
-                    event_type: EventType::from("checkout.command.v1"),
+                    event_type: EventType::from("checkout.command"),
                     total: 1,
                 }
             ]
@@ -999,7 +1034,8 @@ mod tests {
         let instrumentation = StageInstrumentation::new();
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            "checkout.failed.v1",
+            "checkout.failed",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
 

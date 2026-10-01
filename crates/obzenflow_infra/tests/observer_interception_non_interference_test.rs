@@ -60,12 +60,20 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<Chai
 }
 
 async fn delivery_receipts(run_dir: &Path) -> Vec<Value> {
+    let inputs = stage_events(run_dir, "authorised").await;
     stage_events(run_dir, "delivered")
         .await
         .into_iter()
         .filter_map(|envelope| match envelope.into_parts().1 {
             ChainPayload::Delivery(payload) => {
+                let input = inputs
+                    .iter()
+                    .find(|input| payload.subject.matches_record(input))
+                    .expect("receipt names an exact committed input, including its descriptor");
                 let mut value = serde_json::to_value(payload).expect("serialise delivery receipt");
+                // Run and journal placement differ across independent runs. Compare
+                // the resolved business input after proving its exact local subject.
+                value["subject"]["input"] = input.payload();
                 value
                     .as_object_mut()
                     .expect("delivery receipt is an object")
@@ -96,6 +104,7 @@ async fn effect_facts(run_dir: &Path) -> Vec<Value> {
                     "stage": stage_key,
                     "event_type": envelope.event_type(),
                     "event_kind": envelope.payload.kind(),
+                    "payload_schema_version": envelope.envelope.provenance.event.payload_schema_version,
                     "payload": envelope.payload(),
                 }));
             }

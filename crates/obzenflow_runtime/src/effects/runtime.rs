@@ -221,13 +221,11 @@ impl EffectsCore {
     /// order: direct emissions, effect-outcome facts, and transactional
     /// commits. Captures never appear (no `Data` fact). Read by
     /// `StageCompletion` construction (FLOWIP-120z).
-    pub(crate) fn committed_fact_evidence(
-        &self,
-    ) -> (usize, Vec<obzenflow_core::event::types::EventType>) {
+    pub(crate) fn committed_fact_evidence(&self) -> (usize, Vec<obzenflow_core::EventDescriptor>) {
         let types = self
             .committed_facts
             .iter()
-            .map(|event| obzenflow_core::event::types::EventType::from(event.event_type()))
+            .map(ChainEvent::descriptor)
             .collect();
         (self.committed_facts.len(), types)
     }
@@ -424,7 +422,7 @@ impl EffectsCore {
         facts
             .iter()
             .filter(|fact| {
-                is_routable_output_fact(Some(&self.ctx.output_contract), fact.event_type.as_str())
+                is_routable_output_fact(Some(&self.ctx.output_contract), &fact.descriptor())
             })
             .count()
     }
@@ -440,9 +438,12 @@ impl EffectsCore {
             });
         }
 
-        let event_type = T::versioned_event_type();
+        let event_type = T::event_type_name();
         if !self.ctx.output_contract.is_empty()
-            && !self.ctx.output_contract.contains_event_type(&event_type)
+            && !self
+                .ctx
+                .output_contract
+                .contains_descriptor(&T::descriptor())
         {
             return Err(EffectError::UndeclaredOutput {
                 stage_key: self.ctx.stage_key.clone(),
@@ -450,7 +451,7 @@ impl EffectsCore {
             });
         }
         let routed_fact =
-            is_routable_output_fact(Some(&self.ctx.output_contract), &event_type) as usize;
+            is_routable_output_fact(Some(&self.ctx.output_contract), &T::descriptor()) as usize;
         self.ensure_routed_fanout_capacity(routed_fact)?;
 
         let recorded_flow_id = self
@@ -786,9 +787,15 @@ impl EffectsCore {
                     );
                     Ok(output)
                 }
-                Err(err) => {
-                    self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                        .await?;
+                Err((err, observation)) => {
+                    self.append_failed_record(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        observation,
+                        &err,
+                    )
+                    .await?;
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
                         crate::stages::observer::EffectObserverOutcome::Failed,
@@ -803,18 +810,27 @@ impl EffectsCore {
         // pristine context, while the terminal successful outcome rides the
         // slot so only `perform` can record it after the boundary returns.
         let outcome_slot: ExecutedOutcomeSlot<E::Outcome> = Arc::new(Mutex::new(None));
+        let failure_slot = Arc::new(Mutex::new(None::<(EffectError, EffectObservation)>));
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let operation = {
+            let started = started.clone();
             let slot = outcome_slot.clone();
+            let failure = failure_slot.clone();
             let writer_id = self.ctx.writer_id;
             let parent_event = self.ctx.parent.authored();
             let lineage = self.ctx.lineage;
             let base_context = binding_context;
             RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
+                let started = started.clone();
                 let effect = effect.clone();
                 let mut effect_ctx = base_context.clone();
                 let slot = slot.clone();
+                let failure = failure.clone();
                 let parent_event = parent_event.clone();
                 async move {
+                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    started.store(true, std::sync::atomic::Ordering::Release);
+                    *failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
                     let output = match effect.execute(&mut effect_ctx).await {
                         Ok(output) => {
@@ -823,10 +839,19 @@ impl EffectsCore {
                         }
                         Err(err) => {
                             lifecycle.mark_completed(PhysicalCallOutcome::Failed);
+                            *failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                                Some((err.clone(), EffectObservation::returned_failure()));
                             return Err(err);
                         }
                     };
-                    let success = E::OutcomeSemantics::prepare_success(&output)?;
+                    let success =
+                        E::OutcomeSemantics::prepare_success(&output).inspect_err(|error| {
+                            *failure.lock().unwrap_or_else(|p| p.into_inner()) = Some((
+                                error.clone(),
+                                EffectObservation::OutcomePreparationFailed {},
+                            ));
+                        })?;
+                    *failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     let observation =
                         success_observation_events(&success, writer_id, &parent_event, lineage);
                     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
@@ -841,7 +866,29 @@ impl EffectsCore {
             .await;
         let control_events = report.control_events;
 
-        match report.outcome {
+        let observed_failure = failure_slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        // Runtime-owned evidence is authoritative. A refusal after a completed
+        // attempt cannot turn that attempt into a zero-call rejection. Dropping
+        // an in-flight future leaves no terminal, just as interruption does.
+        let outcome = if outcome_slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            EffectBoundaryOutcome::Executed(Ok(Vec::new()))
+        } else if let Some((error, _)) = &observed_failure {
+            EffectBoundaryOutcome::Executed(Err(error.clone()))
+        } else if started.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(EffectError::Execution(
+                "effect execution was interrupted without a completed outcome".to_string(),
+            ));
+        } else {
+            report.outcome
+        };
+        match outcome {
             EffectBoundaryOutcome::Executed(Ok(_observation)) => {
                 let (output, success) = outcome_slot
                     .lock()
@@ -868,11 +915,14 @@ impl EffectsCore {
                 );
                 Ok(output)
             }
-            EffectBoundaryOutcome::Executed(Err(err)) => {
+            EffectBoundaryOutcome::Executed(Err(reported_error)) => {
+                let (err, observation) = observed_failure
+                    .unwrap_or((reported_error, EffectObservation::ExecutionRejected {}));
                 self.append_failed_record_with_control_events(
                     cursor,
                     descriptor_hash,
                     descriptor,
+                    observation,
                     &err,
                     control_events,
                 )
@@ -912,12 +962,16 @@ impl EffectsCore {
     async fn execute_into_success<E>(
         effect: E,
         effect_ctx: &mut EffectContext,
-    ) -> Result<(E::Outcome, PreparedEffectSuccess), EffectError>
+    ) -> Result<(E::Outcome, PreparedEffectSuccess), (EffectError, EffectObservation)>
     where
         E: Effect,
     {
-        let output = effect.execute(effect_ctx).await?;
-        let success = E::OutcomeSemantics::prepare_success(&output)?;
+        let output = effect
+            .execute(effect_ctx)
+            .await
+            .map_err(|error| (error, EffectObservation::returned_failure()))?;
+        let success = E::OutcomeSemantics::prepare_success(&output)
+            .map_err(|error| (error, EffectObservation::OutcomePreparationFailed {}))?;
         Ok((output, success))
     }
 
@@ -967,9 +1021,11 @@ impl EffectsCore {
         )?;
 
         let outcome_slot: ExecutedOutcomeSlot<E::Outcome> = Arc::new(Mutex::new(None));
+        let failure_slot = Arc::new(Mutex::new(None::<(EffectError, EffectObservation)>));
         let start_committed = Arc::new(AtomicBool::new(false));
         let operation = {
             let slot = outcome_slot.clone();
+            let failure = failure_slot.clone();
             let start_committed = start_committed.clone();
             let data_journal = self.ctx.data_journal.clone();
             let flow_context = self.ctx.flow_context.clone();
@@ -1009,6 +1065,7 @@ impl EffectsCore {
                     .map_err(|error| EffectError::Journal(error.to_string()))?;
                     start_committed.store(true, Ordering::Release);
 
+                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
                     let mut effect_ctx = base_context;
                     let output = match effect.execute(&mut effect_ctx).await {
@@ -1018,10 +1075,19 @@ impl EffectsCore {
                         }
                         Err(error) => {
                             lifecycle.mark_completed(PhysicalCallOutcome::Failed);
+                            *failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                                Some((error.clone(), EffectObservation::returned_failure()));
                             return Err(error);
                         }
                     };
-                    let success = E::OutcomeSemantics::prepare_success(&output)?;
+                    let success =
+                        E::OutcomeSemantics::prepare_success(&output).inspect_err(|error| {
+                            *failure.lock().unwrap_or_else(|p| p.into_inner()) = Some((
+                                error.clone(),
+                                EffectObservation::OutcomePreparationFailed {},
+                            ));
+                        })?;
+                    *failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     let observation =
                         success_observation_events(&success, writer_id, &parent_event, lineage);
                     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
@@ -1091,11 +1157,21 @@ impl EffectsCore {
                         Ok(output)
                     }
                     Err(error) => {
+                        let observation = failure_slot
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .as_ref()
+                            .map(|(_, observation)| observation.clone())
+                            .ok_or_else(|| {
+                                EffectError::Execution(
+                                    "affine failure is missing invocation evidence".to_string(),
+                                )
+                            })?;
                         self.append_affine_failed_record(
                             cursor,
                             descriptor_hash,
                             descriptor,
-                            error,
+                            (observation, error),
                             attempt,
                             control_events,
                         )
@@ -1191,6 +1267,7 @@ impl EffectsCore {
             PreparedEffectSuccess::DomainFacts(facts) => facts,
             PreparedEffectSuccess::RecordedReply(output) => {
                 let record = EffectRecord {
+                    observation: EffectObservation::returned_success(),
                     cursor: cursor.clone(),
                     descriptor_hash,
                     descriptor,
@@ -1274,10 +1351,11 @@ impl EffectsCore {
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
-        error: &EffectError,
+        observed_failure: (EffectObservation, &EffectError),
         attempt: EffectAttemptOrdinal,
         mut control_events: Vec<ChainEvent>,
     ) -> Result<(), EffectError> {
+        let (observation, error) = observed_failure;
         if matches!(error, EffectError::EffectTargetInvariantViolation { .. }) {
             let (preterminal, terminal) =
                 split_invariant_control_events(&cursor, attempt, control_events)?;
@@ -1291,6 +1369,7 @@ impl EffectsCore {
             control_events = terminal;
         }
         let record = EffectRecord {
+            observation,
             cursor: cursor.clone(),
             descriptor_hash,
             descriptor,
@@ -1351,6 +1430,17 @@ impl EffectsCore {
             boundary_retry: reason.retry,
         };
         let record = EffectRecord {
+            observation: EffectObservation::ExecutionUnresolved {
+                reason: EffectUnresolvedReason::RecoveryAbandoned {
+                    admission_event_id: deterministic_effect_evidence_event_id(
+                        &cursor,
+                        &EffectAttemptStarted::descriptor(),
+                        Some(highest_started_attempt),
+                    ),
+                    attempt: highest_started_attempt,
+                },
+                external_completion: ExternalCompletion::Unknown,
+            },
             cursor: cursor.clone(),
             descriptor_hash: descriptor_hash.clone(),
             descriptor: descriptor.clone(),
@@ -1412,9 +1502,11 @@ impl EffectsCore {
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
+        observation: EffectObservation,
         err: &EffectError,
     ) -> Result<(), EffectError> {
         self.append_record(EffectRecord {
+            observation,
             cursor,
             descriptor_hash,
             descriptor,
@@ -1435,10 +1527,12 @@ impl EffectsCore {
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
+        observation: EffectObservation,
         err: &EffectError,
         control_events: Vec<ChainEvent>,
     ) -> Result<(), EffectError> {
         let record = EffectRecord {
+            observation,
             cursor: cursor.clone(),
             descriptor_hash,
             descriptor,
@@ -1485,6 +1579,7 @@ impl EffectsCore {
             retry: reason.retry,
         };
         let record = EffectRecord {
+            observation: EffectObservation::ExecutionRejected {},
             cursor: cursor.clone(),
             descriptor_hash,
             descriptor,
@@ -1594,6 +1689,7 @@ impl EffectsCore {
         let output =
             serde_json::to_value(&value).map_err(|e| EffectError::Serialization(e.to_string()))?;
         self.append_record(EffectRecord {
+            observation: EffectObservation::ValueCaptured {},
             cursor,
             descriptor_hash,
             descriptor,
@@ -1676,6 +1772,7 @@ impl EffectsCore {
             let executor_name = executor.to_string();
             SingleUseEffectOperation::new_with_lifecycle(move |lifecycle| {
                 async move {
+                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
                     let port_result = port
                         .execute_and_commit(effect, &mut effect_ctx, commit)
@@ -1763,8 +1860,14 @@ impl EffectsCore {
                 if let Some(output_ordinal) = output_ordinal {
                     self.restore_output_ordinal(output_ordinal);
                 }
-                self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                    .await?;
+                self.append_failed_record(
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    EffectObservation::ExecutionRejected {},
+                    &err,
+                )
+                .await?;
                 let result: Result<E::Outcome, EffectError> = Err(err);
                 self.observe_effect_result(E::EFFECT_TYPE, &result);
                 return result;
@@ -1786,6 +1889,11 @@ impl EffectsCore {
                     if let Some(output_ordinal) = output_ordinal {
                         self.restore_output_ordinal(output_ordinal);
                     }
+                    let observed_return = if port_result.is_ok() {
+                        EffectPortReturn::Succeeded
+                    } else {
+                        EffectPortReturn::Failed
+                    };
                     let err = match port_result {
                         Err(err) => err,
                         Ok(()) => EffectError::TransactionalCommitMissing {
@@ -1797,6 +1905,12 @@ impl EffectsCore {
                         cursor,
                         descriptor_hash,
                         descriptor,
+                        EffectObservation::ExecutionUnresolved {
+                            reason: EffectUnresolvedReason::MissingTransactionalSettlement {
+                                port_return: observed_return,
+                            },
+                            external_completion: ExternalCompletion::Unknown,
+                        },
                         &err,
                         control_events,
                     )
@@ -2138,6 +2252,7 @@ impl EffectsCore {
             }
             PreparedEffectSuccess::RecordedReply(output) => {
                 self.append_record(EffectRecord {
+                    observation: EffectObservation::returned_success(),
                     cursor,
                     descriptor_hash,
                     descriptor,
@@ -2172,6 +2287,7 @@ impl EffectsCore {
             }
             PreparedEffectSuccess::RecordedReply(output) => {
                 let record = EffectRecord {
+                    observation: EffectObservation::returned_success(),
                     cursor: cursor.clone(),
                     descriptor_hash,
                     descriptor,
@@ -2438,7 +2554,7 @@ impl EffectsCore {
 
         let mut terminal_control_events = Vec::new();
         for event in &history.terminal_group_events {
-            if EffectRecoveryAbandoned::event_type_matches(&event.event_type()) {
+            if EffectRecoveryAbandoned::matches_event_type(&event.event_type()) {
                 continue;
             }
             if effect_record_from_event(event)?.is_some() {

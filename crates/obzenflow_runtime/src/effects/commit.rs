@@ -182,6 +182,7 @@ where
                         cursor: self.inner.cursor.clone(),
                         descriptor_hash: self.inner.descriptor_hash.clone(),
                         descriptor: self.inner.descriptor.clone(),
+                        observation: EffectObservation::settled_success(),
                         outcome: EffectOutcomePayload::Succeeded { output },
                         origin: None,
                     };
@@ -297,6 +298,7 @@ where
             cursor: self.inner.cursor.clone(),
             descriptor_hash: self.inner.descriptor_hash.clone(),
             descriptor: self.inner.descriptor.clone(),
+            observation: EffectObservation::settled_failure(),
             outcome: outcome.clone(),
             origin: None,
         };
@@ -423,15 +425,15 @@ pub(super) fn build_effect_attempt_started_event(
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
-    let mut event = ChainEventFactory::derived_event(
+    let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
         &parent.authored(),
-        ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(started.clone())),
+        ExecutionPayload::EffectAttemptStarted(started.clone()),
         lineage,
     );
     event.id = deterministic_effect_evidence_event_id(
         &started.cursor,
-        &EffectAttemptStarted::versioned_event_type(),
+        &EffectAttemptStarted::descriptor(),
         Some(started.attempt),
     );
     event.processing.event_time = composite_monotonic_event_time(
@@ -460,15 +462,15 @@ pub(super) fn build_effect_recovery_abandoned_event(
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
-    let mut event = ChainEventFactory::derived_event(
+    let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
         &parent.authored(),
-        ChainPayload::Execution(ExecutionPayload::EffectRecoveryAbandoned(abandoned.clone())),
+        ExecutionPayload::EffectRecoveryAbandoned(abandoned.clone()),
         lineage,
     );
     event.id = deterministic_effect_evidence_event_id(
         &abandoned.cursor,
-        &EffectRecoveryAbandoned::versioned_event_type(),
+        &EffectRecoveryAbandoned::descriptor(),
         None,
     );
     event.processing.event_time = composite_monotonic_event_time(
@@ -525,8 +527,10 @@ pub(super) fn build_domain_effect_success_facts(
             cursor: cursor.clone(),
             descriptor_hash: descriptor_hash.clone(),
             descriptor: descriptor.clone(),
+            observation: EffectObservation::returned_success(),
             outcome: EffectOutcomePayload::SucceededFact {
                 event_type: fact.event_type.clone(),
+                payload_schema_version: fact.payload_schema_version,
                 event_kind: fact.payload.kind(),
                 output: fact
                     .payload
@@ -539,11 +543,12 @@ pub(super) fn build_domain_effect_success_facts(
         };
 
         let mut event = fact.into_derived_event(writer_id, &parent.authored(), lineage);
-        event.id = deterministic_event_id(
+        event.id = deterministic_payload_event_id(
             record.cursor.recorded_flow_id.as_str(),
             record.cursor.stage_key.as_str(),
             StageInputPosition(record.cursor.input_seq.get()),
             output_ordinal,
+            &event.descriptor(),
         );
         event.processing.event_time = composite_monotonic_event_time(
             &parent.authored(),
@@ -669,16 +674,18 @@ pub(super) fn build_effect_record_event(
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
-    let event_type = framework_effect_event_type(&record.descriptor.effect_type);
+    record
+        .validate()
+        .map_err(|error| EffectError::EffectProvenanceMismatch(error.to_string()))?;
     let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
-    let mut event = ChainEventFactory::derived_event(
+    let mut event = ChainEventFactory::derived_execution_event(
         writer_id,
         &parent.authored(),
-        ChainPayload::Execution(ExecutionPayload::EffectRecord(record.clone())),
+        ExecutionPayload::EffectRecord(record.clone()),
         lineage,
     )
     .with_effect_provenance(provenance);
-    event.id = deterministic_effect_record_event_id(&record.cursor, event_type);
+    event.id = deterministic_effect_record_event_id(&record.cursor, &event.descriptor());
     event.processing.event_time = composite_monotonic_event_time(
         &parent.authored(),
         deterministic_effect_record_event_time(&record.cursor),
@@ -687,7 +694,17 @@ pub(super) fn build_effect_record_event(
         event.processing.status =
             obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(
                 error_message.clone(),
-                Some(obzenflow_core::event::status::processing_status::ErrorKind::Remote),
+                Some(
+                    if matches!(
+                        record.observation,
+                        EffectObservation::OutcomePreparationFailed {}
+                            | EffectObservation::ExecutionRejected {}
+                    ) {
+                        obzenflow_core::event::status::processing_status::ErrorKind::Validation
+                    } else {
+                        obzenflow_core::event::status::processing_status::ErrorKind::Remote
+                    },
+                ),
             );
     }
 

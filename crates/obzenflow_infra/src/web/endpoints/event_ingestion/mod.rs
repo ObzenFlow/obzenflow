@@ -84,7 +84,7 @@ where
         let data = serde_json::to_value(payload)
             .map_err(|e| IngressSubmitError::Serialize(e.to_string()))?;
         let submission = EventSubmission {
-            event_type: T::versioned_event_type().into(),
+            event_type: T::event_type_name().into(),
             data,
             metadata: None,
             ingress_handoff: None,

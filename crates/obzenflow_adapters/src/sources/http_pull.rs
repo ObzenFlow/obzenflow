@@ -582,7 +582,7 @@ where
                 let key = pending
                     .front()
                     .expect("ListDetailDecoder pending queue should not be empty (cursor values must come from the decoder)");
-                tracing::debug!(event_type = %T::versioned_event_type(), key = ?key, "detail fetch");
+                tracing::debug!(event_type = %T::event_type_name(), key = ?key, "detail fetch");
                 (self.detail_request)(key)
             }
         }
@@ -601,7 +601,7 @@ where
                     if total > max_list_items {
                         keys.truncate(max_list_items);
                         tracing::info!(
-                            event_type = %T::versioned_event_type(),
+                            event_type = %T::event_type_name(),
                             total,
                             kept = keys.len(),
                             max_list_items,

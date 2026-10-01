@@ -217,13 +217,16 @@ mod tests {
         let clean_batch = vec![ChainEventFactory::data_event(
             writer,
             "test.event",
+            std::num::NonZeroU32::MIN,
             json!({ "index": 0 }),
         )];
-        let error_batch =
-            vec![
-                ChainEventFactory::data_event(writer, "test.event", json!({ "index": 0 }))
-                    .mark_as_error("boom", ErrorKind::Remote),
-            ];
+        let error_batch = vec![ChainEventFactory::data_event(
+            writer,
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            json!({ "index": 0 }),
+        )
+        .mark_as_error("boom", ErrorKind::Remote)];
 
         let clean_facts = SourceBatchFacts::from_events(&clean_batch);
         let error_facts = SourceBatchFacts::from_events(&error_batch);

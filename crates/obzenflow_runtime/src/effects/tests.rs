@@ -1484,10 +1484,11 @@ impl Effect for MultiFactEffect {
 
 fn output_contract_for<T: TypedPayload>() -> StageOutputContract {
     StageOutputContract::single(crate::feed_plan::PayloadTypeDescriptor {
+        event_kind: Some(T::EVENT_KIND),
         type_hint: TypeHintInfo::Exact {
             name: std::any::type_name::<T>().to_string(),
         },
-        event_type: Some(T::versioned_event_type()),
+        event_type: Some(T::event_type_name()),
         schema_version: Some(T::SCHEMA_VERSION),
         visibility: crate::feed_plan::FactVisibility::Routable,
     })
@@ -1501,10 +1502,11 @@ fn output_contract_for_many(
 
 fn output_descriptor_for<T: TypedPayload>() -> crate::feed_plan::PayloadTypeDescriptor {
     crate::feed_plan::PayloadTypeDescriptor {
+        event_kind: Some(T::EVENT_KIND),
         type_hint: TypeHintInfo::Exact {
             name: std::any::type_name::<T>().to_string(),
         },
-        event_type: Some(T::versioned_event_type()),
+        event_type: Some(T::event_type_name()),
         schema_version: Some(T::SCHEMA_VERSION),
         visibility: crate::feed_plan::FactVisibility::Routable,
     }
@@ -1513,7 +1515,12 @@ fn output_descriptor_for<T: TypedPayload>() -> crate::feed_plan::PayloadTypeDesc
 #[test]
 fn deterministic_typed_output_events_preserve_ordinals() {
     let writer_id = WriterId::from(StageId::new());
-    let parent = ChainEventFactory::data_event(writer_id, "test.input.v1", json!({ "id": 1 }));
+    let parent = ChainEventFactory::data_event(
+        writer_id,
+        "test.input",
+        std::num::NonZeroU32::MIN,
+        json!({ "id": 1 }),
+    );
 
     let first = deterministic_typed_output_event(
         writer_id,
@@ -1543,16 +1550,28 @@ fn deterministic_typed_output_events_preserve_ordinals() {
 
     assert_eq!(events.len(), 2);
     assert!(events[0].is_fact());
-    assert_eq!(events[0].event_type(), "test.first_output.v1");
+    assert_eq!(events[0].event_type(), "test.first_output");
     assert!(events[1].is_fact());
-    assert_eq!(events[1].event_type(), "test.second_output.v1");
+    assert_eq!(events[1].event_type(), "test.second_output");
     assert_eq!(
         events[0].id,
-        deterministic_event_id("flow-a", "stage-a", StageInputPosition(4), 2)
+        deterministic_payload_event_id(
+            "flow-a",
+            "stage-a",
+            StageInputPosition(4),
+            2,
+            &FirstOutput::descriptor()
+        )
     );
     assert_eq!(
         events[1].id,
-        deterministic_event_id("flow-a", "stage-a", StageInputPosition(4), 3)
+        deterministic_payload_event_id(
+            "flow-a",
+            "stage-a",
+            StageInputPosition(4),
+            3,
+            &SecondOutput::descriptor()
+        )
     );
     assert_eq!(events[0].processing.event_time, 4_002);
     assert_eq!(events[1].processing.event_time, 4_003);
@@ -1687,7 +1706,12 @@ impl TransactionalEffectPort<TransactionalCountingEffect> for CommittedFailureTr
 }
 
 fn parent_envelope(writer_id: WriterId) -> JournalRecord<ChainPayload> {
-    let event = ChainEventFactory::data_event(writer_id, "test.input", json!({"id": 1}));
+    let event = ChainEventFactory::data_event(
+        writer_id,
+        "test.input",
+        std::num::NonZeroU32::MIN,
+        json!({"id": 1}),
+    );
     crate::testing::causal_fixture::committed_input(JournalWriterId::new(), event)
 }
 
@@ -1950,6 +1974,8 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
 
     let completed_cursor = EffectCursor::new("archived_flow", "effect_stage", 1_u64, 0_u32);
     let completed_record = EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: completed_cursor,
         descriptor_hash: EffectDescriptorHash::new("archived-descriptor"),
         descriptor: EffectDescriptor::new(
@@ -2486,7 +2512,7 @@ async fn affine_start_append_failure_authors_no_terminal_and_never_executes() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         journal.attempted_event_types(),
-        vec![EffectAttemptStarted::versioned_event_type()],
+        vec![EffectAttemptStarted::event_type_name()],
         "a failed Start cut must not attempt an effect terminal"
     );
     assert!(journal
@@ -2543,7 +2569,7 @@ async fn emit_rejects_fact_type_outside_stage_output_contract() {
         EffectError::UndeclaredOutput {
             stage_key,
             event_type,
-        } if stage_key == "effect_stage" && event_type == SecondOutput::versioned_event_type()
+        } if stage_key == "effect_stage" && event_type == SecondOutput::event_type_name()
     ));
     assert!(journal.events().is_empty());
 }
@@ -2571,7 +2597,7 @@ async fn emit_commits_declared_fact_type_immediately() {
     assert!(events[0].is_fact());
     assert_eq!(
         events[0].event_type(),
-        FirstOutput::versioned_event_type().as_str()
+        FirstOutput::event_type_name().as_str()
     );
 }
 
@@ -2630,15 +2656,8 @@ async fn typed_completion_reports_direct_facts_in_commit_order() {
         .expect("committed facts complete normally");
     assert_eq!(receipt.committed_fact_count(), 2);
     assert_eq!(
-        receipt
-            .committed_fact_types()
-            .iter()
-            .map(obzenflow_core::EventType::as_str)
-            .collect::<Vec<_>>(),
-        vec![
-            FirstOutput::versioned_event_type(),
-            SecondOutput::versioned_event_type(),
-        ]
+        receipt.committed_fact_types(),
+        &[FirstOutput::descriptor(), SecondOutput::descriptor()]
     );
 }
 
@@ -2664,8 +2683,8 @@ async fn typed_completion_counts_effect_outcome_facts() {
     assert_eq!(receipt.committed_fact_count(), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        receipt.committed_fact_types()[0].as_str(),
-        CountingOutput::versioned_event_type()
+        receipt.committed_fact_types()[0],
+        CountingOutput::descriptor()
     );
 }
 
@@ -2706,7 +2725,8 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let input = ChainEventFactory::data_event(
         writer_id,
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent =
@@ -2752,11 +2772,11 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
     assert_eq!(events.len(), 2);
     assert_eq!(
         events[0].event_type(),
-        FirstOutput::versioned_event_type().as_str()
+        FirstOutput::event_type_name().as_str()
     );
     assert_eq!(
         events[1].event_type(),
-        SecondOutput::versioned_event_type().as_str()
+        SecondOutput::event_type_name().as_str()
     );
 }
 
@@ -2771,7 +2791,8 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let input = ChainEventFactory::data_event(
         writer_id,
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent =
@@ -2817,7 +2838,8 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
     let make_input = |stage_id: StageId| {
         ChainEventFactory::data_event(
             WriterId::from(stage_id),
-            FirstOutput::versioned_event_type(),
+            FirstOutput::event_type_name(),
+            FirstOutput::payload_schema_version(),
             json!({ "value": 7 }),
         )
     };
@@ -2955,7 +2977,8 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
     let stage_id = StageId::new();
     let input = ChainEventFactory::data_event(
         WriterId::from(stage_id),
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
 
@@ -3070,12 +3093,13 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
     let stage_id = StageId::new();
     let input = ChainEventFactory::data_event(
         WriterId::from(stage_id),
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 11 }),
     );
     let failing_journal = Arc::new(MemoryJournal::failing_event(
         JournalOwner::stage(stage_id),
-        SecondOutput::versioned_event_type(),
+        SecondOutput::event_type_name(),
     ));
     let mut live_context = invocation_context(
         failing_journal.clone(),
@@ -3126,7 +3150,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         failing_journal
             .events()
             .iter()
-            .filter(|event| event.event_type() == SecondOutput::versioned_event_type())
+            .filter(|event| event.event_type() == SecondOutput::event_type_name())
             .count(),
         0
     );
@@ -3175,7 +3199,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         resume_journal
             .events()
             .iter()
-            .filter(|event| event.event_type() == SecondOutput::versioned_event_type())
+            .filter(|event| event.event_type() == SecondOutput::event_type_name())
             .count(),
         1
     );
@@ -3192,7 +3216,8 @@ async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let input = ChainEventFactory::data_event(
         writer_id,
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent =
@@ -3228,7 +3253,7 @@ async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
         crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
             if message.contains("effectful_stateful_apply")
                 && message.contains(&committed_fact.id.to_string())
-                && message.contains(&FirstOutput::versioned_event_type())
+                && message.contains(&FirstOutput::event_type_name())
                 && message.contains("Validation error: apply failed")
     ));
     assert_eq!(state, vec![7], "the failed draft must not be installed");
@@ -3245,7 +3270,8 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let input = ChainEventFactory::data_event(
         writer_id,
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent =
@@ -3277,12 +3303,12 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
     assert_eq!(events.len(), 2, "both facts remain durable");
     assert_eq!(
         events[0].event_type(),
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
         "facts remain in commit order"
     );
     assert_eq!(
         events[1].event_type(),
-        SecondOutput::versioned_event_type(),
+        SecondOutput::event_type_name(),
         "facts remain in commit order"
     );
     assert!(matches!(
@@ -3290,7 +3316,7 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
         crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
             if message.contains("effectful_stateful_apply")
                 && message.contains(&events[1].envelope.provenance.event.id.to_string())
-                && message.contains(&SecondOutput::versioned_event_type())
+                && message.contains(&SecondOutput::event_type_name())
                 && message.contains("Validation error: second apply failed")
     ));
     assert_eq!(
@@ -3311,7 +3337,8 @@ async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let input = ChainEventFactory::data_event(
         writer_id,
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent =
@@ -3352,7 +3379,7 @@ async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
     assert!(events[0].is_fact());
     assert_eq!(
         events[0].event_type(),
-        FirstOutput::versioned_event_type().as_str()
+        FirstOutput::event_type_name().as_str()
     );
 }
 
@@ -3469,6 +3496,8 @@ fn effect_records(journal: &MemoryJournal<ChainEvent>) -> Vec<EffectRecord> {
 fn effect_history_uses_record_root_over_archive_fallback() {
     let root_cursor = EffectCursor::new("root_flow", "effect_stage", 1, 0);
     let record = EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: root_cursor,
         descriptor_hash: "hash".into(),
         descriptor: EffectDescriptor::new(
@@ -3500,6 +3529,8 @@ fn effect_history_rejects_mixed_record_roots() {
         "input",
     );
     let first = EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: EffectCursor::new("root_a", "effect_stage", 1, 0),
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
@@ -3509,6 +3540,8 @@ fn effect_history_rejects_mixed_record_roots() {
         origin: None,
     };
     let second = EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: EffectCursor::new("root_b", "effect_stage", 2, 0),
         descriptor_hash: "hash".into(),
         descriptor,
@@ -3618,7 +3651,13 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
     assert!(reply_provenance.fact_owner.is_framework());
     assert_eq!(
         live_events[1].envelope.provenance.event.id,
-        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0),
+        deterministic_payload_event_id(
+            &live_flow_id,
+            "effect_stage",
+            StageInputPosition(1),
+            0,
+            &CountingOutput::descriptor()
+        ),
         "the recorded reply must not consume a user output ordinal"
     );
 
@@ -3678,7 +3717,8 @@ async fn adapter_history_fixture(
     let stage_id = StageId::new();
     let input = ChainEventFactory::data_event(
         WriterId::from(stage_id),
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent = crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input);
@@ -3709,6 +3749,62 @@ async fn adapter_history_fixture(
                 .expect("adapter history indexes"),
         ),
     )
+}
+
+#[tokio::test]
+async fn exact_pass_through_requires_kind_name_and_payload_version() {
+    use crate::stages::common::handlers::{
+        EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
+    };
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let adapter = EffectfulTransformHandlerAdapter::new(
+        ConsumeOneEffectThenSettle {
+            calls: calls.clone(),
+            settlement: AdapterSettlement::Success,
+        },
+        test_allow_all_effect_boundary(),
+    )
+    .with_exact_pass_through::<CountingOutput>();
+    let event = ChainEventFactory::data_event(
+        WriterId::from(StageId::new()),
+        CountingOutput::event_type_name(),
+        CountingOutput::payload_schema_version(),
+        json!({ "value": 9 }),
+    );
+    let forwarded = UnifiedTransformHandler::process(
+        &adapter,
+        event.clone(),
+        None,
+        obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+    )
+    .await
+    .expect("the exact pass-through needs no effect context");
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].id, event.id);
+    assert_eq!(forwarded[0].descriptor(), event.descriptor());
+
+    for changed_field in 0..3 {
+        let mut changed = event.clone();
+        match changed_field {
+            0 => changed.payload_schema_version = std::num::NonZeroU32::new(2).unwrap(),
+            1 => changed.event_kind = EventKind::Execution,
+            2 => changed.event_type = "different.name".to_owned(),
+            _ => unreachable!(),
+        }
+        assert!(
+            UnifiedTransformHandler::process(
+                &adapter,
+                changed,
+                None,
+                obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+            )
+            .await
+            .is_err(),
+            "descriptor drift must not bypass typed dispatch"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 async fn run_consume_one_adapter(
@@ -3751,7 +3847,8 @@ async fn run_caught_binding_fault_adapter(
     let stage_id = StageId::new();
     let input = ChainEventFactory::data_event(
         WriterId::from(stage_id),
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent = crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input);
@@ -3826,7 +3923,8 @@ async fn run_stateful_binding_fault_adapter(
     let stage_id = StageId::new();
     let input = ChainEventFactory::data_event(
         WriterId::from(stage_id),
-        FirstOutput::versioned_event_type(),
+        FirstOutput::event_type_name(),
+        FirstOutput::payload_schema_version(),
         json!({ "value": 9 }),
     );
     let parent =
@@ -4139,9 +4237,9 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
     let events = live_journal.events();
     assert_eq!(events.len(), 2);
     assert!(events[0].is_fact());
-    assert_eq!(events[0].event_type(), "test.first_output.v1");
+    assert_eq!(events[0].event_type(), "test.first_output");
     assert!(events[1].is_fact());
-    assert_eq!(events[1].event_type(), "test.second_output.v1");
+    assert_eq!(events[1].event_type(), "test.second_output");
     assert_eq!(
         events[0]
             .envelope
@@ -4180,11 +4278,23 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
     );
     assert_eq!(
         events[0].envelope.provenance.event.id,
-        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0)
+        deterministic_payload_event_id(
+            &live_flow_id,
+            "effect_stage",
+            StageInputPosition(1),
+            0,
+            &FirstOutput::descriptor()
+        )
     );
     assert_eq!(
         events[1].envelope.provenance.event.id,
-        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 1)
+        deterministic_payload_event_id(
+            &live_flow_id,
+            "effect_stage",
+            StageInputPosition(1),
+            1,
+            &SecondOutput::descriptor()
+        )
     );
 
     let records = effect_records(&live_journal);
@@ -4264,11 +4374,23 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
     assert_eq!(live_events.len(), 2);
     assert_eq!(
         live_events[0].envelope.provenance.event.id,
-        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0)
+        deterministic_payload_event_id(
+            &live_flow_id,
+            "effect_stage",
+            StageInputPosition(1),
+            0,
+            &CountingOutput::descriptor()
+        )
     );
     assert_eq!(
         live_events[1].envelope.provenance.event.id,
-        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 1)
+        deterministic_payload_event_id(
+            &live_flow_id,
+            "effect_stage",
+            StageInputPosition(1),
+            1,
+            &SecondOutput::descriptor()
+        )
     );
 
     let records = effect_records(&live_journal);
@@ -4379,13 +4501,17 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
     );
     let records = vec![
         EffectRecord {
+            observation:
+                obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(
+                ),
             cursor: cursor.clone(),
             descriptor_hash: "hash".into(),
             descriptor: descriptor.clone(),
             outcome: EffectOutcomePayload::SucceededFact {
+                payload_schema_version: std::num::NonZeroU32::MIN,
                 event_kind: EventKind::Fact,
 
-                event_type: FirstOutput::versioned_event_type().into(),
+                event_type: FirstOutput::event_type_name().into(),
                 output: json!({ "value": 10 }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(0),
                 outcome_fact_count: OutcomeFactCount::new(3),
@@ -4393,13 +4519,17 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
             origin: None,
         },
         EffectRecord {
+            observation:
+                obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(
+                ),
             cursor,
             descriptor_hash: "hash".into(),
             descriptor,
             outcome: EffectOutcomePayload::SucceededFact {
+                payload_schema_version: std::num::NonZeroU32::MIN,
                 event_kind: EventKind::Fact,
 
-                event_type: SecondOutput::versioned_event_type().into(),
+                event_type: SecondOutput::event_type_name().into(),
                 output: json!({ "value": "twenty" }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(2),
                 outcome_fact_count: OutcomeFactCount::new(3),
@@ -4422,10 +4552,13 @@ fn incomplete_outcome_group_torn_tail_is_dropped_as_absent() {
     let cursor = EffectCursor::new("flow", "stage", 0, 0);
     let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
     let fact = |ordinal: u32| EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: cursor.clone(),
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
+            payload_schema_version: std::num::NonZeroU32::MIN,
             event_kind: EventKind::Fact,
 
             event_type: "fx.out".into(),
@@ -4454,10 +4587,13 @@ fn incomplete_outcome_group_on_completed_archive_fails_loud() {
     let cursor = EffectCursor::new("flow", "stage", 0, 0);
     let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
     let fact = |ordinal: u32| EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: cursor.clone(),
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
+            payload_schema_version: std::num::NonZeroU32::MIN,
             event_kind: EventKind::Fact,
 
             event_type: "fx.out".into(),
@@ -4485,10 +4621,13 @@ fn interleaved_incomplete_groups_all_drop_on_interrupted_archive() {
     let cursor_b = EffectCursor::new("flow", "stage", 1, 0);
     let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
     let fact = |cursor: &EffectCursor, ordinal: u32, count: u32| EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: cursor.clone(),
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
+            payload_schema_version: std::num::NonZeroU32::MIN,
             event_kind: EventKind::Fact,
 
             event_type: "fx.out".into(),
@@ -4752,7 +4891,10 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
     ));
     assert_eq!(
         live_events[0].envelope.provenance.event.id,
-        deterministic_effect_record_event_id(&live_record.cursor, EFFECT_RECORD_EVENT_TYPE)
+        deterministic_effect_record_event_id(
+            &live_record.cursor,
+            &live_events[0].authored().descriptor()
+        )
     );
 
     let replay_history = Arc::new(
@@ -5617,6 +5759,60 @@ async fn rebuilt_named_binding_replays_by_evidence_and_changed_evidence_rejects(
 }
 
 #[tokio::test]
+async fn replay_rejects_a_version_only_outcome_mismatch_without_execution() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut live = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(stage.into()),
+        None,
+    ));
+    live.perform(CountingEffect {
+        value: 1,
+        label: "version",
+        calls: calls.clone(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let mut records = effect_records(&journal);
+    let EffectOutcomePayload::SucceededFact {
+        payload_schema_version,
+        ..
+    } = &mut records[0].outcome
+    else {
+        panic!("domain output fact");
+    };
+    *payload_schema_version = std::num::NonZeroU32::new(2).unwrap();
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records).unwrap(),
+    );
+    let mut replay = EffectsCore::new(invocation_context(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(stage))),
+        parent_envelope(stage.into()),
+        Some(history),
+    ));
+    let error = replay
+        .perform(CountingEffect {
+            value: 1,
+            label: "version",
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("compatible JSON with the wrong payload version must fail");
+    assert!(
+        matches!(error, EffectError::EffectProvenanceMismatch(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "replay must make zero physical calls"
+    );
+}
+
+#[tokio::test]
 async fn replay_fails_on_descriptor_hash_mismatch() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
@@ -5714,10 +5910,53 @@ async fn effect_record_decode_rejects_payload_provenance_cursor_mismatch() {
 }
 
 #[test]
+fn deterministic_effect_ids_include_the_complete_payload_descriptor() {
+    let cursor = EffectCursor::new("flow", "stage", 1, 0);
+    let descriptor = CountingOutput::descriptor();
+    let mut changed = descriptor.clone();
+    for variant in 0..3 {
+        match variant {
+            0 => changed.payload_schema_version = std::num::NonZeroU32::new(2).unwrap(),
+            1 => changed.event_kind = EventKind::Execution,
+            _ => changed.event_type = "test.other".into(),
+        }
+        assert_ne!(
+            deterministic_effect_record_event_id(&cursor, &descriptor),
+            deterministic_effect_record_event_id(&cursor, &changed)
+        );
+        assert_ne!(
+            deterministic_payload_event_id(
+                "flow",
+                "stage",
+                StageInputPosition(1),
+                0u32,
+                &descriptor
+            ),
+            deterministic_payload_event_id("flow", "stage", StageInputPosition(1), 0u32, &changed)
+        );
+        assert_ne!(
+            identity::deterministic_effect_evidence_event_id(
+                &cursor,
+                &descriptor,
+                Some(EffectAttemptOrdinal::new(1))
+            ),
+            identity::deterministic_effect_evidence_event_id(
+                &cursor,
+                &changed,
+                Some(EffectAttemptOrdinal::new(1))
+            )
+        );
+        changed = descriptor.clone();
+    }
+}
+
+#[test]
 fn effect_record_decode_rejects_reserved_event_without_provenance() {
     let stage_id = StageId::new();
     let cursor = EffectCursor::new("flow", "effect_stage", 1, 0);
     let record = EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor,
         descriptor_hash: "hash".into(),
         descriptor: EffectDescriptor::new(
@@ -5734,15 +5973,16 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
     };
     let application_fact = ChainEventFactory::data_event(
         WriterId::from(stage_id),
-        EFFECT_RECORD_EVENT_TYPE,
+        EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+        std::num::NonZeroU32::MIN,
         serde_json::to_value(&record).expect("record should serialize"),
     );
     assert!(effect_record_from_event(&application_fact)
         .expect("an application descriptor does not select execution semantics")
         .is_none());
-    let event = ChainEventFactory::create_event(
+    let event = ChainEventFactory::execution_event(
         WriterId::from(stage_id),
-        ChainPayload::Execution(ExecutionPayload::EffectRecord(record)),
+        ExecutionPayload::EffectRecord(record),
     );
 
     let err = effect_record_from_event(&event)
@@ -5882,7 +6122,10 @@ async fn capture_replays_recorded_value_without_using_live_value() {
     let live_event_id = journal.events()[0].envelope.provenance.event.id;
     assert_eq!(
         live_event_id,
-        deterministic_effect_record_event_id(&live_record.cursor, CAPTURE_EVENT_TYPE)
+        deterministic_effect_record_event_id(
+            &live_record.cursor,
+            &journal.events()[0].authored().descriptor()
+        )
     );
     let history = Arc::new(
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
@@ -6279,7 +6522,7 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
     assert_eq!(preterminal_calls.load(Ordering::SeqCst), 1);
     let preterminal_events = preterminal_cut.events();
     assert_eq!(preterminal_events.len(), 1);
-    assert!(EffectAttemptStarted::event_type_matches(
+    assert!(EffectAttemptStarted::matches_event_type(
         &preterminal_events[0].event_type()
     ));
     assert!(preterminal_events[0]
@@ -6310,7 +6553,7 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
     assert_eq!(terminal_calls.load(Ordering::SeqCst), 1);
     let terminal_events = terminal_cut.events();
     assert_eq!(terminal_events.len(), 2);
-    assert!(EffectAttemptStarted::event_type_matches(
+    assert!(EffectAttemptStarted::matches_event_type(
         &terminal_events[0].event_type()
     ));
     assert!(terminal_events[1]
@@ -6321,9 +6564,10 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
         .as_deref()
         .is_some_and(|group| group.starts_with("effect-escape-controls:v1:")));
     assert!(
-        terminal_events
-            .iter()
-            .all(|envelope| envelope.event_type() != EFFECT_RECORD_EVENT_TYPE),
+        terminal_events.iter().all(|envelope| !matches!(
+            &envelope.payload,
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+        )),
         "a failed terminal frame exposes no typed invariant terminal"
     );
 }
@@ -6612,7 +6856,7 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     );
     let abandonments = recovery_events
         .iter()
-        .filter(|envelope| EffectRecoveryAbandoned::event_type_matches(&envelope.event_type()))
+        .filter(|envelope| EffectRecoveryAbandoned::matches_event_type(&envelope.event_type()))
         .map(|envelope| {
             EffectRecoveryAbandoned::try_from_event(&envelope.authored())
                 .expect("abandonment payload decodes")
@@ -6892,6 +7136,171 @@ impl Effect for KeyedEffect {
 
 struct CountingBoundary {
     consults: Arc<AtomicUsize>,
+}
+
+struct ExecuteThenRefuseBoundary;
+
+#[async_trait]
+impl EffectBoundary for ExecuteThenRefuseBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        mut operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        let _ = operation.execute().await;
+        AbortingBoundary
+            .around_repeatable_effect(identity, event, operation)
+            .await
+    }
+    async fn around_single_use_effect(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        AbortingBoundary
+            .around_single_use_effect(identity, event, operation)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn refusal_after_failed_execution_preserves_the_observed_failure() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(journal.clone(), parent_envelope(stage.into()), None);
+    ctx.effect_boundary = Some(Arc::new(ExecuteThenRefuseBoundary));
+    let error = EffectsCore::new(ctx)
+        .perform(FailingEffect {
+            label: "late refusal",
+            calls: calls.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EffectError::Execution(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let records = effect_records(&journal);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].observation,
+        EffectObservation::returned_failure()
+    );
+    assert_eq!(journal.events()[0].event_type(), "effect.execution_failed");
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct UnserializableReply;
+
+impl serde::Serialize for UnserializableReply {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("local encoding failed"))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparationFailureEffect;
+
+#[async_trait]
+impl Effect for PreparationFailureEffect {
+    const EFFECT_TYPE: &'static str = "test.preparation_failure";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
+    type Outcome = UnserializableReply;
+    type OutcomeSemantics = crate::effects::RecordedReply;
+    fn label(&self) -> &str {
+        "prepare"
+    }
+    fn canonical_input(&self) -> Value {
+        json!({})
+    }
+    async fn execute(&self, _: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        Ok(UnserializableReply)
+    }
+}
+
+#[tokio::test]
+async fn local_preparation_failure_is_distinct_and_capture_failure_has_no_terminal() {
+    for guarded in [false, true] {
+        let stage = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+        let mut ctx = invocation_context(journal.clone(), parent_envelope(stage.into()), None);
+        ctx.effect_declarations
+            .push(EffectDeclaration::of::<PreparationFailureEffect>());
+        if guarded {
+            ctx.effect_boundary = Some(Arc::new(CountingBoundary {
+                consults: Arc::new(AtomicUsize::new(0)),
+            }));
+        }
+        let mut effects = EffectsCore::new(ctx);
+        assert!(effects
+            .capture("bad capture", UnserializableReply)
+            .await
+            .is_err());
+        assert!(journal.events().is_empty());
+        assert!(effects.perform(PreparationFailureEffect).await.is_err());
+        assert_eq!(
+            effect_records(&journal)[0].observation,
+            EffectObservation::OutcomePreparationFailed {}
+        );
+        let events = journal.events();
+        assert_eq!(events[0].event_type(), "effect.outcome_preparation_failed");
+        assert!(matches!(
+            events[0].envelope.provenance.event.processing.status,
+            obzenflow_core::event::status::processing_status::ProcessingStatus::Error {
+                kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Validation),
+                ..
+            }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn guarded_missing_transactional_settlement_records_uncertainty() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: calls.clone(),
+        commit: false,
+    }));
+    let mut ctx = transactional_invocation_context_with_mode(
+        journal.clone(),
+        parent_envelope(stage.into()),
+        None,
+        EffectRuntimeMode::Live,
+        registry_with_binding(&binding),
+        &binding,
+    );
+    ctx.effect_boundary = Some(Arc::new(CountingBoundary {
+        consults: Arc::new(AtomicUsize::new(0)),
+    }));
+    assert!(EffectsCore::new(ctx)
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: Arc::new(AtomicUsize::new(0)),
+            binding: binding.invocation()
+        })
+        .await
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let records = effect_records(&journal);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].observation,
+        EffectObservation::ExecutionUnresolved {
+            reason: EffectUnresolvedReason::MissingTransactionalSettlement {
+                port_return: EffectPortReturn::Succeeded
+            },
+            external_completion: ExternalCompletion::Unknown,
+        }
+    );
+    assert_eq!(
+        journal.events()[0].event_type(),
+        "effect.execution_unresolved"
+    );
 }
 
 #[async_trait]
@@ -7200,6 +7609,8 @@ async fn stale_recorded_effect_fails_loud_when_key_dropped() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let record = EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: EffectCursor::new("archived_flow", "effect_stage", 1, 0),
         descriptor_hash: "hash".into(),
         descriptor: EffectDescriptor::new(

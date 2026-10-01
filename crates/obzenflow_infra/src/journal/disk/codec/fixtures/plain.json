@@ -9,6 +9,7 @@
         },
         "event_kind": "fact",
         "event_type": "application.value",
+        "payload_schema_version": 37,
         "causality": {
           "parent_ids": [
             "01M2R1P9BW8HY0RX3NQGTKYGMG"

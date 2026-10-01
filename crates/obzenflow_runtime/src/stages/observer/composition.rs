@@ -1196,6 +1196,7 @@ mod tests {
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             "test.event",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
         (flow_id, flow_context, event)

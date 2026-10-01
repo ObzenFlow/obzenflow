@@ -24,8 +24,31 @@ use std::process::Command;
 #[path = "../examples/payment_gateway_resilience/support.rs"]
 pub mod gateway_demo;
 
+fn record_descriptor(row: &obzenflow::journal::read::RunRecord) -> String {
+    use obzenflow::journal::read::RunRecordData;
+    let (kind, name, version) = match &row.record {
+        RunRecordData::Chain(record) => {
+            let event = &record.envelope.provenance.event;
+            (
+                event.event_kind,
+                event.event_type.as_str(),
+                event.payload_schema_version,
+            )
+        }
+        RunRecordData::System(record) => {
+            let event = &record.envelope.provenance.event;
+            (
+                event.event_kind,
+                event.event_type.as_str(),
+                event.payload_schema_version,
+            )
+        }
+    };
+    format!("{}/{name}@{version}", kind.as_str())
+}
+
 fn assert_json_summary(stdout: &str, stderr: &str) {
-    use obzenflow::journal::read::{RunJournalKind, RunRecord, RunRecordData};
+    use obzenflow::journal::read::{RunJournalKind, RunRecord};
     use std::collections::BTreeMap;
 
     let rows: Vec<RunRecord> = stdout
@@ -56,11 +79,7 @@ fn assert_json_summary(stdout: &str, stderr: &str) {
             RunJournalKind::Error => "error",
         };
         *journals.entry(format!("{stage}/{kind}")).or_default() += 1;
-        let event_type = match &row.record {
-            RunRecordData::Chain(record) => record.event_type_name(),
-            RunRecordData::System(record) => record.event_type_name(),
-        };
-        *types.entry(event_type.to_owned()).or_default() += 1;
+        *types.entry(record_descriptor(&row)).or_default() += 1;
     }
     assert_eq!(summary["journals"], serde_json::to_value(journals).unwrap());
     assert_eq!(summary["event_types"], serde_json::to_value(types).unwrap());
@@ -383,9 +402,9 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     );
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.ends_with("Run completed. CLI reached the recorded end of execution.\n"));
-    assert!(human.contains("cli_verify.tick.v1 ← ticks()"), "{human}");
+    assert!(human.contains("cli_verify.tick ← ticks()"), "{human}");
     assert!(
-        human.contains("sink.delivery ← out(cli_verify.tick.v1)"),
+        human.contains("delivery.succeeded ← out(cli_verify.tick)"),
         "{human}"
     );
     assert!(human.contains("\"n\": 1") && human.contains("\"n\": 3"));
@@ -393,7 +412,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     let inspection = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .arg("inspect")
         .arg(&baseline)
-        .args(["--stage", "ticks", "--event-type", "cli_verify.tick.v1"])
+        .args(["--stage", "ticks", "--event-type", "cli_verify.tick"])
         .output()
         .expect("archive inspection process");
     assert!(
@@ -412,7 +431,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     for line in listing {
         let mut columns = line.split_whitespace();
         columns.next().unwrap().parse::<u64>().expect("byte offset");
-        assert_eq!(columns.next(), Some("cli_verify.tick.v1"));
+        assert_eq!(columns.next(), Some("cli_verify.tick"));
         assert!(columns.next().is_none());
     }
 
@@ -611,7 +630,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             (
                 "web_orders",
                 "SOURCE",
-                "commerce.customer_order_placed.v1",
+                "commerce.customer_order_placed",
                 "",
                 "1;38;5;208",
                 223,
@@ -620,8 +639,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             (
                 "validate_order",
                 "TRANSFORM",
-                "payment.order_validated.v1",
-                "commerce.customer_order_placed.v1",
+                "payment.order_validated",
+                "commerce.customer_order_placed",
                 "1;38;5;208",
                 223,
                 215,
@@ -629,8 +648,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             (
                 "authorize_payment",
                 "EFFECTFUL TRANSFORM",
-                "payment.authorized.v1",
-                "payment.order_validated.v1",
+                "payment.authorized",
+                "payment.order_validated",
                 "1;38;5;208",
                 223,
                 215,
@@ -638,8 +657,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             (
                 "paid_orders",
                 "DELIVERY",
-                "sink.delivery",
-                "payment.authorized.v1",
+                "delivery.succeeded",
+                "payment.authorized",
                 "38;5;217",
                 231,
                 224,
@@ -718,32 +737,32 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         let numbers = journal_numbers(text);
         for (event_type, input, stage, order) in [
             (
-                "payment.order_validated.v1",
-                "commerce.customer_order_placed.v1",
+                "payment.order_validated",
+                "commerce.customer_order_placed",
                 "validate_order",
                 "cli-teaching-valid",
             ),
             (
-                "order.invalid.v1",
-                "commerce.customer_order_placed.v1",
+                "order.invalid",
+                "commerce.customer_order_placed",
                 "validate_order",
                 "cli-teaching-invalid",
             ),
             (
-                "order.cancelled.v1",
-                "commerce.customer_order_placed.v1",
+                "order.cancelled",
+                "commerce.customer_order_placed",
                 "validate_order",
                 "cli-teaching-invalid",
             ),
             (
-                "payment.declined.v1",
-                "payment.order_validated.v1",
+                "payment.declined",
+                "payment.order_validated",
                 "authorize_payment",
                 "cli-teaching-declined",
             ),
             (
-                "order.cancelled.v1",
-                "payment.order_validated.v1",
+                "order.cancelled",
+                "payment.order_validated",
                 "authorize_payment",
                 "cli-teaching-declined",
             ),
@@ -771,9 +790,10 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 expression.starts_with(&format!("{event_type} ← {stage}({input})")),
                 "second line names the recorded output and its origin: {block}"
             );
-            assert_eq!(lines[clock + 1], "{", "payload starts at the left margin");
+            assert_eq!(lines[clock + 1], "payload schema version: 1");
+            assert_eq!(lines[clock + 2], "{", "payload starts at the left margin");
             assert!(
-                lines[clock + 2..]
+                lines[clock + 3..]
                     .iter()
                     .all(|line| line.chars().count() <= 90),
                 "{block}"
@@ -801,13 +821,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "piped output and NO_COLOR use plain text"
     );
     for teaching in [
-        "commerce.customer_order_placed.v1 ← web_orders()",
-        "payment.order_validated.v1 ← validate_order(commerce.customer_order_placed.v1)",
-        "payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)",
-        "sink.delivery ← paid_orders(payment.authorized.v1)",
+        "commerce.customer_order_placed ← web_orders()",
+        "payment.order_validated ← validate_order(commerce.customer_order_placed)",
+        "payment.authorized ← authorize_payment(payment.order_validated)",
+        "delivery.succeeded ← paid_orders(payment.authorized)",
         "Clocks ⟨",
         "\"reason\": \"InvalidPaymentMethod\"",
-        "order.cancelled.v1 ← validate_order(commerce.customer_order_placed.v1)",
+        "order.cancelled ← validate_order(commerce.customer_order_placed)",
         "MANIFEST     run_manifest.json",
         "\nJOURNALS\n",
         "Each stage has separate data and error journal files.",
@@ -1009,22 +1029,36 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         heading: &str,
     ) -> std::collections::BTreeMap<(String, String, String), usize> {
         let body = text.split_once(&format!("\n    {heading}\n")).unwrap().1;
-        body.lines()
-            .skip_while(|line| !line.trim_start().starts_with("Count "))
-            .skip(1)
-            .take_while(|line| !line.is_empty())
-            .filter_map(|line| {
-                let mut columns = line.split_whitespace();
-                let count = columns.next()?.parse::<usize>().ok()?;
-                let event_type = columns.next()?.to_owned();
-                let writer = columns.next().unwrap().to_owned();
-                let kind = columns.next().unwrap().to_owned();
-                assert!(
-                    columns.next().is_none(),
-                    "four columns with a compact author type: {line}"
-                );
-                Some(((event_type, writer, kind), count))
-            })
+        let mut lines = body
+            .lines()
+            .skip_while(|line| !line.trim_start().starts_with("Count "));
+        let header = lines.next().expect("event count table header");
+        let descriptor_start = header.find("Descriptor").unwrap();
+        let writer_start = header.find("Author").unwrap();
+        let kind_start = header.find("Author type").unwrap();
+        let mut entries: Vec<(usize, [String; 3])> = Vec::new();
+        for line in lines.take_while(|line| !line.is_empty()) {
+            let cells = [
+                line.get(descriptor_start..writer_start.min(line.len()))
+                    .unwrap_or_default()
+                    .trim(),
+                line.get(writer_start..kind_start.min(line.len()))
+                    .unwrap_or_default()
+                    .trim(),
+                line.get(kind_start..).unwrap_or_default().trim(),
+            ];
+            if let Ok(count) = line[..descriptor_start].trim().parse::<usize>() {
+                entries.push((count, cells.map(str::to_owned)));
+            } else {
+                let (_, previous) = entries.last_mut().expect("wrapped row has a count");
+                for (cell, continuation) in previous.iter_mut().zip(cells) {
+                    cell.push_str(continuation);
+                }
+            }
+        }
+        entries
+            .into_iter()
+            .map(|(count, [descriptor, writer, kind])| ((descriptor, writer, kind), count))
             .collect()
     }
     let mut expected_journals = std::collections::BTreeMap::<
@@ -1089,13 +1123,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                     .to_owned()
             }
         };
-        let (event_type, writer) = match &row.record {
-            RunRecordData::Chain(record) => {
-                (record.event_type_name(), record.writer_id().to_string())
-            }
-            RunRecordData::System(record) => {
-                (record.event_type_name(), record.writer_id().to_string())
-            }
+        let writer = match &row.record {
+            RunRecordData::Chain(record) => record.writer_id().to_string(),
+            RunRecordData::System(record) => record.writer_id().to_string(),
         };
         let descriptor = registrations[&writer];
         let writer_name = stage_names
@@ -1103,7 +1133,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             .copied()
             .unwrap_or(&descriptor.name);
         let key = (
-            event_type.to_owned(),
+            record_descriptor(row),
             writer_name.to_owned(),
             descriptor.kind.label().to_owned(),
         );
@@ -1157,9 +1187,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let system_counts = event_table(&verbose, "system.log");
     assert_eq!(system_counts.values().sum::<usize>(), system_count);
     for event_type in [
-        "lifecycle.stage.running",
-        "lifecycle.stage.completed",
-        "execution.contract.pass",
+        "execution/lifecycle.stage.running@1",
+        "execution/lifecycle.stage.completed@1",
+        "execution/execution.contract.pass@1",
     ] {
         assert_eq!(
             expected_journals
@@ -1176,7 +1206,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .all(|(_, _, author_type)| author_type == "Pipeline"));
     assert_eq!(
         system_counts[&(
-            "system.pipeline.completed".into(),
+            "system/system.pipeline.completed@1".into(),
             "pipeline_supervisor".into(),
             "Pipeline".into()
         )],
@@ -1191,7 +1221,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     for source in ["store_orders", "web_orders"] {
         assert_eq!(
             manual_review[&(
-                "control.source_contract".into(),
+                "flow_signal/control.source_contract@1".into(),
                 source.into(),
                 "FiniteSource".into()
             )],
@@ -1201,7 +1231,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
     assert_eq!(
         event_table(&verbose, data_file("validate_order"))[&(
-            "order.cancelled.v1".into(),
+            "fact/order.cancelled@1".into(),
             "validate_order".into(),
             "Transform".into()
         )],
@@ -1209,7 +1239,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     );
     assert_eq!(
         event_table(&verbose, data_file("authorize_payment"))[&(
-            "order.cancelled.v1".into(),
+            "fact/order.cancelled@1".into(),
             "authorize_payment".into(),
             "Transform".into()
         )],
@@ -1240,7 +1270,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         selected + 2,
         "compact rows and two-line outcome summary"
     );
-    assert!(quiet.contains("EFFECTFUL TRANSFORM  payment.authorized.v1 ←"));
+    assert!(quiet.contains("EFFECTFUL TRANSFORM  payment.authorized ←"));
     assert!(quiet
         .lines()
         .take(selected)
@@ -1290,7 +1320,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert!(
         human.split("\n\n").any(|block| {
             let text = block.split_whitespace().collect::<Vec<_>>().join(" ");
-            text.contains("payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)")
+            text.contains("payment.authorized ← authorize_payment(payment.order_validated)")
                 && text.contains("[read from journal]")
         }),
         "{human}"

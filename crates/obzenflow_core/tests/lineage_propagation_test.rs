@@ -11,12 +11,18 @@ fn test_full_lineage_propagation() {
     let writer_id = WriterId::from(StageId::new());
 
     // Create chain: A -> B -> C -> D
-    let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"level": "A"}));
+    let event_a = ChainEventFactory::data_event(
+        writer_id,
+        "test",
+        std::num::NonZeroU32::MIN,
+        json!({"level": "A"}),
+    );
 
     let event_b = ChainEventFactory::derived_data_event(
         writer_id,
         &event_a,
         "test",
+        std::num::NonZeroU32::MIN,
         json!({"level": "B"}),
         LineagePolicy::default(),
     );
@@ -25,6 +31,7 @@ fn test_full_lineage_propagation() {
         writer_id,
         &event_b,
         "test",
+        std::num::NonZeroU32::MIN,
         json!({"level": "C"}),
         LineagePolicy::default(),
     );
@@ -33,6 +40,7 @@ fn test_full_lineage_propagation() {
         writer_id,
         &event_c,
         "test",
+        std::num::NonZeroU32::MIN,
         json!({"level": "D"}),
         LineagePolicy::default(),
     );
@@ -81,6 +89,7 @@ fn test_lineage_depth_limit() {
     events.push(ChainEventFactory::data_event(
         writer_id,
         "test",
+        std::num::NonZeroU32::MIN,
         json!({"index": 0}),
     ));
 
@@ -91,6 +100,7 @@ fn test_lineage_depth_limit() {
             writer_id,
             parent,
             "test",
+            std::num::NonZeroU32::MIN,
             json!({"index": i}),
             policy,
         ));
@@ -124,12 +134,18 @@ fn test_cycle_detection() {
     let writer_id = WriterId::from(StageId::new());
 
     // Create a simple chain
-    let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
+    let event_a = ChainEventFactory::data_event(
+        writer_id,
+        "test",
+        std::num::NonZeroU32::MIN,
+        json!({"name": "A"}),
+    );
 
     let event_b = ChainEventFactory::derived_data_event(
         writer_id,
         &event_a,
         "test",
+        std::num::NonZeroU32::MIN,
         json!({"name": "B"}),
         LineagePolicy::default(),
     );
@@ -157,12 +173,18 @@ fn test_cycle_detection() {
 fn test_full_lineage_helper() {
     let writer_id = WriterId::from(StageId::new());
 
-    let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
+    let event_a = ChainEventFactory::data_event(
+        writer_id,
+        "test",
+        std::num::NonZeroU32::MIN,
+        json!({"name": "A"}),
+    );
 
     let event_b = ChainEventFactory::derived_data_event(
         writer_id,
         &event_a,
         "test",
+        std::num::NonZeroU32::MIN,
         json!({"name": "B"}),
         LineagePolicy::default(),
     );
@@ -171,6 +193,7 @@ fn test_full_lineage_helper() {
         writer_id,
         &event_b,
         "test",
+        std::num::NonZeroU32::MIN,
         json!({"name": "C"}),
         LineagePolicy::default(),
     );

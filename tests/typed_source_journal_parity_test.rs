@@ -51,6 +51,84 @@ impl TypedPayload for Beta {
     const EVENT_TYPE: &'static str = "flowip_134g.beta";
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct VersionedInput<const VERSION: u32> {
+    value: u64,
+}
+
+impl<const VERSION: u32> TypedPayload for VersionedInput<VERSION> {
+    const EVENT_TYPE: &'static str = "test.versioned_input";
+    const SCHEMA_VERSION: u32 = VERSION;
+}
+
+#[tokio::test]
+async fn source_replay_rejects_version_drift_before_selected_feed_filtering() {
+    fn definition<const VERSION: u32>(
+        base: PathBuf,
+        polls: Arc<AtomicUsize>,
+        deliveries: Arc<AtomicUsize>,
+    ) -> FlowDefinition {
+        let input = obzenflow::stages::sources::finite(
+            std::iter::once(VersionedInput::<VERSION> { value: 1 }).inspect(move |_| {
+                polls.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        FlowDefinition::materialize(move |_| {
+            let output = SinkTyped::new(move |_: VersionedInput<VERSION>| {
+                let deliveries = deliveries.clone();
+                async move {
+                    deliveries.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .idempotent();
+            Ok(flow! {
+                name: "versioned_source_replay",
+                journals: disk_journals(base),
+                stages: {
+                    input = source!(VersionedInput<VERSION> => input);
+                    output = sink!(VersionedInput<VERSION> => output);
+                },
+                topology: { input |> output; }
+            })
+        })
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("journals");
+    FlowApplication::builder()
+        .with_cli_args(["live"])
+        .run_async(definition::<1>(
+            base.clone(),
+            Arc::default(),
+            Arc::default(),
+        ))
+        .await
+        .unwrap();
+    let live = latest_run_dir(&base);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let deliveries = Arc::new(AtomicUsize::new(0));
+    let result = FlowApplication::builder()
+        .with_cli_args([
+            OsString::from("replay"),
+            OsString::from("--replay-from"),
+            live.as_os_str().to_os_string(),
+        ])
+        .run_async(definition::<2>(
+            base.clone(),
+            polls.clone(),
+            deliveries.clone(),
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "old version must fail instead of being silently filtered"
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert_eq!(deliveries.load(Ordering::SeqCst), 0);
+    let error = result.expect_err("source descriptor mismatch").to_string();
+    assert!(error.contains("source replay event descriptor fact/test.versioned_input@1 does not match its output contract"),
+        "source must diagnose descriptor drift before filtering: {error}");
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, StageOutputFacts)]
 enum SourceFact {
     Alpha(Alpha),
@@ -389,7 +467,7 @@ fn assert_source_journal(
         data.iter()
             .map(|envelope| envelope.event_type().to_string())
             .collect::<Vec<_>>(),
-        vec![Alpha::versioned_event_type(), Beta::versioned_event_type()]
+        vec![Alpha::event_type_name(), Beta::event_type_name()]
     );
     assert!(data
         .iter()
@@ -413,13 +491,13 @@ fn assert_source_journal(
     assert_eq!(writer_seq.map(|seq| seq.0), Some(2));
     assert_eq!(
         writer_seq_by_event_type
-            .get(Alpha::versioned_event_type().as_str())
+            .get(&Alpha::descriptor())
             .map(|seq| seq.0),
         Some(1)
     );
     assert_eq!(
         writer_seq_by_event_type
-            .get(Beta::versioned_event_type().as_str())
+            .get(&Beta::descriptor())
             .map(|seq| seq.0),
         Some(1)
     );

@@ -164,6 +164,7 @@ impl Layout {
                         field("writer_id", K::Definition(D::Writer)),
                         field("event_kind", K::Enum(EVENT_KINDS)),
                         field("event_type", K::Definition(D::Descriptor)),
+                        field("payload_schema_version", K::Unsigned),
                         field("causality", K::Struct(S::Causality)),
                         field("flow_context", K::Definition(D::Context)),
                         field("processing", K::Struct(S::Processing)),
@@ -249,6 +250,8 @@ impl Layout {
                 const {
                     &[
                         field("event_type", K::Definition(D::Descriptor)),
+                        field("event_kind", K::Enum(EVENT_KINDS)),
+                        field("payload_schema_version", K::Unsigned),
                         field("total", K::Unsigned),
                     ]
                 }
@@ -258,6 +261,8 @@ impl Layout {
                     &[
                         field("upstream", K::StageIdentity),
                         field("event_type", K::Definition(D::Descriptor)),
+                        field("event_kind", K::Enum(EVENT_KINDS)),
+                        field("payload_schema_version", K::Unsigned),
                         field("total", K::Unsigned),
                     ]
                 }

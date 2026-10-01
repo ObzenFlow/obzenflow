@@ -14,7 +14,7 @@ use super::traits::{
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{
-    DeliveryMethod, DeliveryPayload, DeliveryResult,
+    DeliveryMethod, DeliveryOutcome, DeliveryResult, DeliverySubject,
 };
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, StageId, TypedPayload};
@@ -156,7 +156,7 @@ impl PendingRegistry {
         }
     }
 
-    fn mint(&mut self, parent_event_id: EventId) -> PendingSinkInput {
+    fn mint(&mut self, subject: DeliverySubject) -> PendingSinkInput {
         let nonce = self.next_nonce;
         self.next_nonce = self.next_nonce.wrapping_add(1);
         let previous = self.phases.insert(nonce, PendingPhase::Current);
@@ -167,7 +167,7 @@ impl PendingRegistry {
                 stage_id: self.stage_id,
                 nonce,
             },
-            parent_event_id,
+            subject,
         }
     }
 
@@ -348,7 +348,7 @@ impl PendingRegistry {
     fn settle(&mut self, pending: PendingSinkInput) -> Result<EventId, HandlerError> {
         let identity = pending.identity;
         self.commit_lifecycle_batch(&[identity])?;
-        Ok(pending.parent_event_id)
+        Ok(pending.subject.input.event_id)
     }
 
     #[cfg(test)]
@@ -405,7 +405,7 @@ fn protocol_fatal(detail: impl Into<String>) -> HandlerError {
 #[must_use = "a deferred sink input must be returned in a typed commit receipt"]
 pub struct PendingSinkInput {
     identity: PendingIdentity,
-    parent_event_id: EventId,
+    subject: DeliverySubject,
 }
 
 impl std::fmt::Debug for PendingSinkInput {
@@ -420,7 +420,7 @@ impl PendingSinkInput {
     pub(super) fn operation_subject(&self) -> PendingOperationSubject {
         PendingOperationSubject {
             identity: self.identity,
-            parent_event_id: self.parent_event_id,
+            parent_event_id: self.subject.input.event_id,
         }
     }
 }
@@ -462,7 +462,7 @@ impl SinkWriteContext {
 /// Success or partial-success evidence for a terminal input.
 #[derive(Debug, Clone)]
 pub struct SinkTerminalOutcome {
-    payload: DeliveryPayload,
+    payload: DeliveryOutcome,
     method_override: Option<DeliveryMethod>,
 }
 
@@ -471,7 +471,7 @@ impl SinkTerminalOutcome {
     /// receipt method.
     pub fn success(bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::success(DeliveryMethod::Noop, bytes_processed),
+            payload: DeliveryOutcome::success(DeliveryMethod::Noop, bytes_processed),
             method_override: None,
         }
     }
@@ -479,7 +479,7 @@ impl SinkTerminalOutcome {
     /// Describe successful terminal evidence using a per-attempt method.
     pub fn success_via(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::success(method.clone(), bytes_processed),
+            payload: DeliveryOutcome::success(method.clone(), bytes_processed),
             method_override: Some(method),
         }
     }
@@ -493,7 +493,7 @@ impl SinkTerminalOutcome {
         failed_items: Option<Vec<String>>,
     ) -> Self {
         Self {
-            payload: DeliveryPayload::partial(
+            payload: DeliveryOutcome::partial(
                 DeliveryMethod::Noop,
                 successful_count,
                 failed_count,
@@ -513,7 +513,7 @@ impl SinkTerminalOutcome {
         failed_items: Option<Vec<String>>,
     ) -> Self {
         Self {
-            payload: DeliveryPayload::partial(
+            payload: DeliveryOutcome::partial(
                 method.clone(),
                 successful_count,
                 failed_count,
@@ -540,7 +540,7 @@ impl SinkTerminalOutcome {
 /// Provisional evidence for an accepted but not yet committed input.
 #[derive(Debug, Clone)]
 pub struct SinkBufferedOutcome {
-    payload: DeliveryPayload,
+    payload: DeliveryOutcome,
     method_override: Option<DeliveryMethod>,
 }
 
@@ -549,7 +549,7 @@ impl SinkBufferedOutcome {
     /// method.
     pub fn accepted(bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::buffered(DeliveryMethod::Noop, bytes_processed),
+            payload: DeliveryOutcome::buffered(DeliveryMethod::Noop, bytes_processed),
             method_override: None,
         }
     }
@@ -557,7 +557,7 @@ impl SinkBufferedOutcome {
     /// Describe provisional evidence using a per-attempt method.
     pub fn accepted_via(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::buffered(method.clone(), bytes_processed),
+            payload: DeliveryOutcome::buffered(method.clone(), bytes_processed),
             method_override: Some(method),
         }
     }
@@ -572,7 +572,7 @@ impl SinkBufferedOutcome {
 /// Lifecycle-only delivery evidence. It cannot settle an input.
 #[derive(Debug, Clone)]
 pub struct SinkAuditOutcome {
-    payload: DeliveryPayload,
+    payload: DeliveryOutcome,
     method_override: Option<DeliveryMethod>,
 }
 
@@ -581,7 +581,7 @@ impl SinkAuditOutcome {
     /// receipt method.
     pub fn success(bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::success(DeliveryMethod::Noop, bytes_processed),
+            payload: DeliveryOutcome::success(DeliveryMethod::Noop, bytes_processed),
             method_override: None,
         }
     }
@@ -589,7 +589,7 @@ impl SinkAuditOutcome {
     /// Describe a successful lifecycle action using a per-attempt method.
     pub fn success_via(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::success(method.clone(), bytes_processed),
+            payload: DeliveryOutcome::success(method.clone(), bytes_processed),
             method_override: Some(method),
         }
     }
@@ -603,7 +603,7 @@ impl SinkAuditOutcome {
         failed_items: Option<Vec<String>>,
     ) -> Self {
         Self {
-            payload: DeliveryPayload::partial(
+            payload: DeliveryOutcome::partial(
                 DeliveryMethod::Noop,
                 successful_count,
                 failed_count,
@@ -624,7 +624,7 @@ impl SinkAuditOutcome {
         failed_items: Option<Vec<String>>,
     ) -> Self {
         Self {
-            payload: DeliveryPayload::partial(
+            payload: DeliveryOutcome::partial(
                 method.clone(),
                 successful_count,
                 failed_count,
@@ -817,9 +817,9 @@ impl<W> SinkWriterAdapter<W> {
 
     fn resolve_method(
         &self,
-        mut payload: DeliveryPayload,
+        mut payload: DeliveryOutcome,
         method_override: Option<DeliveryMethod>,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    ) -> Result<DeliveryOutcome, HandlerError> {
         let method = method_override
             .or_else(|| self.default_method.clone())
             .ok_or_else(|| {
@@ -828,13 +828,14 @@ impl<W> SinkWriterAdapter<W> {
                 )
             })?;
         payload.delivery_method = method;
+        payload.validate().map_err(protocol_fatal)?;
         Ok(payload)
     }
 
     fn lower_terminal(
         &self,
         outcome: SinkTerminalOutcome,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    ) -> Result<DeliveryOutcome, HandlerError> {
         debug_assert!(matches!(
             outcome.payload.result,
             DeliveryResult::Success { .. } | DeliveryResult::Partial { .. }
@@ -864,7 +865,7 @@ impl<W> SinkWriterAdapter<W> {
         for receipt in returned_receipts {
             settlement_ids.push(receipt.pending.identity);
             commit_receipts.push(CommitReceipt {
-                parent_event_id: receipt.pending.parent_event_id,
+                subject: receipt.pending.subject,
                 payload: self.lower_terminal(receipt.outcome)?,
             });
         }
@@ -900,7 +901,7 @@ impl<W> SinkWriterAdapter<W> {
         for receipt in returned_receipts {
             settlement_ids.push(receipt.pending.identity);
             commit_receipts.push(CommitReceipt {
-                parent_event_id: receipt.pending.parent_event_id,
+                subject: receipt.pending.subject,
                 payload: self.lower_terminal(receipt.outcome)?,
             });
         }
@@ -949,36 +950,21 @@ impl<W> SinkWriterAdapter<W> {
     async fn consume_report_in_scope(
         &mut self,
         event: ChainEvent,
+        subject: DeliverySubject,
         scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError>
     where
         W: SinkWriter,
     {
-        let Some(payload) = event.typed_payload() else {
-            return Ok(SinkConsumeReport::new(DeliveryPayload::success(
+        let Some(_) = event.typed_payload() else {
+            return Ok(SinkConsumeReport::new(DeliveryOutcome::success(
                 DeliveryMethod::Custom("Skipped".to_string()),
                 None,
             )));
         };
-        let event_type = &event.envelope.provenance.event.event_type;
-
-        if !W::Input::event_type_matches(event_type) {
-            return Err(HandlerError::Validation(format!(
-                "SinkWriter expected event type '{}' (or '{}'), got '{}'",
-                W::Input::EVENT_TYPE,
-                W::Input::versioned_event_type(),
-                event_type
-            )));
-        }
-
-        let input: W::Input = serde_json::from_value(payload.clone()).map_err(|error| {
-            HandlerError::Deserialization(format!(
-                "SinkWriter failed to deserialize {}: {error}",
-                std::any::type_name::<W::Input>()
-            ))
-        })?;
-
-        let pending = lock_pending_registry(&self.registry).mint(event.id);
+        let input = W::Input::try_from_event(&event)
+            .map_err(|error| HandlerError::Deserialization(error.to_string()))?;
+        let pending = lock_pending_registry(&self.registry).mint(subject);
         let current = pending.identity;
         let context = SinkWriteContext {
             delivery: DeliveryContext::from_event_and_scope(&event, scope),
@@ -1005,27 +991,30 @@ impl<W> SinkHandler for SinkWriterAdapter<W>
 where
     W: SinkWriter,
 {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryOutcome, HandlerError> {
         Ok(self.consume_report(event).await?.primary)
     }
 
     async fn consume_report(
         &mut self,
-        event: ChainEvent,
+        _event: ChainEvent,
     ) -> Result<SinkConsumeReport, HandlerError> {
-        self.consume_report_in_scope(event, obzenflow_core::MiddlewareExecutionScope::default())
+        Err(protocol_fatal(
+            "typed sink dispatch requires a committed input",
+        ))
+    }
+
+    async fn consume_committed_report(
+        &mut self,
+        input: crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>,
+        scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        let subject = DeliverySubject::from_record(input.record());
+        self.consume_report_in_scope(input.authored(), subject, scope)
             .await
     }
 
-    async fn consume_report_with_scope(
-        &mut self,
-        event: ChainEvent,
-        scope: obzenflow_core::MiddlewareExecutionScope,
-    ) -> Result<SinkConsumeReport, HandlerError> {
-        self.consume_report_in_scope(event, scope).await
-    }
-
-    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+    async fn flush(&mut self) -> Result<Option<DeliveryOutcome>, HandlerError> {
         Ok(self.flush_report().await?.audit_payload)
     }
 
@@ -1040,7 +1029,7 @@ where
         self.lower_lifecycle_report(report)
     }
 
-    async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+    async fn drain(&mut self) -> Result<Option<DeliveryOutcome>, HandlerError> {
         Ok(self.drain_report().await?.audit_payload)
     }
 
@@ -1059,6 +1048,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    impl<W: SinkWriter> SinkWriterAdapter<W> {
+        async fn consume_test(
+            &mut self,
+            event: ChainEvent,
+        ) -> Result<SinkConsumeReport, HandlerError> {
+            let input = crate::testing::causal_fixture::committed_input(
+                obzenflow_core::JournalWriterId::new(),
+                event,
+            );
+            self.consume_committed_report(input.into(), Default::default())
+                .await
+        }
+    }
+
     use futures::FutureExt;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
@@ -1113,7 +1116,8 @@ mod tests {
     fn event(value: u64) -> ChainEvent {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            Input::versioned_event_type(),
+            Input::event_type_name(),
+            Input::payload_schema_version(),
             serde_json::json!({ "value": value }),
         )
     }
@@ -1142,7 +1146,7 @@ mod tests {
         );
 
         let report = adapter
-            .consume_report(event(1))
+            .consume_test(event(1))
             .await
             .expect("connector default resolves the terminal method");
 
@@ -1155,7 +1159,7 @@ mod tests {
         let mut adapter = SinkWriterAdapter::new(UsesConnectorMethod, StageId::new());
 
         let error = adapter
-            .consume_report(event(1))
+            .consume_test(event(1))
             .await
             .expect_err("an unresolved receipt method is a protocol error");
 
@@ -1174,7 +1178,7 @@ mod tests {
         );
         let input = event(7);
         let parent_event_id = input.id;
-        let consume = adapter.consume_report(input).await.expect("consume report");
+        let consume = adapter.consume_test(input).await.expect("consume report");
         assert!(matches!(
             consume.primary.result,
             DeliveryResult::Buffered { .. }
@@ -1183,7 +1187,7 @@ mod tests {
         let lifecycle = adapter.flush_report().await.expect("flush report");
         assert_eq!(lifecycle.commit_receipts.len(), 1);
         assert_eq!(
-            lifecycle.commit_receipts[0].parent_event_id,
+            lifecycle.commit_receipts[0].subject.input.event_id,
             parent_event_id
         );
         assert!(matches!(
@@ -1214,7 +1218,7 @@ mod tests {
 
         let mut adapter = SinkWriterAdapter::new(Invalid, StageId::new());
         let error = adapter
-            .consume_report(event(1))
+            .consume_test(event(1))
             .await
             .expect_err("missing deferral is fatal");
         assert!(matches!(error, HandlerError::Fatal(_)));
@@ -1240,7 +1244,7 @@ mod tests {
 
         let mut adapter = SinkWriterAdapter::new(Invalid, StageId::new());
         let error = adapter
-            .consume_report(event(1))
+            .consume_test(event(1))
             .await
             .expect_err("deferred input cannot have a terminal primary");
         assert!(matches!(error, HandlerError::Fatal(_)));
@@ -1289,7 +1293,7 @@ mod tests {
             StageId::new(),
         );
 
-        let panic = AssertUnwindSafe(adapter.consume_report(event(1)))
+        let panic = AssertUnwindSafe(adapter.consume_test(event(1)))
             .catch_unwind()
             .await;
         assert!(panic.is_err());
@@ -1360,7 +1364,7 @@ mod tests {
         );
 
         let mut report = adapter
-            .consume_report(event(1))
+            .consume_test(event(1))
             .await
             .expect("terminal consume succeeds");
         report
@@ -1384,7 +1388,7 @@ mod tests {
         );
 
         let error = adapter
-            .consume_report(event(1))
+            .consume_test(event(1))
             .await
             .expect_err("consume intentionally fails");
         assert!(matches!(error, HandlerError::SinkWrite(_)));
@@ -1401,7 +1405,7 @@ mod tests {
         fn duplicate_for_test(pending: &PendingSinkInput) -> PendingSinkInput {
             PendingSinkInput {
                 identity: pending.identity,
-                parent_event_id: pending.parent_event_id,
+                subject: pending.subject.clone(),
             }
         }
 
@@ -1417,23 +1421,23 @@ mod tests {
         let parent = EventId::new();
 
         let mut first = PendingRegistry::new(first_stage);
-        let foreign = first.mint(parent);
+        let foreign = first.mint(crate::testing::causal_fixture::delivery_subject(parent));
         first.defer(&foreign);
         let mut other_stage = PendingRegistry::new(second_stage);
         assert!(fatal_detail(other_stage.settle(foreign).unwrap_err()).contains("foreign"));
 
-        let stale = first.mint(parent);
+        let stale = first.mint(crate::testing::causal_fixture::delivery_subject(parent));
         first.defer(&stale);
         let mut replacement = PendingRegistry::new(first_stage);
         assert!(fatal_detail(replacement.settle(stale).unwrap_err()).contains("stale"));
 
-        let original = first.mint(parent);
+        let original = first.mint(crate::testing::causal_fixture::delivery_subject(parent));
         first.defer(&original);
         let duplicate = duplicate_for_test(&original);
         assert_eq!(first.settle(original).expect("first settlement"), parent);
         assert!(fatal_detail(first.settle(duplicate).unwrap_err()).contains("duplicate"));
 
-        let nondeferred = first.mint(parent);
+        let nondeferred = first.mint(crate::testing::causal_fixture::delivery_subject(parent));
         assert!(fatal_detail(first.settle(nondeferred).unwrap_err()).contains("non-deferred"));
     }
 
@@ -1450,7 +1454,7 @@ mod tests {
         let parent = EventId::new();
         let mut registry = PendingRegistry::new(stage_id);
 
-        let deferred = registry.mint(parent);
+        let deferred = registry.mint(crate::testing::causal_fixture::delivery_subject(parent));
         registry.defer(&deferred);
         assert_eq!(
             registry
@@ -1459,7 +1463,9 @@ mod tests {
             parent
         );
 
-        let current = registry.mint(EventId::new());
+        let current = registry.mint(crate::testing::causal_fixture::delivery_subject(
+            EventId::new(),
+        ));
         assert!(fatal_detail(
             registry
                 .validate_operation_subject(None, current.operation_subject())
@@ -1491,7 +1497,9 @@ mod tests {
         )
         .contains("stale"));
 
-        let settled = registry.mint(EventId::new());
+        let settled = registry.mint(crate::testing::causal_fixture::delivery_subject(
+            EventId::new(),
+        ));
         registry.defer(&settled);
         let settled_subject = settled.operation_subject();
         registry.settle(settled).expect("settle deferred input");
@@ -1536,7 +1544,7 @@ mod tests {
         let first = event(1);
         let first_id = first.id;
         let mut first_report = adapter
-            .consume_report(first)
+            .consume_test(first)
             .await
             .expect("first input buffers");
         first_report
@@ -1544,7 +1552,7 @@ mod tests {
             .expect("buffered report validates");
 
         let error = adapter
-            .consume_report(event(2))
+            .consume_test(event(2))
             .await
             .expect_err("second write poisons on the deferred subject");
         let HandlerError::SinkWrite(failure) = error else {
@@ -1591,7 +1599,7 @@ mod tests {
             let mut adapter =
                 SinkWriterAdapter::new(InvalidSubject { nonpoisoned }, StageId::new());
             let error = adapter
-                .consume_report(event(1))
+                .consume_test(event(1))
                 .await
                 .expect_err("invalid subject authority must be fatal");
             assert!(matches!(error, HandlerError::Fatal(_)));
@@ -1602,7 +1610,9 @@ mod tests {
     fn dropping_a_deferred_capability_leaves_the_input_pending() {
         let stage_id = StageId::new();
         let mut registry = PendingRegistry::new(stage_id);
-        let pending = registry.mint(EventId::new());
+        let pending = registry.mint(crate::testing::causal_fixture::delivery_subject(
+            EventId::new(),
+        ));
         let identity = pending.identity;
         registry.defer(&pending);
         drop(pending);
@@ -1655,17 +1665,17 @@ mod tests {
         let first = event(1);
         let second = event(2);
         adapter
-            .consume_report(first.clone())
+            .consume_test(first.clone())
             .await
             .expect("buffer first");
         let report = adapter
-            .consume_report(second.clone())
+            .consume_test(second.clone())
             .await
             .expect("settle in reverse order");
 
         assert_eq!(report.commit_receipts.len(), 2);
-        assert_eq!(report.commit_receipts[0].parent_event_id, second.id);
-        assert_eq!(report.commit_receipts[1].parent_event_id, first.id);
+        assert_eq!(report.commit_receipts[0].subject.input.event_id, second.id);
+        assert_eq!(report.commit_receipts[1].subject.input.event_id, first.id);
     }
 
     #[tokio::test]
@@ -1706,7 +1716,7 @@ mod tests {
 
         let mut adapter = SinkWriterAdapter::new(TwoInputBatch { first: None }, StageId::new());
         let mut first_report = adapter
-            .consume_report(event(1))
+            .consume_test(event(1))
             .await
             .expect("first input is accepted for buffering");
         first_report
@@ -1714,7 +1724,7 @@ mod tests {
             .expect("buffered primary commits its validation token");
 
         let mut batch_report = adapter
-            .consume_report(event(2))
+            .consume_test(event(2))
             .await
             .expect("the complete two-input settlement validates");
         let identities = {
@@ -1754,7 +1764,7 @@ mod tests {
         let mut first_stage = SinkWriterAdapter::new(handler.clone(), StageId::new());
         let mut second_stage = SinkWriterAdapter::new(handler, StageId::new());
         first_stage
-            .consume_report(event(2))
+            .consume_test(event(2))
             .await
             .expect("buffer in first independent stage");
         let error = second_stage
@@ -1770,12 +1780,13 @@ mod tests {
         let mut adapter = SinkWriterAdapter::new(Buffered { pending }, StageId::new());
         let malformed = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            Input::versioned_event_type(),
+            Input::event_type_name(),
+            Input::payload_schema_version(),
             serde_json::json!({ "wrong": true }),
         );
 
         let error = adapter
-            .consume_report(malformed)
+            .consume_test(malformed)
             .await
             .expect_err("decode failure");
         assert!(matches!(error, HandlerError::Deserialization(_)));

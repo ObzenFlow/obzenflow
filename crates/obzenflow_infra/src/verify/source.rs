@@ -299,6 +299,7 @@ mod tests {
                     ChainEventFactory::data_event(
                         stage.into(),
                         "data",
+                        std::num::NonZeroU32::MIN,
                         serde_json::json!({"i": i}),
                     ),
                     Default::default(),

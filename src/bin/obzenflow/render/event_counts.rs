@@ -5,7 +5,7 @@
 //! Bounded counts of displayed entries within each physical journal. Payload
 //! subjects and original writers never move entries into a different journal.
 
-use super::{event_type, writer_id, RunJournal, RunRecord};
+use super::{context::descriptor_label, writer_id, RunJournal, RunRecord};
 use std::collections::BTreeMap;
 
 const MAX_ROWS: usize = 1024;
@@ -32,7 +32,7 @@ impl EventCounts {
                 event_types: BTreeMap::new(),
                 omitted: 0,
             });
-        let key = (event_type(record).to_owned(), writer_id(record));
+        let key = (descriptor_label(record), writer_id(record));
         if let Some(count) = journal.event_types.get_mut(&key) {
             *count += 1;
         } else if self.rows < MAX_ROWS {

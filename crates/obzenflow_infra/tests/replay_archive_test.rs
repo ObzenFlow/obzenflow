@@ -205,7 +205,12 @@ async fn archive_fixture_helpers_accept_current_schema() {
 
 fn write_released_legacy_retry_row(dir: &Path) {
     let writer_id = WriterId::from(obzenflow_core::StageId::new());
-    let event = ChainEventFactory::data_event(writer_id, "fixture.seed", serde_json::json!({}));
+    let event = ChainEventFactory::data_event(
+        writer_id,
+        "fixture.seed",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({}),
+    );
     let record = JournalRecord::new(JournalWriterId::new(), event);
     let mut frame = serde_json::json!({
         "frame_kind": "record_v2",

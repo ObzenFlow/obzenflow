@@ -528,9 +528,9 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     );
     assert_eq!(healthy_gateway.calls(), 5);
     let healthy = exported_run(&healthy_run, &healthy_root.path().join("healthy.jsonl"));
-    assert_eq!(data_event_count(&healthy, "payment.authorized.v1"), 5);
+    assert_eq!(data_event_count(&healthy, "payment.authorized"), 5);
     assert_eq!(
-        data_event_count(&healthy, "payment.authorization_unavailable.v1"),
+        data_event_count(&healthy, "payment.authorization_unavailable"),
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&healthy), 5);
@@ -586,10 +586,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         &healthy_replay_run,
         &healthy_replay_root.path().join("healthy-replay.jsonl"),
     );
-    assert_eq!(
-        data_event_count(&healthy_replay, "payment.authorized.v1"),
-        5
-    );
+    assert_eq!(data_event_count(&healthy_replay, "payment.authorized"), 5);
     assert_eq!(
         attempt_settlements(&healthy_replay),
         healthy_attempts,
@@ -618,10 +615,10 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         &breaker_only_root.path().join("breaker-only.jsonl"),
     );
     assert_eq!(
-        data_event_count(&breaker_only, "payment.authorization_unavailable.v1"),
+        data_event_count(&breaker_only, "payment.authorization_unavailable"),
         1
     );
-    assert_eq!(data_event_count(&breaker_only, "payment.authorized.v1"), 0);
+    assert_eq!(data_event_count(&breaker_only, "payment.authorized"), 0);
     assert_eq!(payment_effect_outcome_group_count(&breaker_only), 1);
     assert_eq!(payment_committed_terminal_group_count(&breaker_only), 1);
     assert_eq!(
@@ -669,9 +666,9 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         &treatment_run,
         &treatment_root.path().join("treatment.jsonl"),
     );
-    assert_eq!(data_event_count(&treatment, "payment.authorized.v1"), 1);
+    assert_eq!(data_event_count(&treatment, "payment.authorized"), 1);
     assert_eq!(
-        data_event_count(&treatment, "payment.authorization_unavailable.v1"),
+        data_event_count(&treatment, "payment.authorization_unavailable"),
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&treatment), 1);
@@ -761,9 +758,9 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     );
     assert_eq!(replay_gateway.calls(), 0);
     let replay = exported_run(&replay_run, &replay_root.path().join("replay.jsonl"));
-    assert_eq!(data_event_count(&replay, "payment.authorized.v1"), 1);
+    assert_eq!(data_event_count(&replay, "payment.authorized"), 1);
     assert_eq!(
-        data_event_count(&replay, "payment.authorization_unavailable.v1"),
+        data_event_count(&replay, "payment.authorization_unavailable"),
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&replay), 1);
@@ -797,10 +794,10 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     assert_eq!(open_gateway.calls(), 5);
     let open = exported_run(&open_run, &open_root.path().join("open.jsonl"));
     assert_eq!(
-        data_event_count(&open, "payment.authorization_unavailable.v1"),
+        data_event_count(&open, "payment.authorization_unavailable"),
         6
     );
-    assert_eq!(data_event_count(&open, "payment.authorized.v1"), 0);
+    assert_eq!(data_event_count(&open, "payment.authorized"), 0);
     assert_eq!(payment_committed_terminal_group_count(&open), 6);
     assert_eq!(
         last_payment_breaker_counts(&open),
@@ -899,7 +896,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         &open_replay_root.path().join("open-replay.jsonl"),
     );
     assert_eq!(
-        data_event_count(&open_replay, "payment.authorization_unavailable.v1"),
+        data_event_count(&open_replay, "payment.authorization_unavailable"),
         6
     );
     assert_eq!(payment_committed_terminal_group_count(&open_replay), 6);
@@ -943,9 +940,9 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
     assert_eq!(live_gateway.calls(), 6);
 
     let live = exported_run(&live_run, &live_root.path().join("half-open.jsonl"));
-    assert_eq!(data_event_count(&live, "payment.authorized.v1"), 1);
+    assert_eq!(data_event_count(&live, "payment.authorized"), 1);
     assert_eq!(
-        data_event_count(&live, "payment.authorization_unavailable.v1"),
+        data_event_count(&live, "payment.authorization_unavailable"),
         6
     );
     assert_eq!(payment_committed_terminal_group_count(&live), 7);
@@ -1029,9 +1026,9 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
         &replay_run,
         &replay_root.path().join("half-open-replay.jsonl"),
     );
-    assert_eq!(data_event_count(&replay, "payment.authorized.v1"), 1);
+    assert_eq!(data_event_count(&replay, "payment.authorized"), 1);
     assert_eq!(
-        data_event_count(&replay, "payment.authorization_unavailable.v1"),
+        data_event_count(&replay, "payment.authorization_unavailable"),
         6
     );
     assert_eq!(

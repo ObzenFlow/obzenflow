@@ -131,20 +131,37 @@ pub fn deterministic_event_time(
 
 pub fn deterministic_effect_record_event_id(
     cursor: &EffectCursor,
-    event_type: impl AsRef<str>,
+    descriptor: &obzenflow_core::EventDescriptor,
 ) -> EventId {
-    let material = format!(
-        "effect-record:v1:{}:{}:{}:{}:{}",
-        event_type.as_ref(),
-        cursor.recorded_flow_id.as_str(),
-        cursor.stage_key.as_str(),
-        cursor.input_seq.get(),
-        cursor.effect_ordinal.get()
-    );
-    let hash = digest(&SHA256, material.as_bytes());
+    descriptor_event_id("effect-record", &(cursor, descriptor))
+}
+
+fn descriptor_event_id(domain: &str, material: &impl Serialize) -> EventId {
+    let bytes =
+        serde_json::to_vec(&(domain, material)).expect("event identity metadata is serializable");
+    let hash = digest(&SHA256, &bytes);
     let mut id_bytes = [0u8; 16];
     id_bytes.copy_from_slice(&hash.as_ref()[..16]);
     EventId::from(obzenflow_core::Ulid(u128::from_be_bytes(id_bytes)))
+}
+
+pub fn deterministic_payload_event_id(
+    recorded_flow_id: impl AsRef<str>,
+    stage_key: impl AsRef<str>,
+    input_seq: StageInputPosition,
+    output_ordinal: impl Into<EffectOutputOrdinal>,
+    descriptor: &obzenflow_core::EventDescriptor,
+) -> EventId {
+    descriptor_event_id(
+        "effect-output",
+        &(
+            recorded_flow_id.as_ref(),
+            stage_key.as_ref(),
+            input_seq.0,
+            output_ordinal.into().get(),
+            descriptor,
+        ),
+    )
 }
 
 pub fn deterministic_effect_record_event_time(cursor: &EffectCursor) -> u64 {
@@ -157,21 +174,10 @@ pub fn deterministic_effect_record_event_time(cursor: &EffectCursor) -> u64 {
 
 pub fn deterministic_effect_evidence_event_id(
     cursor: &EffectCursor,
-    event_type: &str,
+    descriptor: &obzenflow_core::EventDescriptor,
     attempt: Option<EffectAttemptOrdinal>,
 ) -> EventId {
-    let attempt = attempt.map(EffectAttemptOrdinal::get).unwrap_or(0);
-    let material = format!(
-        "effect-evidence:v1:{event_type}:{}:{}:{}:{}:{attempt}",
-        cursor.recorded_flow_id.as_str(),
-        cursor.stage_key.as_str(),
-        cursor.input_seq.get(),
-        cursor.effect_ordinal.get(),
-    );
-    let hash = digest(&SHA256, material.as_bytes());
-    let mut id_bytes = [0u8; 16];
-    id_bytes.copy_from_slice(&hash.as_ref()[..16]);
-    EventId::from(obzenflow_core::Ulid(u128::from_be_bytes(id_bytes)))
+    descriptor_event_id("effect-evidence", &(cursor, descriptor, attempt))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -189,12 +195,16 @@ where
     Out: TypedPayload,
 {
     let output_ordinal = output_ordinal.into();
-    let payload = output
-        .into_chain_payload()
+    let fact = obzenflow_core::event::schema::TypedFact::from_payload(output)
         .map_err(|e| EffectError::Serialization(e.to_string()))?;
-    let mut event = ChainEventFactory::derived_event(writer_id, parent, payload, lineage);
-    event.envelope.provenance.event.event_type = Out::versioned_event_type();
-    event.id = deterministic_event_id(recorded_flow_id, stage_key, input_seq, output_ordinal);
+    let mut event = fact.into_derived_event(writer_id, parent, lineage);
+    event.id = deterministic_payload_event_id(
+        recorded_flow_id,
+        stage_key,
+        input_seq,
+        output_ordinal,
+        &event.descriptor(),
+    );
     let deterministic = deterministic_event_time(input_seq, output_ordinal);
     event.processing.event_time = if parent.composite_activations().is_empty() {
         deterministic

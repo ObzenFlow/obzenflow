@@ -23,7 +23,6 @@ use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
-use obzenflow_core::event::ChainPayload;
 
 use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::ingress::{
@@ -100,14 +99,14 @@ fn http_pull_evidence(
         wait_seconds_poll_interval: snapshot.wait_seconds_poll_interval,
         wait_seconds_backoff: snapshot.wait_seconds_backoff,
     }));
-    ChainEventFactory::create_event(
+    ChainEventFactory::execution_event(
         writer_id,
-        ChainPayload::Execution(ExecutionPayload::HttpPullState(HttpPullStateFact {
+        ExecutionPayload::HttpPullState(HttpPullStateFact {
             state: snapshot.state,
             wait_reason: snapshot.wait_reason,
             next_wake_unix_secs: snapshot.next_wake_unix_secs,
             last_success_unix_secs: snapshot.last_success_unix_secs,
-        })),
+        }),
     )
 }
 
@@ -469,11 +468,11 @@ where
         let expected_key = self.slot.ingress_key();
         let mut decoded = Vec::with_capacity(submissions.len());
         for submission in submissions {
-            if !D::Output::event_type_matches(submission.event_type.as_str()) {
+            if !D::Output::matches_event_type(submission.event_type.as_str()) {
                 return Err(SourceError::Validation(format!(
                     "hosted ingress event type `{}` is outside configured output `{}`",
                     submission.event_type,
-                    D::Output::versioned_event_type(),
+                    D::Output::event_type_name(),
                 )));
             }
             let SubmissionIngressContext {
@@ -501,7 +500,7 @@ where
             .map_err(|error| {
                 SourceError::Deserialization(format!(
                     "hosted ingress `{}` decode failed: {error}",
-                    D::Output::versioned_event_type()
+                    D::Output::event_type_name()
                 ))
             })?;
             decoded.push((
@@ -1129,7 +1128,7 @@ mod tests {
         assert!(observations.is_empty());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].writer_id, writer_id);
-        assert_eq!(events[0].event_type(), Row::versioned_event_type());
+        assert_eq!(events[0].event_type(), Row::event_type_name());
         assert_eq!(Row::from_event(&events[0]), Some(Row(7)));
     }
 
@@ -1321,7 +1320,7 @@ mod tests {
         attempt_seq: u64,
     ) -> EventSubmission {
         EventSubmission {
-            event_type: Row::versioned_event_type().into(),
+            event_type: Row::event_type_name().into(),
             data: serde_json::json!(row),
             metadata: None,
             ingress_handoff: Some(SubmissionIngressContext {
@@ -1360,7 +1359,7 @@ mod tests {
         assert!(observations.is_empty());
         assert_eq!(single.len(), 1);
         assert_eq!(single[0].writer_id, writer_id);
-        assert_eq!(single[0].event_type(), Row::versioned_event_type());
+        assert_eq!(single[0].event_type(), Row::event_type_name());
         assert_eq!(Row::from_event(&single[0]), Some(Row(7)));
         assert_eq!(
             single[0].ingress_context,
@@ -1444,7 +1443,7 @@ mod tests {
             .await
             .expect("valid row queued");
         let mut invalid = hosted_submission(2, 302, "bank.accounts", Some(1), 21);
-        invalid.event_type = OtherRow::versioned_event_type().into();
+        invalid.event_type = OtherRow::event_type_name().into();
         tx.send(invalid).await.expect("invalid row queued");
 
         let (outcome, observations) =
