@@ -130,12 +130,17 @@ impl PhysicalCallLifecycle {
 }
 
 /// One prepared repeatable physical call and its lifecycle receipt.
-pub struct PreparedRepeatableEffectCall {
+///
+/// Holds exclusive access to the operation through preparation and execution.
+/// Dropping the call, including its in-flight execution future, releases that
+/// access; cloned receipts remain observable afterwards.
+pub struct PreparedRepeatableEffectCall<'operation> {
     call: EffectCall,
     receipt: PhysicalCallReceipt,
+    _operation: &'operation mut RepeatableEffectOperation,
 }
 
-impl PreparedRepeatableEffectCall {
+impl PreparedRepeatableEffectCall<'_> {
     pub fn receipt(&self) -> PhysicalCallReceipt {
         self.receipt.clone()
     }
@@ -194,7 +199,31 @@ impl RepeatableEffectOperation {
     }
 
     /// Prepare one physical call without polling it.
-    pub fn prepare(&mut self) -> PreparedRepeatableEffectCall {
+    ///
+    /// The prepared call exclusively borrows this operation until it is
+    /// executed or dropped. Two calls cannot be prepared together:
+    ///
+    /// ```compile_fail,E0499
+    /// use obzenflow_runtime::effects::RepeatableEffectOperation;
+    ///
+    /// let mut operation = RepeatableEffectOperation::new(|| async { Ok(Vec::new()) });
+    /// let first = operation.prepare();
+    /// let second = operation.prepare();
+    /// drop((first, second));
+    /// ```
+    ///
+    /// Calling `execute` retains that borrow until its future completes or
+    /// is dropped, so execution cannot overlap another preparation:
+    ///
+    /// ```compile_fail,E0499
+    /// use obzenflow_runtime::effects::RepeatableEffectOperation;
+    ///
+    /// let mut operation = RepeatableEffectOperation::new(|| async { Ok(Vec::new()) });
+    /// let executing = operation.prepare().execute();
+    /// let next = operation.prepare();
+    /// drop((executing, next));
+    /// ```
+    pub fn prepare(&mut self) -> PreparedRepeatableEffectCall<'_> {
         let receipt = PhysicalCallReceipt::new();
         let lifecycle = PhysicalCallLifecycle {
             receipt: receipt.clone(),
@@ -202,6 +231,7 @@ impl RepeatableEffectOperation {
         PreparedRepeatableEffectCall {
             call: (self.call)(lifecycle),
             receipt,
+            _operation: self,
         }
     }
 
@@ -627,6 +657,32 @@ pub trait EffectBoundary: Send + Sync {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn dropped_prepared_call_releases_operation_without_starting_dependency() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut operation = RepeatableEffectOperation::new({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(Vec::new())
+                }
+            }
+        });
+
+        let prepared = operation.prepare();
+        let receipt = prepared.receipt();
+        drop(prepared);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(receipt.observation(), PhysicalCallObservation::Prepared);
+
+        operation.prepare().execute().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(receipt.observation(), PhysicalCallObservation::Prepared);
+    }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn repeatable_receipt_excludes_post_dependency_materialisation() {
@@ -676,22 +732,42 @@ mod lifecycle_tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn dropped_in_flight_call_leaves_an_observable_started_receipt() {
-        let mut operation = RepeatableEffectOperation::new_with_lifecycle(|lifecycle| async move {
-            lifecycle.mark_started();
-            std::future::pending::<Result<Vec<ChainEvent>, EffectError>>().await
+    async fn dropped_in_flight_call_preserves_receipt_and_releases_operation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut operation = RepeatableEffectOperation::new({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(Vec::new())
+                }
+            }
         });
         let prepared = operation.prepare();
         let receipt = prepared.receipt();
-        let task = tokio::spawn(prepared.execute());
-        tokio::task::yield_now().await;
+        let mut executing = Box::pin(prepared.execute());
+        assert!(futures::poll!(&mut executing).is_pending());
 
         assert!(matches!(
             receipt.observation(),
             PhysicalCallObservation::Started { .. }
         ));
-        task.abort();
-        let _ = task.await;
+        drop(executing);
+
+        let next = operation.prepare();
+        let next_receipt = next.receipt();
+        next.execute().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            next_receipt.observation(),
+            PhysicalCallObservation::Completed {
+                outcome: PhysicalCallOutcome::Succeeded,
+                ..
+            }
+        ));
         assert!(matches!(
             receipt.observation(),
             PhysicalCallObservation::Started { .. }

@@ -7138,6 +7138,117 @@ struct CountingBoundary {
     consults: Arc<AtomicUsize>,
 }
 
+struct TwoPreparedCallsBoundary;
+
+#[async_trait]
+impl EffectBoundary for TwoPreparedCallsBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        mut operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        let _ = operation.prepare().execute().await;
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(operation.prepare().execute().await),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        operation.execute().await.into_report(Vec::new())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AlternatingOutcomeEffect {
+    first_succeeds: bool,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for AlternatingOutcomeEffect {
+    const EFFECT_TYPE: &'static str = "test.alternating_outcome";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = Portless;
+    type Outcome = u64;
+    type OutcomeSemantics = RecordedReply;
+
+    fn label(&self) -> &str {
+        "alternating outcome"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "first_succeeds": self.first_succeeds })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if (attempt == 1) == self.first_succeeds {
+            Ok(attempt as u64)
+        } else {
+            Err(EffectError::Execution(format!("attempt {attempt} failed")))
+        }
+    }
+}
+
+#[tokio::test]
+async fn sequential_prepared_calls_record_only_the_last_physical_outcome() {
+    for first_succeeds in [true, false] {
+        let stage = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = invocation_context(journal.clone(), parent_envelope(stage.into()), None);
+        ctx.effect_boundary = Some(Arc::new(TwoPreparedCallsBoundary));
+        ctx.effect_declarations
+            .push(EffectDeclaration::of::<AlternatingOutcomeEffect>());
+
+        let result = EffectsCore::new(ctx)
+            .perform(AlternatingOutcomeEffect {
+                first_succeeds,
+                calls: calls.clone(),
+            })
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let events = journal.events();
+        assert_eq!(events.len(), 1, "only the terminal attempt is journalled");
+        let records = effect_records(&journal);
+        assert_eq!(records.len(), 1);
+        if first_succeeds {
+            assert!(
+                matches!(result, Err(EffectError::Execution(message)) if message == "attempt 2 failed")
+            );
+            assert_eq!(events[0].event_type(), "effect.execution_failed");
+            assert_eq!(
+                records[0].observation,
+                EffectObservation::returned_failure()
+            );
+            assert!(matches!(
+                &records[0].outcome,
+                EffectOutcomePayload::Failed { error_message, .. } if error_message.contains("attempt 2 failed")
+            ));
+        } else {
+            assert_eq!(result.unwrap(), 2);
+            assert_eq!(events[0].event_type(), "effect.execution_succeeded");
+            assert_eq!(
+                records[0].observation,
+                EffectObservation::returned_success()
+            );
+            assert!(matches!(
+                &records[0].outcome,
+                EffectOutcomePayload::Succeeded { output } if output == &json!(2)
+            ));
+        }
+    }
+}
+
 struct ExecuteThenRefuseBoundary;
 
 #[async_trait]
