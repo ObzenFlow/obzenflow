@@ -540,7 +540,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
     let before = replay_testkit::read_stage_envelopes_appended(&r1, "src").await;
     let watermark_index = before
         .iter()
-        .position(|record| record.event_type() == "control.catch_up_complete")
+        .position(|record| record.event_type() == "runtime.stream.catch_up_completed")
         .expect("source crossed its recorded catch-up boundary");
     let reached_boundary = std::cell::Cell::new(false);
     let removed = obzenflow_infra::testing::journal::retain_archive_frames(&r1, |path, records| {
@@ -549,7 +549,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
         }
         if records.iter().any(|record| {
             record.pointer("/envelope/provenance/event/event_type")
-                == Some(&json!("control.catch_up_complete"))
+                == Some(&json!("runtime.stream.catch_up_completed"))
         }) {
             reached_boundary.set(true);
         }

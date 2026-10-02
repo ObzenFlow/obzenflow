@@ -81,8 +81,9 @@ impl ChainEventFactory {
 
     pub(crate) fn framework_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {
         let event_type = content
-            .framework_event_type()
-            .expect("closed framework payload");
+            .framework_event_type(&FlowContext::default().stage_name)
+            .expect("closed framework payload")
+            .into_owned();
         let version = content
             .framework_schema_version()
             .expect("closed framework payload");

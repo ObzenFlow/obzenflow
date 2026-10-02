@@ -272,7 +272,7 @@ impl JournalEvent for SystemEvent {
     }
 
     fn event_type_name(&self) -> &str {
-        self.payload.event_type()
+        &self.envelope.provenance.event.event_type
     }
 }
 

@@ -9,44 +9,37 @@
 
 /// Control event types (flow through stage journals)
 pub mod control {
-    pub const EOF: &str = "control.eof";
-    pub const WATERMARK: &str = "control.watermark";
-    pub const CHECKPOINT: &str = "control.checkpoint";
-    pub const DRAIN: &str = "control.drain";
+    pub const EOF: &str = "runtime.stream.end_declared";
+    pub const WATERMARK: &str = "runtime.stream.watermark_declared";
+    pub const CHECKPOINT: &str = "runtime.stream.checkpoint_declared";
+    pub const DRAIN: &str = "runtime.stream.drain_requested";
 
-    pub mod middleware {
-        pub const STATE: &str = "control.middleware.state";
-        pub const SUMMARY: &str = "control.middleware.summary";
-        pub const ANOMALY: &str = "control.middleware.anomaly";
-    }
-
-    pub mod metrics {
-        pub const STATE: &str = "control.metrics.state";
-        pub const RESOURCE: &str = "control.metrics.resource";
-        pub const CUSTOM: &str = "control.metrics.custom";
-        pub const ANOMALY: &str = "control.metrics.anomaly";
-    }
+    pub const SOURCE_PRODUCTION_DECLARED: &str = "runtime.source.production_declared";
+    pub const SOURCE_PRODUCTION_FINALIZED: &str = "runtime.source.production_finalized";
+    pub const SUBSCRIPTION_PROGRESS: &str = "runtime.subscription.progress_reported";
+    pub const SUBSCRIPTION_FINALIZED: &str = "runtime.subscription.consumption_finalized";
 }
 
-/// System event types (go to control journal)
+/// Runtime supervisor occurrences. Stage supervisor names are derived through
+/// `supervisor_descriptor::supervisor_event_type` from their canonical names.
 pub mod system {
-    pub mod stage {
-        pub const RUNNING: &str = "system.stage.running";
-        pub const DRAINING: &str = "system.stage.draining";
-        pub const DRAINED: &str = "system.stage.drained";
-        pub const COMPLETED: &str = "system.stage.completed";
-        pub const FAILED: &str = "system.stage.failed";
-    }
-
     pub mod pipeline {
-        pub const ALL_STAGES_COMPLETED: &str = "system.pipeline.all_stages_completed";
-        pub const DRAIN: &str = "system.pipeline.drain";
-        pub const COMPLETED: &str = "system.pipeline.completed";
+        pub const ALL_STAGES_COMPLETED: &str =
+            "supervisor.runtime.pipeline_supervisor.milestone.all_stages_completed";
+        pub const FINAL_MARKER_PUBLISHED: &str =
+            "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published";
+        pub const COMPLETED: &str = "supervisor.runtime.pipeline_supervisor.outcome.completed";
+        pub const FINALIZE_METRICS_REQUESTED: &str =
+            "supervisor.runtime.pipeline_supervisor.command.finalize_metrics.requested";
     }
 
     pub mod metrics {
-        pub const READY: &str = "system.metrics.ready";
-        pub const DRAIN: &str = "system.metrics.drain";
-        pub const DRAINED: &str = "system.metrics.drained";
+        pub const READY: &str = "supervisor.runtime.metrics_aggregator.milestone.ready";
+        pub const FINALIZATION_COMPLETED: &str =
+            "supervisor.runtime.metrics_aggregator.finalization.completed";
+        pub const REFRESH_READERS_STOPPED: &str =
+            "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped";
+        pub const SNAPSHOT_PUBLISHED: &str =
+            "supervisor.runtime.metrics_aggregator.snapshot.published";
     }
 }

@@ -228,7 +228,8 @@ async fn application_drop(hosted: bool) {
     assert!(
         !facts.iter().any(|fact| matches!(
             fact.event_type_name(),
-            "system.pipeline.completed" | "system.pipeline.cancelled"
+            "supervisor.runtime.pipeline_supervisor.outcome.completed"
+                | "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
         )),
         "emergency cancellation must not invent a published outcome"
     );
@@ -335,10 +336,10 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
     assert!(
         !facts.iter().any(|fact| matches!(
             fact.event_type_name(),
-            "system.pipeline.starting"
-                | "system.pipeline.running"
-                | "system.pipeline.completed"
-                | "system.pipeline.cancelled"
+            "supervisor.runtime.pipeline_supervisor.command.start.admitted"
+                | "supervisor.runtime.pipeline_supervisor.milestone.sources_started"
+                | "supervisor.runtime.pipeline_supervisor.outcome.completed"
+                | "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
         )),
         "dropping host preparation must not start input or invent a published outcome"
     );
@@ -374,7 +375,7 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
                 let facts = flow.system_journal().unwrap().read_all_unordered().await.unwrap();
                 assert!(!facts.iter().any(|row| matches!(
                     row.event_type_name(),
-                    "system.pipeline.starting" | "system.pipeline.running" | "system.pipeline.completed"
+                    "supervisor.runtime.pipeline_supervisor.command.start.admitted" | "supervisor.runtime.pipeline_supervisor.milestone.sources_started" | "supervisor.runtime.pipeline_supervisor.outcome.completed"
                 )));
                 Ok(flow)
             }),
@@ -476,14 +477,17 @@ enabled = false
             .filter(|kind| {
                 matches!(
                     *kind,
-                    "system.pipeline.cancelled"
-                        | "system.pipeline.completed"
-                        | "system.pipeline.failed"
-                        | "system.pipeline.not_started"
+                    "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                        | "supervisor.runtime.pipeline_supervisor.outcome.completed"
+                        | "supervisor.runtime.pipeline_supervisor.outcome.failed"
+                        | "supervisor.runtime.pipeline_supervisor.outcome.not_started"
                 )
             })
             .collect();
-        assert_eq!(terminals, ["system.pipeline.not_started"]);
+        assert_eq!(
+            terminals,
+            ["supervisor.runtime.pipeline_supervisor.outcome.not_started"]
+        );
     }
 }
 
@@ -576,14 +580,17 @@ enabled = false
         .filter(|kind| {
             matches!(
                 *kind,
-                "system.pipeline.cancelled"
-                    | "system.pipeline.completed"
-                    | "system.pipeline.failed"
-                    | "system.pipeline.not_started"
+                "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                    | "supervisor.runtime.pipeline_supervisor.outcome.completed"
+                    | "supervisor.runtime.pipeline_supervisor.outcome.failed"
+                    | "supervisor.runtime.pipeline_supervisor.outcome.not_started"
             )
         })
         .collect();
-    assert_eq!(terminals, ["system.pipeline.not_started"]);
+    assert_eq!(
+        terminals,
+        ["supervisor.runtime.pipeline_supervisor.outcome.not_started"]
+    );
     release_tx.send(()).unwrap();
     let result = application.await.unwrap();
     assert!(matches!(result, Err(ApplicationError::IoError(error))
@@ -1099,22 +1106,27 @@ enabled = false
                     .read_all_unordered()
                     .await
                     .unwrap();
-                assert!(!events
-                    .iter()
-                    .any(|envelope| envelope.event_type_name() == "system.pipeline.stop_admitted"));
+                assert!(!events.iter().any(|envelope| matches!(
+                    envelope.event_type_name(),
+                    "supervisor.runtime.pipeline_supervisor.command.graceful_stop.admitted"
+                        | "supervisor.runtime.pipeline_supervisor.command.cancel.admitted"
+                )));
                 let terminal: Vec<_> = events
                     .iter()
                     .map(|event| event.event_type_name())
                     .filter(|kind| {
                         matches!(
                             *kind,
-                            "system.pipeline.failed"
-                                | "system.pipeline.cancelled"
-                                | "system.pipeline.completed"
+                            "supervisor.runtime.pipeline_supervisor.outcome.failed"
+                                | "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                                | "supervisor.runtime.pipeline_supervisor.outcome.completed"
                         )
                     })
                     .collect();
-                assert_eq!(terminal, ["system.pipeline.failed"]);
+                assert_eq!(
+                    terminal,
+                    ["supervisor.runtime.pipeline_supervisor.outcome.failed"]
+                );
                 let _rebound = TcpListener::bind(bound_rx.await.unwrap()).unwrap();
             }
         }
@@ -1241,18 +1253,18 @@ enabled = false
                 .filter(|kind| {
                     matches!(
                         *kind,
-                        "system.pipeline.failed"
-                            | "system.pipeline.cancelled"
-                            | "system.pipeline.completed"
+                        "supervisor.runtime.pipeline_supervisor.outcome.failed"
+                            | "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                            | "supervisor.runtime.pipeline_supervisor.outcome.completed"
                     )
                 })
                 .collect();
             assert_eq!(
                 terminals,
                 [if finite && !cancel {
-                    "system.pipeline.completed"
+                    "supervisor.runtime.pipeline_supervisor.outcome.completed"
                 } else {
-                    "system.pipeline.cancelled"
+                    "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
                 }]
             );
         }

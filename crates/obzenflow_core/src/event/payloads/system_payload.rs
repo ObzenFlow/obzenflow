@@ -152,7 +152,7 @@ pub enum ContractResultStatusLabel {
     Passed,
     Failed,
     Pending,
-    Healthy,
+    Skipped,
 }
 
 impl ContractResultStatusLabel {
@@ -161,7 +161,7 @@ impl ContractResultStatusLabel {
             Self::Passed => "passed",
             Self::Failed => "failed",
             Self::Pending => "pending",
-            Self::Healthy => "healthy",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -180,7 +180,7 @@ impl std::str::FromStr for ContractResultStatusLabel {
             "passed" => Ok(Self::Passed),
             "failed" => Ok(Self::Failed),
             "pending" => Ok(Self::Pending),
-            "healthy" => Ok(Self::Healthy),
+            "skipped" => Ok(Self::Skipped),
             _ => Err(()),
         }
     }
@@ -274,32 +274,70 @@ pub enum MetricsCoordinationEvent {
 impl SystemPayload {
     pub const SCHEMA_VERSION: std::num::NonZeroU32 = std::num::NonZeroU32::MIN;
 
-    pub fn event_type(&self) -> &'static str {
-        match self {
-            SystemPayload::SupervisorRegistered { .. } => "system.supervisor.registered",
+    pub fn event_type(&self) -> std::borrow::Cow<'static, str> {
+        let name = match self {
+            SystemPayload::SupervisorRegistered { descriptor } => {
+                return format!("{}.registered", descriptor.event_prefix()).into()
+            }
             SystemPayload::PipelineLifecycle(event) => match event {
-                PipelineLifecycleEvent::Starting => "system.pipeline.starting",
-                PipelineLifecycleEvent::ReadyForRun { .. } => "system.pipeline.ready_for_run",
-                PipelineLifecycleEvent::Running { .. } => "system.pipeline.running",
-                PipelineLifecycleEvent::StopAdmitted { .. } => "system.pipeline.stop_admitted",
-                PipelineLifecycleEvent::NotStarted => "system.pipeline.not_started",
-                PipelineLifecycleEvent::AllStagesCompleted { .. } => {
-                    "system.pipeline.all_stages_completed"
+                PipelineLifecycleEvent::Starting => {
+                    "supervisor.runtime.pipeline_supervisor.command.start.admitted"
                 }
-                PipelineLifecycleEvent::Draining { .. } => "system.pipeline.draining",
-                PipelineLifecycleEvent::Drained => "system.pipeline.drained",
-                PipelineLifecycleEvent::Completed { .. } => "system.pipeline.completed",
-                PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
-                PipelineLifecycleEvent::Cancelled { .. } => "system.pipeline.cancelled",
+                PipelineLifecycleEvent::ReadyForRun { .. } => {
+                    "supervisor.runtime.pipeline_supervisor.milestone.ready_for_run"
+                }
+                PipelineLifecycleEvent::Running { .. } => {
+                    "supervisor.runtime.pipeline_supervisor.milestone.sources_started"
+                }
+                PipelineLifecycleEvent::StopAdmitted { admission } => match admission {
+                    PipelineStopAdmission::Graceful { .. } => {
+                        "supervisor.runtime.pipeline_supervisor.command.graceful_stop.admitted"
+                    }
+                    PipelineStopAdmission::Cancel { .. } => {
+                        "supervisor.runtime.pipeline_supervisor.command.cancel.admitted"
+                    }
+                },
+                PipelineLifecycleEvent::NotStarted => {
+                    "supervisor.runtime.pipeline_supervisor.outcome.not_started"
+                }
+                PipelineLifecycleEvent::AllStagesCompleted { .. } => {
+                    "supervisor.runtime.pipeline_supervisor.milestone.all_stages_completed"
+                }
+                PipelineLifecycleEvent::Draining { .. } => {
+                    "supervisor.runtime.pipeline_supervisor.milestone.drain_started"
+                }
+                PipelineLifecycleEvent::Drained => {
+                    "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published"
+                }
+                PipelineLifecycleEvent::Completed { .. } => {
+                    "supervisor.runtime.pipeline_supervisor.outcome.completed"
+                }
+                PipelineLifecycleEvent::Failed { .. } => {
+                    "supervisor.runtime.pipeline_supervisor.outcome.failed"
+                }
+                PipelineLifecycleEvent::Cancelled { .. } => {
+                    "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                }
             },
             SystemPayload::MetricsCoordination(event) => match event {
-                MetricsCoordinationEvent::Ready => "system.metrics.ready",
-                MetricsCoordinationEvent::DrainRequested => "system.metrics.drain_requested",
-                MetricsCoordinationEvent::Drained => "system.metrics.drained",
-                MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
-                MetricsCoordinationEvent::Exported { .. } => "system.metrics.exported",
+                MetricsCoordinationEvent::Ready => {
+                    "supervisor.runtime.metrics_aggregator.milestone.ready"
+                }
+                MetricsCoordinationEvent::DrainRequested => {
+                    "supervisor.runtime.pipeline_supervisor.command.finalize_metrics.requested"
+                }
+                MetricsCoordinationEvent::Drained => {
+                    "supervisor.runtime.metrics_aggregator.finalization.completed"
+                }
+                MetricsCoordinationEvent::Shutdown => {
+                    "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped"
+                }
+                MetricsCoordinationEvent::Exported { .. } => {
+                    "supervisor.runtime.metrics_aggregator.snapshot.published"
+                }
             },
             SystemPayload::IngressRefusal { .. } => "system.ingress.refusal",
-        }
+        };
+        name.into()
     }
 }

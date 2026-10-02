@@ -105,6 +105,7 @@ impl ContractChain {
     pub fn on_edge_delivery(
         &mut self,
         event: &obzenflow_core::ChainEvent,
+        producer_event: &obzenflow_core::ChainEvent,
         reader_stage: obzenflow_core::StageId,
         reader_seq: obzenflow_core::event::types::SeqNo,
         upstream_stage: obzenflow_core::StageId,
@@ -127,6 +128,11 @@ impl ContractChain {
             .zip(self.read_contexts.iter_mut())
         {
             if authored_by_upstream || contract.event_scope() == ContractEventScope::PhysicalEdge {
+                let event = if contract.event_scope() == ContractEventScope::SourceProduction {
+                    producer_event
+                } else {
+                    event
+                };
                 contract.on_read(event, read_ctx);
                 contract.on_write(event, write_ctx);
             }
@@ -177,7 +183,11 @@ impl ContractChain {
 
                 let result = match contract.check_progress(&ctx) {
                     Some(v) => ContractResult::Failed(v),
-                    None => ContractResult::Pending,
+                    None => ContractResult::pending(
+                        contract.contract_name(),
+                        &ctx,
+                        obzenflow_core::contracts::PendingReason::ProgressOnly,
+                    ),
                 };
                 (contract.contract_name(), result)
             })
@@ -195,6 +205,64 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn selected_transport_never_replaces_the_original_source_population() {
+        use obzenflow_core::contracts::ContractEvidenceDetails;
+        use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+        use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
+        let upstream = StageId::new();
+        let reader = StageId::new();
+        let mut chain = ContractChain::new()
+            .with_contract(obzenflow_core::TransportContract::new())
+            .with_contract(obzenflow_core::SourceContract::new());
+        let declaration = ChainEventFactory::source_contract_event(
+            upstream.into(),
+            obzenflow_core::event::SourceContractEventParams {
+                expected_count: Some(Count(10)),
+                source_id: upstream,
+                route: None,
+                journal_path: JournalPath("source".into()),
+                journal_index: JournalIndex(0),
+                writer_seq: None,
+                vector_clock: None,
+            },
+        );
+        chain.on_edge_delivery(&declaration, &declaration, reader, SeqNo(0), upstream, true);
+        for seq in 1..=2 {
+            let data = ChainEventFactory::data_event(
+                upstream.into(),
+                "selected",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            );
+            chain.on_edge_delivery(&data, &data, reader, SeqNo(seq), upstream, true);
+        }
+        let mut producer = ChainEventFactory::eof_event(upstream.into(), true);
+        if let obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof {
+            writer_seq,
+            ..
+        }) = &mut producer.payload
+        {
+            *writer_seq = Some(SeqNo(10));
+        }
+        let mut selected = producer.clone();
+        if let obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof {
+            writer_seq,
+            ..
+        }) = &mut selected.payload
+        {
+            *writer_seq = Some(SeqNo(2));
+        }
+        chain.on_edge_delivery(&selected, &producer, reader, SeqNo(2), upstream, true);
+        let results = chain.verify_all(upstream, reader);
+        assert!(
+            matches!(&results[0].1, ContractResult::Passed(e) if matches!(e.details, ContractEvidenceDetails::Transport { advertised_writer_seq: Some(SeqNo(2)), consumed_count: Count(2) }))
+        );
+        assert!(
+            matches!(&results[1].1, ContractResult::Passed(e) if matches!(e.details, ContractEvidenceDetails::Source { expected_count: Some(Count(10)), produced_count: Some(Count(10)), .. }))
+        );
+    }
 
     struct CountingContract {
         scope: ContractEventScope,
@@ -219,8 +287,12 @@ mod tests {
             self.reads.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn verify(&self, _ctx: &ContractContext<'_>) -> ContractResult {
-            ContractResult::Pending
+        fn verify(&self, ctx: &ContractContext<'_>) -> ContractResult {
+            ContractResult::pending(
+                self.contract_name(),
+                ctx,
+                obzenflow_core::contracts::PendingReason::EvaluationUnavailable,
+            )
         }
     }
 
@@ -252,6 +324,7 @@ mod tests {
 
         chain.on_edge_delivery(
             &event,
+            &event,
             reader,
             obzenflow_core::event::types::SeqNo(0),
             upstream,
@@ -263,6 +336,7 @@ mod tests {
         assert_eq!(physical_writes.load(Ordering::SeqCst), 1);
 
         chain.on_edge_delivery(
+            &event,
             &event,
             reader,
             obzenflow_core::event::types::SeqNo(1),

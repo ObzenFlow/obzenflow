@@ -45,6 +45,8 @@ pub enum EdgeContractDecision {
 
 /// Minimal edge context needed by policies.
 pub struct EdgeContext {
+    /// Selected-feed policies already allow unavailable per-type advertisements.
+    pub selected_population: bool,
     pub upstream_stage: StageId,
     pub downstream_stage: StageId,
     pub advertised_writer_seq: Option<SeqNo>,
@@ -93,10 +95,21 @@ impl ContractPolicy for TransportStrictPolicy {
     fn apply(
         &self,
         results: &[ContractResult],
-        _edge: &EdgeContext,
+        edge: &EdgeContext,
         _prior: EdgeContractDecision,
     ) -> EdgeContractDecision {
         for result in results {
+            if let ContractResult::Pending {
+                reason: obzenflow_core::contracts::PendingReason::WriterAdvertisementUnavailable,
+                ..
+            } = result
+            {
+                if !edge.selected_population && edge.reader_seq.0 > 0 {
+                    return EdgeContractDecision::Fail(EventViolationCause::Other(
+                        "writer_advertisement_unavailable".into(),
+                    ));
+                }
+            }
             if let ContractResult::Failed(violation) = result {
                 let event_cause = match &violation.cause {
                     ViolationCause::SeqDivergence { advertised, reader } => {
@@ -158,14 +171,52 @@ mod tests {
             downstream_stage: StageId::new(),
             detected_at: chrono::Utc::now(),
             cause,
-            details: json!({}),
+            details: json!({}).into(),
         })
+    }
+
+    #[test]
+    fn pending_transport_preserves_existing_empty_and_selected_acceptance() {
+        use obzenflow_core::contracts::{ContractEvidenceDetails, PendingReason};
+        for selected_population in [false, true] {
+            for consumed in [0, 10] {
+                let upstream = StageId::new();
+                let reader = StageId::new();
+                let result = ContractResult::Pending {
+                    reason: PendingReason::WriterAdvertisementUnavailable,
+                    evidence: ContractEvidence {
+                        contract_name: ContractName::from("TransportContract"),
+                        upstream_stage: upstream,
+                        downstream_stage: reader,
+                        evaluated_at: chrono::Utc::now(),
+                        details: ContractEvidenceDetails::Transport {
+                            advertised_writer_seq: None,
+                            consumed_count: obzenflow_core::event::types::Count(consumed),
+                        },
+                    },
+                };
+                let edge = EdgeContext {
+                    selected_population,
+                    upstream_stage: upstream,
+                    downstream_stage: reader,
+                    advertised_writer_seq: None,
+                    reader_seq: SeqNo(consumed),
+                };
+                let decision =
+                    TransportStrictPolicy.apply(&[result], &edge, EdgeContractDecision::Pass);
+                assert_eq!(
+                    matches!(decision, EdgeContractDecision::Pass),
+                    selected_population || consumed == 0
+                );
+            }
+        }
     }
 
     #[test]
     fn transport_strict_policy_passes_on_no_failures() {
         let policy = TransportStrictPolicy;
         let edge = EdgeContext {
+            selected_population: false,
             upstream_stage: StageId::new(),
             downstream_stage: StageId::new(),
             advertised_writer_seq: None,
@@ -176,8 +227,8 @@ mod tests {
             contract_name: ContractName::from("transport"),
             upstream_stage: StageId::new(),
             downstream_stage: StageId::new(),
-            verified_at: chrono::Utc::now(),
-            details: json!({}),
+            evaluated_at: chrono::Utc::now(),
+            details: json!({}).into(),
         })];
 
         let decision = policy.apply(&results, &edge, EdgeContractDecision::Pass);
@@ -188,6 +239,7 @@ mod tests {
     fn transport_strict_policy_fails_on_seq_divergence() {
         let policy = TransportStrictPolicy;
         let edge = EdgeContext {
+            selected_population: false,
             upstream_stage: StageId::new(),
             downstream_stage: StageId::new(),
             advertised_writer_seq: Some(SeqNo(3)),

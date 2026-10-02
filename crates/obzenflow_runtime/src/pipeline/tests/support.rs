@@ -92,7 +92,7 @@ where
                 }
             }
         }
-        if event.event_type_name() == "system.metrics.ready" {
+        if event.event_type_name() == "supervisor.runtime.metrics_aggregator.milestone.ready" {
             if let Some(gate) = &self.metrics_ready_append {
                 gate.entered.notify_one();
                 gate.release.notified().await;
@@ -100,7 +100,9 @@ where
         }
         if matches!(
             event.event_type_name(),
-            "system.pipeline.completed" | "system.pipeline.cancelled" | "system.pipeline.failed"
+            "supervisor.runtime.pipeline_supervisor.outcome.completed"
+                | "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                | "supervisor.runtime.pipeline_supervisor.outcome.failed"
         ) {
             if let Some(gate) = &self.terminal_append {
                 gate.entered.notify_one();

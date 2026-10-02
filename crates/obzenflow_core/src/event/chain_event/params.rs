@@ -25,6 +25,9 @@ pub struct SourceContractEventParams {
 
 #[derive(Debug, Clone)]
 pub struct ConsumptionProgressEventParams {
+    pub scope: crate::contracts::SubscriptionScope,
+    pub consumed_count: Count,
+    pub receipts: Option<crate::contracts::SubscriptionReceipts>,
     pub reader_seq: SeqNo,
     pub last_event_id: Option<EventId>,
     pub vector_clock: Option<VectorClock>,
@@ -38,6 +41,8 @@ pub struct ConsumptionProgressEventParams {
 
 #[derive(Debug, Clone)]
 pub struct ConsumptionFinalEventParams {
+    pub scope: crate::contracts::SubscriptionScope,
+    pub receipts: Option<crate::contracts::SubscriptionReceipts>,
     pub pass: bool,
     pub consumed_count: Count,
     pub expected_count: Option<Count>,

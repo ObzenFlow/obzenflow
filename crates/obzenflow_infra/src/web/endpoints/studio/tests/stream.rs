@@ -2019,7 +2019,10 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
             "children cannot write system.log"
         );
         let terminal = history.last().unwrap();
-        assert_eq!(terminal.event_type_name(), "system.pipeline.drained");
+        assert_eq!(
+            terminal.event_type_name(),
+            "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published"
+        );
         let delivered: std::collections::HashSet<_> = frames
             .iter()
             .filter_map(|frame| {
@@ -2070,12 +2073,10 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         completion_latencies.sort_unstable();
         let coord = metrics.coordination.read_all_unordered().await.unwrap();
         let exports = metrics.export.read_all_unordered().await.unwrap();
-        assert!(exports
-            .iter()
-            .any(|row| row.event_type_name() == "system.metrics.exported"));
-        assert!(coord
-            .iter()
-            .all(|row| row.event_type_name() != "system.metrics.exported"));
+        assert!(exports.iter().any(|row| row.event_type_name()
+            == "supervisor.runtime.metrics_aggregator.snapshot.published"));
+        assert!(coord.iter().all(|row| row.event_type_name()
+            != "supervisor.runtime.metrics_aggregator.snapshot.published"));
         eprintln!("composed backend={disk}, stages={stages}, settlement={settled:?}, Studio={:?}, stage-completion-to-pipeline-drained-us p50={} p95={} p99={} max={}, exports={}, coordination={}", started.elapsed(), completion_latencies[stages / 2], completion_latencies[(stages - 1) * 95 / 100], completion_latencies[(stages - 1) * 99 / 100], completion_latencies[stages - 1], exports.len(), coord.len());
     }
 }

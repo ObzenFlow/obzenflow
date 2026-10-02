@@ -145,19 +145,22 @@ fn test_control_event_type_strings() {
 
     // Test EOF event type string
     let eof_event = ChainEventFactory::eof_event(writer_id, true);
-    assert_eq!(eof_event.event_type(), "control.eof");
+    assert_eq!(eof_event.event_type(), "runtime.stream.end_declared");
     assert!(eof_event.is_control());
     assert!(eof_event.is_eof());
 
     // Test drain event type string
     let drain_event = ChainEventFactory::drain_event(writer_id);
-    assert_eq!(drain_event.event_type(), "control.drain");
+    assert_eq!(drain_event.event_type(), "runtime.stream.drain_requested");
     assert!(drain_event.is_control());
 
     // Test watermark event type string
     let watermark_event =
         ChainEventFactory::watermark_event(writer_id, 12345, Some("stage1".to_string()));
-    assert_eq!(watermark_event.event_type(), "control.watermark");
+    assert_eq!(
+        watermark_event.event_type(),
+        "runtime.stream.watermark_declared"
+    );
     assert!(watermark_event.is_control());
 
     // Test checkpoint event type string
@@ -166,7 +169,10 @@ fn test_control_event_type_strings() {
         "checkpoint-1".to_string(),
         Some(json!({"offset": 100})),
     );
-    assert_eq!(checkpoint_event.event_type(), "control.checkpoint");
+    assert_eq!(
+        checkpoint_event.event_type(),
+        "runtime.stream.checkpoint_declared"
+    );
     assert!(checkpoint_event.is_control());
 }
 
@@ -215,22 +221,14 @@ fn test_flow_signal_payloads() {
 }
 
 #[test]
-fn test_legacy_eof_natural_bool_deserializes_to_kind() {
-    let payload: FlowControlPayload = serde_json::from_value(json!({
-        "flow_control_type": "eof",
-        "natural": false,
-        "timestamp": 12345
-    }))
-    .expect("legacy EOF natural bool should deserialize");
-
-    match &payload {
-        FlowControlPayload::Eof { kind, .. } => assert_eq!(*kind, EofKind::Poison),
-        _ => panic!("Expected EOF signal"),
+fn obsolete_eof_alias_and_missing_frontier_availability_are_rejected() {
+    for payload in [
+        json!({"flow_control_type":"eof", "natural":false, "writer_seq_by_event_type_complete":false}),
+        json!({"flow_control_type":"eof", "kind":"natural"}),
+        json!({"flow_control_type":"eof", "kind":true, "writer_seq_by_event_type_complete":false}),
+    ] {
+        assert!(serde_json::from_value::<FlowControlPayload>(payload).is_err());
     }
-
-    let serialized = serde_json::to_value(payload).expect("EOF payload should serialize");
-    assert_eq!(serialized["kind"], "poison");
-    assert!(serialized.get("natural").is_none());
 }
 
 #[test]
@@ -238,6 +236,7 @@ fn truncated_eof_kind_round_trips_through_serde() {
     let payload: FlowControlPayload = serde_json::from_value(json!({
         "flow_control_type": "eof",
         "kind": "truncated",
+        "writer_seq_by_event_type_complete": false,
         "timestamp": 12345
     }))
     .expect("truncated EOF kind should deserialize");
@@ -249,23 +248,6 @@ fn truncated_eof_kind_round_trips_through_serde() {
 
     let serialized = serde_json::to_value(payload).expect("EOF payload should serialize");
     assert_eq!(serialized["kind"], "truncated");
-}
-
-#[test]
-fn legacy_eof_natural_bool_never_produces_truncated() {
-    // The bool path predates Truncated and can only express Natural/Poison.
-    for (natural, expected) in [(true, EofKind::Natural), (false, EofKind::Poison)] {
-        let payload: FlowControlPayload = serde_json::from_value(json!({
-            "flow_control_type": "eof",
-            "natural": natural,
-            "timestamp": 1
-        }))
-        .expect("legacy bool should deserialize");
-        match &payload {
-            FlowControlPayload::Eof { kind, .. } => assert_eq!(*kind, expected),
-            _ => panic!("Expected EOF signal"),
-        }
-    }
 }
 
 #[test]
@@ -311,15 +293,21 @@ fn test_control_event_backward_compatibility() {
 
     // Create various control events and verify their event_type() method
     let events = vec![
-        (ChainEventFactory::eof_event(writer_id, true), "control.eof"),
-        (ChainEventFactory::drain_event(writer_id), "control.drain"),
+        (
+            ChainEventFactory::eof_event(writer_id, true),
+            "runtime.stream.end_declared",
+        ),
+        (
+            ChainEventFactory::drain_event(writer_id),
+            "runtime.stream.drain_requested",
+        ),
         (
             ChainEventFactory::watermark_event(writer_id, 1000, None),
-            "control.watermark",
+            "runtime.stream.watermark_declared",
         ),
         (
             ChainEventFactory::checkpoint_event(writer_id, "cp1".to_string(), None),
-            "control.checkpoint",
+            "runtime.stream.checkpoint_declared",
         ),
     ];
 
@@ -369,7 +357,7 @@ fn test_data_vs_control_events() {
     for event in control_events {
         assert!(event.is_control());
         assert!(!event.consumes_data_credit());
-        assert!(event.event_type().starts_with("control."));
+        assert!(event.event_type().starts_with("runtime."));
     }
 }
 
@@ -384,6 +372,7 @@ fn test_direct_chain_event_construction() {
             writer_id: Some(WriterId::from(StageId::new())),
             writer_seq: None,
             writer_seq_by_event_type: Default::default(),
+            writer_seq_by_event_type_complete: false,
             vector_clock: None,
             last_event_id: None,
         },
@@ -391,5 +380,5 @@ fn test_direct_chain_event_construction() {
 
     assert!(event.is_control());
     assert!(event.is_eof());
-    assert_eq!(event.event_type(), "control.eof");
+    assert_eq!(event.event_type(), "runtime.stream.end_declared");
 }

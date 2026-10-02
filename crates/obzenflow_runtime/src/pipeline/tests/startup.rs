@@ -139,7 +139,8 @@ pub async fn startup_waits_for_achieved_transitions_with_zero_child_journal_read
         .await
         .unwrap()
         .iter()
-        .any(|r| r.event_type_name() == "system.pipeline.running"));
+        .any(|r| r.event_type_name()
+            == "supervisor.runtime.pipeline_supervisor.milestone.sources_started"));
     // Sources may complete before the parent observes their retained startup acknowledgement.
     source_results.acknowledge(StageMilestone::Started);
     wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
@@ -158,11 +159,13 @@ pub async fn startup_waits_for_achieved_transitions_with_zero_child_journal_read
     assert!(
         types
             .iter()
-            .position(|t| *t == "system.pipeline.starting")
+            .position(|t| *t == "supervisor.runtime.pipeline_supervisor.command.start.admitted")
             .unwrap()
             < types
                 .iter()
-                .position(|t| *t == "system.pipeline.running")
+                .position(
+                    |t| *t == "supervisor.runtime.pipeline_supervisor.milestone.sources_started"
+                )
                 .unwrap()
     );
 }
@@ -186,7 +189,7 @@ pub async fn blocked_registration_preserves_cancellation_and_cleanup(
             fail: false,
         });
         let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-        journal.gate_event = Some("system.supervisor.registered");
+        journal.gate_event = Some("supervisor.runtime.pipeline_supervisor.registered");
         journal.gate = Some(gate.clone());
         let journal = Arc::new(journal);
         let (topology, source, sink) = source_sink_topology_with_source();
@@ -247,13 +250,16 @@ pub async fn blocked_registration_preserves_cancellation_and_cleanup(
         let rows = journal.read_all_unordered().await.unwrap();
         assert_eq!(
             rows.iter()
-                .filter(|r| r.event_type_name() == "system.supervisor.registered")
+                .filter(
+                    |r| r.event_type_name() == "supervisor.runtime.pipeline_supervisor.registered"
+                )
                 .count(),
             1
         );
         assert!(!rows.iter().any(|r| matches!(
             r.event_type_name(),
-            "system.pipeline.ready_for_run" | "system.pipeline.running"
+            "supervisor.runtime.pipeline_supervisor.milestone.ready_for_run"
+                | "supervisor.runtime.pipeline_supervisor.milestone.sources_started"
         )));
     }
 }
@@ -274,7 +280,7 @@ pub async fn blocked_ready_publication_exposes_pending_state_and_preserves_cance
         fail: false,
     });
     let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-    journal.gate_event = Some("system.pipeline.ready_for_run");
+    journal.gate_event = Some("supervisor.runtime.pipeline_supervisor.milestone.ready_for_run");
     journal.gate = Some(gate.clone());
     let journal = Arc::new(journal);
     let (topology, source, sink) = source_sink_topology_with_source();
@@ -311,11 +317,11 @@ pub async fn blocked_ready_publication_exposes_pending_state_and_preserves_cance
     let rows = journal.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|r| r.event_type_name() == "system.pipeline.ready_for_run")
+            .filter(|r| r.event_type_name()
+                == "supervisor.runtime.pipeline_supervisor.milestone.ready_for_run")
             .count(),
         1
     );
-    assert!(!rows
-        .iter()
-        .any(|r| r.event_type_name() == "system.pipeline.running"));
+    assert!(!rows.iter().any(|r| r.event_type_name()
+        == "supervisor.runtime.pipeline_supervisor.milestone.sources_started"));
 }

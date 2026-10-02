@@ -446,7 +446,7 @@ fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
             }) => {
                 assert_eq!(
                     envelope.event_type(),
-                    "control.catch_up_complete",
+                    "runtime.stream.catch_up_completed",
                     "the watermark row must carry the catch-up event type"
                 );
                 Some(ResumeRow::CatchUp {

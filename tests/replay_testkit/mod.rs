@@ -213,7 +213,7 @@ pub async fn count_reader_telemetry_rows(run_dir: &Path, stage_key: &str) -> usi
             matches!(
                 &envelope.payload,
                 ChainPayload::FlowControl(payload)
-                    if payload.is_reader_telemetry()
+                    if payload.is_reporting_telemetry()
             )
         })
         .count()

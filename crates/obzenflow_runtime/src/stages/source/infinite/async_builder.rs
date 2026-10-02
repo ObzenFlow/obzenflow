@@ -108,7 +108,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
         handler.install_observation_recorder(context.instrumentation.observation_recorder());
 
         let supervisor = AsyncInfiniteSourceSupervisor {
-            name: format!("async_infinite_source_{}", self.config.stage_name),
+            name: self.config.stage_name.clone(),
             handler: Some(handler),
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),

@@ -11,6 +11,13 @@ fn progress() -> RunRecord {
     record.kind = RunRecordKind::FlowSignal;
     if let RunRecordData::Chain(row) = &mut record.record {
         row.payload = ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
+            scope: obzenflow_core::contracts::SubscriptionScope {
+                upstream: id(31).parse().unwrap(),
+                reader: row.envelope.provenance.event.flow_context.stage_id,
+                selection: obzenflow_core::contracts::SubscriptionSelection::All,
+            },
+            consumed_count: obzenflow_core::event::types::Count(2),
+            receipts: None,
             reader_seq: SeqNo(2),
             last_event_id: Some(serde_json::from_value(json!(id(100))).unwrap()),
             vector_clock: Some(watermark(7)),
@@ -22,8 +29,11 @@ fn progress() -> RunRecord {
             stalled_since: None,
         });
         row.envelope.provenance.event.event_kind = row.payload.kind();
-        row.envelope.provenance.event.event_type =
-            row.payload.framework_event_type().unwrap().into();
+        row.envelope.provenance.event.event_type = row
+            .payload
+            .framework_event_type(&row.envelope.provenance.event.flow_context.stage_name)
+            .unwrap()
+            .into();
     }
     record
 }
@@ -102,12 +112,14 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
     let original = serde_json::to_value(&record).unwrap();
     let mut renderer = progress_renderer();
     let text = render_record(&mut renderer, &record);
-    assert!(text.contains("RUNTIME (stage: classify, journal: 2)\ncontrol.consumption_progress ← classify\n⟨2:101⟩\npayload schema version: 1\n{\n"), "{text}");
+    assert!(text.contains("RUNTIME (stage: classify, journal: 2)\nruntime.subscription.progress_reported ← classify\n⟨2:101⟩\npayload schema version: 1\n{\n"), "{text}");
     assert_eq!(
         json_body(&text),
         json!({
             "upstream": "thermometer", "upstream_journal": 1,
             "reader_seq": 2, "eof_seen": false,
+            "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
+            "consumed_count": 2, "receipts": null,
         })
     );
     assert!(!text.contains("Input:") && !text.contains("Progress:"));
@@ -117,6 +129,7 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
     let mut record = progress();
     if let FlowControlPayload::ConsumptionProgress {
         reader_seq,
+        consumed_count,
         eof_seen,
         advertised_writer_seq,
         stalled_since,
@@ -124,6 +137,7 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
     } = progress_payload(&mut record)
     {
         *reader_seq = SeqNo(u64::MAX);
+        *consumed_count = obzenflow_core::event::types::Count(u64::MAX);
         *eof_seen = true;
         *advertised_writer_seq = Some(SeqNo(0));
         *stalled_since = Some(DurationMs(u64::MAX));
@@ -140,6 +154,8 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
         json!({
             "upstream": "thermometer", "upstream_journal": 1,
             "reader_seq": u64::MAX, "eof_seen": true,
+            "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
+            "consumed_count": u64::MAX, "receipts": null,
             "advertised_writer_seq": 0, "stalled_ms": u64::MAX,
         })
     );
@@ -166,6 +182,8 @@ fn explain_keeps_the_json_summary_and_only_underlines_the_event_clock() {
             json!({
                 "upstream": "thermometer", "upstream_journal": 1,
                 "reader_seq": 2, "eof_seen": false,
+            "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
+            "consumed_count": 2, "receipts": null,
             })
         );
         assert_eq!(text.matches('⟨').count(), 1);
@@ -173,7 +191,7 @@ fn explain_keeps_the_json_summary_and_only_underlines_the_event_clock() {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
-            .contains("do not establish that the reader has caught up"));
+            .contains("Producer advertisements retain their own attribution"));
         renderer.color = true;
         let colored = render_record(&mut renderer, &record);
         assert_eq!(colored.matches("\x1b[1;4;38;5;").count(), 1);
@@ -194,6 +212,8 @@ fn unresolved_input_identity_is_json_escaped_and_ambiguous_journals_are_not_gues
     let expected = json!({
         "reader_path": "unresolved\u{1b}[2J\n\u{202e}", "reader_index": 99,
         "reader_seq": 2, "eof_seen": false,
+            "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
+            "consumed_count": 2, "receipts": null,
     });
     assert_eq!(json_body(&text), expected);
     assert!(!text.contains('\x1b') && !text.contains('\u{202e}'));
@@ -222,6 +242,8 @@ fn unresolved_input_identity_is_json_escaped_and_ambiguous_journals_are_not_gues
         json_body(&text),
         json!({
             "upstream": "thermometer", "reader_seq": 2, "eof_seen": false,
+            "scope": {"upstream": id(31), "reader": id(2), "selection": {"selection": "all"}},
+            "consumed_count": 2, "receipts": null,
         })
     );
     assert!(!text.contains("Input: thermometer"));
@@ -259,7 +281,7 @@ fn metrics_exports_project_a_small_json_notice_in_every_human_mode() {
         let mut renderer = progress_renderer();
         renderer.explain = explain;
         let text = render_record(&mut renderer, &record);
-        assert!(text.contains("system.metrics.exported ←"));
+        assert!(text.contains("supervisor.runtime.metrics_aggregator.snapshot.published ←"));
         assert!(text.contains("⟨3:119⟩"));
         assert_eq!(text.matches('⟨').count(), 1);
         assert_eq!(json_body(&text), expected);

@@ -341,7 +341,7 @@ mod tests {
             _options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             // Exercise a dispatch failure after successful registration.
-            if event.event_type_name() == "system.supervisor.registered" {
+            if event.event_type_name() == "supervisor.runtime.metrics_aggregator.registered" {
                 return Ok(JournalRecord::new(self.id.into(), event));
             }
             Err(JournalError::Implementation {

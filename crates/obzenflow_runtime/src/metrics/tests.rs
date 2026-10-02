@@ -299,7 +299,7 @@ fn run(
 ) {
     let (control, receiver, watcher) = ChannelBuilder::new().build(State::Created);
     let supervisor = MetricsAggregatorSupervisor {
-        name: "metrics-test".into(),
+        name: "metrics_aggregator".into(),
         system_journal: ctx.journals.coordination.clone(),
         system_id: ctx.system_id,
         control: receiver.into(),
@@ -484,17 +484,23 @@ pub async fn metrics_pending_refresh_does_not_block_publication_or_other_journal
     let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
     let drained = names
         .iter()
-        .position(|name| *name == "system.metrics.drained")
+        .position(|name| *name == "supervisor.runtime.metrics_aggregator.finalization.completed")
         .unwrap();
     let exported = owned.export.read_last_n(1).await.unwrap().pop().unwrap();
-    assert_eq!(exported.event_type_name(), "system.metrics.exported");
+    assert_eq!(
+        exported.event_type_name(),
+        "supervisor.runtime.metrics_aggregator.snapshot.published"
+    );
     assert!(
         obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
             &exported.envelope.provenance.journal.vector_clock,
             &rows[drained].envelope.provenance.journal.vector_clock
         )
     );
-    assert_eq!(names[drained + 1], "system.metrics.shutdown");
+    assert_eq!(
+        names[drained + 1],
+        "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped"
+    );
     assert_eq!(
         exports.0.lock().unwrap().last().unwrap().event_counts[&b],
         500
@@ -523,7 +529,8 @@ pub async fn metrics_cancellation_stops_owned_readers_without_drained(
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event_type_name() == "system.metrics.drained"));
+        .any(|row| row.event_type_name()
+            == "supervisor.runtime.metrics_aggregator.finalization.completed"));
 }
 
 pub async fn metrics_tail_identity_and_accounting_are_idempotent(
@@ -768,7 +775,10 @@ pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(end.event_type_name(), "system.metrics.shutdown");
+    assert_eq!(
+        end.event_type_name(),
+        "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped"
+    );
 }
 
 pub async fn metrics_drain_during_export_settles_before_final_refresh(
@@ -805,10 +815,10 @@ pub async fn metrics_drain_during_export_settles_before_final_refresh(
     assert_eq!(
         names,
         [
-            "system.supervisor.registered",
-            "system.metrics.ready",
-            "system.metrics.drained",
-            "system.metrics.shutdown",
+            "supervisor.runtime.metrics_aggregator.registered",
+            "supervisor.runtime.metrics_aggregator.milestone.ready",
+            "supervisor.runtime.metrics_aggregator.finalization.completed",
+            "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped",
         ]
     );
 }

@@ -133,6 +133,14 @@ impl JournalPayload for ChainPayload {
 
     fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error> {
         self.validate_semantics()?;
+        if let ChainPayload::Execution(
+            super::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor },
+        ) = self
+        {
+            descriptor
+                .validate(&provenance.writer_id)
+                .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        }
         if let ChainPayload::Delivery(payload) = self {
             if !provenance
                 .causality
@@ -147,7 +155,7 @@ impl JournalPayload for ChainPayload {
                 .framework_schema_version()
                 .is_some_and(|expected| expected != provenance.payload_schema_version)
             || self
-                .framework_event_type()
+                .framework_event_type(&provenance.flow_context.stage_name)
                 .is_some_and(|expected| expected != provenance.event_type)
         {
             return Err(descriptor_mismatch());

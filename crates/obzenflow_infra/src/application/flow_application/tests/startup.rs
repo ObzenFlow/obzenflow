@@ -373,7 +373,7 @@ enabled = false
         let event_type = event["event_type"].as_str().expect("record event type");
         let event_kind = event["event_kind"].as_str().expect("record event kind");
         assert_ne!(
-            event_type, "system.pipeline.running",
+            event_type, "supervisor.runtime.pipeline_supervisor.milestone.sources_started",
             "failed bind cannot publish Running"
         );
         assert_ne!(
@@ -578,7 +578,7 @@ enabled = false
         records.iter().any(|record| {
             record.pointer("/envelope/provenance/event/event_type")
                 .and_then(serde_json::Value::as_str)
-                == Some("system.pipeline.completed")
+                == Some("supervisor.runtime.pipeline_supervisor.outcome.completed")
         }),
         "on_terminal=exit must not close the runtime before the final pipeline_completed fact is committed; records: {records:?}"
     );

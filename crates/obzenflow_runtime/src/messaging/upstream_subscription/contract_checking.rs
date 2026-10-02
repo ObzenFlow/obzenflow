@@ -4,6 +4,9 @@
 
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
 use crate::messaging::upstream_subscription_policy::{EdgeContext, EdgeContractDecision};
+use obzenflow_core::contracts::{
+    ContractPhase, SubscriptionFeed, SubscriptionReceipts, SubscriptionScope, SubscriptionSelection,
+};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, SystemFeedRole,
@@ -25,7 +28,6 @@ enum ContractCheckMode {
 
 fn contract_result_labels_for_emission(
     result: &ContractResult,
-    pending_label: ContractResultStatusLabel,
 ) -> (ContractResultStatusLabel, Option<String>) {
     match result {
         ContractResult::Passed(_) => (ContractResultStatusLabel::Passed, None),
@@ -33,7 +35,8 @@ fn contract_result_labels_for_emission(
             ContractResultStatusLabel::Failed,
             Some(v.cause.cause_label().to_string()),
         ),
-        ContractResult::Pending => (pending_label, None),
+        ContractResult::Pending { .. } => (ContractResultStatusLabel::Pending, None),
+        ContractResult::Skipped { .. } => (ContractResultStatusLabel::Skipped, None),
     }
 }
 
@@ -42,7 +45,7 @@ struct DirectFeedContractEvidence {
     event_type: obzenflow_core::EventDescriptor,
     feed_role: Option<SystemFeedRole>,
     reader_seq: SeqNo,
-    advertised_writer_seq: SeqNo,
+    advertised_writer_seq: Option<SeqNo>,
     pass: bool,
     reason: Option<EventViolationCause>,
     contract_results: Vec<(ContractName, ContractResult)>,
@@ -84,6 +87,70 @@ impl<T> UpstreamSubscription<T>
 where
     T: JournalEvent + 'static,
 {
+    fn report_scope(
+        &self,
+        progress: &ReaderProgress,
+        tracker: &ContractTracker,
+    ) -> SubscriptionScope {
+        let mut feeds: Vec<_> = self
+            .selected_event_types_by_stage
+            .get(&progress.stage_id)
+            .into_iter()
+            .flatten()
+            .flat_map(|descriptor| {
+                let roles: Vec<_> = self
+                    .selected_feeds_by_stage
+                    .get(&progress.stage_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|feed| feed.descriptor() == descriptor)
+                    .collect();
+                if roles.is_empty() {
+                    vec![SubscriptionFeed {
+                        descriptor: descriptor.clone(),
+                        role: None,
+                    }]
+                } else {
+                    roles
+                        .into_iter()
+                        .map(|feed| SubscriptionFeed {
+                            descriptor: descriptor.clone(),
+                            role: feed.system_feed_role(),
+                        })
+                        .collect()
+                }
+            })
+            .collect();
+        feeds.sort_by(|left, right| {
+            left.descriptor.cmp(&right.descriptor).then_with(|| {
+                left.role
+                    .map(|r| r.as_str())
+                    .cmp(&right.role.map(|r| r.as_str()))
+            })
+        });
+        feeds.dedup();
+        SubscriptionScope {
+            upstream: progress.stage_id,
+            reader: tracker
+                .reader_stage
+                .or_else(|| tracker.writer_id.as_stage().copied())
+                .expect("subscription reports have a stage owner"),
+            selection: if feeds.is_empty() {
+                SubscriptionSelection::All
+            } else {
+                SubscriptionSelection::Selected { feeds }
+            },
+        }
+    }
+
+    fn report_receipts(&self, progress: &ReaderProgress) -> Option<SubscriptionReceipts> {
+        self.uses_receipt_watermark()
+            .then_some(SubscriptionReceipts {
+                terminal_frontier: progress.receipted_seq,
+                last_event_id: progress.last_receipted_event_id,
+            })
+    }
+
     pub(crate) fn with_advisory_contract_upstreams(
         mut self,
         upstreams: std::collections::HashSet<obzenflow_core::StageId>,
@@ -102,11 +169,7 @@ where
             return Vec::new();
         };
 
-        let Some(advertised_by_type) = self.advertised_writer_seq_by_reader_event_type.get(index)
-        else {
-            return Vec::new();
-        };
-        if advertised_by_type.is_empty() || feed_chains.is_empty() {
+        if feed_chains.is_empty() {
             return Vec::new();
         }
 
@@ -114,9 +177,8 @@ where
             .iter()
             .map(|feed_chain| {
                 let reader_seq = self.selected_reader_seq_for_feed(index, &feed_chain.metadata);
-                let advertised_writer_seq = self
-                    .advertised_writer_seq_for_feed(index, &feed_chain.metadata)
-                    .unwrap_or(SeqNo(0));
+                let advertised_writer_seq =
+                    self.advertised_writer_seq_for_feed(index, &feed_chain.metadata);
                 let contract_results = feed_chain.chain.verify_all(progress.stage_id, reader_stage);
                 let raw_failure = contract_results.iter().find_map(|(contract_name, result)| {
                     let ContractResult::Failed(violation) = result else {
@@ -158,9 +220,10 @@ where
                     .map(|(_, result)| result.clone())
                     .collect();
                 let edge = EdgeContext {
+                    selected_population: self.has_selected_event_type_filter(progress.stage_id),
                     upstream_stage: progress.stage_id,
                     downstream_stage: reader_stage,
-                    advertised_writer_seq: Some(advertised_writer_seq),
+                    advertised_writer_seq,
                     reader_seq,
                 };
                 let decision = self
@@ -168,12 +231,18 @@ where
                     .get(index)
                     .and_then(|policy| policy.as_ref())
                     .map(|policy| policy.decide(&results_only, &edge));
-                let (pass, reason) = match decision {
+                let (mut pass, reason) = match decision {
                     Some(EdgeContractDecision::Pass) => (true, None),
                     Some(EdgeContractDecision::Fail(cause)) => (false, Some(cause)),
                     None if raw_failure.is_some() => (false, raw_reason.clone()),
                     None => (true, None),
                 };
+                if self
+                    .advisory_contract_upstreams
+                    .contains(&progress.stage_id)
+                {
+                    pass = true;
+                }
                 DirectFeedContractEvidence {
                     event_type: feed_chain.metadata.descriptor().clone(),
                     feed_role: feed_chain.metadata.system_feed_role(),
@@ -199,8 +268,7 @@ where
         let mut append_ok = true;
         for feed in evidence {
             for (contract_name, result) in &feed.contract_results {
-                let (status_label, cause_label) =
-                    contract_result_labels_for_emission(result, ContractResultStatusLabel::Pending);
+                let (status_label, cause_label) = contract_result_labels_for_emission(result);
 
                 let result_event = ChainEventFactory::execution_event(
                     tracker.writer_id,
@@ -211,9 +279,11 @@ where
                         feed_role: feed.feed_role,
                         contract_name: contract_name.clone(),
                         status: status_label,
+                        phase: ContractPhase::Final,
+                        result: Box::new(result.clone()),
                         cause: cause_label,
                         reader_seq: Some(feed.reader_seq),
-                        advertised_writer_seq: Some(feed.advertised_writer_seq),
+                        advertised_writer_seq: feed.advertised_writer_seq,
                     },
                 );
                 let result_event = tracker.with_owner_context(result_event);
@@ -248,7 +318,7 @@ where
                     feed_role: feed.feed_role,
                     pass: feed.pass,
                     reader_seq: Some(feed.reader_seq),
-                    advertised_writer_seq: Some(feed.advertised_writer_seq),
+                    advertised_writer_seq: feed.advertised_writer_seq,
                     reason: feed.reason.clone(),
                 },
             );
@@ -305,8 +375,8 @@ where
                 let has_failure = contract_results
                     .iter()
                     .any(|(_, result)| matches!(result, ContractResult::Failed(_)));
-                let should_emit_healthy = reader_seq != feed_chain.last_contract_result_seq;
-                if !has_failure && !should_emit_healthy {
+                let should_emit_pending = reader_seq != feed_chain.last_contract_result_seq;
+                if !has_failure && !should_emit_pending {
                     return None;
                 }
 
@@ -318,7 +388,7 @@ where
                     advertised_writer_seq: self
                         .advertised_writer_seq_for_feed(index, &feed_chain.metadata),
                     contract_results,
-                    should_record_heartbeat: should_emit_healthy,
+                    should_record_heartbeat: should_emit_pending,
                 })
             })
             .collect()
@@ -342,8 +412,7 @@ where
         for feed in &evidence {
             let mut emitted_any_for_feed = false;
             for (contract_name, result) in &feed.contract_results {
-                let (status_label, cause_label) =
-                    contract_result_labels_for_emission(result, ContractResultStatusLabel::Healthy);
+                let (status_label, cause_label) = contract_result_labels_for_emission(result);
 
                 let result_event = ChainEventFactory::execution_event(
                     writer_id,
@@ -354,6 +423,8 @@ where
                         feed_role: feed.feed_role,
                         contract_name: contract_name.clone(),
                         status: status_label,
+                        phase: ContractPhase::Progress,
+                        result: Box::new(result.clone()),
                         cause: cause_label,
                         reader_seq: Some(feed.reader_seq),
                         advertised_writer_seq: feed.advertised_writer_seq,
@@ -540,7 +611,7 @@ where
             return;
         };
 
-        // Avoid emitting contract "healthy" heartbeats before we've observed any
+        // Avoid emitting contract pending heartbeats before we've observed any
         // data events on this edge.
         //
         // In server mode with `startup_mode=manual`, non-source stages are started
@@ -558,13 +629,13 @@ where
             return;
         }
 
-        let should_emit_healthy = progress_seq != progress.last_contract_result_seq;
+        let should_emit_pending = progress_seq != progress.last_contract_result_seq;
 
         let results = chain_slot.check_progress_all(progress.stage_id, reader_stage);
         let results_only: Vec<ContractResult> = results.iter().map(|(_, r)| r.clone()).collect();
 
         // Emit per-contract progress results to the consuming stage journal so SSE/UIs can
-        // render mid-flight contract health (even when no violations are present).
+        // render mid-flight contract observations (even when no violations are present).
         //
         // MetricsAggregator also observes ContractResult, so this provides a
         // lightweight heartbeat for long-running flows (e.g. prometheus_demo).
@@ -572,28 +643,29 @@ where
             let journal = &tracker.journal;
             let mut emitted_any = false;
             for (contract_name, result) in &results {
-                // Only emit "healthy" heartbeats when we've observed additional
+                // Only emit pending heartbeats when we've observed additional
                 // data since the last heartbeat. Failed results must always be
                 // emitted (and may occur without new data due to control-signal
                 // predicates like divergence detection).
-                if matches!(result, ContractResult::Pending) && !should_emit_healthy {
+                if matches!(result, ContractResult::Pending { .. }) && !should_emit_pending {
                     continue;
                 }
 
-                let (status_label, cause_label) =
-                    contract_result_labels_for_emission(result, ContractResultStatusLabel::Healthy);
+                let (status_label, cause_label) = contract_result_labels_for_emission(result);
 
                 let result_event = ChainEventFactory::execution_event(
                     tracker.writer_id,
                     ExecutionPayload::ContractResult {
                         upstream: progress.stage_id,
                         reader: reader_stage,
-                        selected_event_type: selected_event_type.clone(),
-                        feed_role,
+                        selected_event_type: None,
+                        feed_role: None,
                         contract_name: contract_name.clone(),
                         status: status_label,
+                        phase: ContractPhase::Progress,
+                        result: Box::new(result.clone()),
                         cause: cause_label,
-                        reader_seq: Some(progress_seq),
+                        reader_seq: Some(progress.reader_seq),
                         advertised_writer_seq: progress.advertised_writer_seq,
                     },
                 );
@@ -620,12 +692,13 @@ where
                 }
             }
 
-            if emitted_any && should_emit_healthy {
+            if emitted_any && should_emit_pending {
                 progress.last_contract_result_seq = progress_seq;
             }
         }
 
         let edge = EdgeContext {
+            selected_population: self.has_selected_event_type_filter(progress.stage_id),
             upstream_stage: progress.stage_id,
             downstream_stage: reader_stage,
             advertised_writer_seq: progress.advertised_writer_seq,
@@ -640,7 +713,10 @@ where
         match decision {
             EdgeContractDecision::Pass => {}
             EdgeContractDecision::Fail(cause) => {
-                if !matches!(status, ContractStatus::Violated { .. }) {
+                let advisory = self
+                    .advisory_contract_upstreams
+                    .contains(&progress.stage_id);
+                if !advisory && !matches!(status, ContractStatus::Violated { .. }) {
                     *status = ContractStatus::Violated {
                         upstream: progress.stage_id,
                         cause: cause.clone(),
@@ -658,7 +734,7 @@ where
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
                             feed_role,
-                            pass: false,
+                            pass: advisory,
                             reader_seq: Some(progress.reader_seq),
                             advertised_writer_seq: progress.advertised_writer_seq,
                             reason: Some(cause.clone()),
@@ -684,7 +760,7 @@ where
                     }
                 }
 
-                progress.contract_violated = true;
+                progress.contract_violated = !advisory;
             }
         }
     }
@@ -700,8 +776,8 @@ where
             return;
         };
         let progress_seq = self.progress_seq(progress);
-        let progress_last_event_id = self.progress_last_event_id(progress);
-        let progress_vector_clock = self.progress_vector_clock(progress);
+        let progress_last_event_id = progress.last_event_id;
+        let progress_vector_clock = progress.last_vector_clock.clone();
 
         // Emit progress event
         let stalled_duration = progress
@@ -712,14 +788,17 @@ where
             tracker.with_owner_context(ChainEventFactory::consumption_progress_event(
                 tracker.writer_id,
                 ConsumptionProgressEventParams {
-                    reader_seq: progress_seq,
+                    scope: self.report_scope(progress, tracker),
+                    consumed_count: Count(progress.reader_seq.0),
+                    receipts: self.report_receipts(progress),
+                    reader_seq: progress.reader_seq,
                     last_event_id: progress_last_event_id,
                     vector_clock: progress_vector_clock.clone(),
                     eof_seen: self.state.is_reader_eof(index),
                     reader_path: JournalPath(progress.stage_id.to_string()),
                     reader_index: JournalIndex(index as u64),
                     advertised_writer_seq: progress.advertised_writer_seq,
-                    advertised_vector_clock: progress_vector_clock,
+                    advertised_vector_clock: progress.advertised_vector_clock.clone(),
                     stalled_since: stalled_duration,
                 },
             ));
@@ -763,11 +842,9 @@ where
         let Some(tracker) = &self.contract_tracker else {
             return;
         };
+        let progress_last_event_id = progress.last_event_id;
         let (selected_event_type, feed_role) =
             self.unique_selected_feed_for_stage(progress.stage_id);
-        let progress_seq = self.progress_seq(progress);
-        let progress_last_event_id = self.progress_last_event_id(progress);
-        let progress_vector_clock = self.progress_vector_clock(progress);
         let direct_feed_evidence = tracker
             .reader_stage
             .map(|reader_stage| {
@@ -775,6 +852,7 @@ where
             })
             .unwrap_or_default();
 
+        let mut evidence_append_ok = true;
         let mut pass = true;
         let mut failure_reason = None;
         let mut aggregate_violation_for_journal = false;
@@ -798,22 +876,35 @@ where
             {
                 let journal = &tracker.journal;
                 for (contract_name, result) in &results {
-                    let (status_label, cause_label) = contract_result_labels_for_emission(
-                        result,
-                        ContractResultStatusLabel::Pending,
-                    );
+                    let (status_label, cause_label) = contract_result_labels_for_emission(result);
 
                     let result_event = ChainEventFactory::execution_event(
                         tracker.writer_id,
                         ExecutionPayload::ContractResult {
                             upstream: progress.stage_id,
                             reader: reader_stage,
-                            selected_event_type: selected_event_type.clone(),
-                            feed_role,
+                            selected_event_type: if matches!(
+                                result.details(),
+                                obzenflow_core::contracts::ContractEvidenceDetails::Transport { .. }
+                            ) {
+                                selected_event_type.clone()
+                            } else {
+                                None
+                            },
+                            feed_role: if matches!(
+                                result.details(),
+                                obzenflow_core::contracts::ContractEvidenceDetails::Transport { .. }
+                            ) {
+                                feed_role
+                            } else {
+                                None
+                            },
                             contract_name: contract_name.clone(),
                             status: status_label,
+                            phase: ContractPhase::Final,
+                            result: Box::new(result.clone()),
                             cause: cause_label,
-                            reader_seq: Some(progress_seq),
+                            reader_seq: Some(progress.reader_seq),
                             advertised_writer_seq: progress.advertised_writer_seq,
                         },
                     );
@@ -825,6 +916,7 @@ where
                     )
                     .await
                     {
+                        evidence_append_ok = false;
                         tracing::error!(
                             target: "flowip-105",
                             owner = %self.owner_label,
@@ -840,6 +932,7 @@ where
             }
 
             let edge = EdgeContext {
+                selected_population: self.has_selected_event_type_filter(progress.stage_id),
                 upstream_stage: progress.stage_id,
                 downstream_stage: reader_stage,
                 advertised_writer_seq: progress.advertised_writer_seq,
@@ -889,6 +982,7 @@ where
                                 )
                                 .await
                                 {
+                                    evidence_append_ok = false;
                                     tracing::error!(
                                         target: "flowip-105",
                                         owner = %self.owner_label,
@@ -904,7 +998,7 @@ where
                 }
             }
         } else if let Some(advertised) = progress.advertised_writer_seq {
-            // Legacy fallback: compare advertised vs reader seq.
+            // Without a configured chain, compare the explicit advertisement with reads.
             if advertised.0 != progress.reader_seq.0 {
                 pass = false;
                 let cause = EventViolationCause::SeqDivergence {
@@ -931,6 +1025,7 @@ where
                     )
                     .await
                     {
+                        evidence_append_ok = false;
                         tracing::error!(
                             target: "flowip-105",
                             owner = %self.owner_label,
@@ -956,7 +1051,7 @@ where
                 .reason
                 .clone()
                 .unwrap_or(EventViolationCause::SeqDivergence {
-                    advertised: Some(feed_failure.advertised_writer_seq),
+                    advertised: feed_failure.advertised_writer_seq,
                     reader: feed_failure.reader_seq,
                 });
             pass = false;
@@ -967,6 +1062,15 @@ where
                     cause,
                 };
             }
+        }
+
+        if !pass
+            && self
+                .advisory_contract_upstreams
+                .contains(&progress.stage_id)
+        {
+            pass = true;
+            *status = ContractStatus::Healthy;
         }
 
         // Capture reason for downstream system status before moving it into events
@@ -996,6 +1100,7 @@ where
                 )
                 .await
                 {
+                    evidence_append_ok = false;
                     tracing::error!(
                         target: "flowip-105",
                         owner = %self.owner_label,
@@ -1007,43 +1112,6 @@ where
                 }
             }
         }
-
-        // Emit final event
-        let final_event = tracker.with_owner_context(ChainEventFactory::consumption_final_event(
-            tracker.writer_id,
-            ConsumptionFinalEventParams {
-                pass,
-                consumed_count: Count(progress_seq.0),
-                expected_count: None,
-                eof_seen: true,
-                last_event_id: progress_last_event_id,
-                reader_seq: progress_seq,
-                advertised_writer_seq: progress.advertised_writer_seq,
-                advertised_vector_clock: progress_vector_clock,
-                failure_reason,
-            },
-        ));
-
-        let final_append_ok = match crate::supervised_base::publication::append(
-            &tracker.journal,
-            final_event,
-            Default::default(),
-        )
-        .await
-        {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::error!(
-                    target: "flowip-105",
-                    owner = %self.owner_label,
-                    upstream = ?progress.stage_id,
-                    reader_index = index,
-                    error = %e,
-                    "Failed to append final event; skipping state update"
-                );
-                false
-            }
-        };
 
         // Publish the consuming stage’s contract decision.
         let mut status_append_ok = true;
@@ -1058,17 +1126,18 @@ where
                     )
                     .await;
             }
-        } else if let Some(reader_stage) = tracker.reader_stage {
+        }
+        if let Some(reader_stage) = tracker.reader_stage {
             let journal = &tracker.journal;
             let status_event = ChainEventFactory::execution_event(
                 tracker.writer_id,
                 ExecutionPayload::ContractStatus {
                     upstream: progress.stage_id,
                     reader: reader_stage,
-                    selected_event_type: selected_event_type.clone(),
+                    selected_event_type,
                     feed_role,
                     pass,
-                    reader_seq: Some(progress_seq),
+                    reader_seq: Some(progress.reader_seq),
                     advertised_writer_seq: progress.advertised_writer_seq,
                     reason: status_reason,
                 },
@@ -1094,7 +1163,50 @@ where
             }
         }
 
-        if final_append_ok && status_append_ok {
+        if !evidence_append_ok || !status_append_ok {
+            return;
+        }
+
+        // Emit final event
+        let final_event = tracker.with_owner_context(ChainEventFactory::consumption_final_event(
+            tracker.writer_id,
+            ConsumptionFinalEventParams {
+                scope: self.report_scope(progress, tracker),
+                receipts: self.report_receipts(progress),
+                pass,
+                consumed_count: Count(progress.reader_seq.0),
+                expected_count: None,
+                eof_seen: true,
+                last_event_id: progress_last_event_id,
+                reader_seq: progress.reader_seq,
+                advertised_writer_seq: progress.advertised_writer_seq,
+                advertised_vector_clock: progress.advertised_vector_clock.clone(),
+                failure_reason,
+            },
+        ));
+
+        let final_append_ok = match crate::supervised_base::publication::append(
+            &tracker.journal,
+            final_event,
+            Default::default(),
+        )
+        .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::error!(
+                    target: "flowip-105",
+                    owner = %self.owner_label,
+                    upstream = ?progress.stage_id,
+                    reader_index = index,
+                    error = %e,
+                    "Failed to append final event; skipping state update"
+                );
+                false
+            }
+        };
+
+        if final_append_ok {
             progress.final_emitted = true;
             progress.contract_violated = !pass;
         }

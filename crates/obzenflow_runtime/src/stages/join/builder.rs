@@ -233,7 +233,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
 
         // Create supervisor
         let supervisor = JoinSupervisor {
-            name: format!("join_{}", self.config.stage_name),
+            name: self.config.stage_name.clone(),
             stage_id: self.config.stage_id,
             reference_subscription: None,
             stream_subscription: None,

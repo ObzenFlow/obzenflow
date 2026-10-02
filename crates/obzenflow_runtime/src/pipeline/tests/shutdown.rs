@@ -305,9 +305,9 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
                 .iter()
                 .any(|row| matches!(
                     row.event_type_name(),
-                    "system.pipeline.failed"
-                        | "system.pipeline.cancelled"
-                        | "system.pipeline.completed"
+                    "supervisor.runtime.pipeline_supervisor.outcome.failed"
+                        | "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                        | "supervisor.runtime.pipeline_supervisor.outcome.completed"
                 )));
         }
     }
@@ -366,13 +366,18 @@ pub async fn failure_remains_observable_while_child_cleanup_is_blocked(
     let rows = journal.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|r| r.event_type_name() == "system.pipeline.failed")
+            .filter(
+                |r| r.event_type_name() == "supervisor.runtime.pipeline_supervisor.outcome.failed"
+            )
             .count(),
         1
     );
-    assert!(!rows
-        .iter()
-        .any(|r| r.event_type_name() == "system.pipeline.cancelled"));
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.event_type_name()
+                == "supervisor.runtime.pipeline_supervisor.outcome.cancelled")
+    );
 }
 
 pub async fn contract_failure_cause_survives_child_observation_order(
@@ -523,7 +528,8 @@ pub async fn terminal_publication_is_owned_until_settlement_and_failure_is_retai
         let rows = journal.read_all_unordered().await.unwrap();
         assert_eq!(
             rows.iter()
-                .filter(|r| r.event_type_name() == "system.pipeline.completed")
+                .filter(|r| r.event_type_name()
+                    == "supervisor.runtime.pipeline_supervisor.outcome.completed")
                 .count(),
             usize::from(!fail)
         );

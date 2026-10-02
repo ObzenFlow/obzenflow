@@ -58,10 +58,8 @@ impl<T: JournalEvent> TestJournal<T> {
     pub(super) fn assert_registered(&self) {
         assert!(
             self.records.lock().unwrap().first().is_some_and(|record| {
-                matches!(
-                    record.event_type_name(),
-                    "execution.supervisor.registered" | "system.supervisor.registered"
-                )
+                record.event_type_name().starts_with("supervisor.")
+                    && record.event_type_name().ends_with(".registered")
             }),
             "registration must precede FSM dispatch and actions"
         );
@@ -131,10 +129,8 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for T
         }
         if self.fail
             && !(self.allow_registration
-                && matches!(
-                    event.event_type_name(),
-                    "execution.supervisor.registered" | "system.supervisor.registered"
-                ))
+                && event.event_type_name().starts_with("supervisor.")
+                && event.event_type_name().ends_with(".registered"))
         {
             return Err(JournalError::Full);
         }

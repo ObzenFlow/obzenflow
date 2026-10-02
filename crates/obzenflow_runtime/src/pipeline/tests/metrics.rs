@@ -243,7 +243,8 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
     let rows = coordination.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|row| row.event_type_name() == "system.metrics.ready")
+            .filter(|row| row.event_type_name()
+                == "supervisor.runtime.metrics_aggregator.milestone.ready")
             .count(),
         1
     );
@@ -252,7 +253,8 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event_type_name() == "system.pipeline.drained"));
+        .any(|row| row.event_type_name()
+            == "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published"));
 }
 
 pub async fn metrics_preparation_is_passive_and_cancellation_prevents_late_installation(
@@ -478,7 +480,8 @@ pub async fn late_metrics_bootstrap_selects_current_values_without_stage_eof(
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event_type_name() == "system.metrics.drained"));
+        .any(|row| row.event_type_name()
+            == "supervisor.runtime.metrics_aggregator.finalization.completed"));
 }
 
 pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
@@ -534,7 +537,8 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
         .await
         .unwrap()
         .iter()
-        .any(|event| event.event_type_name() == "system.metrics.drained"));
+        .any(|event| event.event_type_name()
+            == "supervisor.runtime.metrics_aggregator.finalization.completed"));
     system_journal
         .append(
             SystemEventFactory::new(system_id).pipeline_not_started(),

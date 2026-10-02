@@ -608,8 +608,11 @@ fn execution(event: u64, parents: &[u64], payload: ExecutionPayload) -> RunRecor
     if let RunRecordData::Chain(row) = &mut record.record {
         row.payload = ChainPayload::Execution(payload);
         row.envelope.provenance.event.event_kind = row.payload.kind();
-        row.envelope.provenance.event.event_type =
-            row.payload.framework_event_type().unwrap().into();
+        row.envelope.provenance.event.event_type = row
+            .payload
+            .framework_event_type(&row.envelope.provenance.event.flow_context.stage_name)
+            .unwrap()
+            .into();
         row.envelope.provenance.event.payload_schema_version =
             row.payload.framework_schema_version().unwrap();
     }
