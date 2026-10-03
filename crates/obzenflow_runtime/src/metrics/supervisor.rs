@@ -274,6 +274,8 @@ impl Drop for MetricsAggregatorSupervisor {
 
 #[cfg(test)]
 mod tests {
+    use obzenflow_core::event::payloads::system_payload::SystemPayload as SystemFact;
+
     use super::*;
     use crate::metrics::fsm::MetricsStore;
     use crate::supervised_base::{ChannelBuilder, SelfSupervisedExt};
@@ -306,27 +308,22 @@ mod tests {
         }
     }
 
-    struct FailAppendJournal<T> {
+    struct FailAppendJournal {
         id: JournalId,
         owner: JournalOwner,
-        _phantom: PhantomData<T>,
     }
 
-    impl<T> FailAppendJournal<T> {
+    impl FailAppendJournal {
         fn new(system: SystemId) -> Self {
             Self {
                 id: JournalId::new(),
                 owner: JournalOwner::system(system),
-                _phantom: PhantomData,
             }
         }
     }
 
     #[async_trait]
-    impl<T> obzenflow_core::journal::JournalStorage<T> for FailAppendJournal<T>
-    where
-        T: obzenflow_core::event::JournalEvent + 'static,
-    {
+    impl obzenflow_core::journal::JournalStorage<SystemEvent> for FailAppendJournal {
         fn storage_id(&self) -> &JournalId {
             &self.id
         }
@@ -337,11 +334,12 @@ mod tests {
 
         async fn storage_append(
             &self,
-            event: T,
-            _options: obzenflow_core::journal::AppendOptions<T>,
-        ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            event: SystemEvent,
+            _options: obzenflow_core::journal::AppendOptions<SystemEvent>,
+        ) -> Result<JournalRecord<SystemFact>, JournalError> {
             // Exercise a dispatch failure after successful registration.
-            if event.event_type_name() == "supervisor.runtime.metrics_aggregator.registered" {
+            if matches!(&event.payload, SystemFact::SupervisorRegistered { descriptor } if descriptor.kind == obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::MetricsAggregator)
+            {
                 return Ok(JournalRecord::new(self.id.into(), event));
             }
             Err(JournalError::Implementation {
@@ -352,21 +350,21 @@ mod tests {
 
         async fn storage_read_all_unordered(
             &self,
-        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        ) -> Result<Vec<JournalRecord<SystemFact>>, JournalError> {
             Ok(Vec::new())
         }
 
         async fn storage_read_event(
             &self,
             _event_id: &EventId,
-        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        ) -> Result<Option<JournalRecord<SystemFact>>, JournalError> {
             Ok(None)
         }
 
         async fn storage_reader_from(
             &self,
             position: u64,
-        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
             Ok(Box::new(EmptyReader {
                 position,
                 _phantom: PhantomData,
@@ -376,7 +374,7 @@ mod tests {
         async fn storage_read_last_n(
             &self,
             _count: usize,
-        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        ) -> Result<Vec<JournalRecord<SystemFact>>, JournalError> {
             Ok(Vec::new())
         }
     }
@@ -385,7 +383,7 @@ mod tests {
     async fn state_watcher_reports_failed_on_dispatch_error() {
         let system_id = SystemId::new();
         let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(FailAppendJournal::<SystemEvent>::new(system_id));
+            Arc::new(FailAppendJournal::new(system_id));
 
         let (_event_sender, _event_receiver, state_watcher) =
             ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
@@ -393,7 +391,7 @@ mod tests {
                 .build(MetricsAggregatorState::Initializing);
 
         let supervisor = MetricsAggregatorSupervisor {
-            name: "metrics_aggregator".to_string(),
+            name: obzenflow_core::event::vocabulary::supervisor::METRICS_NAME.to_string(),
             system_journal: system_journal.clone(),
             system_id,
             control: _event_receiver.into(),

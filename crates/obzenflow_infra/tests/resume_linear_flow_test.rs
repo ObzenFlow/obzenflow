@@ -23,6 +23,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::vocabulary;
 use obzenflow_core::event::{ChainPayload, JournalRecord, ReplayLifecycleEvent};
 use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::TypedPayload;
@@ -446,7 +447,7 @@ fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
             }) => {
                 assert_eq!(
                     envelope.event_type(),
-                    "runtime.stream.catch_up_completed",
+                    vocabulary::stream::CATCH_UP_COMPLETED,
                     "the watermark row must carry the catch-up event type"
                 );
                 Some(ResumeRow::CatchUp {

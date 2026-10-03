@@ -23,6 +23,7 @@ use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::vocabulary;
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::id::{CompositeId, JournalId};
 use obzenflow_core::journal::journal_error::JournalError;
@@ -4101,7 +4102,13 @@ async fn recorded_heads_deliver_before_any_live_head() {
     }
     assert_eq!(
         order,
-        ["a1", "b1", "runtime.stream.catch_up_completed", "b2", "b3"]
+        [
+            "a1",
+            "b1",
+            vocabulary::stream::CATCH_UP_COMPLETED,
+            "b2",
+            "b3"
+        ]
     );
     assert_eq!(delivered(&subscription), [2, 3]);
 
@@ -4117,7 +4124,7 @@ async fn recorded_heads_deliver_before_any_live_head() {
     // B seals: its EOF (generation 0) still precedes a2 (generation 1).
     journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
     let sixth = expect_delivery(&mut subscription).await;
-    assert_eq!(sixth.event_type(), "runtime.stream.end_declared");
+    assert_eq!(sixth.event_type(), vocabulary::stream::END_DECLARED);
     let seventh = expect_delivery(&mut subscription).await;
     assert_eq!(seventh.event_type(), "a2");
     assert_eq!(
@@ -4182,7 +4189,7 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
 
     // A's watermark (0,1,a) beats b1 (0,1,b): A crosses to generation 1.
     let first = expect_delivery(&mut subscription).await;
-    assert_eq!(first.event_type(), "runtime.stream.catch_up_completed");
+    assert_eq!(first.event_type(), vocabulary::stream::CATCH_UP_COMPLETED);
     assert!(
         !subscription.all_readers_caught_up(ReaderGeneration(1)),
         "B has neither crossed nor delivered its EOF"
@@ -4195,7 +4202,7 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
 
     // B's delivered EOF counts as vacuously crossed (F17).
     let third = expect_delivery(&mut subscription).await;
-    assert_eq!(third.event_type(), "runtime.stream.end_declared");
+    assert_eq!(third.event_type(), vocabulary::stream::END_DECLARED);
     assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
 
     // EOF crossing is per-reader, never global: a pair where only B sealed
@@ -4209,7 +4216,7 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
     let first = expect_delivery(&mut lagging).await;
     assert_eq!(first.event_type(), "a1");
     let second = expect_delivery(&mut lagging).await;
-    assert_eq!(second.event_type(), "runtime.stream.end_declared");
+    assert_eq!(second.event_type(), vocabulary::stream::END_DECLARED);
     assert!(
         !lagging.all_readers_caught_up(ReaderGeneration(1)),
         "only B is EOF-exhausted; A has not crossed"
@@ -4230,9 +4237,9 @@ async fn resume_of_resume_watermarks_stack() {
     // delivers at the generation it closes and advances by exactly one.
     let expected = [
         ("d1", ReaderGeneration(0)),
-        ("runtime.stream.catch_up_completed", ReaderGeneration(0)),
+        (vocabulary::stream::CATCH_UP_COMPLETED, ReaderGeneration(0)),
         ("d2", ReaderGeneration(1)),
-        ("runtime.stream.catch_up_completed", ReaderGeneration(1)),
+        (vocabulary::stream::CATCH_UP_COMPLETED, ReaderGeneration(1)),
         ("d3", ReaderGeneration(2)),
     ];
     for (event_type, generation) in expected {
@@ -4353,9 +4360,9 @@ async fn seq_merge_orders_by_admission_seq_not_arrival() {
             "b1",
             "a1",
             "b2",
-            "runtime.stream.end_declared",
+            vocabulary::stream::END_DECLARED,
             "a2",
-            "runtime.stream.end_declared"
+            vocabulary::stream::END_DECLARED
         ],
         "delivery follows admission sequence with position-inherited control"
     );
@@ -4394,7 +4401,13 @@ async fn seq_merge_orders_re_authored_control_by_journal_position_not_stamp() {
     journal_b.append_with_clock(with_seq(merge_data(stage_b, "b1"), 2), VectorClock::new());
     journal_b.append_with_clock(with_seq(merge_data(stage_b, "b2"), 4), VectorClock::new());
 
-    let expected = ["runtime.source.production_declared", "a1", "b1", "a2", "b2"];
+    let expected = [
+        vocabulary::source::PRODUCTION_DECLARED,
+        "a1",
+        "b1",
+        "a2",
+        "b2",
+    ];
     for event_type in expected {
         let envelope = expect_delivery(&mut subscription).await;
         assert_eq!(envelope.event_type(), event_type);
@@ -4456,9 +4469,9 @@ async fn seq_reader_below_entered_generation_keeps_kahn_wait_until_crossing() {
         VectorClock::new(),
     );
     let second = expect_delivery(&mut subscription).await;
-    assert_eq!(second.event_type(), "runtime.stream.catch_up_completed");
+    assert_eq!(second.event_type(), vocabulary::stream::CATCH_UP_COMPLETED);
     let third = expect_delivery(&mut subscription).await;
-    assert_eq!(third.event_type(), "runtime.stream.catch_up_completed");
+    assert_eq!(third.event_type(), vocabulary::stream::CATCH_UP_COMPLETED);
     assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
 
     // The same reader that blocked the merge no longer blocks: A is quiet

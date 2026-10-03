@@ -802,6 +802,9 @@ interval_ms = 250
 mod managed_lifecycle_regressions {
     use futures::FutureExt;
     use obzenflow_core::event::MetricsCoordinationEvent;
+    use obzenflow_core::event::{
+        PipelineLifecycleEvent as PipelineFact, SystemPayload as SystemFact,
+    };
     use obzenflow_infra::application::{ApplicationError, FlowApplication, LogLevel};
     use obzenflow_runtime::__private::lifecycle;
     use obzenflow_runtime::pipeline::FlowHandle;
@@ -1140,7 +1143,10 @@ mod managed_lifecycle_regressions {
                     loop {
                         if let Some(row) = reader.next().await.unwrap() {
                             if row.envelope.provenance.event.writer_id == flow.pipeline_writer_id()
-                                && row.event_type_name() == "supervisor.runtime.pipeline_supervisor.milestone.sources_started"
+                                && matches!(
+                                    &row.payload,
+                                    SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
+                                )
                             {
                                 break;
                             }
@@ -1217,21 +1223,28 @@ mod managed_lifecycle_regressions {
         let terminal = systems
             .iter()
             .find(|row| {
-                row.event_type_name() == "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
+                matches!(
+                    &row.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Cancelled { .. })
+                )
             })
             .unwrap();
         let metrics = systems
             .iter()
             .find(|row| {
-                row.event_type_name()
-                    == "supervisor.runtime.metrics_aggregator.finalization.completed"
+                matches!(
+                    &row.payload,
+                    SystemFact::MetricsCoordination(MetricsCoordinationEvent::Drained)
+                )
             })
             .unwrap();
         let drained = systems
             .iter()
             .find(|row| {
-                row.event_type_name()
-                    == "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published"
+                matches!(
+                    &row.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Drained)
+                )
             })
             .unwrap();
         let before = |a: &LogRecord<SystemEvent>, b: &LogRecord<SystemEvent>| {
@@ -1241,15 +1254,16 @@ mod managed_lifecycle_regressions {
             )
         };
         assert!(before(terminal, metrics) && before(metrics, drained));
-        assert!(systems.iter().any(|row| row.event_type_name()
-            == "supervisor.runtime.metrics_aggregator.snapshot.published"
-            && before(terminal, row)
+        assert!(systems.iter().any(|row| matches!(
+            &row.payload,
+            SystemFact::MetricsCoordination(MetricsCoordinationEvent::Exported { .. })
+        ) && before(terminal, row)
             && before(row, metrics)));
         assert!(!systems.iter().any(|row| matches!(
-            row.event_type_name(),
-            "supervisor.runtime.pipeline_supervisor.outcome.completed"
-                | "supervisor.runtime.pipeline_supervisor.outcome.failed"
-                | "supervisor.runtime.pipeline_supervisor.outcome.not_started"
+            &row.payload,
+            SystemFact::PipelineLifecycle(PipelineFact::Completed { .. })
+                | SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })
+                | SystemFact::PipelineLifecycle(PipelineFact::NotStarted)
         )));
         assert_eq!(
             model.snapshot().app.as_ref().unwrap().pipeline_state,
@@ -1608,20 +1622,22 @@ enabled = {prometheus}
         );
         let terminals: Vec<_> = systems
             .iter()
-            .map(|row| row.event_type_name())
-            .filter(|kind| {
+            .map(|row| &row.payload)
+            .filter(|payload| {
                 matches!(
-                    *kind,
-                    "supervisor.runtime.pipeline_supervisor.outcome.completed"
-                        | "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
-                        | "supervisor.runtime.pipeline_supervisor.outcome.failed"
+                    payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Completed { .. })
+                        | SystemFact::PipelineLifecycle(PipelineFact::Cancelled { .. })
+                        | SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })
                 )
             })
             .collect();
-        assert_eq!(
-            terminals,
-            ["supervisor.runtime.pipeline_supervisor.outcome.completed"]
-        );
+        assert!(matches!(
+            terminals.as_slice(),
+            [SystemFact::PipelineLifecycle(
+                PipelineFact::Completed { .. }
+            )]
+        ));
         for (cursor, client) in event_clients {
             let frames = tokio::time::timeout(Duration::from_secs(2), client)
                 .await
@@ -1676,13 +1692,13 @@ enabled = {prometheus}
             ExecutionPayload::ContractStatus { pass: false, .. } |
             ExecutionPayload::ContractResult { status: obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel::Failed, .. }
         )));
-        let position = |name| {
+        let position = |predicate: fn(&SystemFact) -> bool| {
             systems
                 .iter()
-                .position(|row| row.event_type_name() == name)
+                .position(|row| predicate(&row.payload))
                 .unwrap_or_else(|| {
                     panic!(
-                        "missing {name}; archive={}; latest metrics={:?}",
+                        "missing required system occurrence; archive={}; latest metrics={:?}",
                         archive.display(),
                         model
                             .snapshot()
@@ -1693,8 +1709,18 @@ enabled = {prometheus}
                 })
         };
         if collecting {
-            let terminal = position("supervisor.runtime.pipeline_supervisor.outcome.completed");
-            let drained = position("supervisor.runtime.metrics_aggregator.finalization.completed");
+            let terminal = position(|payload| {
+                matches!(
+                    payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Completed { .. })
+                )
+            });
+            let drained = position(|payload| {
+                matches!(
+                    payload,
+                    SystemFact::MetricsCoordination(MetricsCoordinationEvent::Drained)
+                )
+            });
             let before = |a: &LogRecord<SystemEvent>, b: &LogRecord<SystemEvent>| {
                 obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
                     &a.envelope.provenance.journal.vector_clock,
@@ -1702,18 +1728,24 @@ enabled = {prometheus}
                 )
             };
             assert!(before(&systems[terminal], &systems[drained]));
-            assert!(systems.iter().any(|row| row.event_type_name()
-                == "supervisor.runtime.metrics_aggregator.snapshot.published"
-                && before(&systems[terminal], row)
+            assert!(systems.iter().any(|row| matches!(
+                &row.payload,
+                SystemFact::MetricsCoordination(MetricsCoordinationEvent::Exported { .. })
+            ) && before(&systems[terminal], row)
                 && before(row, &systems[drained])));
-            let shutdown =
-                position("supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped");
+            let shutdown = position(|payload| {
+                matches!(
+                    payload,
+                    SystemFact::MetricsCoordination(MetricsCoordinationEvent::Shutdown)
+                )
+            });
             assert!(before(&systems[drained], &systems[shutdown]));
             assert!(before(
                 &systems[shutdown],
-                &systems[position(
-                    "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published"
-                )]
+                &systems[position(|payload| matches!(
+                    payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Drained)
+                ))]
             ));
             let finalisation_ms = systems[drained]
                 .envelope
@@ -1928,8 +1960,10 @@ enabled = false
                     .read_all_unordered()
                     .await
                     .unwrap();
-                assert!(!events.iter().any(|event| event.event_type_name()
-                    == "supervisor.runtime.pipeline_supervisor.milestone.sources_started"));
+                assert!(!events.iter().any(|event| matches!(
+                    &event.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
+                )));
             }
         }
     }

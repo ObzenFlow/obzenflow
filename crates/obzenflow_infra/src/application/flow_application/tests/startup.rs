@@ -4,6 +4,9 @@
 
 use super::*;
 use crate::web::endpoints::event_ingestion::{IngestionConfig, IngressDecoder};
+use obzenflow_core::event::payloads::system_payload::{
+    PipelineLifecycleEvent as PipelineFact, SystemPayload as SystemFact,
+};
 
 #[derive(Clone, Debug)]
 struct IdleIngress;
@@ -370,17 +373,22 @@ enabled = false
     );
     for record in records {
         let event = &record["envelope"]["provenance"]["event"];
-        let event_type = event["event_type"].as_str().expect("record event type");
         let event_kind = event["event_kind"].as_str().expect("record event kind");
-        assert_ne!(
-            event_type, "supervisor.runtime.pipeline_supervisor.milestone.sources_started",
-            "failed bind cannot publish Running"
-        );
         assert_ne!(
             event_kind, "delivery",
             "failed bind cannot commit sink receipts"
         );
-        if event_kind != "system" {
+        if event_kind == "system" {
+            let row: obzenflow_core::JournalRecord<SystemFact> =
+                serde_json::from_value(record).unwrap();
+            assert!(
+                !matches!(
+                    row.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
+                ),
+                "failed bind cannot publish Running"
+            );
+        } else {
             let row: obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload> =
                 serde_json::from_value(record).unwrap();
             assert!(
@@ -576,9 +584,11 @@ enabled = false
         .collect();
     assert!(
         records.iter().any(|record| {
-            record.pointer("/envelope/provenance/event/event_type")
-                .and_then(serde_json::Value::as_str)
-                == Some("supervisor.runtime.pipeline_supervisor.outcome.completed")
+            if record.pointer("/envelope/provenance/event/event_kind").and_then(serde_json::Value::as_str) != Some("system") {
+                return false;
+            }
+            let row: obzenflow_core::JournalRecord<SystemFact> = serde_json::from_value(record.clone()).unwrap();
+            matches!(row.payload, SystemFact::PipelineLifecycle(PipelineFact::Completed { .. }))
         }),
         "on_terminal=exit must not close the runtime before the final pipeline_completed fact is committed; records: {records:?}"
     );

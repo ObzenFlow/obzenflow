@@ -24,6 +24,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::vocabulary;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::TypedPayload;
@@ -540,7 +541,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
     let before = replay_testkit::read_stage_envelopes_appended(&r1, "src").await;
     let watermark_index = before
         .iter()
-        .position(|record| record.event_type() == "runtime.stream.catch_up_completed")
+        .position(|record| record.event_type() == vocabulary::stream::CATCH_UP_COMPLETED)
         .expect("source crossed its recorded catch-up boundary");
     let reached_boundary = std::cell::Cell::new(false);
     let removed = obzenflow_infra::testing::journal::retain_archive_frames(&r1, |path, records| {
@@ -549,7 +550,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
         }
         if records.iter().any(|record| {
             record.pointer("/envelope/provenance/event/event_type")
-                == Some(&json!("runtime.stream.catch_up_completed"))
+                == Some(&json!(vocabulary::stream::CATCH_UP_COMPLETED))
         }) {
             reached_boundary.set(true);
         }

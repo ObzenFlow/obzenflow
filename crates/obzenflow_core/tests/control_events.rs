@@ -7,6 +7,9 @@ use obzenflow_core::event::{ChainEventFactory, ChainPayload, WriterId};
 use obzenflow_core::id::StageId;
 use serde_json::json;
 
+#[path = "control_events/runtime_vocabulary.rs"]
+mod runtime_vocabulary;
+
 #[test]
 fn receipt_and_lifecycle_names_validate_subjects_and_partial_counts() {
     use obzenflow_core::event::payloads::delivery_payload::{

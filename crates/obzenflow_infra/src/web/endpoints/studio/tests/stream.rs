@@ -9,6 +9,9 @@ use obzenflow_adapters::studio::ContractBoundaryAliases;
 use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::event::journal_record::{ChainJournalRecord, SystemJournalRecord};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+use obzenflow_core::event::payloads::system_payload::{
+    MetricsCoordinationEvent as MetricsFact, SystemPayload as SystemFact,
+};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemPayload, WriterId};
@@ -2019,10 +2022,10 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
             "children cannot write system.log"
         );
         let terminal = history.last().unwrap();
-        assert_eq!(
-            terminal.event_type_name(),
-            "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published"
-        );
+        assert!(matches!(
+            &terminal.payload,
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained)
+        ));
         let delivered: std::collections::HashSet<_> = frames
             .iter()
             .filter_map(|frame| {
@@ -2073,10 +2076,14 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
         completion_latencies.sort_unstable();
         let coord = metrics.coordination.read_all_unordered().await.unwrap();
         let exports = metrics.export.read_all_unordered().await.unwrap();
-        assert!(exports.iter().any(|row| row.event_type_name()
-            == "supervisor.runtime.metrics_aggregator.snapshot.published"));
-        assert!(coord.iter().all(|row| row.event_type_name()
-            != "supervisor.runtime.metrics_aggregator.snapshot.published"));
+        assert!(exports.iter().any(|row| matches!(
+            &row.payload,
+            SystemFact::MetricsCoordination(MetricsFact::Exported { .. })
+        )));
+        assert!(coord.iter().all(|row| !matches!(
+            &row.payload,
+            SystemFact::MetricsCoordination(MetricsFact::Exported { .. })
+        )));
         eprintln!("composed backend={disk}, stages={stages}, settlement={settled:?}, Studio={:?}, stage-completion-to-pipeline-drained-us p50={} p95={} p99={} max={}, exports={}, coordination={}", started.elapsed(), completion_latencies[stages / 2], completion_latencies[(stages - 1) * 95 / 100], completion_latencies[(stages - 1) * 99 / 100], completion_latencies[stages - 1], exports.len(), coord.len());
     }
 }

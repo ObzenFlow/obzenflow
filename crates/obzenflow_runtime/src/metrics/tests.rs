@@ -15,6 +15,9 @@ use crate::supervised_base::{
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::ObservationSource;
+use obzenflow_core::event::payloads::system_payload::{
+    MetricsCoordinationEvent as MetricsFact, SystemPayload as SystemFact,
+};
 use obzenflow_core::event::{ChainEventFactory, JournalEvent, SystemEvent, SystemEventFactory};
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
@@ -299,7 +302,7 @@ fn run(
 ) {
     let (control, receiver, watcher) = ChannelBuilder::new().build(State::Created);
     let supervisor = MetricsAggregatorSupervisor {
-        name: "metrics_aggregator".into(),
+        name: obzenflow_core::event::vocabulary::supervisor::METRICS_NAME.into(),
         system_journal: ctx.journals.coordination.clone(),
         system_id: ctx.system_id,
         control: receiver.into(),
@@ -481,26 +484,31 @@ pub async fn metrics_pending_refresh_does_not_block_publication_or_other_journal
         .unwrap();
     assert_eq!(slow.probe.active.load(Ordering::SeqCst), 0);
     let rows = owned.coordination.read_all_unordered().await.unwrap();
-    let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
-    let drained = names
+    let payloads: Vec<_> = rows.iter().map(|row| &row.payload).collect();
+    let drained = payloads
         .iter()
-        .position(|name| *name == "supervisor.runtime.metrics_aggregator.finalization.completed")
+        .position(|payload| {
+            matches!(
+                payload,
+                SystemFact::MetricsCoordination(MetricsFact::Drained)
+            )
+        })
         .unwrap();
     let exported = owned.export.read_last_n(1).await.unwrap().pop().unwrap();
-    assert_eq!(
-        exported.event_type_name(),
-        "supervisor.runtime.metrics_aggregator.snapshot.published"
-    );
+    assert!(matches!(
+        &exported.payload,
+        SystemFact::MetricsCoordination(MetricsFact::Exported { .. })
+    ));
     assert!(
         obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
             &exported.envelope.provenance.journal.vector_clock,
             &rows[drained].envelope.provenance.journal.vector_clock
         )
     );
-    assert_eq!(
-        names[drained + 1],
-        "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped"
-    );
+    assert!(matches!(
+        payloads[drained + 1],
+        SystemFact::MetricsCoordination(MetricsFact::Shutdown)
+    ));
     assert_eq!(
         exports.0.lock().unwrap().last().unwrap().event_counts[&b],
         500
@@ -529,8 +537,10 @@ pub async fn metrics_cancellation_stops_owned_readers_without_drained(
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event_type_name()
-            == "supervisor.runtime.metrics_aggregator.finalization.completed"));
+        .any(|row| matches!(
+            &row.payload,
+            SystemFact::MetricsCoordination(MetricsFact::Drained)
+        )));
 }
 
 pub async fn metrics_tail_identity_and_accounting_are_idempotent(
@@ -775,10 +785,10 @@ pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(
-        end.event_type_name(),
-        "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped"
-    );
+    assert!(matches!(
+        &end.payload,
+        SystemFact::MetricsCoordination(MetricsFact::Shutdown)
+    ));
 }
 
 pub async fn metrics_drain_during_export_settles_before_final_refresh(
@@ -811,16 +821,16 @@ pub async fn metrics_drain_during_export_settles_before_final_refresh(
     assert_eq!(exports.0.lock().unwrap().len(), 2);
     assert_eq!(journals.export.committed_position().await.unwrap(), 2);
     let rows = journals.coordination.read_all_unordered().await.unwrap();
-    let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
-    assert_eq!(
-        names,
+    let payloads: Vec<_> = rows.iter().map(|row| &row.payload).collect();
+    assert!(matches!(
+        payloads.as_slice(),
         [
-            "supervisor.runtime.metrics_aggregator.registered",
-            "supervisor.runtime.metrics_aggregator.milestone.ready",
-            "supervisor.runtime.metrics_aggregator.finalization.completed",
-            "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped",
+            SystemFact::SupervisorRegistered { .. },
+            SystemFact::MetricsCoordination(MetricsFact::Ready),
+            SystemFact::MetricsCoordination(MetricsFact::Drained),
+            SystemFact::MetricsCoordination(MetricsFact::Shutdown),
         ]
-    );
+    ));
 }
 
 pub async fn metrics_folds_check_eligibility_before_causal_incorporation(

@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::render::event_counts::JournalEventCounts;
+use obzenflow_core::event::vocabulary::supervisor::{METRICS_NAME, PIPELINE_NAME};
 
 const JOURNAL_INDENT: usize = 4;
 const TABLE_INDENT: usize = 6;
@@ -125,8 +126,7 @@ impl Renderer {
     ) -> Result<(), Error> {
         match journal.kind {
             RunJournalKind::System => {
-                let name =
-                    self.summary_owner_name(&manifest.pipeline_writer_id, "pipeline_supervisor");
+                let name = self.summary_owner_name(&manifest.pipeline_writer_id, PIPELINE_NAME);
                 self.summary_line(output, HEADING, &format!("Supervisor: {name}"))?;
                 let mut inputs = Vec::new();
                 if !manifest.stages.is_empty() {
@@ -148,7 +148,7 @@ impl Renderer {
                     .metrics_journals
                     .as_ref()
                     .ok_or("metrics journal is missing its manifest entry")?;
-                let name = self.summary_owner_name(&metrics.writer_id, "metrics_aggregator");
+                let name = self.summary_owner_name(&metrics.writer_id, METRICS_NAME);
                 self.summary_line(output, HEADING, &format!("Supervisor: {name}"))?;
                 let inputs = if manifest.stages.is_empty() {
                     manifest.system_journal_file.clone()
@@ -205,11 +205,11 @@ impl Renderer {
         journal: &RunJournal,
         manifest: &RunManifest,
     ) -> Result<(), Error> {
-        let pipeline = self.summary_owner_name(&manifest.pipeline_writer_id, "pipeline_supervisor");
+        let pipeline = self.summary_owner_name(&manifest.pipeline_writer_id, PIPELINE_NAME);
         let metrics = manifest
             .metrics_journals
             .as_ref()
-            .map(|metrics| self.summary_owner_name(&metrics.writer_id, "metrics_aggregator"));
+            .map(|metrics| self.summary_owner_name(&metrics.writer_id, METRICS_NAME));
         let (file, purpose, mut readers) = match journal.kind {
             RunJournalKind::System => (
                 &manifest.system_journal_file,
@@ -284,71 +284,66 @@ impl Renderer {
         output: &mut impl Write,
         counts: &JournalEventCounts,
     ) -> Result<(), Error> {
-        // Retain every cell's text even in a narrow terminal. Nesting consumes
-        // columns, so headers wrap by the same rules as their values.
-        let count_width = counts
-            .event_types
-            .values()
-            .map(|count| count.to_string().len())
-            .max()
-            .unwrap_or(0)
-            .max(5);
-        let minimums = [1, 1, 1];
-        let mut widths = [10, 6, 11]; // Descriptor, Author, Author type.
-        for (event_type, writer) in counts.event_types.keys() {
-            let kind = self
-                .context
-                .supervisors
-                .get(writer)
-                .map_or("Not recorded", |descriptor| descriptor.kind.label());
-            for (width, text) in
-                widths
-                    .iter_mut()
-                    .zip([event_type.as_str(), self.context.writer_name(writer), kind])
-            {
-                *width = (*width).max(safe_text(text).chars().count());
-            }
+        // These are presentation groups within one physical journal. Keep the
+        // writer ID in the key even when two recorded authors share a name.
+        let mut groups = BTreeMap::<_, Vec<CountRow<'_>>>::new();
+        for ((descriptor, writer), count) in &counts.event_types {
+            let kind = descriptor.event_kind.as_str();
+            let event = descriptor.event_type.as_str();
+            let version = descriptor.payload_schema_version.to_string();
+            let writer = writer.to_string();
+            let namespace = event.split_once('.').map_or("", |(namespace, _)| namespace);
+            groups
+                .entry((
+                    self.context.writer_name(&writer).to_owned(),
+                    writer,
+                    kind,
+                    namespace,
+                ))
+                .or_default()
+                .push(CountRow {
+                    event,
+                    version,
+                    count: *count,
+                });
         }
-        let available = self.width.saturating_sub(count_width + TABLE_INDENT + 6);
-        while widths.iter().sum::<usize>() > available {
-            let column = (0..3)
-                .max_by_key(|&index| widths[index] - minimums[index])
-                .unwrap();
-            if widths[column] == minimums[column] {
-                break;
+
+        let mut previous_writer = None;
+        let mut previous_kind = None;
+        for ((author, writer, kind, _), mut rows) in groups {
+            // Retain the existing lexical descriptor order, independently of
+            // the typed map's enum and numeric version ordering.
+            rows.sort_by_cached_key(|row| format!("{}@{}", row.event, row.version));
+            writeln!(output)?;
+            if previous_writer.as_ref() != Some(&writer) {
+                let author_type = self
+                    .context
+                    .supervisors
+                    .get(&writer)
+                    .map_or("Not recorded", |descriptor| descriptor.kind.label());
+                self.summary_indented(
+                    output,
+                    BODY,
+                    TABLE_INDENT,
+                    &format!("Author: {author} ({author_type})"),
+                )?;
+                previous_writer = Some(writer);
+                previous_kind = None;
             }
-            widths[column] -= 1;
-        }
-        self.event_count_row(
-            output,
-            MUTED,
-            "Count",
-            ["Descriptor", "Author", "Author type"],
-            count_width,
-            widths,
-        )?;
-        let mut rows: Vec<_> = counts.event_types.iter().collect();
-        rows.sort_by_key(|((event_type, writer), _)| {
-            (
-                event_type.as_str(),
-                self.context.writer_name(writer),
-                writer.as_str(),
-            )
-        });
-        for ((event_type, writer), count) in rows {
-            let kind = self
-                .context
-                .supervisors
-                .get(writer)
-                .map_or("Not recorded", |descriptor| descriptor.kind.label());
-            self.event_count_row(
-                output,
-                BODY,
-                &count.to_string(),
-                [event_type, self.context.writer_name(writer), kind],
-                count_width,
-                widths,
-            )?;
+            if previous_kind != Some(kind) {
+                self.summary_indented(output, BODY, TABLE_INDENT, &format!("Kind: {kind}"))?;
+                previous_kind = Some(kind);
+            }
+            let prefix = shared_event_prefix(&rows);
+            let heading = if prefix.is_empty() {
+                "Event prefix: —".to_owned()
+            } else {
+                format!("Event prefix: {}", safe_text(prefix))
+            };
+            for line in event_name_lines(&heading, self.width.saturating_sub(TABLE_INDENT)) {
+                self.summary_write(output, BODY, &format!("{:TABLE_INDENT$}{line}", ""))?;
+            }
+            self.event_group_table(output, prefix, &rows)?;
         }
         if counts.omitted > 0 {
             self.summary_indented(
@@ -364,26 +359,96 @@ impl Renderer {
         Ok(())
     }
 
-    fn event_count_row(
+    fn event_group_table(
         &self,
         output: &mut impl Write,
-        shade: &str,
-        count: &str,
-        cells: [&str; 3],
-        count_width: usize,
-        widths: [usize; 3],
+        prefix: &str,
+        rows: &[CountRow<'_>],
     ) -> Result<(), Error> {
-        let [type_width, writer_width, _] = widths;
-        let [types, writers, kinds] =
-            std::array::from_fn(|index| cell_lines(&safe_text(cells[index]), widths[index]));
-        for index in 0..types.len().max(writers.len()).max(kinds.len()) {
-            let count = if index == 0 { count } else { "" };
-            let event_type = types.get(index).map_or("", String::as_str);
-            let writer = writers.get(index).map_or("", String::as_str);
-            let kind = kinds.get(index).map_or("", String::as_str);
-            let line = format!("{:TABLE_INDENT$}{count:>count_width$}  {event_type:<type_width$}  {writer:<writer_width$}  {kind}", "");
-            self.summary_write(output, shade, line.trim_end())?;
+        let count_width = rows
+            .iter()
+            .map(|row| row.count.to_string().len())
+            .max()
+            .unwrap_or(0)
+            .max(5);
+        let version_width = rows
+            .iter()
+            .map(|row| row.version.len())
+            .max()
+            .unwrap_or(0)
+            .max(7);
+        let event_width = rows
+            .iter()
+            .map(|row| safe_text(&row.event[prefix.len()..]).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(5)
+            .min(
+                self.width
+                    .saturating_sub(TABLE_INDENT + count_width + version_width + 4)
+                    .max(1),
+            );
+        self.summary_write(
+            output,
+            MUTED,
+            &format!(
+                "{:TABLE_INDENT$}{:>count_width$}  {:<event_width$}  {:>version_width$}",
+                "", "Count", "Event", "Version"
+            ),
+        )?;
+        for row in rows {
+            let event = safe_text(&row.event[prefix.len()..]);
+            let count = row.count.to_string();
+            for (index, line) in event_name_lines(&event, event_width).iter().enumerate() {
+                let (count, version) = if index == 0 {
+                    (count.as_str(), row.version.as_str())
+                } else {
+                    ("", "")
+                };
+                self.summary_write(output, BODY, format!(
+                    "{:TABLE_INDENT$}{count:>count_width$}  {line:<event_width$}  {version:>version_width$}", ""
+                ).trim_end())?;
+            }
         }
         Ok(())
     }
+}
+
+struct CountRow<'a> {
+    event: &'a str,
+    version: String,
+    count: u64,
+}
+
+/// Factor only complete, literal dot-separated segments shared by the rows.
+/// Joining this prefix and the displayed suffix recovers the original name.
+fn shared_event_prefix<'a>(rows: &[CountRow<'a>]) -> &'a str {
+    let first = rows[0].event;
+    let mut prefix = first.rfind('.').map_or("", |end| &first[..=end]);
+    for row in &rows[1..] {
+        while !row.event.starts_with(prefix) {
+            prefix = prefix[..prefix.len() - 1]
+                .rfind('.')
+                .map_or("", |end| &prefix[..=end]);
+        }
+    }
+    prefix
+}
+
+/// Prefer name boundaries to splitting words. An individual segment longer
+/// than the available width still wraps without discarding any characters.
+fn event_name_lines(text: &str, width: usize) -> Vec<String> {
+    let mut remaining = text;
+    let mut lines = Vec::new();
+    while let Some((limit, _)) = remaining.char_indices().nth(width) {
+        let end = remaining[..limit]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| matches!(ch, '.' | '_' | ' '))
+            .map_or(limit, |(index, ch)| index + ch.len_utf8());
+        lines.push(remaining[..end].to_owned());
+        remaining = &remaining[end..];
+    }
+    lines.push(remaining.to_owned());
+    lines
 }

@@ -275,69 +275,54 @@ impl SystemPayload {
     pub const SCHEMA_VERSION: std::num::NonZeroU32 = std::num::NonZeroU32::MIN;
 
     pub fn event_type(&self) -> std::borrow::Cow<'static, str> {
-        let name = match self {
-            SystemPayload::SupervisorRegistered { descriptor } => {
-                return format!("{}.registered", descriptor.event_prefix()).into()
+        use super::supervisor_descriptor::{supervisor_event_type, SupervisionMode};
+        use crate::event::vocabulary::supervisor::{self, command, milestone, outcome};
+
+        let (author, occurrence) = match self {
+            Self::SupervisorRegistered { descriptor } => {
+                return descriptor.registered_event_type().into();
             }
-            SystemPayload::PipelineLifecycle(event) => match event {
-                PipelineLifecycleEvent::Starting => {
-                    "supervisor.runtime.pipeline_supervisor.command.start.admitted"
-                }
-                PipelineLifecycleEvent::ReadyForRun { .. } => {
-                    "supervisor.runtime.pipeline_supervisor.milestone.ready_for_run"
-                }
-                PipelineLifecycleEvent::Running { .. } => {
-                    "supervisor.runtime.pipeline_supervisor.milestone.sources_started"
-                }
-                PipelineLifecycleEvent::StopAdmitted { admission } => match admission {
-                    PipelineStopAdmission::Graceful { .. } => {
-                        "supervisor.runtime.pipeline_supervisor.command.graceful_stop.admitted"
+            Self::PipelineLifecycle(event) => (
+                supervisor::PIPELINE_NAME,
+                match event {
+                    PipelineLifecycleEvent::Starting => command::START_ADMITTED,
+                    PipelineLifecycleEvent::ReadyForRun { .. } => milestone::READY_FOR_RUN,
+                    PipelineLifecycleEvent::Running { .. } => milestone::SOURCES_STARTED,
+                    PipelineLifecycleEvent::StopAdmitted { admission } => match admission {
+                        PipelineStopAdmission::Graceful { .. } => command::GRACEFUL_STOP_ADMITTED,
+                        PipelineStopAdmission::Cancel { .. } => command::CANCEL_ADMITTED,
+                    },
+                    PipelineLifecycleEvent::NotStarted => outcome::NOT_STARTED,
+                    PipelineLifecycleEvent::AllStagesCompleted { .. } => {
+                        milestone::ALL_STAGES_COMPLETED
                     }
-                    PipelineStopAdmission::Cancel { .. } => {
-                        "supervisor.runtime.pipeline_supervisor.command.cancel.admitted"
-                    }
+                    PipelineLifecycleEvent::Draining { .. } => milestone::DRAIN_STARTED,
+                    PipelineLifecycleEvent::Drained => milestone::FINAL_MARKER_PUBLISHED,
+                    PipelineLifecycleEvent::Completed { .. } => outcome::COMPLETED,
+                    PipelineLifecycleEvent::Failed { .. } => outcome::FAILED,
+                    PipelineLifecycleEvent::Cancelled { .. } => outcome::CANCELLED,
                 },
-                PipelineLifecycleEvent::NotStarted => {
-                    "supervisor.runtime.pipeline_supervisor.outcome.not_started"
-                }
-                PipelineLifecycleEvent::AllStagesCompleted { .. } => {
-                    "supervisor.runtime.pipeline_supervisor.milestone.all_stages_completed"
-                }
-                PipelineLifecycleEvent::Draining { .. } => {
-                    "supervisor.runtime.pipeline_supervisor.milestone.drain_started"
-                }
-                PipelineLifecycleEvent::Drained => {
-                    "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published"
-                }
-                PipelineLifecycleEvent::Completed { .. } => {
-                    "supervisor.runtime.pipeline_supervisor.outcome.completed"
-                }
-                PipelineLifecycleEvent::Failed { .. } => {
-                    "supervisor.runtime.pipeline_supervisor.outcome.failed"
-                }
-                PipelineLifecycleEvent::Cancelled { .. } => {
-                    "supervisor.runtime.pipeline_supervisor.outcome.cancelled"
-                }
-            },
-            SystemPayload::MetricsCoordination(event) => match event {
-                MetricsCoordinationEvent::Ready => {
-                    "supervisor.runtime.metrics_aggregator.milestone.ready"
-                }
-                MetricsCoordinationEvent::DrainRequested => {
-                    "supervisor.runtime.pipeline_supervisor.command.finalize_metrics.requested"
-                }
-                MetricsCoordinationEvent::Drained => {
-                    "supervisor.runtime.metrics_aggregator.finalization.completed"
-                }
+            ),
+            Self::MetricsCoordination(event) => match event {
+                // The payload family does not determine its author.
+                MetricsCoordinationEvent::DrainRequested => (
+                    supervisor::PIPELINE_NAME,
+                    command::FINALIZE_METRICS_REQUESTED,
+                ),
+                MetricsCoordinationEvent::Ready => (supervisor::METRICS_NAME, milestone::READY),
+                MetricsCoordinationEvent::Drained => (
+                    supervisor::METRICS_NAME,
+                    supervisor::finalization::COMPLETED,
+                ),
                 MetricsCoordinationEvent::Shutdown => {
-                    "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped"
+                    (supervisor::METRICS_NAME, milestone::REFRESH_READERS_STOPPED)
                 }
                 MetricsCoordinationEvent::Exported { .. } => {
-                    "supervisor.runtime.metrics_aggregator.snapshot.published"
+                    (supervisor::METRICS_NAME, supervisor::snapshot::PUBLISHED)
                 }
             },
-            SystemPayload::IngressRefusal { .. } => "system.ingress.refusal",
+            Self::IngressRefusal { .. } => return "system.ingress.refusal".into(),
         };
-        name.into()
+        supervisor_event_type(author, SupervisionMode::SelfSupervised, occurrence).into()
     }
 }

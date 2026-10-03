@@ -16,6 +16,7 @@ use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, StandardHandle, SupervisorBuilder,
     SupervisorTaskBuilder,
 };
+use obzenflow_core::event::vocabulary::supervisor::METRICS_NAME;
 use obzenflow_core::{
     event::SystemEvent,
     journal::Journal,
@@ -173,7 +174,7 @@ impl PreparedMetricsAggregator {
 
         // Create supervisor (private struct)
         let supervisor = MetricsAggregatorSupervisor {
-            name: "metrics_aggregator".to_string(),
+            name: METRICS_NAME.to_string(),
             system_journal,
             system_id,
             control: event_receiver.into(),
@@ -185,7 +186,7 @@ impl PreparedMetricsAggregator {
 
         // Spawn the supervisor task
         let supervisor_task =
-            SupervisorTaskBuilder::<MetricsAggregatorSupervisor>::new("metrics_aggregator")
+            SupervisorTaskBuilder::<MetricsAggregatorSupervisor>::new(METRICS_NAME)
                 .spawn_self_supervised(
                     supervisor,
                     MetricsAggregatorState::Created,

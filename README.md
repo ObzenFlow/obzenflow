@@ -122,6 +122,8 @@ Add `--include-runtime` for runtime and system records, `--full` for complete di
 
 Payloads display as JSON for every record category, including runtime progress and metrics exports.
 
+Event-count summaries group each journal's records by original author, kind and shared event prefix. The tables show count, remaining event name and payload version within the existing 90-column limit. Forwarded records keep separate author groups; journal records and JSONL retain their full descriptors.
+
 `--follow` keeps reading newly committed records from disk until execution settles and the CLI catches up, or Ctrl-C detaches. `show --follow` does not use HTTP:
 
 ```bash

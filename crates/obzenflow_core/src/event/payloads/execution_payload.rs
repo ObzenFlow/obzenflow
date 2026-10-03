@@ -17,6 +17,7 @@ use crate::event::observability::{HttpPullState, WaitReason};
 use crate::event::provenance::ExecutionAccounting;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::{Count, DurationMs};
+use crate::event::vocabulary;
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::StageId;
 use serde::{Deserialize, Serialize};
@@ -372,31 +373,39 @@ impl ExecutionPayload {
         let name = match self {
             Self::ReplayLifecycle(_) => "execution.replay.lifecycle",
             Self::SupervisorRegistered { descriptor } => {
-                return format!("{}.registered", descriptor.event_prefix()).into()
+                return descriptor.registered_event_type().into()
             }
             Self::SupervisorCommandDiscarded { .. } => "execution.supervisor.command_discarded",
             Self::SourceCleanupFailed { .. } => "execution.source.cleanup_failed",
             Self::ContractStatus { pass, .. } => {
                 if *pass {
-                    "runtime.contract.policy_accepted"
+                    vocabulary::contract::POLICY_ACCEPTED
                 } else {
-                    "runtime.contract.policy_rejected"
+                    vocabulary::contract::POLICY_REJECTED
                 }
             }
             Self::ContractResult { status, .. } => match status {
-                ContractResultStatusLabel::Passed => "runtime.contract.verification_passed",
-                ContractResultStatusLabel::Failed => "runtime.contract.verification_failed",
-                ContractResultStatusLabel::Pending => "runtime.contract.verification_pending",
-                ContractResultStatusLabel::Skipped => "runtime.contract.verification_skipped",
+                ContractResultStatusLabel::Passed => vocabulary::contract::VERIFICATION_PASSED,
+                ContractResultStatusLabel::Failed => vocabulary::contract::VERIFICATION_FAILED,
+                ContractResultStatusLabel::Pending => vocabulary::contract::VERIFICATION_PENDING,
+                ContractResultStatusLabel::Skipped => vocabulary::contract::VERIFICATION_SKIPPED,
             },
             Self::StageLifecycle(fact) => {
                 let occurrence = match fact {
-                    StageLifecycleFact::Running { .. } => "milestone.ready",
-                    StageLifecycleFact::Draining { .. } => "milestone.drain_started",
-                    StageLifecycleFact::Drained { .. } => "milestone.drain_completed",
-                    StageLifecycleFact::Completed { .. } => "outcome.completed",
-                    StageLifecycleFact::Cancelled { .. } => "outcome.cancelled",
-                    StageLifecycleFact::Failed { .. } => "outcome.failed",
+                    StageLifecycleFact::Running { .. } => vocabulary::supervisor::milestone::READY,
+                    StageLifecycleFact::Draining { .. } => {
+                        vocabulary::supervisor::milestone::DRAIN_STARTED
+                    }
+                    StageLifecycleFact::Drained { .. } => {
+                        vocabulary::supervisor::milestone::DRAIN_COMPLETED
+                    }
+                    StageLifecycleFact::Completed { .. } => {
+                        vocabulary::supervisor::outcome::COMPLETED
+                    }
+                    StageLifecycleFact::Cancelled { .. } => {
+                        vocabulary::supervisor::outcome::CANCELLED
+                    }
+                    StageLifecycleFact::Failed { .. } => vocabulary::supervisor::outcome::FAILED,
                 };
                 return supervisor_event_type(
                     stage_name,
@@ -410,39 +419,41 @@ impl ExecutionPayload {
                 | CircuitBreakerFact::StateChanged {
                     to_state: CircuitState::Open,
                     ..
-                } => "runtime.circuit_breaker.opened",
+                } => vocabulary::circuit_breaker::OPENED,
                 CircuitBreakerFact::Closed { .. }
                 | CircuitBreakerFact::StateChanged {
                     to_state: CircuitState::Closed,
                     ..
-                } => "runtime.circuit_breaker.closed",
+                } => vocabulary::circuit_breaker::CLOSED,
                 CircuitBreakerFact::HalfOpen { .. }
                 | CircuitBreakerFact::StateChanged {
                     to_state: CircuitState::HalfOpen,
                     ..
-                } => "runtime.circuit_breaker.half_open_entered",
-                CircuitBreakerFact::Rejected { .. } => "runtime.circuit_breaker.admission_rejected",
-                CircuitBreakerFact::AttemptSettled { .. } => {
-                    "runtime.circuit_breaker.attempt_assessed"
+                } => vocabulary::circuit_breaker::HALF_OPEN_ENTERED,
+                CircuitBreakerFact::Rejected { .. } => {
+                    vocabulary::circuit_breaker::ADMISSION_REJECTED
                 }
-                CircuitBreakerFact::RetryScheduled { .. } => "runtime.retry.scheduled",
-                CircuitBreakerFact::RetrySucceeded { .. } => "runtime.retry.succeeded",
-                CircuitBreakerFact::RetryExhausted { .. } => "runtime.retry.exhausted",
+                CircuitBreakerFact::AttemptSettled { .. } => {
+                    vocabulary::circuit_breaker::ATTEMPT_ASSESSED
+                }
+                CircuitBreakerFact::RetryScheduled { .. } => vocabulary::retry::SCHEDULED,
+                CircuitBreakerFact::RetrySucceeded { .. } => vocabulary::retry::SUCCEEDED,
+                CircuitBreakerFact::RetryExhausted { .. } => vocabulary::retry::EXHAUSTED,
                 CircuitBreakerFact::RetryStoppedNonRetryable { .. } => {
-                    "runtime.retry.stopped_non_retryable"
+                    vocabulary::retry::STOPPED_NON_RETRYABLE
                 }
                 CircuitBreakerFact::RecoveryCompleted { .. } => {
-                    "runtime.resilience.evaluation_finished"
+                    vocabulary::resilience::EVALUATION_FINISHED
                 }
             },
             Self::RateLimiter(fact) => match fact {
-                RateLimiterFact::Delayed { .. } => "runtime.rate_limiter.wait_started",
-                RateLimiterFact::ModeChange { .. } => "runtime.rate_limiter.mode_changed",
+                RateLimiterFact::Delayed { .. } => vocabulary::rate_limiter::WAIT_STARTED,
+                RateLimiterFact::ModeChange { .. } => vocabulary::rate_limiter::MODE_CHANGED,
                 RateLimiterFact::ConfigChanged { .. } => {
-                    "runtime.rate_limiter.configuration_changed"
+                    vocabulary::rate_limiter::CONFIGURATION_CHANGED
                 }
             },
-            Self::Backpressure(_) => "runtime.backpressure.stall_detected",
+            Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourcePollError(_) => "source.poll_error",
             Self::HttpPullState(_) => "source.http_pull_state",
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",

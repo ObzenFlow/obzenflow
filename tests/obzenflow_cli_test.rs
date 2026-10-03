@@ -163,36 +163,60 @@ fn event_table(
     heading: &str,
 ) -> std::collections::BTreeMap<(String, String, String), usize> {
     let body = text.split_once(&format!("\n    {heading}\n")).unwrap().1;
-    let mut lines = body
+    let mut author = "";
+    let mut author_type = "";
+    let mut kind = "";
+    let mut prefix = "";
+    let mut columns = None;
+    let mut entries: Vec<(usize, [String; 4])> = Vec::new();
+    // Reconstruct full descriptors from the visible context. Compare these
+    // against the journal records below, independently of presentation grouping.
+    for line in body
         .lines()
-        .skip_while(|line| !line.trim_start().starts_with("Count "));
-    let header = lines.next().expect("event count table header");
-    let descriptor_start = header.find("Descriptor").unwrap();
-    let writer_start = header.find("Author").unwrap();
-    let kind_start = header.find("Author type").unwrap();
-    let mut entries: Vec<(usize, [String; 3])> = Vec::new();
-    for line in lines.take_while(|line| !line.is_empty()) {
-        let cells = [
-            line.get(descriptor_start..writer_start.min(line.len()))
+        .take_while(|line| line.is_empty() || line.starts_with("      "))
+    {
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(value) = text.strip_prefix("Author: ") {
+            (author, author_type) = value.strip_suffix(')').unwrap().rsplit_once(" (").unwrap();
+            columns = None;
+        } else if let Some(value) = text.strip_prefix("Kind: ") {
+            kind = value;
+            columns = None;
+        } else if let Some(value) = text.strip_prefix("Event prefix: ") {
+            prefix = if value == "—" { "" } else { value };
+            columns = None;
+        } else if text.starts_with("Count ") {
+            columns = Some((line.find("Event").unwrap(), line.find("Version").unwrap()));
+        } else if let Some((event_start, version_start)) = columns {
+            let event = line
+                .get(event_start..version_start.min(line.len()))
                 .unwrap_or_default()
-                .trim(),
-            line.get(writer_start..kind_start.min(line.len()))
-                .unwrap_or_default()
-                .trim(),
-            line.get(kind_start..).unwrap_or_default().trim(),
-        ];
-        if let Ok(count) = line[..descriptor_start].trim().parse::<usize>() {
-            entries.push((count, cells.map(str::to_owned)));
-        } else {
-            let (_, previous) = entries.last_mut().expect("wrapped row has a count");
-            for (cell, continuation) in previous.iter_mut().zip(cells) {
-                cell.push_str(continuation);
+                .trim();
+            let version = line.get(version_start..).unwrap_or_default().trim();
+            if let Ok(count) = line[..event_start].trim().parse::<usize>() {
+                entries.push((
+                    count,
+                    [
+                        format!("{kind}/{prefix}{event}"),
+                        version.into(),
+                        author.into(),
+                        author_type.into(),
+                    ],
+                ));
+            } else {
+                let (_, previous) = entries.last_mut().expect("wrapped event has a count");
+                previous[0].push_str(event);
             }
         }
     }
     entries
         .into_iter()
-        .map(|(count, [descriptor, writer, kind])| ((descriptor, writer, kind), count))
+        .map(|(count, [event, version, author, author_type])| {
+            ((format!("{event}@{version}"), author, author_type), count)
+        })
         .collect()
 }
 
@@ -286,7 +310,7 @@ async fn runtime_writer_columns_use_journaled_registration() {
             .split_once("Supervisor: metrics_aggregator\n")
             .unwrap();
         assert!(pipeline.contains("\n    system.log\n"));
-        assert!(!pipeline.contains("supervisor.runtime.metrics_aggregator.snapshot.published"));
+        assert!(!pipeline.contains("supervisor.runtime.metrics_aggregator."));
         assert!(metrics.contains("\n    metrics-coordination.log\n"));
         assert!(metrics.contains("\n    metrics-export.log\n"));
         assert_eq!(
@@ -302,6 +326,18 @@ async fn runtime_writer_columns_use_journaled_registration() {
             .join(" ")
             .contains("across 7 journals."));
         if width == 90 {
+            assert!(pipeline.contains("Author: pipeline_supervisor (Pipeline)"));
+            assert!(pipeline.contains("Event prefix: supervisor.runtime.pipeline_supervisor."));
+            assert!(pipeline
+                .lines()
+                .any(|line| line.contains("command.finalize_metrics.requested")
+                    && line.trim_end().ends_with('1')));
+            assert!(metrics.contains("Author: metrics_aggregator (MetricsAggregator)"));
+            assert!(metrics.contains("Event prefix: supervisor.runtime.metrics_aggregator."));
+            assert!(metrics
+                .lines()
+                .any(|line| line.contains("milestone.refresh_readers_stopped")
+                    && line.trim_end().ends_with('1')));
             let metrics_rows = event_table(metrics, "metrics-export.log");
             assert!(
                 metrics_rows.contains_key(&(

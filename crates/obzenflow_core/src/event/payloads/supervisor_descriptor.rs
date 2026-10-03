@@ -4,6 +4,7 @@
 
 //! Durable identity of the state machine behind a recorded event writer.
 
+use crate::event::vocabulary::supervisor;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +65,10 @@ impl SupervisorDescriptor {
         supervisor_event_prefix(&self.name, self.supervision)
     }
 
+    pub(crate) fn registered_event_type(&self) -> String {
+        supervisor_event_type(&self.name, self.supervision, supervisor::REGISTERED)
+    }
+
     pub fn validate(&self, writer: &crate::WriterId) -> Result<(), &'static str> {
         if self.name.trim().is_empty() {
             return Err("supervisor name must not be empty");
@@ -89,11 +94,11 @@ impl SupervisorDescriptor {
 pub fn supervisor_event_prefix(name: &str, mode: SupervisionMode) -> String {
     use std::fmt::Write;
     let family = if mode == SupervisionMode::SelfSupervised {
-        "runtime"
+        supervisor::RUNTIME
     } else {
-        "stage"
+        supervisor::STAGE
     };
-    let mut prefix = format!("supervisor.{family}.");
+    let mut prefix = format!("{}.{family}.", supervisor::ROOT);
     for byte in name.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') {
             prefix.push(char::from(byte));
@@ -104,8 +109,11 @@ pub fn supervisor_event_prefix(name: &str, mode: SupervisionMode) -> String {
     prefix
 }
 
-pub fn supervisor_event_type(name: &str, mode: SupervisionMode, occurrence: &str) -> String {
-    format!("{}.{occurrence}", supervisor_event_prefix(name, mode))
+pub(crate) fn supervisor_event_type(name: &str, mode: SupervisionMode, occurrence: &str) -> String {
+    let mut event_type = supervisor_event_prefix(name, mode);
+    event_type.push('.');
+    event_type.push_str(occurrence);
+    event_type
 }
 
 #[cfg(test)]

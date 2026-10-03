@@ -7,6 +7,7 @@ use super::delivery_payload::DeliveryPayload;
 use super::execution_payload::ExecutionPayload;
 use super::flow_control_payload::FlowControlPayload;
 use crate::event::chain_event::ReplayDisposition;
+use crate::event::vocabulary;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use std::num::NonZeroU32;
@@ -60,34 +61,38 @@ impl ChainPayload {
             Self::Delivery(payload) => Some(payload.event_type().into()),
             Self::FlowControl(payload) => Some(
                 match payload {
-                    FlowControlPayload::Eof { .. } => "runtime.stream.end_declared",
-                    FlowControlPayload::Watermark { .. } => "runtime.stream.watermark_declared",
+                    FlowControlPayload::Eof { .. } => vocabulary::stream::END_DECLARED,
+                    FlowControlPayload::Watermark { .. } => vocabulary::stream::WATERMARK_DECLARED,
                     FlowControlPayload::CatchUpComplete { .. } => {
-                        "runtime.stream.catch_up_completed"
+                        vocabulary::stream::CATCH_UP_COMPLETED
                     }
-                    FlowControlPayload::Checkpoint { .. } => "runtime.stream.checkpoint_declared",
-                    FlowControlPayload::Drain => "runtime.stream.drain_requested",
-                    FlowControlPayload::PipelineAbort { .. } => "runtime.pipeline.abort_requested",
+                    FlowControlPayload::Checkpoint { .. } => {
+                        vocabulary::stream::CHECKPOINT_DECLARED
+                    }
+                    FlowControlPayload::Drain => vocabulary::stream::DRAIN_REQUESTED,
+                    FlowControlPayload::PipelineAbort { .. } => {
+                        vocabulary::pipeline::ABORT_REQUESTED
+                    }
                     FlowControlPayload::SourceContract { .. } => {
-                        "runtime.source.production_declared"
+                        vocabulary::source::PRODUCTION_DECLARED
                     }
                     FlowControlPayload::ConsumptionProgress { .. } => {
-                        "runtime.subscription.progress_reported"
+                        vocabulary::subscription::PROGRESS_REPORTED
                     }
                     FlowControlPayload::ConsumptionGap { .. } => {
-                        "runtime.subscription.gap_detected"
+                        vocabulary::subscription::GAP_DETECTED
                     }
                     FlowControlPayload::ProductionFinal { .. } => {
-                        "runtime.source.production_finalized"
+                        vocabulary::source::PRODUCTION_FINALIZED
                     }
                     FlowControlPayload::ConsumptionFinal { .. } => {
-                        "runtime.subscription.consumption_finalized"
+                        vocabulary::subscription::CONSUMPTION_FINALIZED
                     }
                     FlowControlPayload::ReaderStalled { .. } => {
-                        "runtime.subscription.stall_detected"
+                        vocabulary::subscription::STALL_DETECTED
                     }
                     FlowControlPayload::AtLeastOnceViolation { .. } => {
-                        "runtime.subscription.at_least_once_violated"
+                        vocabulary::subscription::AT_LEAST_ONCE_VIOLATED
                     }
                 }
                 .into(),

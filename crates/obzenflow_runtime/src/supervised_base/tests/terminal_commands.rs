@@ -43,7 +43,29 @@ impl<T: JournalEvent> Default for TestJournal<T> {
     }
 }
 
-impl<T: JournalEvent> TestJournal<T> {
+pub(super) trait RegistrationPayload {
+    fn is_registration(&self) -> bool;
+}
+
+impl RegistrationPayload for SystemPayload {
+    fn is_registration(&self) -> bool {
+        matches!(self, Self::SupervisorRegistered { .. })
+    }
+}
+
+impl RegistrationPayload for ChainPayload {
+    fn is_registration(&self) -> bool {
+        matches!(
+            self,
+            Self::Execution(ExecutionPayload::SupervisorRegistered { .. })
+        )
+    }
+}
+
+impl<T: JournalEvent> TestJournal<T>
+where
+    T::Payload: RegistrationPayload,
+{
     pub(super) fn with_owner(mut self, owner: JournalOwner) -> Self {
         self.owner = Some(owner);
         self
@@ -57,10 +79,11 @@ impl<T: JournalEvent> TestJournal<T> {
 
     pub(super) fn assert_registered(&self) {
         assert!(
-            self.records.lock().unwrap().first().is_some_and(|record| {
-                record.event_type_name().starts_with("supervisor.")
-                    && record.event_type_name().ends_with(".registered")
-            }),
+            self.records
+                .lock()
+                .unwrap()
+                .first()
+                .is_some_and(|record| { record.payload.is_registration() }),
             "registration must precede FSM dispatch and actions"
         );
     }
@@ -105,7 +128,10 @@ async fn self_supervised_runner_does_not_invent_registration_actions() {
 }
 
 #[async_trait::async_trait]
-impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T>
+where
+    T::Payload: RegistrationPayload,
+{
     fn storage_id(&self) -> &JournalId {
         &self.id
     }
@@ -127,13 +153,11 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for T
                 release.notified().await;
             }
         }
-        if self.fail
-            && !(self.allow_registration
-                && event.event_type_name().starts_with("supervisor.")
-                && event.event_type_name().ends_with(".registered"))
-        {
+        let (envelope, payload) = event.into_parts();
+        if self.fail && !(self.allow_registration && payload.is_registration()) {
             return Err(JournalError::Full);
         }
+        let event = T::from_parts(envelope, payload);
         let mut records = self.records.lock().unwrap();
         let record = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
         records.push(record.clone());
