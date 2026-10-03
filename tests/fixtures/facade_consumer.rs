@@ -53,7 +53,7 @@ fn renamed_facade_ingress_builders_compile() {
     let _sender = inbox.handle();
     let direct_source = app.ingress(inbox);
     let _flow = FlowDefinition::materialize(move |_| {
-        let output = sinks::debug::<Fact>();
+        let output = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);
         Ok(flow! {
             name: "facade_ingress",
             journals: of::journal::memory_journals(),
@@ -175,6 +175,10 @@ impl joins::TypedJoinHandler for Pure {
 #[async_trait]
 impl sinks::InlineSink for Pure {
     type Input = Fact;
+    fn describe(&self) -> sinks::SinkDescription {
+        sinks::SinkDescription::method(sinks::DeliveryMethod::Noop)
+    }
+
     async fn write(
         &mut self,
         _input: Fact,
@@ -258,11 +262,11 @@ fn renamed_facade_derives_preserve_flat_facts() {
 #[test]
 fn renamed_facade_macros_and_constructors_compile() {
     let _flow = FlowDefinition::materialize(|_config| {
-        let input = sources::finite([Fact(1)]);
+        let input = sources::ValuesSource::new([Fact(1)]);
         let mapped = transforms::map(|fact: Fact| fact);
         let folded =
             stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0).emit_on_eof();
-        let output = sinks::SinkTyped::new(|_: Fact| async {});
+        let output = Pure;
         Ok(of::flow::flow! {
             name: "facade",
             journals: of::journal::memory_journals(),
@@ -306,9 +310,9 @@ fn renamed_facade_macros_and_constructors_compile() {
     let _ = sink!(Fact => Pure);
 
     let _selected = FlowDefinition::materialize(|_config| {
-        let input = sources::once(Fact(1));
-        let first = sinks::SinkTyped::new(|_: Fact| async {});
-        let second = sinks::debug::<Fact>();
+        let input = sources::ValuesSource::new([Fact(1)]);
+        let first = Pure;
+        let second = sinks::ConsoleSink::<Fact, _>::new(sinks::DebugFormatter);
         Ok(flow! {
             journals: of::journal::memory_journals(),
             stages: {

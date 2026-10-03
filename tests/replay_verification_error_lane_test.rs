@@ -13,6 +13,8 @@
 //! named exclusion. Sink delivery rows are independently excluded by the
 //! projection's receipt-lane rule.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -24,7 +26,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -109,22 +110,11 @@ impl EffectfulTransformHandler for RejectOdd {
     }
 }
 
-fn discard<T>(
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
-{
-    move |_payload: T, _delivery| std::future::ready(())
-}
-
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let numbers_handler = Numbers::new();
         let gate_handler = RejectOdd;
-        let out_handler = SinkTyped::with_delivery(discard::<Accepted>()).idempotent();
+        let out_handler = replay_testkit::Discard::<Accepted>::default();
 
         Ok(flow! {
             name: "replay_verification_error_lane",

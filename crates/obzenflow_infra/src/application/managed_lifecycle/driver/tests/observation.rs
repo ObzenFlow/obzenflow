@@ -83,7 +83,11 @@ struct CountingSink {
 impl InlineSink for CountingSink {
     type Input = Payload;
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "test".to_string(),
+            ),
+        )
     }
     async fn write(
         &mut self,

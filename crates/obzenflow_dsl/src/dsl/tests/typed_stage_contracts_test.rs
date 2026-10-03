@@ -428,6 +428,11 @@ mod tests {
     #[async_trait]
     impl InlineSink for ExactSink {
         type Input = OutputEvent;
+        fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+            obzenflow_runtime::stages::sink::SinkDescription::method(
+                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            )
+        }
 
         async fn write(
             &mut self,

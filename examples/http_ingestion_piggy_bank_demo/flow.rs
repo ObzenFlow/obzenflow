@@ -88,7 +88,7 @@ pub fn build_flow(
         let checkbook_handler = Checkbook;
         let accounts_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
         let tx_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
-        let printer_sink = sinks::console::<CheckbookSnapshot, _>(
+        let printer_sink = sinks::ConsoleSink::<CheckbookSnapshot, _>::new(
             SnapshotTableFormatter::new(
                 &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
                 |snapshot: &CheckbookSnapshot| {

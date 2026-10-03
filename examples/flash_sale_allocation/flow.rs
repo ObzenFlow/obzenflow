@@ -15,7 +15,6 @@ use super::warehouse::{
 use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{CircuitBreaker, EffectResilience};
-use obzenflow::stages::sinks::SinkTyped;
 use obzenflow::stages::sources;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,17 +93,11 @@ pub fn assemble_flow(
             .build()
             .expect("reserve resilience configuration must be valid");
 
-        let allocation_feed = sources::finite(inputs.clone());
+        let allocation_feed = sources::ValuesSource::new(inputs.clone());
         let allocator = Allocator::new(1);
-        let record_reservation = SinkTyped::new(|reserved: StockReserved| async move {
-            tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
-        });
-        let record_release = SinkTyped::new(|released: StockReleased| async move {
-            tracing::info!(order_id = %released.order_id.0, "stock release delivered");
-        });
-        let record_reservation_failure = SinkTyped::new(|failed: ReservationFailed| async move {
-            tracing::info!(order_id = %failed.order_id.0, "reservation failure delivered");
-        });
+        let record_reservation = RecordReservation;
+        let record_release = RecordRelease;
+        let record_reservation_failure = RecordReservationFailure;
 
         Ok(flow! {
             name: "flash_sale_allocation",
@@ -154,4 +147,79 @@ pub fn assemble_flow(
             }
         })
     })
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordReservation;
+
+#[async_trait::async_trait]
+impl obzenflow::stages::sinks::InlineSink for RecordReservation {
+    type Input = StockReserved;
+
+    fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
+        obzenflow::stages::sinks::SinkDescription::method(
+            obzenflow::stages::sinks::DeliveryMethod::Custom("tracing".to_string()),
+        )
+    }
+
+    async fn write(
+        &mut self,
+        reserved: StockReserved,
+        _context: obzenflow::stages::sinks::SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
+        Ok(obzenflow::stages::sinks::SinkWriteReport::terminal(
+            obzenflow::stages::sinks::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordRelease;
+
+#[async_trait::async_trait]
+impl obzenflow::stages::sinks::InlineSink for RecordRelease {
+    type Input = StockReleased;
+
+    fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
+        obzenflow::stages::sinks::SinkDescription::method(
+            obzenflow::stages::sinks::DeliveryMethod::Custom("tracing".to_string()),
+        )
+    }
+
+    async fn write(
+        &mut self,
+        released: StockReleased,
+        _context: obzenflow::stages::sinks::SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        tracing::info!(order_id = %released.order_id.0, "stock release delivered");
+        Ok(obzenflow::stages::sinks::SinkWriteReport::terminal(
+            obzenflow::stages::sinks::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordReservationFailure;
+
+#[async_trait::async_trait]
+impl obzenflow::stages::sinks::InlineSink for RecordReservationFailure {
+    type Input = ReservationFailed;
+
+    fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
+        obzenflow::stages::sinks::SinkDescription::method(
+            obzenflow::stages::sinks::DeliveryMethod::Custom("tracing".to_string()),
+        )
+    }
+
+    async fn write(
+        &mut self,
+        failed: ReservationFailed,
+        _context: obzenflow::stages::sinks::SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        tracing::info!(order_id = %failed.order_id.0, "reservation failure delivered");
+        Ok(obzenflow::stages::sinks::SinkWriteReport::terminal(
+            obzenflow::stages::sinks::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
 }

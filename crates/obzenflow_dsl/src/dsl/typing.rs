@@ -1592,6 +1592,10 @@ where
 {
     type Input = In;
 
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(DeliveryMethod::Noop)
+    }
+
     async fn write(&mut self, _input: In, _context: SinkWriteContext) -> SinkWriteResult {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));

@@ -5,12 +5,12 @@
 //! Named typed shipping destination.
 
 use super::console;
-use super::domain::PaymentAuthorized;
+use super::domain::{CancelledOrder, PaymentAuthorizationUnavailable, PaymentAuthorized};
 use async_trait::async_trait;
 use obzenflow::middleware::{SinkDeliveryObserver, SinkDeliveryObserverContext};
 use obzenflow::stages::sinks::DeliveryMethod;
 use obzenflow::stages::sinks::{
-    InlineSink, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
 };
 
 /// Small in-process shipping handoff used by the demo.
@@ -21,6 +21,10 @@ pub struct ShippingHandoff;
 impl InlineSink for ShippingHandoff {
     type Input = PaymentAuthorized;
 
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::ConsoleStdout)
+    }
+
     async fn write(
         &mut self,
         authorized: PaymentAuthorized,
@@ -28,11 +32,61 @@ impl InlineSink for ShippingHandoff {
     ) -> obzenflow::stages::sinks::SinkWriteResult {
         console::send_to_shipping(authorized, context.delivery().provenance());
         Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success_via(
-                DeliveryMethod::Custom("console:stdout".to_string()),
-                None,
-            )
-            .with_items(1),
+            SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+/// Console record of a cancelled order, including its delivery provenance.
+#[derive(Clone, Debug, Default)]
+pub struct RecordCancelled;
+
+#[async_trait]
+impl InlineSink for RecordCancelled {
+    type Input = CancelledOrder;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::ConsoleStdout)
+    }
+
+    async fn write(
+        &mut self,
+        cancelled: CancelledOrder,
+        context: SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        console::record_cancelled_order(cancelled, context.delivery().provenance());
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+/// Console handoff for authorizations that require manual review.
+#[derive(Clone, Debug, Default)]
+pub struct RecordUnavailable;
+
+#[async_trait]
+impl InlineSink for RecordUnavailable {
+    type Input = PaymentAuthorizationUnavailable;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::ConsoleStdout)
+    }
+
+    async fn write(
+        &mut self,
+        unavailable: PaymentAuthorizationUnavailable,
+        context: SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        tracing::info!(
+            operation = "payment.authorization",
+            handoff_kind = "manual_review",
+            order_id = %unavailable.order_id,
+            "authorization queued for manual review"
+        );
+        console::record_authorization_unavailable(unavailable, context.delivery().provenance());
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success(None).with_items(1),
         ))
     }
 }

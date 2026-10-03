@@ -64,10 +64,10 @@ fn selectable_audit_flow(
     preview_writes: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let input = sources::finite(audit_records());
+        let input = sources::ValuesSource::new(audit_records());
 
         let preview_writes_for_formatter = Arc::clone(&preview_writes);
-        let preview_sink = sinks::console(move |record: &AuditRecord| {
+        let preview_sink = sinks::ConsoleSink::new(move |record: &AuditRecord| {
             preview_writes_for_formatter.fetch_add(1, Ordering::SeqCst);
             format!("{}: {}", record.sequence, record.action)
         });

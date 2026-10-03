@@ -97,7 +97,7 @@ impl InlineSink for EventCounterSink {
     type Input = TransformStageEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
     async fn write(
@@ -129,7 +129,7 @@ impl InlineSink for CollectSink {
     type Input = TransformStageEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
     async fn write(

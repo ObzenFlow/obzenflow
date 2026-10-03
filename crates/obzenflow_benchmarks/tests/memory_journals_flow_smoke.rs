@@ -74,7 +74,7 @@ impl InlineSink for CountingSink {
     type Input = SmokeEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
     async fn write(

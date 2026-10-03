@@ -325,7 +325,7 @@ impl<P> std::fmt::Debug for CsvSinkBuilder<P> {
 }
 
 impl<P> CsvSinkBuilder<P> {
-    pub fn new(projection: P) -> Self {
+    fn new(projection: P) -> Self {
         Self {
             projection,
             path: None,
@@ -491,14 +491,6 @@ where
 {
     pub fn builder(projection: P) -> CsvSinkBuilder<P> {
         CsvSinkBuilder::new(projection)
-    }
-
-    pub fn new(projection: P, path: impl Into<PathBuf>) -> Result<Self, anyhow::Error> {
-        Self::builder(projection).path(path).build()
-    }
-
-    pub fn tsv(projection: P, path: impl Into<PathBuf>) -> Result<Self, anyhow::Error> {
-        Self::builder(projection).path(path).tab_delimited().build()
     }
 }
 
@@ -1210,17 +1202,16 @@ mod tests {
             ))
             .await
             .expect("CSV connector opens");
-        SinkWriterAdapter::with_default_method(
-            writer,
-            stage_id,
-            description.default_method().cloned(),
-        )
+        SinkWriterAdapter::new(writer, stage_id, description.default_method().clone())
     }
 
     #[test]
     fn csv_sink_describes_repeatable_redelivery() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::new(SerializeInput::<TestRow>::default(), tmp.path()).unwrap();
+        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
+            .path(tmp.path())
+            .build()
+            .unwrap();
         assert_eq!(
             sink.describe().redelivery_safety(),
             Some(SinkRedeliverySafety::SafeToRepeat)
@@ -1284,7 +1275,10 @@ mod tests {
     #[tokio::test]
     async fn projection_failure_is_current_only_and_precedes_deferral() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::new(RejectProjection, tmp.path()).expect("projection connector");
+        let sink = CsvSink::builder(RejectProjection)
+            .path(tmp.path())
+            .build()
+            .expect("projection connector");
         let mut sink = adapted(sink).await;
 
         let error = sink
@@ -1455,11 +1449,8 @@ mod tests {
             .get_mut()
             .expect("CSV writer lock")
             .fail_next_buffer_flush = true;
-        let mut sink = SinkWriterAdapter::with_default_method(
-            writer,
-            stage_id,
-            description.default_method().cloned(),
-        );
+        let mut sink =
+            SinkWriterAdapter::new(writer, stage_id, description.default_method().clone());
         let first = event(1, 2);
         let failed = event(3, 4);
 
@@ -1662,7 +1653,7 @@ mod tests {
             .auto_flush(false)
             .build()
             .expect("local configuration is valid");
-        let method = connector.describe().default_method().cloned();
+        let method = connector.describe().default_method().clone();
         let first_stage = StageId::new();
         let second_stage = StageId::new();
         let first_writer = connector
@@ -1681,10 +1672,8 @@ mod tests {
             ))
             .await
             .expect("second writer opens");
-        let mut first =
-            SinkWriterAdapter::with_default_method(first_writer, first_stage, method.clone());
-        let mut second =
-            SinkWriterAdapter::with_default_method(second_writer, second_stage, method);
+        let mut first = SinkWriterAdapter::new(first_writer, first_stage, method.clone());
+        let mut second = SinkWriterAdapter::new(second_writer, second_stage, method);
 
         first
             .report_test(event(1, 2))
@@ -1723,8 +1712,10 @@ mod tests {
     #[tokio::test]
     async fn csv_sink_routes_typed_serialization_failures_before_deferral() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink =
-            CsvSink::new(SerializeInput::<SerializationFails>::default(), tmp.path()).unwrap();
+        let sink = CsvSink::builder(SerializeInput::<SerializationFails>::default())
+            .path(tmp.path())
+            .build()
+            .unwrap();
         let mut sink = adapted(sink).await;
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -1748,7 +1739,10 @@ mod tests {
     #[tokio::test]
     async fn csv_sink_rejects_non_object_typed_payloads_before_deferral() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::new(SerializeInput::<ScalarRow>::default(), tmp.path()).unwrap();
+        let sink = CsvSink::builder(SerializeInput::<ScalarRow>::default())
+            .path(tmp.path())
+            .build()
+            .unwrap();
         let mut sink = adapted(sink).await;
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),

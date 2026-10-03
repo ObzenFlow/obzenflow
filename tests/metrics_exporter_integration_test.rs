@@ -150,7 +150,7 @@ impl InlineSink for CountingSink {
     type Input = MetricEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("count".to_string()))
     }
 
     async fn write(
@@ -184,7 +184,7 @@ impl InlineSink for SleepingSink {
     type Input = MetricEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("sleep".to_string()))
     }
 
     async fn write(

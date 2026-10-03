@@ -68,7 +68,7 @@ impl InlineSink for NullSink {
     type Input = Item;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Null".to_string()))
     }
 
     async fn write(

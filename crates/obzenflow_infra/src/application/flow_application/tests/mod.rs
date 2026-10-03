@@ -71,7 +71,7 @@ impl InlineSink for NoopSink {
     type Input = IdlePayload;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("test".to_string()))
     }
 
     async fn write(

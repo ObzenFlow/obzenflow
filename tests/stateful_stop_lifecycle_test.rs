@@ -44,7 +44,7 @@ impl InlineSink for NoopSink {
     type Input = LifecycleEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
     async fn write(
@@ -76,7 +76,7 @@ impl InlineSink for SlowSink {
     type Input = LifecycleEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
     async fn write(
@@ -330,7 +330,7 @@ async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input()
     impl InlineSink for GatedSink {
         type Input = LifecycleEvent;
         fn describe(&self) -> SinkDescription {
-            SinkDescription::unspecified()
+            SinkDescription::method(DeliveryMethod::Custom("GatedSink".into()))
         }
         async fn write(
             &mut self,

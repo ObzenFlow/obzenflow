@@ -183,7 +183,8 @@ impl InlineSink for CountingSink {
     type Input = Enriched;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(DeliveryMethod::Noop)
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
     async fn write(

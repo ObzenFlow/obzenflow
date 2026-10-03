@@ -120,7 +120,7 @@ impl InlineSink for NoopSink {
     type Input = Joined;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
     async fn write(
@@ -472,6 +472,11 @@ struct CountsHandlerOutputs {
 #[async_trait]
 impl InlineSink for CountsHandlerOutputs {
     type Input = HandlerOutput;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+    }
 
     async fn write(
         &mut self,
@@ -646,6 +651,11 @@ struct CountsConcurrentOutputs {
 #[async_trait]
 impl InlineSink for CountsConcurrentOutputs {
     type Input = ConcurrentOutput;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+    }
 
     async fn write(
         &mut self,

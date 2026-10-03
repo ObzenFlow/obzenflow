@@ -74,7 +74,7 @@ impl InlineSink for Printer {
     type Input = DoubledEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Print".to_string()))
     }
 
     async fn write(

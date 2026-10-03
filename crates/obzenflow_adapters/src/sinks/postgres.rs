@@ -460,32 +460,6 @@ pub struct PostgresSink<B> {
     test_probe: Option<testing::PostgresTestProbe>,
 }
 
-/// A validated, I/O-free PostgreSQL sink recipe accepted by
-/// [`crate::sinks::postgres`]. Keeping the recipe distinct from the connector
-/// gives application code the same `sinks::<kind>(config)` construction shape
-/// as the other sink facades.
-pub struct PostgresSinkConfig<B> {
-    sink: PostgresSink<B>,
-}
-
-impl<B> fmt::Debug for PostgresSinkConfig<B>
-where
-    B: PostgresBind,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PostgresSinkConfig")
-            .field(&self.sink)
-            .finish()
-    }
-}
-
-impl<B> PostgresSinkConfig<B> {
-    /// Consume this cold recipe into the ordinary PostgreSQL connector.
-    pub fn into_sink(self) -> PostgresSink<B> {
-        self.sink
-    }
-}
-
 impl<B> fmt::Debug for PostgresSink<B>
 where
     B: PostgresBind,
@@ -640,12 +614,6 @@ where
             #[cfg(feature = "test-support")]
             test_probe: self.test_probe,
         })
-    }
-
-    /// Finish local validation as a cold recipe for the generic
-    /// `sinks::postgres(config)` facade.
-    pub fn build_config(self) -> Result<PostgresSinkConfig<B>, PostgresConfigError> {
-        self.build().map(|sink| PostgresSinkConfig { sink })
     }
 }
 
@@ -2012,18 +1980,17 @@ mod tests {
     }
 
     #[test]
-    fn deferred_environment_connection_stays_cold_through_recipe_construction() {
+    fn deferred_environment_connection_stays_cold_through_connector_construction() {
         let deferred = PostgresConnection::deferred_from_env(
             "OBZENFLOW_POSTGRES_INTENTIONALLY_ABSENT_FOR_COLD_RECIPE_TEST",
             PostgresTransport::VerifiedTls,
         );
-        let config = PostgresSink::builder(Binder)
+        let sink = PostgresSink::builder(Binder)
             .connection(deferred.clone())
             .insert_into("public", "events", "(value) VALUES ($1)")
             .unwrap()
-            .build_config()
+            .build()
             .expect("a cold recipe does not read the referenced environment value");
-        let sink = crate::sinks::postgres(config);
         assert_eq!(
             sink.describe().destination_name(),
             Some("postgres.public.events")

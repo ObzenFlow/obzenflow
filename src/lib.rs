@@ -36,7 +36,7 @@
 //! Handlers contain the processing logic for each stage. The framework provides
 //! several handler traits, each matching a different stage role.
 //!
-//! **Sources** produce events. [`crate::stages::sources::finite`] is the easiest way
+//! **Sources** produce events. [`crate::stages::sources::ValuesSource`] is the easiest way
 //! to emit a `Vec<T>` (or any iterator) of typed payloads:
 //!
 //! ```rust,ignore
@@ -46,7 +46,7 @@
 //!     TemperatureReading { sensor_id: "A1".into(), celsius: 22.5 },
 //!     TemperatureReading { sensor_id: "B2".into(), celsius: 35.1 },
 //! ];
-//! let source = sources::finite(readings);
+//! let source = sources::ValuesSource::new(readings);
 //! ```
 //!
 //! **Transforms** process typed payloads one at a time. Implement
@@ -54,9 +54,10 @@
 //! like [`crate::stages::transforms::map`] for simple one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
-//! [`crate::stages::sinks::SinkWriter`], or construct a
-//! [`crate::stages::sinks::SinkTyped`] adapter from a closure inside
-//! the deferred materialiser and pass its binding to `sink!`.
+//! [`crate::stages::sinks::InlineSink`] for a small integration, or configure a
+//! [`crate::stages::sinks::SinkConnector`] that opens a stage-local writer.
+//! Built-in destinations expose one constructor or builder. Pass the configured
+//! binding to `sink!`.
 //!
 //! ## 3. The `flow!` block
 //!
@@ -123,7 +124,7 @@
 //! use obzenflow::flow::{flow, sink, source, transform, FlowDefinition};
 //! use obzenflow::application::FlowApplication;
 //! use obzenflow::journal::disk_journals;
-//! use obzenflow::stages::sinks::SinkTyped;
+//! use obzenflow::stages::sinks::ConsoleSink;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +156,7 @@
 //!     ];
 //!
 //!     let flow = FlowDefinition::materialize(move |_runtime_config| {
-//!         let readings_source = sources::finite(readings);
+//!         let readings_source = sources::ValuesSource::new(readings);
 //!         let check_temperature = transforms::map(|m: Measurement| {
 //!                 Alert {
 //!                     sensor: m.sensor.clone(),
@@ -166,8 +167,8 @@
 //!                     },
 //!                 }
 //!             });
-//!         let print_alert = SinkTyped::new(|alert: Alert| async move {
-//!             println!("[ALERT] {}", alert.message);
+//!         let print_alert = ConsoleSink::new(|alert: &Alert| {
+//!             format!("[ALERT] {}", alert.message)
 //!         });
 //!
 //!         Ok(flow! {

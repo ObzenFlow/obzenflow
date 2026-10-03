@@ -125,7 +125,7 @@ impl InlineSink for MetricsSink {
     type Input = CircuitMetricEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("collect".to_string()))
     }
 
     async fn write(

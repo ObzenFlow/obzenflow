@@ -448,7 +448,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     pub receipt_destination: String,
 
     /// Connector-described method used for runtime-authored failure receipts.
-    pub default_delivery_method: Option<DeliveryMethod>,
+    pub default_delivery_method: DeliveryMethod,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -1328,7 +1328,7 @@ mod tests {
             stage_id,
             stage_name: "audit_sink".into(),
             receipt_destination: "audit_sink".into(),
-            default_delivery_method: None,
+            default_delivery_method: DeliveryMethod::Noop,
             flow_name: "projection_flow".into(),
             flow_id: FlowId::new(),
             data_journal: data.clone(),

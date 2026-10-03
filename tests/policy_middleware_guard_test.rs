@@ -74,7 +74,9 @@ impl InlineSink for NullSink {
     type Input = GuardEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
     }
 
     async fn write(

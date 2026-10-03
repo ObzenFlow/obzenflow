@@ -292,7 +292,7 @@ impl InlineSink for CompletionSink {
     type Input = ProcessedEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("InMemory".to_string()))
     }
 
     async fn write(

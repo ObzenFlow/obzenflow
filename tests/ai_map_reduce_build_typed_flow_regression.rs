@@ -267,7 +267,7 @@ where
     type Input = T;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
     async fn write(
@@ -299,7 +299,7 @@ impl InlineSink for CountingOutSink {
     type Input = BuildOnlyOut;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("CountingOut".to_string()))
     }
 
     async fn write(

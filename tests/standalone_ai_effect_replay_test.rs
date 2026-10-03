@@ -140,7 +140,8 @@ impl InlineSink for CollectEmbedded {
     type Input = TicketEmbedded;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(DeliveryMethod::Custom("CollectEmbedded".to_string()))
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
     async fn write(
@@ -329,10 +330,10 @@ fn build_flow(
                 },
             )
             .map_err(|error| binding_error("embedding_handler", error))?;
-        let input = sources::once(TicketRaised {
+        let input = sources::ValuesSource::new([TicketRaised {
             id: 7,
             description: "Customer cannot sign in".to_string(),
-        });
+        }]);
         let collected = CollectEmbedded { outputs };
 
         Ok(flow! {

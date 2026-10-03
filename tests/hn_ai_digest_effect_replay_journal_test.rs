@@ -555,7 +555,8 @@ impl InlineSink for CollectOut {
     type Input = DigestOut;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(DeliveryMethod::Custom("FLOWIP-128g fixture".to_string()))
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
     async fn write(
@@ -1390,8 +1391,9 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "let chat_target = chat.target().clone();",
         "token_estimator: chat.estimator().source(),",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
-        "let console_sink = sinks::console(format_digest_summary_for_console);",
-        "let postgres_sink = sinks::postgres(postgres_config);",
+        "let console_sink = sinks::ConsoleSink::new(format_digest_summary_for_console);",
+        "let postgres_sink = HnDigestPostgresConfig::from_env()",
+        ".and_then(build_digest_postgres_sink)",
         "HnDigestSummary => handler_set!(",
         "handler_set!(console_sink, postgres_sink)",
         "HnDigestPostgresConfig::from_env()",
@@ -1490,9 +1492,9 @@ fn hn_postgres_sink_description_is_truthful_without_selection_instrumentation() 
     );
     assert_eq!(
         description.default_method(),
-        Some(&DeliveryMethod::DatabaseInsert {
+        &DeliveryMethod::DatabaseInsert {
             table: "hn_digest_fixture.hn_digest_summaries".to_string(),
-        })
+        }
     );
     assert_eq!(
         description.redelivery_safety(),

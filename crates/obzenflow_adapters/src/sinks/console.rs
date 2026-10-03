@@ -39,8 +39,8 @@ impl OutputDestination {
 
     fn delivery_method(self) -> DeliveryMethod {
         match self {
-            Self::Stdout => DeliveryMethod::Custom("console:stdout".to_string()),
-            Self::Stderr => DeliveryMethod::Custom("console:stderr".to_string()),
+            Self::Stdout => DeliveryMethod::ConsoleStdout,
+            Self::Stderr => DeliveryMethod::ConsoleStderr,
         }
     }
 
@@ -547,77 +547,34 @@ impl<T, F> std::fmt::Debug for ConsoleSink<T, F> {
     }
 }
 
-impl<T, F0> ConsoleSink<T, F0>
+impl<T, F> ConsoleSink<T, F>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    T: TypedPayload + Send + Sync + 'static,
+    F: Formatter<T>,
 {
-    pub fn json() -> ConsoleSink<T, JsonFormatter>
-    where
-        T: Serialize,
-    {
-        ConsoleSink {
-            formatter: JsonFormatter,
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn json_pretty() -> ConsoleSink<T, JsonPrettyFormatter>
-    where
-        T: Serialize,
-    {
-        ConsoleSink {
-            formatter: JsonPrettyFormatter,
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn debug() -> ConsoleSink<T, DebugFormatter>
-    where
-        T: std::fmt::Debug,
-    {
-        ConsoleSink {
-            formatter: DebugFormatter,
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn table<E>(columns: &[&str], extractor: E) -> TableConsoleSink<T, E>
-    where
-        E: Fn(&T) -> Vec<String> + Send + Sync + Clone,
-    {
-        TableConsoleSink {
-            formatter: TableFormatter::new(columns, extractor),
-            destination: OutputDestination::Stdout,
-            max_rows: 256,
-            max_bytes: 64 * 1024,
-        }
-    }
-
-    pub fn snapshot_table<E>(
-        columns: &[&str],
-        extractor: E,
-    ) -> ConsoleSink<T, SnapshotTableFormatter<T, E>>
-    where
-        E: Fn(&T) -> Vec<Vec<String>> + Send + Sync + Clone,
-    {
-        ConsoleSink {
-            formatter: SnapshotTableFormatter::new(columns, extractor),
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn new<F>(formatter: F) -> ConsoleSink<T, F>
-    where
-        F: Formatter<T>,
-    {
-        ConsoleSink {
+    /// Configure immediate console output with a pure formatter.
+    pub fn new(formatter: F) -> Self {
+        Self {
             formatter,
             destination: OutputDestination::Stdout,
             _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, E> ConsoleSink<T, TableFormatter<T, E>>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    E: Fn(&T) -> Vec<String> + Send + Sync + Clone,
+{
+    /// Buffer table rows in each stage-local writer until a size limit or drain.
+    /// Defaults to 256 rows and 64 KiB of prepared cell bytes; there is no timer.
+    pub fn buffered(self) -> TableConsoleSink<T, E> {
+        TableConsoleSink {
+            formatter: self.formatter,
+            destination: self.destination,
+            max_rows: 256,
+            max_bytes: 64 * 1024,
         }
     }
 }
@@ -947,11 +904,7 @@ mod tests {
             .await
             .unwrap();
         writer.output = Some(Arc::new(Mutex::new(Box::new(Output(output)))));
-        SinkWriterAdapter::with_default_method(
-            writer,
-            stage,
-            connector.describe().default_method().cloned(),
-        )
+        SinkWriterAdapter::new(writer, stage, connector.describe().default_method().clone())
     }
     #[test]
     fn immediate_formatters_and_snapshot_are_stateless() {
@@ -1012,7 +965,7 @@ mod tests {
                 Ok(ConsoleOutput::Empty)
             }
         }
-        let connector = ConsoleSink::<TestEvent>::new(Empty);
+        let connector = ConsoleSink::<TestEvent, _>::new(Empty);
         let stage = StageId::new();
         let writer = SinkConnector::open(
             &connector,
@@ -1020,11 +973,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut adapter = SinkWriterAdapter::with_default_method(
-            writer,
-            stage,
-            Some(DeliveryMethod::Custom("console:stdout".into())),
-        );
+        let mut adapter = SinkWriterAdapter::new(writer, stage, DeliveryMethod::ConsoleStdout);
         let report = adapter
             .consume_committed_report(input("ignored"), Default::default())
             .await
@@ -1036,7 +985,11 @@ mod tests {
     }
     #[tokio::test]
     async fn table_receipts_follow_output_and_keep_exact_reconvergent_subjects() {
-        let connector = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()])
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .buffered()
             .batch_limits(
                 std::num::NonZeroUsize::new(2).unwrap(),
                 std::num::NonZeroUsize::new(1024).unwrap(),
@@ -1081,7 +1034,11 @@ mod tests {
     }
     #[tokio::test]
     async fn encoding_failure_preserves_earlier_pending_rows_and_writers_are_isolated() {
-        let connector = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()])
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .buffered()
             .batch_limits(
                 std::num::NonZeroUsize::new(10).unwrap(),
                 std::num::NonZeroUsize::new(3).unwrap(),
@@ -1121,7 +1078,11 @@ mod tests {
     }
     #[tokio::test]
     async fn byte_limit_flushes_and_uncertain_output_never_releases_partial_receipts() {
-        let connector = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()])
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .buffered()
             .batch_limits(
                 std::num::NonZeroUsize::new(10).unwrap(),
                 std::num::NonZeroUsize::new(4).unwrap(),
@@ -1163,10 +1124,14 @@ mod tests {
     #[tokio::test]
     async fn descriptor_mismatch_reaches_no_writer_output() {
         let connector =
-            ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()]).to_stderr();
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .to_stderr()
+            .buffered();
         assert_eq!(
             connector.describe().default_method(),
-            Some(&DeliveryMethod::Custom("console:stderr".into()))
+            &DeliveryMethod::ConsoleStderr
         );
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;

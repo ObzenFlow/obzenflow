@@ -13,8 +13,8 @@ mod tests {
     use obzenflow_runtime::bootstrap::ReplayVerb;
     use obzenflow_runtime::effects::SinkRedeliverySafety;
     use obzenflow_runtime::stages::sink::{
-        SinkConnector, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext,
-        SinkWriteReport, SinkWriter, SinkWriterInitContext,
+        SinkConnector, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+        SinkWriter, SinkWriterInitContext,
     };
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
@@ -79,15 +79,39 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct DiscardInput {
+        safety: Option<SinkRedeliverySafety>,
+    }
+    #[async_trait::async_trait]
+    impl obzenflow_runtime::stages::sink::InlineSink for DiscardInput {
+        type Input = SinkInput;
+        fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+            let description = obzenflow_runtime::stages::sink::SinkDescription::method(
+                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            );
+            match self.safety {
+                Some(safety) => description.with_redelivery_safety(safety),
+                None => description,
+            }
+        }
+        async fn write(
+            &mut self,
+            input: SinkInput,
+            context: obzenflow_runtime::stages::sink::SinkWriteContext,
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+            let _ = (input, context);
+            Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+                obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+            ))
+        }
+    }
     fn sink_descriptor(
         name: &str,
         delivery_safety: Option<SinkRedeliverySafety>,
     ) -> Box<dyn StageDescriptor> {
-        let connector = SinkTyped::new(|_value: SinkInput| async move {});
-        let connector = match delivery_safety {
-            Some(SinkRedeliverySafety::SafeToRepeat) => connector.idempotent(),
-            Some(SinkRedeliverySafety::DuplicateSensitive) => connector.non_idempotent(),
-            None => connector,
+        let connector = DiscardInput {
+            safety: delivery_safety,
         };
         let description = connector.describe();
         Box::new(SinkDescriptor {
@@ -211,10 +235,12 @@ mod tests {
         }
         // The refusal names both supported classification homes.
         assert!(
-            message.contains("`delivery: idempotent` on its `sink!` row"),
+            message.contains(
+                "`delivery: idempotent` or `delivery: non_idempotent` on its `sink!` row"
+            ),
             "{message}"
         );
-        assert!(message.contains("`.idempotent()`"), "{message}");
+        assert!(!message.contains("`.idempotent()`"), "{message}");
         assert!(
             message.contains("classified `SinkDescription`"),
             "{message}"
@@ -259,7 +285,7 @@ mod tests {
 
     #[test]
     fn sink_macro_delivery_clause_snapshots_through_bound_typed_adapters() {
-        let idempotent_sink = SinkTyped::new(|_value: SinkInput| async move {});
+        let idempotent_sink = DiscardInput { safety: None };
         let idempotent = crate::sink!(
             name: "declared_idempotent",
             SinkInput => idempotent_sink,
@@ -272,7 +298,7 @@ mod tests {
             Some(SinkRedeliverySafety::SafeToRepeat)
         );
 
-        let non_idempotent_sink = SinkTyped::new(|_value: SinkInput| async move {});
+        let non_idempotent_sink = DiscardInput { safety: None };
         let non_idempotent = crate::sink!(
             name: "declared_non_idempotent",
             SinkInput => non_idempotent_sink,
@@ -285,7 +311,7 @@ mod tests {
             Some(SinkRedeliverySafety::DuplicateSensitive)
         );
 
-        let adapter_sink = SinkTyped::new(|_value: SinkInput| async move {});
+        let adapter_sink = DiscardInput { safety: None };
         let adapter_form = crate::sink!(
             name: "adapter_declared",
             SinkInput => adapter_sink,
@@ -298,7 +324,7 @@ mod tests {
             Some(SinkRedeliverySafety::SafeToRepeat)
         );
 
-        let undeclared_sink = SinkTyped::new(|_value: SinkInput| async move {});
+        let undeclared_sink = DiscardInput { safety: None };
         let undeclared = crate::sink!(
             name: "undeclared",
             SinkInput => undeclared_sink
@@ -332,7 +358,7 @@ mod tests {
                 description.redelivery_safety(),
                 Some(SinkRedeliverySafety::SafeToRepeat)
             );
-            assert_eq!(description.default_method(), Some(&DeliveryMethod::Noop));
+            assert_eq!(description.default_method(), &DeliveryMethod::Noop);
         }
         descriptor.set_name("final_binding_name".to_string());
         assert_eq!(descriptor.name(), "final_binding_name");

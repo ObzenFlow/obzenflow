@@ -44,8 +44,7 @@
 //! does not cancel; no decision was reached, so those orders go to manual
 //! review. See `README.md`.
 
-use super::console;
-use super::deliveries::{ShippingDeliveryLog, ShippingHandoff};
+use super::deliveries::{RecordCancelled, RecordUnavailable, ShippingDeliveryLog, ShippingHandoff};
 use super::domain::{
     CancelledOrder, CustomerOrderPlaced, InvalidOrder, PaymentAuthorizationUnavailable,
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
@@ -59,7 +58,6 @@ use obzenflow::middleware::{
     sink_delivery_observer, CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
     Retry,
 };
-use obzenflow::stages::sinks::SinkTyped;
 use obzenflow::stages::sources;
 use std::time::Duration;
 
@@ -125,25 +123,12 @@ pub fn assemble_flow(
             .build()
             .expect("gateway resilience configuration must be valid");
 
-        let web_orders_feed = sources::finite(scripted_web_orders);
-        let store_orders_feed = sources::finite(scripted_store_orders);
+        let web_orders_feed = sources::ValuesSource::new(scripted_web_orders);
+        let store_orders_feed = sources::ValuesSource::new(scripted_store_orders);
         let validate_order = validation::ValidateOrder;
         let shipping_handoff = ShippingHandoff;
-        let record_cancelled =
-            SinkTyped::with_delivery(|cancelled: CancelledOrder, delivery| async move {
-                console::record_cancelled_order(cancelled, delivery.provenance());
-            });
-        let record_unavailable = SinkTyped::with_delivery(
-            |unavailable: PaymentAuthorizationUnavailable, delivery| async move {
-                tracing::info!(
-                    operation = "payment.authorization",
-                    handoff_kind = "manual_review",
-                    order_id = %unavailable.order_id,
-                    "authorization queued for manual review"
-                );
-                console::record_authorization_unavailable(unavailable, delivery.provenance());
-            },
-        );
+        let record_cancelled = RecordCancelled;
+        let record_unavailable = RecordUnavailable;
 
         Ok(flow! {
             name: "payment_gateway_resilience_demo",

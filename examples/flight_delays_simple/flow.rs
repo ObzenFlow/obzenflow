@@ -22,8 +22,8 @@ use obzenflow::stages::{joins, sinks};
 pub fn run_example() -> Result<()> {
     FlowApplication::builder().run_blocking(FlowDefinition::materialize(
         move |_runtime_config| {
-            let carriers_handler = sources::finite(fixtures::carriers());
-            let flights_handler = sources::finite(fixtures::flights());
+            let carriers_handler = sources::ValuesSource::new(fixtures::carriers());
+            let flights_handler = sources::ValuesSource::new(fixtures::flights());
             let validator_handler = FlightValidator;
             let calculator_handler = DelayCalculator;
             let enricher_handler =
@@ -44,25 +44,27 @@ pub fn run_example() -> Result<()> {
                     },
                 );
             let aggregator_handler = CarrierAggregator;
-            let printer_handler = sinks::table::<CarrierStatistics, _>(
-                &["status", "carrier", "avg_delay", "flights"],
-                |stats: &CarrierStatistics| {
-                    let status = if stats.average_delay < 10.0 {
-                        "🟢"
-                    } else if stats.average_delay < 30.0 {
-                        "🟡"
-                    } else {
-                        "🔴"
-                    };
+            let printer_handler =
+                sinks::ConsoleSink::<CarrierStatistics, _>::new(sinks::TableFormatter::new(
+                    &["status", "carrier", "avg_delay", "flights"],
+                    |stats: &CarrierStatistics| {
+                        let status = if stats.average_delay < 10.0 {
+                            "🟢"
+                        } else if stats.average_delay < 30.0 {
+                            "🟡"
+                        } else {
+                            "🔴"
+                        };
 
-                    vec![
-                        status.to_string(),
-                        stats.carrier.clone(),
-                        format!("{:.1} min", stats.average_delay),
-                        stats.flight_count.to_string(),
-                    ]
-                },
-            );
+                        vec![
+                            status.to_string(),
+                            stats.carrier.clone(),
+                            format!("{:.1} min", stats.average_delay),
+                            stats.flight_count.to_string(),
+                        ]
+                    },
+                ))
+                .buffered();
 
             Ok(flow! {
                 name: "flight_delays",

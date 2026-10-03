@@ -452,7 +452,8 @@ impl InlineSink for InvalidBufferedSink {
     type Input = SinkRecord;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(DeliveryMethod::Noop)
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
     async fn write(
@@ -537,7 +538,7 @@ impl InlineSink for FailingSink {
             )
             .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
         } else {
-            SinkDescription::unspecified()
+            SinkDescription::method(DeliveryMethod::Custom("declared_failure".to_string()))
                 .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
         }
     }

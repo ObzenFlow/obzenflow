@@ -31,8 +31,8 @@ fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> Str
             "{flag} refused: sink '{stage}' has no redelivery-safety classification; \
              {re_execution}, and the gate fails closed on undeclared sinks \
              (FLOWIP-120n F16, FLOWIP-120v). Bind the sink before `flow!`, then use \
-             `delivery: idempotent` on its `sink!` row, `.idempotent()` / \
-             `.non_idempotent()` while constructing a closure sink, or return a \
+             `delivery: idempotent` or `delivery: non_idempotent` on its `sink!` row, \
+             or return a \
              classified `SinkDescription` from a custom `SinkConnector` or \
              `InlineSink`. A duplicate-sensitive external write belongs behind \
              the effect boundary (effectful transform plus plain sink). Or pass \

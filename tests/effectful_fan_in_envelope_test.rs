@@ -188,7 +188,10 @@ impl InlineSink for DropSink {
     type Input = EnvelopeOutput;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
     async fn write(

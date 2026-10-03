@@ -17,7 +17,6 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::sink::{DeliveryContext, SinkTyped};
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     InfiniteSourceConnector, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
@@ -68,19 +67,14 @@ async fn source_replay_rejects_version_drift_before_selected_feed_filtering() {
         polls: Arc<AtomicUsize>,
         deliveries: Arc<AtomicUsize>,
     ) -> FlowDefinition {
-        let input = obzenflow::stages::sources::finite(
+        let input = obzenflow::stages::sources::ValuesSource::new(
             std::iter::once(VersionedInput::<VERSION> { value: 1 }).inspect(move |_| {
                 polls.fetch_add(1, Ordering::SeqCst);
             }),
         );
         FlowDefinition::materialize(move |_| {
-            let output = SinkTyped::new(move |_: VersionedInput<VERSION>| {
-                let deliveries = deliveries.clone();
-                async move {
-                    deliveries.fetch_add(1, Ordering::SeqCst);
-                }
-            })
-            .idempotent();
+            let output =
+                replay_testkit::CountDeliveries::<VersionedInput<VERSION>>::new(deliveries);
             Ok(flow! {
                 name: "versioned_source_replay",
                 journals: disk_journals(base),
@@ -258,16 +252,35 @@ impl TypedAsyncInfiniteSourceHandler for AsyncInfinite {
     }
 }
 
-fn counting<T>(
+#[derive(Clone)]
+struct CountSourceOutput<T: TypedPayload + Clone + Send + Sync + 'static> {
     count: Arc<Counters>,
     select: fn(&Counters) -> &AtomicUsize,
-) -> impl FnMut(T, DeliveryContext) -> std::future::Ready<()> + Send + Sync + Clone
-where
-    T: Clone + Send + Sync + 'static,
+    input: std::marker::PhantomData<fn() -> T>,
+}
+#[async_trait::async_trait]
+impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages::sink::InlineSink
+    for CountSourceOutput<T>
 {
-    move |_value, _delivery| {
-        select(&count).fetch_add(1, Ordering::SeqCst);
-        std::future::ready(())
+    type Input = T;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "source_output_counter".into(),
+            ),
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+    async fn write(
+        &mut self,
+        input: T,
+        context: obzenflow_runtime::stages::sink::SinkWriteContext,
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        let _ = (input, context);
+        (self.select)(&self.count).fetch_add(1, Ordering::SeqCst);
+        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+        ))
     }
 }
 
@@ -293,15 +306,16 @@ fn build_flow(journal_base: PathBuf, counters: Arc<Counters>, connectors: bool) 
         let async_finite_connector = AsyncFiniteConnector(counters.clone());
         let sync_infinite_connector = SyncInfiniteConnector(counters.clone());
         let async_infinite_connector = AsyncInfiniteConnector(counters.clone());
-        let alpha_sink =
-            SinkTyped::with_delivery(counting::<Alpha>(counters.clone(), |counters| {
-                &counters.alpha_delivered
-            }))
-            .idempotent();
-        let beta_sink = SinkTyped::with_delivery(counting::<Beta>(counters, |counters| {
-            &counters.beta_delivered
-        }))
-        .idempotent();
+        let alpha_sink = CountSourceOutput::<Alpha> {
+            count: counters.clone(),
+            select: |counters| &counters.alpha_delivered,
+            input: std::marker::PhantomData,
+        };
+        let beta_sink = CountSourceOutput::<Beta> {
+            count: counters,
+            select: |counters| &counters.beta_delivered,
+            input: std::marker::PhantomData,
+        };
 
         Ok(flow! {
             name: "typed_source_journal_parity",
@@ -554,7 +568,7 @@ async fn cold_connector_source_journal_parity() {
 async fn lazy_iterator_replay_never_consumes_live_input() {
     fn definition(base: PathBuf, polls: Arc<AtomicUsize>) -> FlowDefinition {
         let counter = polls.clone();
-        let input = obzenflow::stages::sources::finite(std::iter::from_fn(move || {
+        let input = obzenflow::stages::sources::ValuesSource::new(std::iter::from_fn(move || {
             let index = counter.fetch_add(1, Ordering::SeqCst);
             (index < 2).then(|| Alpha {
                 source: "iterator".into(),
@@ -567,7 +581,7 @@ async fn lazy_iterator_replay_never_consumes_live_input() {
             "source construction is cold"
         );
         FlowDefinition::materialize(move |_| {
-            let output = SinkTyped::new(|_: Alpha| async {}).idempotent();
+            let output = replay_testkit::Discard::<Alpha>::default();
             Ok(flow! {
                 name: "lazy_iterator_replay",
                 journals: disk_journals(base),
@@ -805,5 +819,11 @@ async fn four_connector_families_open_independent_readers() {
     b.drain().await.unwrap();
     for count in &counters.opens {
         assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+}
+
+impl<T: TypedPayload + Clone + Send + Sync + 'static> std::fmt::Debug for CountSourceOutput<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CountSourceOutput")
     }
 }

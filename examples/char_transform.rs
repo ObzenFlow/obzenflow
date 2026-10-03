@@ -112,7 +112,7 @@ fn main() -> Result<()> {
 
     FlowApplication::builder().run_blocking(FlowDefinition::materialize(
         move |_runtime_config| {
-            let characters_handler = sources::finite(build_char_inputs(&INPUT_LINES));
+            let characters_handler = sources::ValuesSource::new(build_char_inputs(&INPUT_LINES));
             let transform_text_handler = transforms::map(|input: CharInput| TextChunk {
                 text: transform_char(input.character),
             });
@@ -130,7 +130,7 @@ fn main() -> Result<()> {
                 },
             )
             .emit_on_eof();
-            let output_handler = sinks::console::<TransformedText, _>(format_output);
+            let output_handler = sinks::ConsoleSink::<TransformedText, _>::new(format_output);
 
             Ok(flow! {
                 name: "char_transform",

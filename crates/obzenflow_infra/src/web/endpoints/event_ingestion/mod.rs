@@ -977,7 +977,7 @@ mod tests {
         type Input = T;
 
         fn describe(&self) -> SinkDescription {
-            SinkDescription::unspecified()
+            SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
         }
 
         async fn write(

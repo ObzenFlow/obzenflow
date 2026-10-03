@@ -39,7 +39,7 @@ use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::DeliveryMethod;
 use obzenflow::stages::sinks::SinkRedeliverySafety;
 use obzenflow::stages::sinks::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteReport,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
 };
 use obzenflow::stages::sources::SourceError;
 use obzenflow::stages::sources::TypedFiniteSourceHandler;
@@ -203,7 +203,8 @@ impl InlineSink for CompletionSink {
     type Input = ProcessedEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(DeliveryMethod::Custom("InMemory".to_string()))
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
     async fn write(
@@ -298,26 +299,7 @@ pub(crate) fn flow_definition_with_outage_interval(
             },
         )
         .emit_on_eof();
-        let summary_sink_handler = SinkTyped::new(move |summary: EventCountState| async move {
-                    let count = summary.event_count;
-                    let errors = total_events.saturating_sub(count);
-
-                    println!();
-                    println!("=====================================");
-                    println!("📊 Business-Level Event Count (FLOWIP-080j):");
-                    println!("   Successfully processed: {count} events");
-                    println!(
-                        "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)"
-                    );
-                    println!("=====================================");
-                    println!();
-                    println!("💡 Key Improvement:");
-                    println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
-                    println!("   Type-safe accumulation with zero ChainEvent manipulation!");
-                    println!();
-                    println!("=====================================");
-                })
-                .idempotent();
+        let summary_sink_handler = PrintSummary { total_events };
         let completion_sink_handler = CompletionSink::new();
 
         Ok(flow! {
@@ -352,4 +334,49 @@ pub(crate) fn flow_definition_with_outage_interval(
             }
         })
     })
+}
+
+#[derive(Clone, Debug)]
+struct PrintSummary {
+    total_events: usize,
+}
+
+#[async_trait::async_trait]
+impl obzenflow::stages::sinks::InlineSink for PrintSummary {
+    type Input = EventCountState;
+
+    fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
+        obzenflow::stages::sinks::SinkDescription::method(
+            obzenflow::stages::sinks::DeliveryMethod::ConsoleStdout,
+        )
+        .with_redelivery_safety(obzenflow::stages::sinks::SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(
+        &mut self,
+        summary: EventCountState,
+        _context: obzenflow::stages::sinks::SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        let total_events = self.total_events;
+        let count = summary.event_count;
+        let errors = total_events.saturating_sub(count);
+
+        println!();
+        println!("=====================================");
+        println!("📊 Business-Level Event Count (FLOWIP-080j):");
+        println!("   Successfully processed: {count} events");
+        println!(
+                        "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)"
+                    );
+        println!("=====================================");
+        println!();
+        println!("💡 Key Improvement:");
+        println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
+        println!("   Type-safe accumulation with zero ChainEvent manipulation!");
+        println!();
+        println!("=====================================");
+        Ok(obzenflow::stages::sinks::SinkWriteReport::terminal(
+            obzenflow::stages::sinks::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
 }

@@ -144,7 +144,7 @@ impl InlineSink for NullSink {
     type Input = IngestSummary;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
     async fn write(

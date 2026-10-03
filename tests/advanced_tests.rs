@@ -116,7 +116,7 @@ async fn test_dsl_pipeline() -> Result<()> {
         type Input = AdvancedTestEvent;
 
         fn describe(&self) -> SinkDescription {
-            SinkDescription::unspecified()
+            SinkDescription::method(DeliveryMethod::Custom("Sum".to_string()))
         }
 
         async fn write(

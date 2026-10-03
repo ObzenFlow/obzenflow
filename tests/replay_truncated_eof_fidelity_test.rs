@@ -23,7 +23,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -140,21 +139,6 @@ impl TypedStatefulHandler for SumHandler {
     }
 }
 
-fn counting<T>(
-    counter: Arc<AtomicUsize>,
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
-{
-    move |_payload: T, _delivery| {
-        counter.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(())
-    }
-}
-
 /// EOF kinds present in a stage journal, in append order.
 async fn eof_kinds(run_dir: &Path, stage_key: &str) -> Vec<EofKind> {
     kinds_of(&replay_testkit::read_stage_envelopes_appended(run_dir, stage_key).await)
@@ -253,7 +237,7 @@ macro_rules! linear_flow {
         FlowDefinition::materialize(move |_runtime_config| {
             let ticks = $source;
             let summer = SumHandler::new();
-            let out = SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent();
+            let out = replay_testkit::CountDeliveries::<SumResult>::new($delivered);
 
             Ok(flow! {
                 name: "truncated_fidelity_linear",
@@ -507,7 +491,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
                 let fast = Ticks::sealing(3);
                 let slow = Ticks::stalling(4);
                 let summer = SumHandler::new();
-                let out = SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent();
+                let out = replay_testkit::CountDeliveries::<SumResult>::new($delivered);
 
                 Ok(flow! {
                     name: "truncated_fidelity_fan_in",
@@ -696,7 +680,7 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
                 let seeds = Ticks::stalling(2);
                 let entry = CycleEntry;
                 let iter = CycleIter;
-                let out = SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent();
+                let out = replay_testkit::CountDeliveries::<Tick>::new($delivered);
 
                 Ok(flow! {
                     name: "truncated_fidelity_cycle",

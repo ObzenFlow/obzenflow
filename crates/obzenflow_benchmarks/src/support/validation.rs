@@ -18,7 +18,10 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow_runtime::stages::sink::{
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    SinkWriteResult,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -59,10 +62,7 @@ impl TypedFiniteSourceHandler for Ticks {
 fn definition(base: PathBuf, count: u64) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
         let input = Ticks { next: 0, count };
-        let output = SinkTyped::with_delivery(
-            |_: Tick, _: obzenflow_runtime::stages::sink::DeliveryContext| std::future::ready(()),
-        )
-        .idempotent();
+        let output = DiscardTicks;
         Ok(flow! {
             name: "validation_benchmark",
             journals: disk_journals(base),
@@ -334,5 +334,23 @@ impl ObserverJournals {
             inputs,
             _directory: directory,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DiscardTicks;
+#[async_trait::async_trait]
+impl InlineSink for DiscardTicks {
+    type Input = Tick;
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+    async fn write(&mut self, _input: Tick, _context: SinkWriteContext) -> SinkWriteResult {
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success(None).with_items(1),
+        ))
     }
 }

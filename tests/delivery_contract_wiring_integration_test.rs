@@ -164,7 +164,7 @@ impl InlineSink for CountingSink {
     type Input = DeliveryTestEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
     async fn write(
@@ -216,7 +216,7 @@ where
     type Input = T;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("BufferedCount".to_string()))
     }
 
     async fn write(

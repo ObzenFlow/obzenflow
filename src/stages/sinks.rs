@@ -7,6 +7,24 @@
 //! Sinks are the terminal stages of a pipeline. This module re-exports the
 //! built-in destinations and the contracts for implementing application sinks.
 //!
+//! ## Construction catalogue
+//!
+//! | Integration | Entry point |
+//! |---|---|
+//! | Console | [`ConsoleSink::new`] with a pure formatter |
+//! | Buffered console table | `ConsoleSink::new(TableFormatter::new(columns, extractor)).buffered()` |
+//! | CSV or TSV | [`CsvSink::builder`] |
+//! | PostgreSQL | `postgres::PostgresSink::builder` (`postgres` feature) |
+//!
+//! TSV is a CSV builder setting, `.tab_delimited()`. Table buffering consumes
+//! console configuration and moves its formatter and stdout/stderr selection
+//! into isolated writers; [`TableConsoleSink::batch_limits`] configures size
+//! limits. There is no timed flush guarantee.
+//!
+//! For custom execution, implement [`InlineSink`] or [`SinkConnector`] and
+//! [`SinkWriter`]. Every connector's [`SinkDescription`] must declare a
+//! [`DeliveryMethod`]; per-attempt outcomes inherit it unless overridden.
+//!
 //! ## Console sinks
 //!
 //! [`ConsoleSink`] prints events to stdout using a pluggable [`Formatter`].
@@ -84,9 +102,9 @@
 pub use obzenflow_adapters::sinks::csv::CsvWriter;
 /// Console and CSV sinks, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{
-    console, debug, json, json_pretty, table, ConsoleSink, CsvProjection, CsvSink, CsvSinkBuilder,
-    DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
-    SnapshotTableFormatter, TableFormatter,
+    ConsoleSink, CsvProjection, CsvSink, CsvSinkBuilder, DebugFormatter, Formatter, JsonFormatter,
+    JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter, TableConsoleSink,
+    TableFormatter,
 };
 
 pub use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
@@ -97,9 +115,9 @@ pub use obzenflow_runtime::stages::sink::{
     SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
     SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
     SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
-    SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteFailure,
-    SinkWriteFailureDisposition, SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter,
-    SinkWriterInitContext, SinkWriterLifecycleReport,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteFailureDisposition,
+    SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
+    SinkWriterLifecycleReport,
 };
 
 /// Feature-gated PostgreSQL sink and its typed parameter-binding surface.

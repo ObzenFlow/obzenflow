@@ -107,7 +107,11 @@ fn placeholder_stateful_emits_nothing_and_drains() {
 #[tokio::test]
 async fn placeholder_sink_acks_and_flushes_safely() {
     let handler = PlaceholderSink::<PlaceholderInput>::new(None);
-    let mut handler = SinkWriterAdapter::new(handler, StageId::new());
+    let mut handler = SinkWriterAdapter::new(
+        handler,
+        StageId::new(),
+        obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+    );
     let event = PlaceholderInput.to_event(WriterId::from(StageId::new()));
 
     let report = SinkHandler::consume_committed_report(

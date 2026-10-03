@@ -660,11 +660,7 @@ where
 {
     fn new(writer: W, stage_id: StageId, description: &SinkDescription) -> Self {
         Self {
-            adapter: SinkWriterAdapter::with_default_method(
-                writer,
-                stage_id,
-                description.default_method().cloned(),
-            ),
+            adapter: SinkWriterAdapter::new(writer, stage_id, description.default_method().clone()),
             writer_id: WriterId::from(stage_id),
         }
     }

@@ -218,7 +218,7 @@ impl InlineSink for ShippingHandoff {
     type Input = ShippingReady;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("shipping-handoff".to_string()))
     }
 
     async fn write(

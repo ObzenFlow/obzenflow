@@ -67,7 +67,7 @@ fn guarded_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         materialisations.fetch_add(1, Ordering::SeqCst);
-        let inputs = sources::finite([Input(1)]);
+        let inputs = sources::ValuesSource::new([Input(1)]);
         let output = CountingConnector(opens);
         Ok(flow! {
             name: "archive_manifest_epoch_gate",

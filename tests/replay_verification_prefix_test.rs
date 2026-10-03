@@ -13,13 +13,14 @@
 //! also pins the killed-run tail shape (torn trailing writes are skipped at
 //! the framed-record layer) that the FLOWIP flagged for fixture confirmation.
 
+mod replay_testkit;
+
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -65,26 +66,11 @@ impl TypedFiniteSourceHandler for StallingTicks {
     }
 }
 
-fn counting<T>(
-    counter: Arc<AtomicUsize>,
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
-{
-    move |_payload: T, _delivery| {
-        counter.fetch_add(1, Ordering::SeqCst);
-        std::future::ready(())
-    }
-}
-
 macro_rules! prefix_flow {
     ($journal_base:expr, $delivered:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
             let stalling_ticks = StallingTicks::new();
-            let counting_sink = SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent();
+            let counting_sink = replay_testkit::CountDeliveries::<Tick>::new($delivered);
 
             Ok(flow! {
                 name: "replay_verification_prefix",

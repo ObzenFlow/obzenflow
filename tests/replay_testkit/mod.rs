@@ -277,3 +277,97 @@ pub async fn assert_prefix_stable(
     };
     prefix.assert_equal(&truncated);
 }
+
+/// A named no-op destination for replay fixtures that only inspect journals.
+pub struct Discard<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Default for Discard<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+impl<T> Clone for Discard<T> {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: obzenflow_core::TypedPayload + Send + Sync + 'static>
+    obzenflow_runtime::stages::sink::InlineSink for Discard<T>
+{
+    type Input = T;
+
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(
+        &mut self,
+        _input: T,
+        _context: obzenflow_runtime::stages::sink::SinkWriteContext,
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+/// Count physical deliveries, including deliveries admitted during replay.
+pub struct CountDeliveries<T> {
+    counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    input: std::marker::PhantomData<fn() -> T>,
+}
+impl<T> CountDeliveries<T> {
+    pub fn new(counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        Self {
+            counter,
+            input: std::marker::PhantomData,
+        }
+    }
+}
+impl<T> Clone for CountDeliveries<T> {
+    fn clone(&self) -> Self {
+        Self::new(self.counter.clone())
+    }
+}
+#[async_trait::async_trait]
+impl<T: obzenflow_core::TypedPayload + Send + Sync + 'static>
+    obzenflow_runtime::stages::sink::InlineSink for CountDeliveries<T>
+{
+    type Input = T;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "delivery_counter".into(),
+            ),
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+    async fn write(
+        &mut self,
+        _input: T,
+        _context: obzenflow_runtime::stages::sink::SinkWriteContext,
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+impl<T> std::fmt::Debug for Discard<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Discard")
+    }
+}
+
+impl<T> std::fmt::Debug for CountDeliveries<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CountDeliveries")
+    }
+}

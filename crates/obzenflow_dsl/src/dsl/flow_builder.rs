@@ -1723,7 +1723,6 @@ mod configured_sink_tests {
     use obzenflow_runtime::runtime_config::{
         CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate, SINK_HANDLER_KEY,
     };
-    use obzenflow_runtime::stages::sink::SinkTyped;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1734,8 +1733,52 @@ mod configured_sink_tests {
     }
 
     fn pending_stage() -> Box<dyn StageDescriptor> {
-        let console_sink = SinkTyped::new(|_output: Output| async move {});
-        let postgres_sink = SinkTyped::with_delivery(|_output: Output, _delivery| async move {});
+        #[derive(Clone, Debug)]
+        struct DiscardConsoleSink {}
+        #[async_trait::async_trait]
+        impl obzenflow_runtime::stages::sink::InlineSink for DiscardConsoleSink {
+            type Input = Output;
+            fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+                obzenflow_runtime::stages::sink::SinkDescription::method(
+                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+                )
+            }
+            async fn write(
+                &mut self,
+                input: Output,
+                context: obzenflow_runtime::stages::sink::SinkWriteContext,
+            ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+                let _ = (input, context);
+                Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+                    obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
+                        .with_items(1),
+                ))
+            }
+        }
+        let console_sink = DiscardConsoleSink {};
+        #[derive(Clone, Debug)]
+        struct DiscardPostgresSink {}
+        #[async_trait::async_trait]
+        impl obzenflow_runtime::stages::sink::InlineSink for DiscardPostgresSink {
+            type Input = Output;
+            fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+                obzenflow_runtime::stages::sink::SinkDescription::method(
+                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+                )
+            }
+            async fn write(
+                &mut self,
+                input: Output,
+                context: obzenflow_runtime::stages::sink::SinkWriteContext,
+            ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+                let _ = (input, context);
+                Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+                    obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
+                        .with_items(1),
+                ))
+            }
+        }
+        let postgres_sink = DiscardPostgresSink {};
         let mut pending = crate::sink!(
             Output => handler_set!(console_sink, postgres_sink)
         )

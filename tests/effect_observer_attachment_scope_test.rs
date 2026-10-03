@@ -156,7 +156,9 @@ impl InlineSink for CountingSink {
     type Input = EffectFact;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom(
+            "effect-observer-scope-test".to_string(),
+        ))
     }
 
     async fn write(

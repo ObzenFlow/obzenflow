@@ -97,7 +97,7 @@ impl InlineSink for CollectSink {
     type Input = AsyncTestEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
     async fn write(

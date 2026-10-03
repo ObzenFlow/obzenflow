@@ -10,11 +10,12 @@
 //! uncertified verdicts are exercised in-process by the other verification
 //! suites; the contract mapping itself is unit-tested in `verdict`.)
 
+mod replay_testkit;
+
 use obzenflow::application::FlowApplication;
 use obzenflow::flow::{flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::{DeliveryContext, SinkTyped};
 use obzenflow::stages::sources::{SourceError, TypedFiniteSourceHandler};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -119,17 +120,10 @@ impl TypedFiniteSourceHandler for Ticks {
     }
 }
 
-fn discard<T>() -> impl FnMut(T, DeliveryContext) -> std::future::Ready<()> + Send + Sync + Clone
-where
-    T: Clone + Send + Sync + 'static,
-{
-    move |_payload: T, _delivery| std::future::ready(())
-}
-
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let ticks_handler = Ticks::new();
-        let out_handler = SinkTyped::with_delivery(discard::<Tick>()).idempotent();
+        let out_handler = replay_testkit::Discard::<Tick>::default();
 
         Ok(flow! {
             name: "cli_verify",
@@ -1848,11 +1842,25 @@ mod hosted {
         let root = PathBuf::from(std::env::var_os(HOST_ROOT).expect("parent fixture root"));
         let port = std::env::var(HOST_PORT).unwrap();
         let definition = FlowDefinition::materialize(move |_| {
-            let source = obzenflow::stages::sources::async_finite(|index| async move {
-                tokio::time::sleep(Duration::from_millis(30)).await;
-                Some(vec![Tick { n: index as u64 }])
-            });
-            let sink = SinkTyped::with_delivery(discard::<Tick>()).idempotent();
+            #[derive(Debug)]
+            struct PacedTicks {
+                emitted: u64,
+            }
+            #[async_trait::async_trait]
+            impl obzenflow::stages::sources::TypedAsyncFiniteSourceHandler for PacedTicks {
+                type Output = Tick;
+                async fn next(
+                    &mut self,
+                ) -> Result<Option<Vec<Tick>>, obzenflow::stages::sources::SourceError>
+                {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    let tick = Tick { n: self.emitted };
+                    self.emitted += 1;
+                    Ok(Some(vec![tick]))
+                }
+            }
+            let source = PacedTicks { emitted: 0 };
+            let sink = replay_testkit::Discard::<Tick>::default();
             Ok(flow! {
                 name: "cli_process_lifetime", journals: disk_journals(root),
                 stages: {

@@ -95,7 +95,7 @@ impl InlineSink for TimestampedSink {
     type Input = BenchEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
     async fn write(

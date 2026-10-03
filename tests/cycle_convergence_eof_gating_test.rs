@@ -276,7 +276,7 @@ impl InlineSink for DoneCounterSink {
     type Input = SeedEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
     async fn write(

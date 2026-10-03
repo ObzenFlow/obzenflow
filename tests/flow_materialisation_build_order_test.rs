@@ -102,8 +102,8 @@ fn materialised_failure_probe(
             ));
         }
 
-        let input = sources::finite(Vec::<ProbeEvent>::new());
-        let output = sinks::debug::<ProbeEvent>();
+        let input = sources::ValuesSource::new(Vec::<ProbeEvent>::new());
+        let output = sinks::ConsoleSink::<ProbeEvent, _>::new(sinks::DebugFormatter);
 
         Ok(flow! {
             name: "flowip_133b_build_order_probe",

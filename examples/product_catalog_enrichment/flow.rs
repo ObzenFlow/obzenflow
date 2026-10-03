@@ -6,7 +6,6 @@ use super::{console, domain::*, handlers, sources::*};
 use obzenflow::flow::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::RateLimiterBuilder;
-use obzenflow::stages::sinks::SinkTyped;
 use obzenflow::stages::{joins, stateful};
 use std::path::PathBuf;
 
@@ -48,21 +47,13 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
         let promotions_handler = promotions_source();
         let payment_methods_handler = payment_methods_source();
         let orders_handler = orders_source();
-        let per_order_printer_handler =
-            SinkTyped::new(|order: EnrichedOrderWithPromo| async move {
-                console::print_order(&order);
-            })
-            .idempotent();
+        let per_order_printer_handler = PrintOrder;
         let catalog_stats_handler = stateful::reduce(
             CatalogAnalyticsSummary::default(),
             handlers::summarise_order,
         )
         .emit_on_eof();
-        let summary_printer_handler =
-            SinkTyped::new(|summary: CatalogAnalyticsSummary| async move {
-                console::print_summary(&summary);
-            })
-            .idempotent();
+        let summary_printer_handler = PrintSummary;
 
         Ok(flow! {
             name: "product_catalog_enrichment",
@@ -126,4 +117,56 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
             }
         })
     })
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PrintOrder;
+
+#[async_trait::async_trait]
+impl obzenflow::stages::sinks::InlineSink for PrintOrder {
+    type Input = EnrichedOrderWithPromo;
+
+    fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
+        obzenflow::stages::sinks::SinkDescription::method(
+            obzenflow::stages::sinks::DeliveryMethod::ConsoleStdout,
+        )
+        .with_redelivery_safety(obzenflow::stages::sinks::SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(
+        &mut self,
+        order: EnrichedOrderWithPromo,
+        _context: obzenflow::stages::sinks::SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        console::print_order(&order);
+        Ok(obzenflow::stages::sinks::SinkWriteReport::terminal(
+            obzenflow::stages::sinks::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PrintSummary;
+
+#[async_trait::async_trait]
+impl obzenflow::stages::sinks::InlineSink for PrintSummary {
+    type Input = CatalogAnalyticsSummary;
+
+    fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
+        obzenflow::stages::sinks::SinkDescription::method(
+            obzenflow::stages::sinks::DeliveryMethod::ConsoleStdout,
+        )
+        .with_redelivery_safety(obzenflow::stages::sinks::SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(
+        &mut self,
+        summary: CatalogAnalyticsSummary,
+        _context: obzenflow::stages::sinks::SinkWriteContext,
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
+        console::print_summary(&summary);
+        Ok(obzenflow::stages::sinks::SinkWriteReport::terminal(
+            obzenflow::stages::sinks::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
 }

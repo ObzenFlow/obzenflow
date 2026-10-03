@@ -56,7 +56,7 @@ impl InlineSink for NoopSink {
     type Input = PollingEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("source-polling-proof".to_string()))
     }
 
     async fn write(

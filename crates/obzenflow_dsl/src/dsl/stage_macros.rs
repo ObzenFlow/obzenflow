@@ -2812,7 +2812,7 @@ macro_rules! __obzenflow_sink_typed {
     // ── exact input, real handler (facade call anchoring) ──
     //
     // Like joins, sink facade helpers often need the contract type injected to avoid
-    // turbofish/annotations at the call site (e.g., `sinks::json()` and `sinks::table(...)`).
+    // turbofish/annotations at the call site (e.g., `sinks::ConsoleSink::new(sinks::JsonFormatter)` and `sinks::ConsoleSink::new(sinks::TableFormatter::new(...)).buffered()`).
 
     // ── exact input, real handler ──
     //
@@ -2996,8 +2996,8 @@ macro_rules! handler_set {
 ///
 /// Canonical grammar: `InputType => handler_path`, optional `with [...]`,
 /// optional `delivery: idempotent | non_idempotent`, then optional
-/// `observers: [ ... ]`. Construct closure-tier `SinkTyped`
-/// adapters and sink facades in ordinary Rust inside the materialiser, then
+/// `observers: [ ... ]`. Configure a built-in or named trait implementation
+/// in ordinary Rust inside the materialiser, then
 /// pass the resulting binding by path.
 ///
 /// The config-selected form composes the direct surface with a syntax-only
@@ -3011,7 +3011,7 @@ macro_rules! handler_set {
 /// ```compile_fail
 /// use obzenflow_core::TypedPayload;
 /// use obzenflow_dsl::sink;
-/// use obzenflow_runtime::stages::sink::SinkTyped;
+/// use obzenflow_adapters::sinks::{ConsoleSink, JsonFormatter};
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3025,8 +3025,8 @@ macro_rules! handler_set {
 ///     const EVENT_TYPE: &'static str = "docs.handler-set.wrong";
 /// }
 ///
-/// let output_sink = SinkTyped::new(|_value: Output| async move {});
-/// let wrong_sink = SinkTyped::new(|_value: Wrong| async move {});
+/// let output_sink = ConsoleSink::<Output, _>::new(JsonFormatter);
+/// let wrong_sink = ConsoleSink::<Wrong, _>::new(JsonFormatter);
 /// let _ = sink!(Output => handler_set!(output_sink, wrong_sink));
 /// ```
 /// Duplicate binding names are also a compile error rather than an ambiguous
@@ -3035,7 +3035,7 @@ macro_rules! handler_set {
 /// ```compile_fail
 /// use obzenflow_core::TypedPayload;
 /// use obzenflow_dsl::sink;
-/// use obzenflow_runtime::stages::sink::SinkTyped;
+/// use obzenflow_adapters::sinks::{ConsoleSink, JsonFormatter};
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3044,7 +3044,7 @@ macro_rules! handler_set {
 ///     const EVENT_TYPE: &'static str = "docs.handler-set.duplicate";
 /// }
 ///
-/// let output_sink = SinkTyped::new(|_value: Output| async move {});
+/// let output_sink = ConsoleSink::<Output, _>::new(JsonFormatter);
 /// let _ = sink!(Output => handler_set!(output_sink, output_sink));
 /// ```
 /// The earlier uncomposed spelling receives a migration diagnostic:
@@ -3136,31 +3136,31 @@ macro_rules! sink {
     (|$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(Event => output);"
+            "let output = MySink::new(...); events = sink!(Event => output);"
         )
     };
     (move |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(Event => output);"
+            "let output = MySink::new(...); events = sink!(Event => output);"
         )
     };
     ($in:ty => |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(Event => output);"
+            "let output = MySink::new(...); events = sink!(Event => output);"
         )
     };
     ($in:ty => move |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(Event => output);"
+            "let output = MySink::new(...); events = sink!(Event => output);"
         )
     };
     ($in:ty => sinks::$factory:ident($($args:tt)*) $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = sinks::json::<Event>(); events = sink!(Event => output);"
+            "let output = sinks::ConsoleSink::<Event, _>::new(sinks::JsonFormatter); events = sink!(Event => output);"
         )
     };
     ($in:ty => $handler_head:ident $(:: $handler_tail:ident)*
@@ -3181,31 +3181,31 @@ macro_rules! sink {
     (name: $name:literal, |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
+            "let output = MySink::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, move |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
+            "let output = MySink::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, $in:ty => |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
+            "let output = MySink::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, $in:ty => move |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
+            "let output = MySink::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, $in:ty => sinks::$factory:ident($($args:tt)*) $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = sinks::json::<Event>(); events = sink!(name: \"events\", Event => output);"
+            "let output = sinks::ConsoleSink::<Event, _>::new(sinks::JsonFormatter); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, $in:ty => $handler_head:ident $(:: $handler_tail:ident)*
@@ -3226,13 +3226,13 @@ macro_rules! sink {
     ($in:ty => $handler:expr, delivery: idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(Event => output);"
+            "let output = MySink::new(...); events = sink!(Event => output);"
         )
     };
     ($in:ty => $handler:expr, delivery: non_idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(Event => output);"
+            "let output = MySink::new(...); events = sink!(Event => output);"
         )
     };
     ($in:ty => $handler:expr, delivery: $other:ident $(, observers: [$($mw:expr),* $(,)?])?) => {
@@ -3241,13 +3241,13 @@ macro_rules! sink {
     (name: $name:literal, $in:ty => $handler:expr, delivery: idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
+            "let output = MySink::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, $in:ty => $handler:expr, delivery: non_idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
+            "let output = MySink::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, $in:ty => $handler:expr, delivery: $other:ident $(, observers: [$($mw:expr),* $(,)?])?) => {
@@ -3259,7 +3259,7 @@ macro_rules! sink {
     ) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(Event => output);"
+            "let output = MySink::new(...); events = sink!(Event => output);"
         )
     };
     (name: $name:literal, $in:ty => $handler:expr
@@ -3268,7 +3268,7 @@ macro_rules! sink {
     ) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
-            "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
+            "let output = MySink::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
 }

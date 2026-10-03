@@ -153,7 +153,7 @@ impl InlineSink for NoopSink {
     type Input = EnrichedRecord;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
     async fn write(

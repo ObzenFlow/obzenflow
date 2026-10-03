@@ -142,7 +142,7 @@ impl InlineSink for CountingSink {
     type Input = BenchEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
     async fn write(

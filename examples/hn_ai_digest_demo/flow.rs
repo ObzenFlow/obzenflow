@@ -26,9 +26,7 @@ use obzenflow::journal::disk_journals;
 use obzenflow::middleware::ai_resilience;
 use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::postgres::{
-    PostgresBind, PostgresBindings, PostgresSink, PostgresSinkConfig,
-};
+use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
 use obzenflow::stages::sinks::SinkRedeliverySafety;
 use obzenflow::stages::sources::{http_pull_config, HttpPullSource};
 use obzenflow::stages::{sinks, stateful, transforms};
@@ -112,22 +110,22 @@ impl PostgresBind for HnDigestPostgresBinder {
     }
 }
 
-fn build_digest_postgres_config(
+fn build_digest_postgres_sink(
     config: HnDigestPostgresConfig,
-) -> Result<PostgresSinkConfig<HnDigestPostgresBinder>> {
+) -> Result<PostgresSink<HnDigestPostgresBinder>> {
     Ok(PostgresSink::builder(HnDigestPostgresBinder)
         .connection(config.connection)
         .insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?
         .batch_size(1)?
         .redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)
-        .build_config()?)
+        .build()?)
 }
 
 #[cfg(test)]
 pub(crate) fn describe_digest_postgres_sink(
     config: HnDigestPostgresConfig,
 ) -> Result<obzenflow::stages::sinks::SinkDescription> {
-    let sink = sinks::postgres(build_digest_postgres_config(config)?);
+    let sink = build_digest_postgres_sink(config)?;
     Ok(obzenflow::stages::sinks::SinkConnector::describe(&sink))
 }
 
@@ -478,15 +476,14 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?;
         let source_limiter = RateLimiterBuilder::new(source_rate_limit).build();
-        let console_sink = sinks::console(format_digest_summary_for_console);
-        let postgres_config = HnDigestPostgresConfig::from_env()
-            .and_then(build_digest_postgres_config)
+        let console_sink = sinks::ConsoleSink::new(format_digest_summary_for_console);
+        let postgres_sink = HnDigestPostgresConfig::from_env()
+            .and_then(build_digest_postgres_sink)
             .map_err(|error| {
                 FlowBuildError::StageResourcesFailed(format!(
                     "HN digest PostgreSQL sink configuration failed: {error}"
                 ))
             })?;
-        let postgres_sink = sinks::postgres(postgres_config);
 
         Ok(flow! {
             name: "hn_ai_digest_demo",

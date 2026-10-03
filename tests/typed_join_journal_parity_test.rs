@@ -22,7 +22,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -288,7 +287,7 @@ fn build_flow(
         let joined = ExactJoin {
             calls: join_calls.clone(),
         };
-        let output = SinkTyped::new(|_fact: JoinedFact| async move {}).idempotent();
+        let output = replay_testkit::Discard::<JoinedFact>::default();
 
         Ok(flow! {
             name: "typed_join_journal_parity",
@@ -676,7 +675,7 @@ async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpr
         let stream_a = StreamSource::new(Arc::new(AtomicUsize::new(0)));
         let stream_b = StreamSource::new(Arc::new(AtomicUsize::new(0)));
         let joined = ExactJoin { calls: Arc::new(AtomicUsize::new(0)) };
-        let output = SinkTyped::new(|_: JoinedFact| async {}).idempotent();
+        let output = replay_testkit::Discard::<JoinedFact>::default();
         Ok(flow! {
             name: "explicit_multi_stream_join",
             journals: disk_journals(journal_base),
@@ -811,7 +810,7 @@ async fn mixed_join_feeds_filter_both_roles_with_backpressure_and_replay() {
             };
             let stream_b = stream_a.clone();
             let joined = ExactJoin { calls: join_calls };
-            let output = SinkTyped::new(|_: JoinedFact| async {}).idempotent();
+            let output = replay_testkit::Discard::<JoinedFact>::default();
             Ok(flow! {
                 name: "mixed_join_feeds",
                 journals: disk_journals(journal_base),

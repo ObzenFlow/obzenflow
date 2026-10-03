@@ -133,7 +133,7 @@ impl InlineSink for CollectSink {
     type Input = AsyncInfiniteEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
     async fn write(
@@ -275,7 +275,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = obzenflow::stages::sources::from_receiver(rx);
+        let source = obzenflow::stages::sources::ChannelSource::new(rx);
         let sink = CollectSink::new(events_for_flow, event_ready_for_flow);
 
         Ok(flow! {

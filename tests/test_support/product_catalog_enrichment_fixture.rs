@@ -5,13 +5,13 @@
 //! Instrumented catalog flow for rejection and replay tests.
 //! Business transformations, domain types and input fixtures come from the demo.
 
-use crate::product_catalog_enrichment::{console, domain::*, handlers, sources::*};
+use crate::product_catalog_enrichment::flow::{PrintOrder, PrintSummary};
+use crate::product_catalog_enrichment::{domain::*, handlers, sources::*};
 use anyhow::Result;
 use obzenflow::stages::{joins, stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_dsl::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::sink::SinkTyped;
 
 pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -66,21 +66,13 @@ pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> F
             probe.source(payment_methods_handler),
             probe.source(orders_handler),
         );
-        let per_order_printer_handler =
-            SinkTyped::new(|order: EnrichedOrderWithPromo| async move {
-                console::print_order(&order);
-            })
-            .idempotent();
+        let per_order_printer_handler = PrintOrder;
         let catalog_stats_handler = stateful::reduce(
             CatalogAnalyticsSummary::default(),
             handlers::summarise_order,
         )
         .emit_on_eof();
-        let summary_printer_handler =
-            SinkTyped::new(|summary: CatalogAnalyticsSummary| async move {
-                console::print_summary(&summary);
-            })
-            .idempotent();
+        let summary_printer_handler = PrintSummary;
 
         // The proof's rejected control changes only the enrichment input below.
         macro_rules! catalog_flow {

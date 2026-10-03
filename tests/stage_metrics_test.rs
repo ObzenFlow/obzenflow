@@ -109,7 +109,7 @@ impl InlineSink for CollectorSink {
     type Input = MetricEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
     async fn write(

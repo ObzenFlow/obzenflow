@@ -22,7 +22,6 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
-use obzenflow_runtime::stages::sink::SinkTyped;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -243,15 +242,31 @@ fn canonical_recovery() -> Retry {
         .attempt_start_window(Duration::from_secs(30))
 }
 
-fn discard<T>(
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
+#[derive(Clone)]
+struct Discard<T: obzenflow_core::TypedPayload + Clone + Send + Sync + 'static> {
+    input: std::marker::PhantomData<fn() -> T>,
+}
+#[async_trait::async_trait]
+impl<T: obzenflow_core::TypedPayload + Clone + Send + Sync + 'static>
+    obzenflow_runtime::stages::sink::InlineSink for Discard<T>
 {
-    move |_payload: T, _delivery| std::future::ready(())
+    type Input = T;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+    async fn write(
+        &mut self,
+        input: T,
+        context: obzenflow_runtime::stages::sink::SinkWriteContext,
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        let _ = (input, context);
+        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
 }
 
 /// Build the focused, configuration-faithful integration-test flow.
@@ -285,12 +300,14 @@ pub fn build_flow(
             .build()
             .expect("gateway resilience witness configuration must be valid");
 
-        let order_feed = sources::finite(orders);
+        let order_feed = sources::ValuesSource::new(orders);
         let authorize_payment = ScriptedGatewayTransform { gateway };
-        let record_authorized =
-            SinkTyped::with_delivery(discard::<PaymentAuthorized>()).idempotent();
-        let record_unavailable =
-            SinkTyped::with_delivery(discard::<PaymentAuthorizationUnavailable>()).idempotent();
+        let record_authorized = Discard::<PaymentAuthorized> {
+            input: std::marker::PhantomData,
+        };
+        let record_unavailable = Discard::<PaymentAuthorizationUnavailable> {
+            input: std::marker::PhantomData,
+        };
 
         Ok(flow! {
             name: "payment_gateway_resilience_demo",
@@ -348,4 +365,12 @@ pub fn open_rejection_orders() -> Vec<ValidatedOrder> {
 
 pub fn half_open_recovery_orders() -> Vec<ValidatedOrder> {
     orders("half-open-witness", 7)
+}
+
+impl<T: obzenflow_core::TypedPayload + Clone + Send + Sync + 'static> std::fmt::Debug
+    for Discard<T>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Discard")
+    }
 }

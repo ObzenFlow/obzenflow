@@ -12,6 +12,17 @@ use syn::visit::Visit;
 
 const RETIRED_IDENTIFIERS: &[&str] = &[
     "SinkTyping",
+    "SinkTyped",
+    "ClosureSinkWriter",
+    "PostgresSinkConfig",
+    "FiniteSourceTyped",
+    "FallibleFiniteSourceTyped",
+    "AsyncFiniteSourceTyped",
+    "FallibleAsyncFiniteSourceTyped",
+    "InfiniteSourceTyped",
+    "FallibleInfiniteSourceTyped",
+    "AsyncInfiniteSourceTyped",
+    "FallibleAsyncInfiniteSourceTyped",
     "SinkTypedWithDelivery",
     "FallibleSinkTyped",
     "allow_skip",

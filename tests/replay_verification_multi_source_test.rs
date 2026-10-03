@@ -16,6 +16,8 @@
 //! orders by admission sequence, reproducible under replay but
 //! arrival-dependent across independent live runs).
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
@@ -29,7 +31,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -170,24 +171,13 @@ impl EffectfulTransformHandler for ChargeOrders {
     }
 }
 
-fn discard<T>(
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
-{
-    move |_payload: T, _delivery| std::future::ready(())
-}
-
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let web_orders_handler = Channel::new(vec![1, 3, 5]);
         let store_orders_handler = Channel::new(vec![2, 4, 6]);
         let intake_handler = Intake::new();
         let charge_handler = ChargeOrders { calls };
-        let receipts_handler = SinkTyped::with_delivery(discard::<Charged>()).idempotent();
+        let receipts_handler = replay_testkit::Discard::<Charged>::default();
 
         Ok(flow! {
             name: "replay_verification_multi_source",

@@ -13,7 +13,6 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -152,19 +151,7 @@ fn build_flow(
             count,
             progress: progress.clone(),
         };
-        let out_handler = SinkTyped::with_delivery(move |_: Tick, _delivery| {
-            let progress = progress.clone();
-            let gate = gate.clone();
-            async move {
-                progress.sink_entered.fetch_add(1, Ordering::Relaxed);
-                if let Some(gate) = gate {
-                    progress.blocked.notify_one();
-                    gate.acquire().await.unwrap().forget();
-                }
-                progress.sink_returned.fetch_add(1, Ordering::Relaxed);
-            }
-        })
-        .idempotent();
+        let out_handler = GatedDelivery { progress, gate };
 
         Ok(flow! {
             name: "replay_verification_scale",
@@ -344,4 +331,43 @@ async fn blocked_sink_reports_live_phase_and_progress_before_recovery() {
         .expect("releasing the gate must resume the same flow")
         .expect("flow should complete");
     assert_eq!(progress.sink_returned.load(Ordering::Relaxed), 1);
+}
+#[derive(Clone)]
+struct GatedDelivery {
+    progress: Arc<Progress>,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::InlineSink for GatedDelivery {
+    type Input = Tick;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "gated_counter".into(),
+            ),
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+    async fn write(
+        &mut self,
+        input: Tick,
+        context: obzenflow_runtime::stages::sink::SinkWriteContext,
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        let _ = (input, context);
+        self.progress.sink_entered.fetch_add(1, Ordering::Relaxed);
+        if let Some(gate) = &self.gate {
+            self.progress.blocked.notify_one();
+            gate.acquire().await.unwrap().forget();
+        }
+        self.progress.sink_returned.fetch_add(1, Ordering::Relaxed);
+        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+        ))
+    }
+}
+
+impl std::fmt::Debug for GatedDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GatedDelivery")
+    }
 }

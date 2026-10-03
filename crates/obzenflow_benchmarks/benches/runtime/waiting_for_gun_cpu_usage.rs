@@ -72,7 +72,7 @@ impl InlineSink for NoopSink {
     type Input = BenchEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
     async fn write(

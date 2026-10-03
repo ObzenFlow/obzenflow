@@ -179,7 +179,7 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
         BTreeSet::from(["cancelled_orders", "paid_orders"])
     );
 
-    // Both the closure sink and the named shipping sink deliver one item
+    // Both named console destinations deliver one item
     // without measuring its byte count. Verify the persisted fields.
     for delivery in deliveries {
         assert_eq!(
@@ -219,7 +219,8 @@ mod shipping_adapter {
             serde_json::to_value(authorized).expect("serialize payment"),
         );
         let stage_id = StageId::new();
-        let mut adapter = SinkWriterAdapter::new(ShippingHandoff, stage_id);
+        let mut adapter =
+            SinkWriterAdapter::new(ShippingHandoff, stage_id, DeliveryMethod::ConsoleStdout);
         let report = adapter
             .consume_committed_report(
                 obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event)
@@ -235,7 +236,7 @@ mod shipping_adapter {
         ));
         assert!(matches!(
             report.primary.delivery_method,
-            DeliveryMethod::Custom(ref method) if method == "console:stdout"
+            DeliveryMethod::ConsoleStdout
         ));
         assert_eq!(report.primary.items_delivered, Some(1));
         assert_eq!(report.primary.bytes_processed, None);

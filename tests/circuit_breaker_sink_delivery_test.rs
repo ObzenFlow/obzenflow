@@ -88,7 +88,11 @@ impl InlineSink for AlwaysFailingSink {
     type Input = SinkBreakerEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "test.failure".to_string(),
+            ),
+        )
     }
 
     async fn write(

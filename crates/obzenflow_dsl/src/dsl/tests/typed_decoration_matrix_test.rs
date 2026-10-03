@@ -26,7 +26,6 @@ mod tests {
         TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
         TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
-    use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
 
@@ -289,6 +288,11 @@ mod tests {
     #[async_trait]
     impl InlineSink for Sn {
         type Input = Out;
+        fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+            obzenflow_runtime::stages::sink::SinkDescription::method(
+                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            )
+        }
 
         async fn write(
             &mut self,
@@ -406,7 +410,7 @@ mod tests {
         let stateful = St;
         let effectful_stateful = FxSt;
         let join = Jn;
-        let sink = SinkTyped::new(|_out: Out| async move {});
+        let sink = Sn;
 
         let _ = crate::source!(
             name: "finite",
@@ -679,16 +683,20 @@ mod tests {
     #[test]
     fn sink_handler_set_lowers_one_heterogeneous_binding_by_its_exact_name() {
         let inline_sink = Sn;
-        let closure_sink = SinkTyped::new(|_out: Out| async move {});
-        let pending = crate::sink!(Out => handler_set!(inline_sink, closure_sink))
+        let classified_sink =
+            obzenflow_runtime::stages::common::handlers::WithRedeliverySafety::new(
+                Sn,
+                SinkRedeliverySafety::SafeToRepeat,
+            );
+        let pending = crate::sink!(Out => handler_set!(inline_sink, classified_sink))
             .expect("the closed handler set is valid");
 
         assert_eq!(
             pending.configured_sink_handler_keys(),
-            Some(["inline_sink", "closure_sink"].as_slice())
+            Some(["inline_sink", "classified_sink"].as_slice())
         );
         let selected = pending
-            .select_configured_sink_handler("closure_sink")
+            .select_configured_sink_handler("classified_sink")
             .expect("the configured binding name is in the closed set");
         assert_eq!(
             selected
@@ -706,7 +714,10 @@ mod tests {
         let policy_probe = std::sync::Arc::clone(&policy_constructions);
         let observer_probe = std::sync::Arc::clone(&observer_constructions);
         let first_sink = Sn;
-        let second_sink = SinkTyped::new(|_out: Out| async move {});
+        let second_sink = obzenflow_runtime::stages::common::handlers::WithRedeliverySafety::new(
+            Sn,
+            SinkRedeliverySafety::SafeToRepeat,
+        );
 
         let pending = crate::sink!(
             Out => handler_set!(first_sink, second_sink) with [{
@@ -757,11 +768,15 @@ mod tests {
         let policy_probe = std::sync::Arc::clone(&policy_constructions);
         let observer_probe = std::sync::Arc::clone(&observer_constructions);
         let inline_sink = Sn;
-        let closure_sink = SinkTyped::new(|_out: Out| async move {});
+        let classified_sink =
+            obzenflow_runtime::stages::common::handlers::WithRedeliverySafety::new(
+                Sn,
+                SinkRedeliverySafety::SafeToRepeat,
+            );
 
         let pending = crate::sink!(
             name: "selected_output",
-            Out => handler_set!(inline_sink, closure_sink) with [{
+            Out => handler_set!(inline_sink, classified_sink) with [{
                 policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
             }],
@@ -796,29 +811,26 @@ mod tests {
     }
     #[test]
     fn sink_typed_delivery_clause() {
-        // The clause rides the sealed closure-tier structs; a custom handler
-        // returns its aggregate `SinkDescription` directly instead.
-        let idempotent_sink = SinkTyped::new(|_out: Out| async move {});
+        // Site-level classification applies to every configured connector.
+        let idempotent_sink = Sn;
         let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
-        let non_idempotent_sink = SinkTyped::new(|_out: Out| async move {});
+        let non_idempotent_sink = Sn;
         let _ = crate::sink!(Out => non_idempotent_sink, delivery: non_idempotent, observers: []);
     }
     #[test]
-    fn sink_exact_contract_one_arg_closure() {
-        let bare_sink = SinkTyped::new(|_out: Out| async move {});
+    fn sink_exact_contract_inline_sink() {
+        let bare_sink = Sn;
         let _ = crate::sink!(Out => bare_sink);
-        let idempotent_sink = SinkTyped::new(|_out: Out| async move {});
+        let idempotent_sink = Sn;
         let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
-        let named_sink = SinkTyped::new(|_out: Out| async move {});
+        let named_sink = Sn;
         let _ = crate::sink!(name: "s", Out => named_sink, observers: []);
     }
     #[test]
-    fn sink_exact_contract_delivery_closure() {
-        let bare_sink = SinkTyped::with_delivery(|_out: Out, _delivery| async move {});
+    fn sink_exact_contract_named_delivery() {
+        let bare_sink = Sn;
         let _ = crate::sink!(Out => bare_sink);
-        let named_sink = SinkTyped::with_delivery(|out: Out, delivery| async move {
-            let _ = (out, delivery.provenance());
-        });
+        let named_sink = Sn;
         let _ = crate::sink!(
             name: "s",
             Out => named_sink,

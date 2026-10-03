@@ -181,7 +181,7 @@ impl InlineSink for AggregateSink {
     type Input = WindowAgg;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
     async fn write(
@@ -205,7 +205,7 @@ impl InlineSink for AckSink {
     type Input = GroupAggOutput;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Ack".to_string()))
     }
 
     async fn write(

@@ -784,7 +784,7 @@ pub trait SinkWriter: Send + Sync + 'static {
 pub struct SinkWriterAdapter<W> {
     writer: W,
     stage_id: StageId,
-    default_method: Option<DeliveryMethod>,
+    default_method: DeliveryMethod,
     registry: Arc<Mutex<PendingRegistry>>,
 }
 
@@ -798,15 +798,7 @@ impl<W> std::fmt::Debug for SinkWriterAdapter<W> {
 }
 
 impl<W> SinkWriterAdapter<W> {
-    pub fn new(writer: W, stage_id: StageId) -> Self {
-        Self::with_default_method(writer, stage_id, None)
-    }
-
-    pub fn with_default_method(
-        writer: W,
-        stage_id: StageId,
-        default_method: Option<DeliveryMethod>,
-    ) -> Self {
+    pub fn new(writer: W, stage_id: StageId, default_method: DeliveryMethod) -> Self {
         Self {
             writer,
             stage_id,
@@ -820,14 +812,7 @@ impl<W> SinkWriterAdapter<W> {
         mut payload: DeliveryOutcome,
         method_override: Option<DeliveryMethod>,
     ) -> Result<DeliveryOutcome, HandlerError> {
-        let method = method_override
-            .or_else(|| self.default_method.clone())
-            .ok_or_else(|| {
-                protocol_fatal(
-                    "sink outcome has no delivery method; configure a connector default or use a *_via outcome",
-                )
-            })?;
-        payload.delivery_method = method;
+        payload.delivery_method = method_override.unwrap_or_else(|| self.default_method.clone());
         payload.validate().map_err(protocol_fatal)?;
         Ok(payload)
     }
@@ -1139,11 +1124,8 @@ mod tests {
     #[tokio::test]
     async fn connector_default_supplies_the_normal_receipt_method() {
         let expected = DeliveryMethod::Custom("connector.default".to_string());
-        let mut adapter = SinkWriterAdapter::with_default_method(
-            UsesConnectorMethod,
-            StageId::new(),
-            Some(expected.clone()),
-        );
+        let mut adapter =
+            SinkWriterAdapter::new(UsesConnectorMethod, StageId::new(), expected.clone());
 
         let report = adapter
             .consume_test(event(1))
@@ -1155,19 +1137,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_default_and_attempt_override_fail_loud() {
-        let mut adapter = SinkWriterAdapter::new(UsesConnectorMethod, StageId::new());
-
-        let error = adapter
-            .consume_test(event(1))
-            .await
-            .expect_err("an unresolved receipt method is a protocol error");
-
-        assert!(matches!(error, HandlerError::Fatal(_)));
-        assert!(error.to_string().contains("no delivery method"));
-    }
-
-    #[tokio::test]
     async fn buffered_capability_lowers_to_the_original_parent() {
         let pending = Arc::new(Mutex::new(Vec::new()));
         let mut adapter = SinkWriterAdapter::new(
@@ -1175,6 +1144,7 @@ mod tests {
                 pending: Arc::clone(&pending),
             },
             StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
         );
         let input = event(7);
         let parent_event_id = input.id;
@@ -1216,7 +1186,11 @@ mod tests {
             }
         }
 
-        let mut adapter = SinkWriterAdapter::new(Invalid, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(
+            Invalid,
+            StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        );
         let error = adapter
             .consume_test(event(1))
             .await
@@ -1242,7 +1216,11 @@ mod tests {
             }
         }
 
-        let mut adapter = SinkWriterAdapter::new(Invalid, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(
+            Invalid,
+            StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        );
         let error = adapter
             .consume_test(event(1))
             .await
@@ -1291,6 +1269,7 @@ mod tests {
                 pending: Arc::new(Mutex::new(Vec::new())),
             },
             StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
         );
 
         let panic = AssertUnwindSafe(adapter.consume_test(event(1)))
@@ -1361,6 +1340,7 @@ mod tests {
                 fail_consume: false,
             },
             StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
         );
 
         let mut report = adapter
@@ -1385,6 +1365,7 @@ mod tests {
                 fail_consume: true,
             },
             StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
         );
 
         let error = adapter
@@ -1539,8 +1520,11 @@ mod tests {
             }
         }
 
-        let mut adapter =
-            SinkWriterAdapter::new(DeferredOriginPoison { first: None }, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(
+            DeferredOriginPoison { first: None },
+            StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        );
         let first = event(1);
         let first_id = first.id;
         let mut first_report = adapter
@@ -1596,8 +1580,11 @@ mod tests {
         }
 
         for nonpoisoned in [false, true] {
-            let mut adapter =
-                SinkWriterAdapter::new(InvalidSubject { nonpoisoned }, StageId::new());
+            let mut adapter = SinkWriterAdapter::new(
+                InvalidSubject { nonpoisoned },
+                StageId::new(),
+                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            );
             let error = adapter
                 .consume_test(event(1))
                 .await
@@ -1661,6 +1648,7 @@ mod tests {
                 pending: Arc::new(Mutex::new(Vec::new())),
             },
             StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
         );
         let first = event(1);
         let second = event(2);
@@ -1714,7 +1702,11 @@ mod tests {
             }
         }
 
-        let mut adapter = SinkWriterAdapter::new(TwoInputBatch { first: None }, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(
+            TwoInputBatch { first: None },
+            StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        );
         let mut first_report = adapter
             .consume_test(event(1))
             .await
@@ -1761,8 +1753,16 @@ mod tests {
         let handler = Buffered {
             pending: Arc::clone(&pending),
         };
-        let mut first_stage = SinkWriterAdapter::new(handler.clone(), StageId::new());
-        let mut second_stage = SinkWriterAdapter::new(handler, StageId::new());
+        let mut first_stage = SinkWriterAdapter::new(
+            handler.clone(),
+            StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        );
+        let mut second_stage = SinkWriterAdapter::new(
+            handler,
+            StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        );
         first_stage
             .consume_test(event(2))
             .await
@@ -1777,7 +1777,11 @@ mod tests {
     #[tokio::test]
     async fn decode_failures_stay_ordinary_handler_errors() {
         let pending = Arc::new(Mutex::new(Vec::new()));
-        let mut adapter = SinkWriterAdapter::new(Buffered { pending }, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(
+            Buffered { pending },
+            StageId::new(),
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        );
         let malformed = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             Input::event_type_name(),

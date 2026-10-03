@@ -59,7 +59,7 @@ impl InlineSink for EventCounterSink {
     type Input = StreamItem;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
     async fn write(
@@ -289,7 +289,7 @@ impl InlineSink for SumSink {
     type Input = NumberItem;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Sum".to_string()))
     }
 
     async fn write(
