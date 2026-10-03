@@ -130,6 +130,16 @@ pub enum ReplayLifecycleEvent {
     },
 }
 
+impl ReplayLifecycleEvent {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Started { .. } => vocabulary::replay::STARTED,
+            Self::Completed { .. } => vocabulary::replay::COMPLETED,
+            Self::ResumedLive { .. } => vocabulary::replay::LIVE_RESUMED,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "stage_state", rename_all = "snake_case")]
 pub enum StageLifecycleFact {
@@ -168,6 +178,20 @@ pub enum StageLifecycleFact {
 }
 
 impl StageLifecycleFact {
+    pub fn event_type(&self, stage_name: &str) -> String {
+        use super::supervisor_descriptor::{supervisor_event_type, SupervisionMode};
+
+        let occurrence = match self {
+            Self::Running { .. } => vocabulary::supervisor::READY,
+            Self::Draining { .. } => vocabulary::supervisor::DRAIN_STARTED,
+            Self::Drained { .. } => vocabulary::supervisor::DRAIN_COMPLETED,
+            Self::Completed { .. } => vocabulary::supervisor::COMPLETED,
+            Self::Cancelled { .. } => vocabulary::supervisor::CANCELLED,
+            Self::Failed { .. } => vocabulary::supervisor::FAILED,
+        };
+        supervisor_event_type(stage_name, SupervisionMode::HandlerSupervised, occurrence)
+    }
+
     pub fn stage_id(&self) -> StageId {
         match self {
             Self::Running { stage_id }
@@ -263,6 +287,35 @@ pub enum CircuitBreakerFact {
     },
 }
 
+impl CircuitBreakerFact {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Opened { .. }
+            | Self::StateChanged {
+                to_state: CircuitState::Open,
+                ..
+            } => vocabulary::circuit_breaker::OPENED,
+            Self::Closed { .. }
+            | Self::StateChanged {
+                to_state: CircuitState::Closed,
+                ..
+            } => vocabulary::circuit_breaker::CLOSED,
+            Self::HalfOpen { .. }
+            | Self::StateChanged {
+                to_state: CircuitState::HalfOpen,
+                ..
+            } => vocabulary::circuit_breaker::HALF_OPEN_ENTERED,
+            Self::Rejected { .. } => vocabulary::circuit_breaker::ADMISSION_REJECTED,
+            Self::AttemptSettled { .. } => vocabulary::circuit_breaker::CALL_CLASSIFIED,
+            Self::RetryScheduled { .. } => vocabulary::retry::SCHEDULED,
+            Self::RetrySucceeded { .. } => vocabulary::retry::SUCCEEDED,
+            Self::RetryExhausted { .. } => vocabulary::retry::EXHAUSTED,
+            Self::RetryStoppedNonRetryable { .. } => vocabulary::retry::STOPPED_NON_RETRYABLE,
+            Self::RecoveryCompleted { .. } => vocabulary::resilience::ATTEMPTS_REPORTED,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RateLimiterFact {
@@ -280,6 +333,16 @@ pub enum RateLimiterFact {
         old_rate: f64,
         new_rate: f64,
     },
+}
+
+impl RateLimiterFact {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Delayed { .. } => vocabulary::rate_limiter::WAIT_STARTED,
+            Self::ModeChange { .. } => vocabulary::rate_limiter::MODE_CHANGED,
+            Self::ConfigChanged { .. } => vocabulary::rate_limiter::CONFIGURATION_CHANGED,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,9 +432,8 @@ impl ExecutionPayload {
     }
 
     pub fn event_type(&self, stage_name: &str) -> std::borrow::Cow<'static, str> {
-        use super::supervisor_descriptor::{supervisor_event_type, SupervisionMode};
         let name = match self {
-            Self::ReplayLifecycle(_) => "execution.replay.lifecycle",
+            Self::ReplayLifecycle(event) => event.event_type(),
             Self::SupervisorRegistered { descriptor } => {
                 return descriptor.registered_event_type().into()
             }
@@ -379,80 +441,15 @@ impl ExecutionPayload {
             Self::SourceCleanupFailed { .. } => "execution.source.cleanup_failed",
             Self::ContractStatus { pass, .. } => {
                 if *pass {
-                    vocabulary::contract::POLICY_ACCEPTED
+                    vocabulary::contract::CONTINUATION_ALLOWED
                 } else {
-                    vocabulary::contract::POLICY_REJECTED
+                    vocabulary::contract::CONTINUATION_DENIED
                 }
             }
-            Self::ContractResult { status, .. } => match status {
-                ContractResultStatusLabel::Passed => vocabulary::contract::VERIFICATION_PASSED,
-                ContractResultStatusLabel::Failed => vocabulary::contract::VERIFICATION_FAILED,
-                ContractResultStatusLabel::Pending => vocabulary::contract::VERIFICATION_PENDING,
-                ContractResultStatusLabel::Skipped => vocabulary::contract::VERIFICATION_SKIPPED,
-            },
-            Self::StageLifecycle(fact) => {
-                let occurrence = match fact {
-                    StageLifecycleFact::Running { .. } => vocabulary::supervisor::milestone::READY,
-                    StageLifecycleFact::Draining { .. } => {
-                        vocabulary::supervisor::milestone::DRAIN_STARTED
-                    }
-                    StageLifecycleFact::Drained { .. } => {
-                        vocabulary::supervisor::milestone::DRAIN_COMPLETED
-                    }
-                    StageLifecycleFact::Completed { .. } => {
-                        vocabulary::supervisor::outcome::COMPLETED
-                    }
-                    StageLifecycleFact::Cancelled { .. } => {
-                        vocabulary::supervisor::outcome::CANCELLED
-                    }
-                    StageLifecycleFact::Failed { .. } => vocabulary::supervisor::outcome::FAILED,
-                };
-                return supervisor_event_type(
-                    stage_name,
-                    SupervisionMode::HandlerSupervised,
-                    occurrence,
-                )
-                .into();
-            }
-            Self::CircuitBreaker(fact) => match fact {
-                CircuitBreakerFact::Opened { .. }
-                | CircuitBreakerFact::StateChanged {
-                    to_state: CircuitState::Open,
-                    ..
-                } => vocabulary::circuit_breaker::OPENED,
-                CircuitBreakerFact::Closed { .. }
-                | CircuitBreakerFact::StateChanged {
-                    to_state: CircuitState::Closed,
-                    ..
-                } => vocabulary::circuit_breaker::CLOSED,
-                CircuitBreakerFact::HalfOpen { .. }
-                | CircuitBreakerFact::StateChanged {
-                    to_state: CircuitState::HalfOpen,
-                    ..
-                } => vocabulary::circuit_breaker::HALF_OPEN_ENTERED,
-                CircuitBreakerFact::Rejected { .. } => {
-                    vocabulary::circuit_breaker::ADMISSION_REJECTED
-                }
-                CircuitBreakerFact::AttemptSettled { .. } => {
-                    vocabulary::circuit_breaker::ATTEMPT_ASSESSED
-                }
-                CircuitBreakerFact::RetryScheduled { .. } => vocabulary::retry::SCHEDULED,
-                CircuitBreakerFact::RetrySucceeded { .. } => vocabulary::retry::SUCCEEDED,
-                CircuitBreakerFact::RetryExhausted { .. } => vocabulary::retry::EXHAUSTED,
-                CircuitBreakerFact::RetryStoppedNonRetryable { .. } => {
-                    vocabulary::retry::STOPPED_NON_RETRYABLE
-                }
-                CircuitBreakerFact::RecoveryCompleted { .. } => {
-                    vocabulary::resilience::EVALUATION_FINISHED
-                }
-            },
-            Self::RateLimiter(fact) => match fact {
-                RateLimiterFact::Delayed { .. } => vocabulary::rate_limiter::WAIT_STARTED,
-                RateLimiterFact::ModeChange { .. } => vocabulary::rate_limiter::MODE_CHANGED,
-                RateLimiterFact::ConfigChanged { .. } => {
-                    vocabulary::rate_limiter::CONFIGURATION_CHANGED
-                }
-            },
+            Self::ContractResult { status, .. } => status.event_type(),
+            Self::StageLifecycle(fact) => return fact.event_type(stage_name).into(),
+            Self::CircuitBreaker(fact) => fact.event_type(),
+            Self::RateLimiter(fact) => fact.event_type(),
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourcePollError(_) => "source.poll_error",
             Self::HttpPullState(_) => "source.http_pull_state",

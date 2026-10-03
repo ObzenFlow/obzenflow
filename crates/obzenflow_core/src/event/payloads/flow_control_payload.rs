@@ -10,6 +10,7 @@ use crate::event::types::{
     Count, DurationMs, JournalIndex, JournalPath, ReaderGeneration, RouteKey, SeqNo, ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
+use crate::event::vocabulary;
 use crate::id::StageKey;
 use crate::StageId;
 use crate::WriterId;
@@ -295,6 +296,24 @@ pub enum FlowControlPayload {
 }
 
 impl FlowControlPayload {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Eof { .. } => vocabulary::stream::EOF_DECLARED,
+            Self::Watermark { .. } => vocabulary::stream::WATERMARK_DECLARED,
+            Self::CatchUpComplete { .. } => vocabulary::stream::CATCH_UP_COMPLETED,
+            Self::Checkpoint { .. } => vocabulary::stream::CHECKPOINT_DECLARED,
+            Self::Drain => vocabulary::stream::DRAIN_REQUESTED,
+            Self::PipelineAbort { .. } => vocabulary::pipeline::ABORT_REQUESTED,
+            Self::SourceContract { .. } => vocabulary::source::CONTRACT_DECLARED,
+            Self::ConsumptionProgress { .. } => vocabulary::subscription::PROGRESS_REPORTED,
+            Self::ConsumptionGap { .. } => vocabulary::subscription::GAP_DETECTED,
+            Self::ProductionFinal { .. } => vocabulary::source::PRODUCTION_FINALIZED,
+            Self::ConsumptionFinal { .. } => vocabulary::subscription::CONSUMPTION_FINALIZED,
+            Self::ReaderStalled { .. } => vocabulary::subscription::STALL_DETECTED,
+            Self::AtLeastOnceViolation { .. } => vocabulary::subscription::AT_LEAST_ONCE_VIOLATED,
+        }
+    }
+
     pub fn eof_kind(&self) -> Option<EofKind> {
         match self {
             Self::Eof { kind, .. } => Some(*kind),

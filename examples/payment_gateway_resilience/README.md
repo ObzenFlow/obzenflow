@@ -48,15 +48,17 @@ Framework occurrences identify their author and what that author observed:
 
 | Earlier name | Current name and meaning |
 | --- | --- |
-| `lifecycle.stage.running` | `supervisor.stage.validate_order.milestone.ready`: the named stage reports readiness. |
-| `system.pipeline.all_stages_completed` | `supervisor.runtime.pipeline_supervisor.milestone.all_stages_completed`: the pipeline observed its required child results. |
+| `lifecycle.stage.running` | `supervisor.stage.validate_order.ready`: the named stage reports readiness. |
+| `system.pipeline.all_stages_completed` | `supervisor.runtime.pipeline_supervisor.all_stages_completed`: the pipeline observed its required child results. |
 | `lifecycle.middleware.circuit_breaker` | `runtime.circuit_breaker.opened`, `runtime.retry.scheduled`, or another typed occurrence. A finished resilience evaluation can include zero attempts. |
+| `execution.replay.lifecycle` | `runtime.replay.started`, `runtime.replay.completed`, or `runtime.replay.live_resumed`: the recorded replay occurrence. |
+| `control.source_contract` | `runtime.source.contract_declared`: the source's expected production contract; its expected count can be unknown. |
 | `control.consumption_final`, source-authored | `runtime.source.production_finalized`: the source's production frontier and end kind. |
 | `control.consumption_final`, subscriber-authored | `runtime.subscription.consumption_finalized`: reads, optional receipt frontier, selection and effective policy for one subscription. |
 | `execution.contract.result` | `runtime.contract.verification_pending`: verification is incomplete; `phase` distinguishes progress from final evaluation. |
-| `execution.contract.pass` | `runtime.contract.policy_accepted`: policy permits continuation, including configured warnings. The verification finding remains separate. |
+| `execution.contract.pass` | `runtime.contract.continuation_allowed`: policy permits continuation, including configured warnings. The verification finding remains separate. |
 | `control.eof` | `runtime.stream.eof_declared`: an upstream declaration, preserving natural, poison or truncated ending. |
-| `system.metrics.drained` | `supervisor.runtime.metrics_aggregator.finalization.completed`: the aggregator reports reader shutdown and publication of its available current buffer. |
+| `system.metrics.drained` | `supervisor.runtime.metrics_aggregator.final_snapshot_published`: the aggregator reports reader shutdown and publication of its available current buffer. |
 
 A pipeline observation trusts the child reports it received. These occurrences do
 not require stages to agree, and a final marker does not certify viewer coverage.

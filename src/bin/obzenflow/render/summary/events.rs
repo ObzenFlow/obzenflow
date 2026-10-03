@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::render::event_counts::JournalEventCounts;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::vocabulary::{
     supervisor::{METRICS_NAME, PIPELINE_NAME},
     RUNTIME_PREFIX,
@@ -46,8 +47,8 @@ impl Renderer {
             "Journals with no displayed entries remain in the inventory above.",
             "Each journal has one owner; an owner can have several journals.",
             "Runtime readers show framework wiring; CLI/Studio can also observe journal histories.",
-            "Event labels use kind/name@version; framework names omit runtime. and supervisor identity.",
-            "Delivery labels omit the repeated delivery. prefix. Full names remain in records/JSONL.",
+            "Event labels use kind/name@version; supervisor subjects appear as stage, flow or metrics.",
+            "Runtime and repeated delivery prefixes are omitted. Full names remain in records/JSONL.",
         ] {
             self.summary_line(output, MUTED, line)?;
         }
@@ -367,15 +368,30 @@ impl Renderer {
             EventKind::Execution | EventKind::FlowSignal | EventKind::System => {
                 if let Some(suffix) = name.strip_prefix(RUNTIME_PREFIX) {
                     suffix.to_owned()
-                } else if let Some(suffix) = self
+                } else if let Some(label) = self
                     .context
                     .supervisors
                     .get(&writer.to_string())
                     .and_then(|supervisor| {
                         name.strip_prefix(&format!("{}.", supervisor.event_prefix()))
+                            .map(|suffix| {
+                                let subject = match supervisor.kind {
+                                    SupervisorKind::Pipeline => "flow",
+                                    SupervisorKind::MetricsAggregator => "metrics",
+                                    SupervisorKind::FiniteSource
+                                    | SupervisorKind::AsyncFiniteSource
+                                    | SupervisorKind::InfiniteSource
+                                    | SupervisorKind::AsyncInfiniteSource
+                                    | SupervisorKind::Transform
+                                    | SupervisorKind::Stateful
+                                    | SupervisorKind::Join
+                                    | SupervisorKind::Sink => "stage",
+                                };
+                                format!("{subject}.{suffix}")
+                            })
                     })
                 {
-                    format!("supervisor.{suffix}")
+                    label
                 } else {
                     name.to_owned()
                 }

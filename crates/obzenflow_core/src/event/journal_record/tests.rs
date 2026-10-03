@@ -312,8 +312,7 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
                     id: EventId::new(),
                     writer_id,
                     event_kind: EventKind::System,
-                    event_type: "supervisor.runtime.pipeline_supervisor.command.start.admitted"
-                        .into(),
+                    event_type: "supervisor.runtime.pipeline_supervisor.start_accepted".into(),
                     timestamp: 10,
                 },
             },

@@ -205,34 +205,39 @@ fn event_table(
                 .find(|descriptor| descriptor.name == author)
                 .unwrap();
             let (kind, name) = event.split_once('/').unwrap();
-            let expanded =
-                if matches!(kind, "execution" | "system") && name.starts_with("supervisor.") {
-                    format!(
-                        "{kind}/{}.{}",
-                        descriptor.event_prefix(),
-                        name.strip_prefix("supervisor.").unwrap()
-                    )
-                } else if matches!(kind, "execution" | "flow_signal")
-                    && matches!(
-                        name.split('.').next().unwrap(),
-                        "stream"
-                            | "pipeline"
-                            | "source"
-                            | "subscription"
-                            | "contract"
-                            | "circuit_breaker"
-                            | "retry"
-                            | "resilience"
-                            | "rate_limiter"
-                            | "backpressure"
-                    )
-                {
-                    format!("{kind}/runtime.{name}")
-                } else if kind == "delivery" {
-                    format!("delivery/delivery.{name}")
-                } else {
-                    event
-                };
+            let subject = match descriptor.kind {
+                obzenflow::journal::read::SupervisorKind::Pipeline => "flow.",
+                obzenflow::journal::read::SupervisorKind::MetricsAggregator => "metrics.",
+                _ => "stage.",
+            };
+            let expanded = if matches!(kind, "execution" | "system") && name.starts_with(subject) {
+                format!(
+                    "{kind}/{}.{}",
+                    descriptor.event_prefix(),
+                    name.strip_prefix(subject).unwrap()
+                )
+            } else if matches!(kind, "execution" | "flow_signal")
+                && matches!(
+                    name.split('.').next().unwrap(),
+                    "stream"
+                        | "pipeline"
+                        | "replay"
+                        | "source"
+                        | "subscription"
+                        | "contract"
+                        | "circuit_breaker"
+                        | "retry"
+                        | "resilience"
+                        | "rate_limiter"
+                        | "backpressure"
+                )
+            {
+                format!("{kind}/runtime.{name}")
+            } else if kind == "delivery" {
+                format!("delivery/delivery.{name}")
+            } else {
+                event
+            };
             (
                 (expanded, author, descriptor.kind.label().to_owned()),
                 count,
@@ -367,12 +372,19 @@ async fn runtime_writer_columns_use_journaled_registration() {
             assert!(!pipeline.contains("Event prefix:"));
             assert!(!pipeline.contains("Author:"));
             assert!(pipeline.lines().any(|line| line
-                .contains("system/supervisor.command.finalize_metrics.requested@1")
+                .contains("system/flow.command.finalize_metrics.requested@1")
                 && line.trim_end().ends_with("pipeline_supervisor")));
+            assert!(pipeline.contains("system/flow.ready_for_run@1"));
+            assert!(pipeline.contains("system/flow.start_accepted@1"));
+            assert!(pipeline.contains("system/flow.completed@1"));
             assert!(!metrics.contains("Event prefix:"));
             assert!(metrics.lines().any(|line| line
-                .contains("system/supervisor.milestone.refresh_readers_stopped@1")
+                .contains("system/metrics.refresh_readers_stopped@1")
                 && line.trim_end().ends_with("metrics_aggregator")));
+            assert!(metrics.contains("system/metrics.ready@1"));
+            assert!(metrics.contains("system/metrics.final_snapshot_published@1"));
+            assert!(application.contains("execution/stage.ready@1"));
+            assert!(application.contains("execution/stage.completed@1"));
             let metrics_rows = event_table(metrics, "metrics-export.log", &registered);
             assert!(
                 metrics_rows.contains_key(&(
@@ -977,6 +989,14 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let (verbose, _) = show(&baseline, &["--include-runtime"]);
     assert_eq!(journal_numbers(&verbose), numbers);
     assert!(verbose.contains("RUNTIME"));
+    for label in [
+        "flow_signal/source.contract_declared@1",
+        "execution/contract.continuation_allowed@1",
+        "execution/circuit_breaker.call_classified@1",
+        "execution/resilience.attempts_reported@1",
+    ] {
+        assert!(verbose.contains(label), "missing occurrence label {label}");
+    }
     assert!(!verbose.contains("Runtime readers: pipeline_supervisor"));
     assert!(!verbose.contains("Runtime readers: metrics_aggregator"));
     assert!(
@@ -1270,9 +1290,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let system_counts = event_table(&verbose, "system.log", &registrations);
     assert_eq!(system_counts.values().sum::<usize>(), system_count);
     for event_type in [
-        ".milestone.ready@1",
-        ".outcome.completed@1",
-        "execution/runtime.contract.policy_accepted@1",
+        ".ready@1",
+        ".completed@1",
+        "execution/runtime.contract.continuation_allowed@1",
     ] {
         assert_eq!(
             expected_journals
@@ -1290,7 +1310,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .all(|(_, _, author_type)| author_type == "Pipeline"));
     assert_eq!(
         system_counts[&(
-            "system/supervisor.runtime.pipeline_supervisor.outcome.completed@1".into(),
+            "system/supervisor.runtime.pipeline_supervisor.completed@1".into(),
             "pipeline_supervisor".into(),
             "Pipeline".into()
         )],
@@ -1305,7 +1325,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     for source in ["store_orders", "web_orders"] {
         assert_eq!(
             manual_review[&(
-                "flow_signal/runtime.source.production_declared@1".into(),
+                "flow_signal/runtime.source.contract_declared@1".into(),
                 source.into(),
                 "FiniteSource".into()
             )],
@@ -1399,6 +1419,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .unwrap();
     let replay = latest_run_dir(temp.path());
     assert_ne!(baseline, replay);
+    let (replay_runtime, _) = show(&replay, &["--include-runtime"]);
+    assert!(replay_runtime.contains("execution/replay.started@1"));
+    assert!(replay_runtime.contains("execution/replay.completed@1"));
     let (human, _) = show(&replay, &[]);
     assert_fact_origins(&human);
     assert!(

@@ -9,6 +9,9 @@
 //! Fixed names are static; named supervisors use the shared escaping constructor.
 
 macro_rules! event_names {
+    (@names; $($name:ident => $suffix:literal),+ $(,)?) => {
+        $(pub const $name: &str = $suffix;)+
+    };
     (@names $prefix:expr; $($name:ident => $suffix:literal),+ $(,)?) => {
         $(pub const $name: &str = concat!($prefix, ".", $suffix);)+
     };
@@ -32,8 +35,13 @@ event_names! {
     pipeline => "pipeline" {
         ABORT_REQUESTED => "abort_requested",
     },
+    replay => "replay" {
+        STARTED => "started",
+        COMPLETED => "completed",
+        LIVE_RESUMED => "live_resumed",
+    },
     source => "source" {
-        PRODUCTION_DECLARED => "production_declared",
+        CONTRACT_DECLARED => "contract_declared",
         PRODUCTION_FINALIZED => "production_finalized",
     },
     subscription => "subscription" {
@@ -44,8 +52,8 @@ event_names! {
         AT_LEAST_ONCE_VIOLATED => "at_least_once_violated",
     },
     contract => "contract" {
-        POLICY_ACCEPTED => "policy_accepted",
-        POLICY_REJECTED => "policy_rejected",
+        CONTINUATION_ALLOWED => "continuation_allowed",
+        CONTINUATION_DENIED => "continuation_denied",
         VERIFICATION_PASSED => "verification_passed",
         VERIFICATION_FAILED => "verification_failed",
         VERIFICATION_PENDING => "verification_pending",
@@ -56,7 +64,7 @@ event_names! {
         CLOSED => "closed",
         HALF_OPEN_ENTERED => "half_open_entered",
         ADMISSION_REJECTED => "admission_rejected",
-        ATTEMPT_ASSESSED => "attempt_assessed",
+        CALL_CLASSIFIED => "call_classified",
     },
     retry => "retry" {
         SCHEDULED => "scheduled",
@@ -65,7 +73,7 @@ event_names! {
         STOPPED_NON_RETRYABLE => "stopped_non_retryable",
     },
     resilience => "resilience" {
-        EVALUATION_FINISHED => "evaluation_finished",
+        ATTEMPTS_REPORTED => "attempts_reported",
     },
     rate_limiter => "rate_limiter" {
         WAIT_STARTED => "wait_started",
@@ -87,41 +95,30 @@ pub mod supervisor {
     pub const PIPELINE_NAME: &str = "pipeline_supervisor";
     pub const METRICS_NAME: &str = "metrics_aggregator";
 
-    pub(crate) const REGISTERED: &str = "registered";
-
-    pub(crate) mod milestone {
-        event_names!(@names "milestone";
-            READY => "ready",
-            READY_FOR_RUN => "ready_for_run",
-            SOURCES_STARTED => "sources_started",
-            DRAIN_STARTED => "drain_started",
-            DRAIN_COMPLETED => "drain_completed",
-            ALL_STAGES_COMPLETED => "all_stages_completed",
-            FINAL_MARKER_PUBLISHED => "final_marker_published",
-            REFRESH_READERS_STOPPED => "refresh_readers_stopped",
-        );
-    }
+    event_names!(@names;
+        REGISTERED => "registered",
+        READY => "ready",
+        READY_FOR_RUN => "ready_for_run",
+        SOURCES_STARTED => "sources_started",
+        DRAIN_STARTED => "drain_started",
+        DRAIN_COMPLETED => "drain_completed",
+        ALL_STAGES_COMPLETED => "all_stages_completed",
+        FINAL_MARKER_PUBLISHED => "final_marker_published",
+        REFRESH_READERS_STOPPED => "refresh_readers_stopped",
+        FINAL_SNAPSHOT_PUBLISHED => "final_snapshot_published",
+        START_ACCEPTED => "start_accepted",
+        GRACEFUL_STOP_ACCEPTED => "graceful_stop_accepted",
+        CANCEL_ACCEPTED => "cancel_accepted",
+        COMPLETED => "completed",
+        FAILED => "failed",
+        CANCELLED => "cancelled",
+        NOT_STARTED => "not_started",
+    );
 
     pub(crate) mod command {
         event_names!(@names "command";
-            START_ADMITTED => "start.admitted",
-            GRACEFUL_STOP_ADMITTED => "graceful_stop.admitted",
-            CANCEL_ADMITTED => "cancel.admitted",
             FINALIZE_METRICS_REQUESTED => "finalize_metrics.requested",
         );
-    }
-
-    pub(crate) mod outcome {
-        event_names!(@names "outcome";
-            COMPLETED => "completed",
-            FAILED => "failed",
-            CANCELLED => "cancelled",
-            NOT_STARTED => "not_started",
-        );
-    }
-
-    pub(crate) mod finalization {
-        event_names!(@names "finalization"; COMPLETED => "completed");
     }
 
     pub(crate) mod snapshot {

@@ -133,13 +133,11 @@ fn forwarded_declarations_show_the_author_and_forwarding_stage() {
         renderer.include_runtime = true;
         renderer.compact = compact;
         let own = render_record(&mut renderer, &source);
-        assert!(own.contains("runtime.source.production_declared ← thermometer"));
+        assert!(own.contains("runtime.source.contract_declared ← thermometer"));
         assert!(!own.contains("forwarded by"));
         let text = render_record(&mut renderer, &forwarded);
         assert!(
-            text.contains(
-                "runtime.source.production_declared ← thermometer (forwarded by classify)"
-            ),
+            text.contains("runtime.source.contract_declared ← thermometer (forwarded by classify)"),
             "{text}"
         );
         if !compact {

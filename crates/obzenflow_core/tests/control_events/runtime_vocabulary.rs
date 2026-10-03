@@ -62,7 +62,7 @@ fn stream_and_subscription_wire_names_match_the_contract() {
         ),
         (
             json!({"flow_control_type":"source_contract", "source_id":stage, "journal_path":"orders.log", "journal_index":0}),
-            "runtime.source.production_declared",
+            "runtime.source.contract_declared",
         ),
         (
             json!({"flow_control_type":"production_final", "produced_count":0, "produced_by_event_type":[], "end_kind":"natural"}),
@@ -99,34 +99,60 @@ fn stream_and_subscription_wire_names_match_the_contract() {
 }
 
 #[test]
-fn stage_and_middleware_wire_names_are_unchanged() {
+fn replay_wire_names_identify_the_recorded_occurrence() {
+    let stage = StageId::new();
+    for (payload, name) in [
+        (
+            json!({"replay_event":"started", "archive_path":"/archive", "archive_flow_id":"archived", "archive_status":"completed", "archive_status_derivation":{"terminal_events_found":1, "chosen":"completed"}, "allow_incomplete":false, "source_stages":["orders"]}),
+            "runtime.replay.started",
+        ),
+        (
+            json!({"replay_event":"completed", "replayed_count":3, "skipped_count":0, "duration_ms":10}),
+            "runtime.replay.completed",
+        ),
+        (
+            json!({"replay_event":"resumed_live", "archive_flow_id":"archived", "replayed_count":3, "generation":1}),
+            "runtime.replay.live_resumed",
+        ),
+    ] {
+        let payload = ExecutionPayload::ReplayLifecycle(serde_json::from_value(payload).unwrap());
+        assert_chain(
+            ChainEventFactory::execution_event(stage.into(), payload),
+            name,
+            "execution",
+        );
+    }
+}
+
+#[test]
+fn stage_and_middleware_wire_names_match_the_contract() {
     let stage = StageId::new();
     let cursor =
         json!({"recorded_flow_id":"flow", "stage_key":"orders", "input_seq":1, "effect_ordinal":0});
     for (payload, name) in [
         (
             json!({"execution_type":"stage_lifecycle", "stage_state":"running", "stage_id":stage}),
-            "supervisor.stage.orders%2Ev2.milestone.ready",
+            "supervisor.stage.orders%2Ev2.ready",
         ),
         (
             json!({"execution_type":"stage_lifecycle", "stage_state":"draining", "stage_id":stage}),
-            "supervisor.stage.orders%2Ev2.milestone.drain_started",
+            "supervisor.stage.orders%2Ev2.drain_started",
         ),
         (
             json!({"execution_type":"stage_lifecycle", "stage_state":"drained", "stage_id":stage}),
-            "supervisor.stage.orders%2Ev2.milestone.drain_completed",
+            "supervisor.stage.orders%2Ev2.drain_completed",
         ),
         (
             json!({"execution_type":"stage_lifecycle", "stage_state":"completed", "stage_id":stage}),
-            "supervisor.stage.orders%2Ev2.outcome.completed",
+            "supervisor.stage.orders%2Ev2.completed",
         ),
         (
             json!({"execution_type":"stage_lifecycle", "stage_state":"cancelled", "stage_id":stage, "reason":"requested"}),
-            "supervisor.stage.orders%2Ev2.outcome.cancelled",
+            "supervisor.stage.orders%2Ev2.cancelled",
         ),
         (
             json!({"execution_type":"stage_lifecycle", "stage_state":"failed", "stage_id":stage, "error":"failed"}),
-            "supervisor.stage.orders%2Ev2.outcome.failed",
+            "supervisor.stage.orders%2Ev2.failed",
         ),
         (
             json!({"execution_type":"resilience_occurrence", "action":"opened", "cooldown_ms":10, "error_rate":1.0, "failure_count":1, "trigger":"consecutive_failures", "observed_calls":1}),
@@ -146,7 +172,7 @@ fn stage_and_middleware_wire_names_are_unchanged() {
         ),
         (
             json!({"execution_type":"resilience_occurrence", "action":"attempt_settled", "cursor":cursor, "attempt":1, "health_classification":"success", "slow":false, "dependency_elapsed_ms":1, "admission_wait_ms":0}),
-            "runtime.circuit_breaker.attempt_assessed",
+            "runtime.circuit_breaker.call_classified",
         ),
         (
             json!({"execution_type":"resilience_occurrence", "action":"retry_scheduled", "cursor":cursor, "next_attempt":2, "delay_ms":1}),
@@ -166,7 +192,7 @@ fn stage_and_middleware_wire_names_are_unchanged() {
         ),
         (
             json!({"execution_type":"resilience_occurrence", "action":"recovery_completed", "cursor":cursor, "total_attempts":1, "backoff_elapsed_ms":0, "recovery_elapsed_ms":1}),
-            "runtime.resilience.evaluation_finished",
+            "runtime.resilience.attempts_reported",
         ),
         (
             json!({"execution_type":"resilience_occurrence", "action":"state_changed", "from_state":"closed", "to_state":"open", "timestamp":1}),
@@ -215,55 +241,55 @@ fn system_wire_names_keep_the_pipeline_author_for_metrics_requests() {
     for (payload, name) in [
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"starting"}),
-            "supervisor.runtime.pipeline_supervisor.command.start.admitted",
+            "supervisor.runtime.pipeline_supervisor.start_accepted",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"ready_for_run"}),
-            "supervisor.runtime.pipeline_supervisor.milestone.ready_for_run",
+            "supervisor.runtime.pipeline_supervisor.ready_for_run",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"running"}),
-            "supervisor.runtime.pipeline_supervisor.milestone.sources_started",
+            "supervisor.runtime.pipeline_supervisor.sources_started",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"stop_admitted", "admission":{"mode":"graceful", "timeout_ms":10}}),
-            "supervisor.runtime.pipeline_supervisor.command.graceful_stop.admitted",
+            "supervisor.runtime.pipeline_supervisor.graceful_stop_accepted",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"stop_admitted", "admission":{"mode":"cancel", "cause":"requested"}}),
-            "supervisor.runtime.pipeline_supervisor.command.cancel.admitted",
+            "supervisor.runtime.pipeline_supervisor.cancel_accepted",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"not_started"}),
-            "supervisor.runtime.pipeline_supervisor.outcome.not_started",
+            "supervisor.runtime.pipeline_supervisor.not_started",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"draining"}),
-            "supervisor.runtime.pipeline_supervisor.milestone.drain_started",
+            "supervisor.runtime.pipeline_supervisor.drain_started",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"all_stages_completed"}),
-            "supervisor.runtime.pipeline_supervisor.milestone.all_stages_completed",
+            "supervisor.runtime.pipeline_supervisor.all_stages_completed",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"drained"}),
-            "supervisor.runtime.pipeline_supervisor.milestone.final_marker_published",
+            "supervisor.runtime.pipeline_supervisor.final_marker_published",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"completed", "duration_ms":1, "metrics":metrics}),
-            "supervisor.runtime.pipeline_supervisor.outcome.completed",
+            "supervisor.runtime.pipeline_supervisor.completed",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"failed", "duration_ms":1, "reason":"failed"}),
-            "supervisor.runtime.pipeline_supervisor.outcome.failed",
+            "supervisor.runtime.pipeline_supervisor.failed",
         ),
         (
             json!({"system_event_type":"pipeline_lifecycle", "pipeline_event":"cancelled", "duration_ms":1, "reason":"requested"}),
-            "supervisor.runtime.pipeline_supervisor.outcome.cancelled",
+            "supervisor.runtime.pipeline_supervisor.cancelled",
         ),
         (
             json!({"system_event_type":"metrics_coordination", "metrics_event":"ready"}),
-            "supervisor.runtime.metrics_aggregator.milestone.ready",
+            "supervisor.runtime.metrics_aggregator.ready",
         ),
         (
             json!({"system_event_type":"metrics_coordination", "metrics_event":"drain_requested"}),
@@ -271,11 +297,11 @@ fn system_wire_names_keep_the_pipeline_author_for_metrics_requests() {
         ),
         (
             json!({"system_event_type":"metrics_coordination", "metrics_event":"drained"}),
-            "supervisor.runtime.metrics_aggregator.finalization.completed",
+            "supervisor.runtime.metrics_aggregator.final_snapshot_published",
         ),
         (
             json!({"system_event_type":"metrics_coordination", "metrics_event":"shutdown"}),
-            "supervisor.runtime.metrics_aggregator.milestone.refresh_readers_stopped",
+            "supervisor.runtime.metrics_aggregator.refresh_readers_stopped",
         ),
         (
             json!({"system_event_type":"metrics_coordination", "metrics_event":"exported", "watermark":{"entries":[]}}),
@@ -343,8 +369,8 @@ fn contract_wire_names_preserve_all_findings_and_both_policy_verdicts() {
         );
     }
     for (pass, name) in [
-        (true, "runtime.contract.policy_accepted"),
-        (false, "runtime.contract.policy_rejected"),
+        (true, "runtime.contract.continuation_allowed"),
+        (false, "runtime.contract.continuation_denied"),
     ] {
         let payload = serde_json::from_value(json!({
             "execution_type":"contract_status", "upstream":upstream, "reader":reader, "pass":pass

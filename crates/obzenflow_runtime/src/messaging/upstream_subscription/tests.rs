@@ -4402,7 +4402,7 @@ async fn seq_merge_orders_re_authored_control_by_journal_position_not_stamp() {
     journal_b.append_with_clock(with_seq(merge_data(stage_b, "b2"), 4), VectorClock::new());
 
     let expected = [
-        vocabulary::source::PRODUCTION_DECLARED,
+        vocabulary::source::CONTRACT_DECLARED,
         "a1",
         "b1",
         "a2",

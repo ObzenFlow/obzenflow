@@ -7,7 +7,6 @@ use super::delivery_payload::DeliveryPayload;
 use super::execution_payload::ExecutionPayload;
 use super::flow_control_payload::FlowControlPayload;
 use crate::event::chain_event::ReplayDisposition;
-use crate::event::vocabulary;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use std::num::NonZeroU32;
@@ -59,44 +58,7 @@ impl ChainPayload {
             Self::CompositeData(payload) => Some(payload.event_type().into()),
             Self::Execution(payload) => Some(payload.event_type(stage_name)),
             Self::Delivery(payload) => Some(payload.event_type().into()),
-            Self::FlowControl(payload) => Some(
-                match payload {
-                    FlowControlPayload::Eof { .. } => vocabulary::stream::EOF_DECLARED,
-                    FlowControlPayload::Watermark { .. } => vocabulary::stream::WATERMARK_DECLARED,
-                    FlowControlPayload::CatchUpComplete { .. } => {
-                        vocabulary::stream::CATCH_UP_COMPLETED
-                    }
-                    FlowControlPayload::Checkpoint { .. } => {
-                        vocabulary::stream::CHECKPOINT_DECLARED
-                    }
-                    FlowControlPayload::Drain => vocabulary::stream::DRAIN_REQUESTED,
-                    FlowControlPayload::PipelineAbort { .. } => {
-                        vocabulary::pipeline::ABORT_REQUESTED
-                    }
-                    FlowControlPayload::SourceContract { .. } => {
-                        vocabulary::source::PRODUCTION_DECLARED
-                    }
-                    FlowControlPayload::ConsumptionProgress { .. } => {
-                        vocabulary::subscription::PROGRESS_REPORTED
-                    }
-                    FlowControlPayload::ConsumptionGap { .. } => {
-                        vocabulary::subscription::GAP_DETECTED
-                    }
-                    FlowControlPayload::ProductionFinal { .. } => {
-                        vocabulary::source::PRODUCTION_FINALIZED
-                    }
-                    FlowControlPayload::ConsumptionFinal { .. } => {
-                        vocabulary::subscription::CONSUMPTION_FINALIZED
-                    }
-                    FlowControlPayload::ReaderStalled { .. } => {
-                        vocabulary::subscription::STALL_DETECTED
-                    }
-                    FlowControlPayload::AtLeastOnceViolation { .. } => {
-                        vocabulary::subscription::AT_LEAST_ONCE_VIOLATED
-                    }
-                }
-                .into(),
-            ),
+            Self::FlowControl(payload) => Some(payload.event_type().into()),
         }
     }
 

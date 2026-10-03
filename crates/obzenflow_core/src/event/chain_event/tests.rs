@@ -22,14 +22,14 @@ fn stage_occurrence_descriptor_is_bound_to_the_canonical_context_name() {
     event = event.with_flow_context(context);
     assert_eq!(
         event.event_type(),
-        "supervisor.stage.orders%2Ev2%2F%C3%A9.milestone.ready"
+        "supervisor.stage.orders%2Ev2%2F%C3%A9.ready"
     );
     let value = serde_json::to_value(event).unwrap();
     assert!(serde_json::from_value::<ChainEvent>(value.clone()).is_ok());
     for wrong in [
-        "supervisor.stage.orders.v2/é.milestone.ready",
+        "supervisor.stage.orders.v2/é.ready",
         "lifecycle.stage.running",
-        "supervisor.stage.other.milestone.ready",
+        "supervisor.stage.other.ready",
     ] {
         let mut invalid = value.clone();
         invalid["envelope"]["provenance"]["event"]["event_type"] = json!(wrong);

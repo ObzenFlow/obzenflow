@@ -630,7 +630,10 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
             )
         })
         .expect("the resumed source must record its resumed-live fact");
-    assert_eq!(resumed_live.event_type_name(), "execution.replay.lifecycle");
+    assert_eq!(
+        resumed_live.event_type_name(),
+        "runtime.replay.live_resumed"
+    );
     if let ChainPayload::Execution(ExecutionPayload::ReplayLifecycle(
         ReplayLifecycleEvent::ResumedLive {
             replayed_count,
