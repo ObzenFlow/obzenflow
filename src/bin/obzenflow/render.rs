@@ -22,7 +22,7 @@ mod summary;
 mod terminal;
 #[path = "render/view.rs"]
 mod view;
-use context::{event_id, parent_ids, writer_id, Context};
+use context::{event_id, parent_ids, Context};
 use payload::{pretty, safe_text, wrap_fields};
 use terminal::{OutputMode, RenderOptions, TerminalRenderer};
 use view::{fact_error, replay_note, stage_heading, Category, EventView};

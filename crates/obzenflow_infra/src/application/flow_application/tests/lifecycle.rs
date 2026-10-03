@@ -3,6 +3,9 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::event::payloads::system_payload::{
+    self as system_facts, PipelineLifecycleEvent as PipelineFact, SystemPayload as SystemFact,
+};
 use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::supervised_base::HandleError;
 
@@ -227,8 +230,9 @@ async fn application_drop(hosted: bool) {
     let facts = journal.read_all_unordered().await.unwrap();
     assert!(
         !facts.iter().any(|fact| matches!(
-            fact.event_type_name(),
-            "system.pipeline.completed" | "system.pipeline.cancelled"
+            &fact.payload,
+            SystemFact::PipelineLifecycle(PipelineFact::Completed { .. })
+                | SystemFact::PipelineLifecycle(PipelineFact::Cancelled { .. })
         )),
         "emergency cancellation must not invent a published outcome"
     );
@@ -334,11 +338,11 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
         .unwrap();
     assert!(
         !facts.iter().any(|fact| matches!(
-            fact.event_type_name(),
-            "system.pipeline.starting"
-                | "system.pipeline.running"
-                | "system.pipeline.completed"
-                | "system.pipeline.cancelled"
+            &fact.payload,
+            SystemFact::PipelineLifecycle(PipelineFact::Starting)
+                | SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
+                | SystemFact::PipelineLifecycle(PipelineFact::Completed { .. })
+                | SystemFact::PipelineLifecycle(PipelineFact::Cancelled { .. })
         )),
         "dropping host preparation must not start input or invent a published outcome"
     );
@@ -372,10 +376,7 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
                 assert!(!flow.is_running());
                 assert!(!flow.current_state().is_terminal());
                 let facts = flow.system_journal().unwrap().read_all_unordered().await.unwrap();
-                assert!(!facts.iter().any(|row| matches!(
-                    row.event_type_name(),
-                    "system.pipeline.starting" | "system.pipeline.running" | "system.pipeline.completed"
-                )));
+                assert!(!facts.iter().any(|row| matches!(&row.payload, SystemFact::PipelineLifecycle(PipelineFact::Starting) | SystemFact::PipelineLifecycle(PipelineFact::Running { .. }) | SystemFact::PipelineLifecycle(PipelineFact::Completed { .. }))));
                 Ok(flow)
             }),
             LaunchParams {
@@ -472,18 +473,23 @@ enabled = false
             .unwrap();
         let terminals: Vec<_> = facts
             .iter()
-            .map(|event| event.event_type_name())
-            .filter(|kind| {
+            .map(|event| &event.payload)
+            .filter(|payload| {
                 matches!(
-                    *kind,
-                    "system.pipeline.cancelled"
-                        | "system.pipeline.completed"
-                        | "system.pipeline.failed"
-                        | "system.pipeline.not_started"
+                    payload,
+                    SystemFact::PipelineLifecycle(
+                        PipelineFact::Cancelled { .. }
+                            | PipelineFact::Completed { .. }
+                            | PipelineFact::Failed { .. }
+                            | PipelineFact::NotStarted
+                    )
                 )
             })
             .collect();
-        assert_eq!(terminals, ["system.pipeline.not_started"]);
+        assert!(matches!(
+            terminals.as_slice(),
+            [SystemFact::PipelineLifecycle(PipelineFact::NotStarted)]
+        ));
     }
 }
 
@@ -572,18 +578,23 @@ enabled = false
         .unwrap();
     let terminals: Vec<_> = facts
         .iter()
-        .map(|event| event.event_type_name())
-        .filter(|kind| {
+        .map(|event| &event.payload)
+        .filter(|payload| {
             matches!(
-                *kind,
-                "system.pipeline.cancelled"
-                    | "system.pipeline.completed"
-                    | "system.pipeline.failed"
-                    | "system.pipeline.not_started"
+                payload,
+                SystemFact::PipelineLifecycle(
+                    PipelineFact::Cancelled { .. }
+                        | PipelineFact::Completed { .. }
+                        | PipelineFact::Failed { .. }
+                        | PipelineFact::NotStarted
+                )
             )
         })
         .collect();
-    assert_eq!(terminals, ["system.pipeline.not_started"]);
+    assert!(matches!(
+        terminals.as_slice(),
+        [SystemFact::PipelineLifecycle(PipelineFact::NotStarted)]
+    ));
     release_tx.send(()).unwrap();
     let result = application.await.unwrap();
     assert!(matches!(result, Err(ApplicationError::IoError(error))
@@ -1099,22 +1110,32 @@ enabled = false
                     .read_all_unordered()
                     .await
                     .unwrap();
-                assert!(!events
-                    .iter()
-                    .any(|envelope| envelope.event_type_name() == "system.pipeline.stop_admitted"));
+                assert!(!events.iter().any(|envelope| matches!(
+                    &envelope.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::StopAdmitted {
+                        admission: system_facts::PipelineStopAdmission::Graceful { .. }
+                    }) | SystemFact::PipelineLifecycle(PipelineFact::StopAdmitted {
+                        admission: system_facts::PipelineStopAdmission::Cancel { .. }
+                    })
+                )));
                 let terminal: Vec<_> = events
                     .iter()
-                    .map(|event| event.event_type_name())
-                    .filter(|kind| {
+                    .map(|event| &event.payload)
+                    .filter(|payload| {
                         matches!(
-                            *kind,
-                            "system.pipeline.failed"
-                                | "system.pipeline.cancelled"
-                                | "system.pipeline.completed"
+                            payload,
+                            SystemFact::PipelineLifecycle(
+                                PipelineFact::Failed { .. }
+                                    | PipelineFact::Cancelled { .. }
+                                    | PipelineFact::Completed { .. }
+                            )
                         )
                     })
                     .collect();
-                assert_eq!(terminal, ["system.pipeline.failed"]);
+                assert!(matches!(
+                    terminal.as_slice(),
+                    [SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })]
+                ));
                 let _rebound = TcpListener::bind(bound_rx.await.unwrap()).unwrap();
             }
         }
@@ -1237,24 +1258,33 @@ enabled = false
                 .unwrap();
             let terminals: Vec<_> = facts
                 .iter()
-                .map(|event| event.event_type_name())
-                .filter(|kind| {
+                .map(|event| &event.payload)
+                .filter(|payload| {
                     matches!(
-                        *kind,
-                        "system.pipeline.failed"
-                            | "system.pipeline.cancelled"
-                            | "system.pipeline.completed"
+                        payload,
+                        SystemFact::PipelineLifecycle(
+                            PipelineFact::Failed { .. }
+                                | PipelineFact::Cancelled { .. }
+                                | PipelineFact::Completed { .. }
+                        )
                     )
                 })
                 .collect();
-            assert_eq!(
-                terminals,
-                [if finite && !cancel {
-                    "system.pipeline.completed"
-                } else {
-                    "system.pipeline.cancelled"
-                }]
-            );
+            if finite && !cancel {
+                assert!(matches!(
+                    terminals.as_slice(),
+                    [SystemFact::PipelineLifecycle(
+                        PipelineFact::Completed { .. }
+                    )]
+                ));
+            } else {
+                assert!(matches!(
+                    terminals.as_slice(),
+                    [SystemFact::PipelineLifecycle(
+                        PipelineFact::Cancelled { .. }
+                    )]
+                ));
+            }
         }
     }
 }

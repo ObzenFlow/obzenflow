@@ -17,7 +17,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::Count;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, ConsumptionFinalEventParams};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
@@ -641,13 +641,15 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
                     writer_id: writer_id_field,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,
+                    writer_seq_by_event_type_complete,
                     last_event_id,
                     ..
                 }) = &mut eof_event.payload
                 {
                     *writer_id_field = Some(writer_id);
                     *writer_seq = Some(authored_writer_seq);
-                    *eof_writer_seq_by_event_type = writer_seq_by_event_type;
+                    *eof_writer_seq_by_event_type = writer_seq_by_event_type.clone();
+                    *writer_seq_by_event_type_complete = true;
                     *last_event_id = authored_last_event_id;
                 }
 
@@ -672,20 +674,16 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
                     obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
                 })?;
 
-                let mut final_event = ChainEventFactory::consumption_final_event(
+                let mut final_event = ChainEventFactory::flow_signal_event(
                     writer_id,
-                    ConsumptionFinalEventParams {
-                        pass: true,
-                        consumed_count: Count(authored_writer_seq.0),
-                        expected_count: None,
-                        eof_seen: true,
-                        last_event_id: None,
-                        reader_seq: authored_writer_seq,
-                        advertised_writer_seq: Some(authored_writer_seq),
-                        advertised_vector_clock: None,
-                        failure_reason: None,
+                    FlowControlPayload::ProductionFinal {
+                        produced_count: Count(authored_writer_seq.0),
+                        produced_by_event_type: writer_seq_by_event_type,
+                        end_kind: eof_kind,
+                        last_event_id: authored_last_event_id,
                     },
                 );
+
                 final_event.flow_context = FlowContext {
                     flow_name: ctx.flow_name.clone(),
                     flow_id: ctx.flow_id.to_string(),
@@ -707,7 +705,7 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
                 .await
                 .map_err(|e| {
                     obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to send source consumption_final: {e}"
+                        "Failed to send source production_finalized: {e}"
                     ))
                 })?;
 
@@ -716,7 +714,7 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
                     emitted,
                     eof_kind = ?eof_kind,
                     reason = ?ctx.completion_reason,
-                    "Infinite source sent EOF and consumption_final"
+                    "Infinite source sent EOF and production_finalized"
                 );
                 Ok(())
             }

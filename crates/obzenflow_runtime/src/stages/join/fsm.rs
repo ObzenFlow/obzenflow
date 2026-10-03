@@ -834,6 +834,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                     writer_id: ref mut eof_writer,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,
+                    writer_seq_by_event_type_complete,
                     vector_clock,
                     last_event_id,
                     ..
@@ -841,7 +842,8 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 {
                     *eof_writer = Some(writer_id);
                     *writer_seq = Some(authored_writer_seq);
-                    *eof_writer_seq_by_event_type = writer_seq_by_event_type;
+                    *eof_writer_seq_by_event_type = writer_seq_by_event_type.clone();
+                    *writer_seq_by_event_type_complete = true;
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }

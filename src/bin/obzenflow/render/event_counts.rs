@@ -5,14 +5,18 @@
 //! Bounded counts of displayed entries within each physical journal. Payload
 //! subjects and original writers never move entries into a different journal.
 
-use super::{context::descriptor_label, writer_id, RunJournal, RunRecord};
+use super::{
+    context::{event_descriptor, record_writer_id},
+    RunJournal, RunRecord,
+};
+use obzenflow_core::{EventDescriptor, WriterId};
 use std::collections::BTreeMap;
 
 const MAX_ROWS: usize = 1024;
 
 pub(super) struct JournalEventCounts {
     pub journal: RunJournal,
-    pub event_types: BTreeMap<(String, String), u64>,
+    pub event_types: BTreeMap<(EventDescriptor, WriterId), u64>,
     pub omitted: u64,
 }
 
@@ -32,7 +36,7 @@ impl EventCounts {
                 event_types: BTreeMap::new(),
                 omitted: 0,
             });
-        let key = (descriptor_label(record), writer_id(record));
+        let key = (event_descriptor(record), record_writer_id(record));
         if let Some(count) = journal.event_types.get_mut(&key) {
             *count += 1;
         } else if self.rows < MAX_ROWS {

@@ -117,6 +117,7 @@ pub(crate) fn commit_control_output(
             writer_id,
             writer_seq,
             writer_seq_by_event_type,
+            writer_seq_by_event_type_complete,
             last_event_id,
             ..
         }) = &mut event.payload
@@ -127,6 +128,7 @@ pub(crate) fn commit_control_output(
             *writer_id = Some(authored_writer);
             *writer_seq = Some(seq);
             *writer_seq_by_event_type = by_type;
+            *writer_seq_by_event_type_complete = true;
             *last_event_id = last;
         }
         let mut snapshot = instrumentation.capture_accounting();
@@ -570,6 +572,7 @@ impl OutputCommitter<'_> {
             writer_id,
             writer_seq,
             writer_seq_by_event_type,
+            writer_seq_by_event_type_complete,
             last_event_id,
             ..
         }) = &mut event.payload
@@ -603,6 +606,7 @@ impl OutputCommitter<'_> {
         *writer_id = Some(expected_writer);
         *writer_seq = Some(expected_seq);
         *writer_seq_by_event_type = expected_by_type;
+        *writer_seq_by_event_type_complete = true;
         *last_event_id = expected_last_event_id;
 
         self.commit_prebuilt_with_intent_inline(

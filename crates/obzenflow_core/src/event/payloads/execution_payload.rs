@@ -17,6 +17,7 @@ use crate::event::observability::{HttpPullState, WaitReason};
 use crate::event::provenance::ExecutionAccounting;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::{Count, DurationMs};
+use crate::event::vocabulary;
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::StageId;
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,8 @@ pub enum ExecutionPayload {
         feed_role: Option<SystemFeedRole>,
         contract_name: ContractName,
         status: ContractResultStatusLabel,
+        phase: crate::contracts::ContractPhase,
+        result: Box<crate::ContractResult>,
         /// Stable category label (e.g. "seq_divergence", "content_mismatch", "other")
         #[serde(skip_serializing_if = "Option::is_none")]
         cause: Option<String>,
@@ -76,6 +79,7 @@ pub enum ExecutionPayload {
         advertised_writer_seq: Option<crate::event::types::SeqNo>,
     },
     StageLifecycle(StageLifecycleFact),
+    #[serde(rename = "resilience_occurrence")]
     CircuitBreaker(CircuitBreakerFact),
     RateLimiter(RateLimiterFact),
     Backpressure(BackpressureFact),
@@ -364,39 +368,92 @@ impl ExecutionPayload {
         }
     }
 
-    pub fn event_type(&self) -> &'static str {
-        match self {
+    pub fn event_type(&self, stage_name: &str) -> std::borrow::Cow<'static, str> {
+        use super::supervisor_descriptor::{supervisor_event_type, SupervisionMode};
+        let name = match self {
             Self::ReplayLifecycle(_) => "execution.replay.lifecycle",
-            Self::SupervisorRegistered { .. } => "execution.supervisor.registered",
+            Self::SupervisorRegistered { descriptor } => {
+                return descriptor.registered_event_type().into()
+            }
             Self::SupervisorCommandDiscarded { .. } => "execution.supervisor.command_discarded",
             Self::SourceCleanupFailed { .. } => "execution.source.cleanup_failed",
             Self::ContractStatus { pass, .. } => {
                 if *pass {
-                    "execution.contract.pass"
+                    vocabulary::contract::POLICY_ACCEPTED
                 } else {
-                    "execution.contract.fail"
+                    vocabulary::contract::POLICY_REJECTED
                 }
             }
             Self::ContractResult { status, .. } => match status {
-                ContractResultStatusLabel::Passed => "execution.contract.result.passed",
-                ContractResultStatusLabel::Failed => "execution.contract.result.failed",
-                ContractResultStatusLabel::Pending => "execution.contract.result.pending",
-                ContractResultStatusLabel::Healthy => "execution.contract.result",
+                ContractResultStatusLabel::Passed => vocabulary::contract::VERIFICATION_PASSED,
+                ContractResultStatusLabel::Failed => vocabulary::contract::VERIFICATION_FAILED,
+                ContractResultStatusLabel::Pending => vocabulary::contract::VERIFICATION_PENDING,
+                ContractResultStatusLabel::Skipped => vocabulary::contract::VERIFICATION_SKIPPED,
             },
-            Self::StageLifecycle(fact) => match fact {
-                StageLifecycleFact::Running { .. } => "lifecycle.stage.running",
-                StageLifecycleFact::Draining { .. } => "lifecycle.stage.draining",
-                StageLifecycleFact::Drained { .. } => "lifecycle.stage.drained",
-                StageLifecycleFact::Completed { .. } => "lifecycle.stage.completed",
-                StageLifecycleFact::Cancelled { .. } => "lifecycle.stage.cancelled",
-                StageLifecycleFact::Failed { .. } => "lifecycle.stage.failed",
-            },
-            Self::CircuitBreaker(CircuitBreakerFact::StateChanged { .. }) => {
-                "lifecycle.middleware.circuit_breaker.state_changed"
+            Self::StageLifecycle(fact) => {
+                let occurrence = match fact {
+                    StageLifecycleFact::Running { .. } => vocabulary::supervisor::milestone::READY,
+                    StageLifecycleFact::Draining { .. } => {
+                        vocabulary::supervisor::milestone::DRAIN_STARTED
+                    }
+                    StageLifecycleFact::Drained { .. } => {
+                        vocabulary::supervisor::milestone::DRAIN_COMPLETED
+                    }
+                    StageLifecycleFact::Completed { .. } => {
+                        vocabulary::supervisor::outcome::COMPLETED
+                    }
+                    StageLifecycleFact::Cancelled { .. } => {
+                        vocabulary::supervisor::outcome::CANCELLED
+                    }
+                    StageLifecycleFact::Failed { .. } => vocabulary::supervisor::outcome::FAILED,
+                };
+                return supervisor_event_type(
+                    stage_name,
+                    SupervisionMode::HandlerSupervised,
+                    occurrence,
+                )
+                .into();
             }
-            Self::CircuitBreaker(_) => "lifecycle.middleware.circuit_breaker",
-            Self::RateLimiter(_) => "lifecycle.middleware.rate_limiter",
-            Self::Backpressure(_) => "lifecycle.backpressure",
+            Self::CircuitBreaker(fact) => match fact {
+                CircuitBreakerFact::Opened { .. }
+                | CircuitBreakerFact::StateChanged {
+                    to_state: CircuitState::Open,
+                    ..
+                } => vocabulary::circuit_breaker::OPENED,
+                CircuitBreakerFact::Closed { .. }
+                | CircuitBreakerFact::StateChanged {
+                    to_state: CircuitState::Closed,
+                    ..
+                } => vocabulary::circuit_breaker::CLOSED,
+                CircuitBreakerFact::HalfOpen { .. }
+                | CircuitBreakerFact::StateChanged {
+                    to_state: CircuitState::HalfOpen,
+                    ..
+                } => vocabulary::circuit_breaker::HALF_OPEN_ENTERED,
+                CircuitBreakerFact::Rejected { .. } => {
+                    vocabulary::circuit_breaker::ADMISSION_REJECTED
+                }
+                CircuitBreakerFact::AttemptSettled { .. } => {
+                    vocabulary::circuit_breaker::ATTEMPT_ASSESSED
+                }
+                CircuitBreakerFact::RetryScheduled { .. } => vocabulary::retry::SCHEDULED,
+                CircuitBreakerFact::RetrySucceeded { .. } => vocabulary::retry::SUCCEEDED,
+                CircuitBreakerFact::RetryExhausted { .. } => vocabulary::retry::EXHAUSTED,
+                CircuitBreakerFact::RetryStoppedNonRetryable { .. } => {
+                    vocabulary::retry::STOPPED_NON_RETRYABLE
+                }
+                CircuitBreakerFact::RecoveryCompleted { .. } => {
+                    vocabulary::resilience::EVALUATION_FINISHED
+                }
+            },
+            Self::RateLimiter(fact) => match fact {
+                RateLimiterFact::Delayed { .. } => vocabulary::rate_limiter::WAIT_STARTED,
+                RateLimiterFact::ModeChange { .. } => vocabulary::rate_limiter::MODE_CHANGED,
+                RateLimiterFact::ConfigChanged { .. } => {
+                    vocabulary::rate_limiter::CONFIGURATION_CHANGED
+                }
+            },
+            Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourcePollError(_) => "source.poll_error",
             Self::HttpPullState(_) => "source.http_pull_state",
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
@@ -412,7 +469,8 @@ impl ExecutionPayload {
             Self::EffectRecoveryAbandoned(_) => {
                 super::effect_payload::EFFECT_RECOVERY_ABANDONED_EVENT_TYPE
             }
-        }
+        };
+        name.into()
     }
 
     /// The existing effect protocol charges these physical rows. Other execution
@@ -514,9 +572,11 @@ mod tests {
     fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
         use crate::event::types::SeqNo;
         use serde_json::json;
+        let upstream = StageId::new();
+        let reader = StageId::new();
         let payload = ExecutionPayload::ContractResult {
-            upstream: StageId::new(),
-            reader: StageId::new(),
+            upstream,
+            reader,
             selected_event_type: Some(crate::EventDescriptor {
                 event_kind: crate::event::payloads::chain_payload::EventKind::Fact,
                 event_type: "test.selected".into(),
@@ -524,7 +584,18 @@ mod tests {
             }),
             feed_role: Some(SystemFeedRole::Reference),
             contract_name: ContractName::from("TransportContract"),
-            status: ContractResultStatusLabel::Healthy,
+            status: ContractResultStatusLabel::Pending,
+            phase: crate::contracts::ContractPhase::Progress,
+            result: Box::new(crate::ContractResult::Pending {
+                reason: crate::contracts::PendingReason::ProgressOnly,
+                evidence: crate::ContractEvidence {
+                    contract_name: ContractName::from("TransportContract"),
+                    upstream_stage: upstream,
+                    downstream_stage: reader,
+                    evaluated_at: chrono::Utc::now(),
+                    details: crate::contracts::ContractEvidenceDetails::Progress,
+                },
+            }),
             cause: None,
             reader_seq: Some(SeqNo(3)),
             advertised_writer_seq: Some(SeqNo(5)),
@@ -537,7 +608,22 @@ mod tests {
         );
         assert_eq!(serialized["feed_role"], "reference");
         assert_eq!(serialized["contract_name"], "TransportContract");
-        assert_eq!(serialized["status"], "healthy");
+        assert_eq!(serialized["status"], "pending");
+
+        let record =
+            crate::event::ChainEventFactory::execution_event(reader.into(), payload.clone());
+        assert_eq!(record.event_type(), "runtime.contract.verification_pending");
+        let encoded = serde_json::to_value(record).unwrap();
+        assert!(serde_json::from_value::<crate::ChainEvent>(encoded.clone()).is_ok());
+        for (field, value) in [
+            ("status", json!("passed")),
+            ("contract_name", json!("OtherContract")),
+            ("reader", json!(StageId::new())),
+        ] {
+            let mut invalid = encoded.clone();
+            invalid["payload"][field] = value;
+            assert!(serde_json::from_value::<crate::ChainEvent>(invalid).is_err());
+        }
 
         let decoded: ExecutionPayload = serde_json::from_value(json!({
             "execution_type": "contract_result",
@@ -546,7 +632,9 @@ mod tests {
             "selected_event_type": serialized["selected_event_type"].clone(),
             "feed_role": "reference",
             "contract_name": "TransportContract",
-            "status": "healthy",
+            "status": "pending",
+            "phase": "progress",
+            "result": serialized["result"].clone(),
             "reader_seq": 3,
             "advertised_writer_seq": 5
         }))
@@ -570,7 +658,7 @@ mod tests {
                 );
                 assert_eq!(feed_role, Some(SystemFeedRole::Reference));
                 assert_eq!(contract_name.as_str(), "TransportContract");
-                assert_eq!(status, ContractResultStatusLabel::Healthy);
+                assert_eq!(status, ContractResultStatusLabel::Pending);
             }
             other => panic!("expected ContractResult, got {other:?}"),
         }

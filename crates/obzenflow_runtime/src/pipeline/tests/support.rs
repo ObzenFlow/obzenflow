@@ -37,9 +37,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// Storage, envelope construction and readers belong to the supplied journal.
 pub(in crate::pipeline) struct ControlledJournal<T: JournalEvent> {
     inner: Arc<dyn Journal<T>>,
-    pub(in crate::pipeline) terminal_append: Option<Arc<TerminalAppendGate>>,
-    pub(in crate::pipeline) metrics_ready_append: Option<Arc<TerminalAppendGate>>,
-    pub(in crate::pipeline) gate_event: Option<&'static str>,
+    pub(in crate::pipeline) gate_event: Option<fn(&T) -> bool>,
     pub(in crate::pipeline) gate: Option<Arc<TerminalAppendGate>>,
     pub(in crate::pipeline) fail_reader: Option<usize>,
     pub(in crate::pipeline) reader_calls: AtomicUsize,
@@ -49,8 +47,6 @@ impl<T: JournalEvent> ControlledJournal<T> {
     pub(in crate::pipeline) fn new(inner: Arc<dyn Journal<T>>) -> Self {
         Self {
             inner,
-            terminal_append: None,
-            metrics_ready_append: None,
             fail_reader: None,
             gate_event: None,
             gate: None,
@@ -83,26 +79,8 @@ where
         event: T,
         options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
-        if self.gate_event == Some(event.event_type_name()) {
+        if self.gate_event.is_some_and(|matches| matches(&event)) {
             if let Some(gate) = &self.gate {
-                gate.entered.notify_one();
-                gate.release.notified().await;
-                if gate.fail {
-                    return Err(JournalError::Full);
-                }
-            }
-        }
-        if event.event_type_name() == "system.metrics.ready" {
-            if let Some(gate) = &self.metrics_ready_append {
-                gate.entered.notify_one();
-                gate.release.notified().await;
-            }
-        }
-        if matches!(
-            event.event_type_name(),
-            "system.pipeline.completed" | "system.pipeline.cancelled" | "system.pipeline.failed"
-        ) {
-            if let Some(gate) = &self.terminal_append {
                 gate.entered.notify_one();
                 gate.release.notified().await;
                 if gate.fail {

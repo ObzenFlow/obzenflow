@@ -1205,7 +1205,7 @@ impl MetricsAggregatorResources {
             .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
         tracing::trace!(
             event_id = %envelope.id(),
-            event_type = envelope.payload.event_type(),
+            event_type = %envelope.payload.event_type(),
             "Metrics aggregator selected pipeline lifecycle fact"
         );
         let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();

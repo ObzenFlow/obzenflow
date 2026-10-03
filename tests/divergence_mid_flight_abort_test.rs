@@ -597,7 +597,7 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
                 advertised_writer_seq,
                 ..
             }) if contract_name.as_str() == TransportContract::NAME => {
-                if *status == ContractResultStatusLabel::Healthy
+                if *status == ContractResultStatusLabel::Pending
                     && cause.is_none()
                     && advertised_writer_seq.is_none()
                 {
@@ -670,7 +670,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
                 cause,
                 ..
             }) if contract_name.as_str() == DivergenceContract::NAME => {
-                if *status == ContractResultStatusLabel::Healthy && cause.is_none() {
+                if *status == ContractResultStatusLabel::Pending && cause.is_none() {
                     seen_divergence_healthy = true;
                 }
                 if *status == ContractResultStatusLabel::Failed

@@ -100,7 +100,10 @@ fn event_counts_keep_physical_journals_separate_for_the_same_event_type() {
             .find(|counts| counts.journal.id == record.journal.id)
             .unwrap();
         assert_eq!(
-            journal.event_types[&("fact/sensor.reading@1".into(), writer_id(record))],
+            journal.event_types[&(
+                context::event_descriptor(record),
+                context::record_writer_id(record)
+            )],
             expected
         );
         assert_eq!(journal.omitted, 0);
@@ -120,12 +123,122 @@ fn event_counts_distinguish_payload_versions_with_identical_names_and_bodies() {
     counts.record(&second);
     let journal = counts.journals().next().unwrap();
     assert_eq!(
-        journal.event_types[&("fact/sensor.reading@1".into(), writer_id(&first))],
+        journal.event_types[&(
+            context::event_descriptor(&first),
+            context::record_writer_id(&first)
+        )],
         1
     );
     assert_eq!(
-        journal.event_types[&("fact/sensor.reading@2".into(), writer_id(&second))],
+        journal.event_types[&(
+            context::event_descriptor(&second),
+            context::record_writer_id(&second)
+        )],
         1
+    );
+}
+
+#[test]
+fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions() {
+    use obzenflow_core::event::payloads::supervisor_descriptor::{
+        SupervisionMode, SupervisorDescriptor, SupervisorKind,
+    };
+
+    let source = fact(1, 100, &[], json!({}));
+    let second_author = fact(2, 101, &[], json!({}));
+    let stage = source.journal.stage.as_ref().unwrap();
+    let manifest: RunManifest = serde_json::from_value(json!({
+        "journal_schema_version": obzenflow_core::journal::JOURNAL_SCHEMA_VERSION,
+        "obzenflow_version": "test", "flow_id": id(10),
+        "pipeline_writer_id": source.run.pipeline_writer_id,
+        "flow_name": "sensors", "created_at": "2026-09-23T00:00:00Z",
+        "system_journal_file": "system.log", "metrics_journals": null,
+        "stages": {stage.key.clone(): {
+            "dsl_var": stage.key, "stage_type": stage.stage_type, "is_effectful": false,
+            "stage_id": stage.id.to_string(), "stage_logic_version": "1",
+            "data_journal_file": "thermometer.log", "error_journal_file": "thermometer.errors.log",
+            "inbound": [], "ordered_delivery": true
+        }}
+    }))
+    .unwrap();
+    let mut renderer = Renderer::new(
+        &ViewArgs::default(),
+        false,
+        false,
+        [&source.journal].into_iter(),
+    );
+    renderer.width = 90;
+    renderer.context.stages.clear();
+    for record in [&source, &second_author] {
+        renderer.context.supervisors.insert(
+            writer_id(record),
+            SupervisorDescriptor {
+                name: "shared".into(),
+                kind: SupervisorKind::Transform,
+                supervision: SupervisionMode::HandlerSupervised,
+            },
+        );
+    }
+    // These names deliberately contain the punctuation of descriptor Display.
+    for (author, name, version) in [
+        (&source, "sensor.value@unit/reading", 2),
+        (&source, "sensor.value@unit/reading", 10),
+        (&source, "sensor.value@unit/reading", 1),
+        (&source, "sensor.value", 1),
+        (&source, "runtime.source.production_declared", 1),
+        (&second_author, "sensor.value@unit/reading", 1),
+    ] {
+        let mut record = author.clone();
+        record.journal = source.journal.clone();
+        let RunRecordData::Chain(row) = &mut record.record else {
+            unreachable!()
+        };
+        row.envelope.provenance.event.event_type = name.into();
+        row.envelope.provenance.event.payload_schema_version =
+            std::num::NonZeroU32::new(version).unwrap();
+        renderer.event_counts.record(&record);
+    }
+    let mut output = Vec::new();
+    renderer
+        .finish(
+            &mut output,
+            &mut Vec::new(),
+            &source.run,
+            &manifest,
+            ObservationEnd::Snapshot,
+            &RunReadProgress::default(),
+        )
+        .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        text.lines().all(|line| line.chars().count() <= 90),
+        "{text}"
+    );
+    assert!(!text.contains("Author:") && !text.contains("Event prefix:"));
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.trim_start().starts_with("Count "))
+            .count(),
+        1
+    );
+    let summary = text.split_once("\nAPPLICATION STAGES\n").unwrap().1;
+    let rows: Vec<_> = summary
+        .lines()
+        .filter_map(|line| {
+            let cells: Vec<_> = line.split_whitespace().collect();
+            (cells.len() == 3 && cells[0] == "1").then_some(cells)
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            vec!["1", "fact/runtime.source.production_declared@1", "shared"],
+            vec!["1", "fact/sensor.value@1", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@1", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@10", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@2", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@1", "shared"],
+        ]
     );
 }
 
@@ -224,10 +337,14 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
             "pipeline does not consume error journals"
         );
         if width == 90 {
+            assert_eq!(transform_group.matches("fact/sensor.reading@1").count(), 2);
             assert_eq!(
                 transform_group
                     .lines()
-                    .filter(|line| line.contains("sensor.reading") && line.contains("thermometer"))
+                    .filter(|line| {
+                        line.contains("fact/sensor.reading@1")
+                            && line.trim_end().ends_with("thermometer")
+                    })
                     .count(),
                 2
             );
@@ -608,8 +725,11 @@ fn execution(event: u64, parents: &[u64], payload: ExecutionPayload) -> RunRecor
     if let RunRecordData::Chain(row) = &mut record.record {
         row.payload = ChainPayload::Execution(payload);
         row.envelope.provenance.event.event_kind = row.payload.kind();
-        row.envelope.provenance.event.event_type =
-            row.payload.framework_event_type().unwrap().into();
+        row.envelope.provenance.event.event_type = row
+            .payload
+            .framework_event_type(&row.envelope.provenance.event.flow_context.stage_name)
+            .unwrap()
+            .into();
         row.envelope.provenance.event.payload_schema_version =
             row.payload.framework_schema_version().unwrap();
     }

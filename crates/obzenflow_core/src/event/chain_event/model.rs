@@ -172,6 +172,9 @@ impl ChainEvent {
 
     /// Replace the flow-context block and return the updated event.
     pub fn with_flow_context(mut self, ctx: FlowContext) -> Self {
+        if let Some(name) = self.payload.framework_event_type(&ctx.stage_name) {
+            self.event_type = name.into_owned();
+        }
         self.flow_context = ctx;
         self
     }

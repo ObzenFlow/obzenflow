@@ -81,6 +81,9 @@ impl<S: SelfSupervised> Supervisor for SelfRunner<S> {
     fn name(&self) -> &str {
         self.0.name()
     }
+    fn event_prefix(&self) -> String {
+        self.0.event_prefix()
+    }
     fn supervisor_kind(
         &self,
     ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {

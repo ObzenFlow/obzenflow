@@ -117,7 +117,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
 
         // Create supervisor (private - not exposed)
         let supervisor = InfiniteSourceSupervisor {
-            name: format!("infinite_source_{}", self.config.stage_name),
+            name: self.config.stage_name.clone(),
             handler: Some(handler),
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),

@@ -11,7 +11,8 @@ use crate::event::{
 use crate::id::StageId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as JsonValue};
+pub mod evidence;
+pub use evidence::*;
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -19,23 +20,71 @@ use std::time::{Duration, Instant};
 
 /// Result of contract verification for a single contract on an edge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "outcome", content = "evidence", rename_all = "snake_case")]
 pub enum ContractResult {
     /// Contract passed and produced evidence suitable for audit trail.
     Passed(ContractEvidence),
     /// Contract failed with a concrete violation cause.
     Failed(ContractViolation),
     /// Contract is not yet verifiable (e.g., waiting for EOF / more evidence).
-    Pending,
+    Pending {
+        reason: PendingReason,
+        evidence: ContractEvidence,
+    },
+    /// An explicit declaration establishes that this check does not apply.
+    Skipped {
+        reason: SkippedReason,
+        evidence: ContractEvidence,
+    },
 }
 
-/// Evidence that a contract was satisfied.
+impl ContractResult {
+    pub fn pending(name: ContractName, ctx: &ContractContext<'_>, reason: PendingReason) -> Self {
+        Self::Pending {
+            reason,
+            evidence: contract_evidence(name, ctx, ContractEvidenceDetails::Progress),
+        }
+    }
+
+    pub fn status(&self) -> crate::event::payloads::system_payload::ContractResultStatusLabel {
+        use crate::event::payloads::system_payload::ContractResultStatusLabel as Status;
+        match self {
+            Self::Passed(_) => Status::Passed,
+            Self::Failed(_) => Status::Failed,
+            Self::Pending { .. } => Status::Pending,
+            Self::Skipped { .. } => Status::Skipped,
+        }
+    }
+
+    pub fn details(&self) -> &ContractEvidenceDetails {
+        match self {
+            Self::Passed(e)
+            | Self::Pending { evidence: e, .. }
+            | Self::Skipped { evidence: e, .. } => &e.details,
+            Self::Failed(v) => &v.details,
+        }
+    }
+
+    pub fn subject(&self) -> (&ContractName, StageId, StageId) {
+        match self {
+            Self::Passed(e)
+            | Self::Pending { evidence: e, .. }
+            | Self::Skipped { evidence: e, .. } => {
+                (&e.contract_name, e.upstream_stage, e.downstream_stage)
+            }
+            Self::Failed(v) => (&v.contract_name, v.upstream_stage, v.downstream_stage),
+        }
+    }
+}
+
+/// Observations retained by a contract evaluation, independently of its outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractEvidence {
     pub contract_name: ContractName,
     pub upstream_stage: StageId,
     pub downstream_stage: StageId,
-    pub verified_at: DateTime<Utc>,
-    pub details: JsonValue,
+    pub evaluated_at: DateTime<Utc>,
+    pub details: ContractEvidenceDetails,
 }
 
 /// Details of a contract violation.
@@ -46,7 +95,7 @@ pub struct ContractViolation {
     pub downstream_stage: StageId,
     pub detected_at: DateTime<Utc>,
     pub cause: ViolationCause,
-    pub details: JsonValue,
+    pub details: ContractEvidenceDetails,
 }
 
 /// Well-known categories of contract violations.
@@ -206,6 +255,8 @@ pub struct ContractContext<'a> {
 pub enum ContractEventScope {
     /// Only rows whose author resolves to the journal-owning upstream.
     UpstreamAuthored,
+    /// Original producer declarations, before selected-feed transport accounting.
+    SourceProduction,
     /// Every row physically delivered across the edge.
     PhysicalEdge,
 }
@@ -237,6 +288,20 @@ pub trait Contract: Send + Sync {
     /// Optional incremental check, for early warnings or streaming policies.
     fn check_progress(&self, _ctx: &ContractContext<'_>) -> Option<ContractViolation> {
         None
+    }
+}
+
+pub fn contract_evidence(
+    name: ContractName,
+    ctx: &ContractContext<'_>,
+    details: ContractEvidenceDetails,
+) -> ContractEvidence {
+    ContractEvidence {
+        contract_name: name,
+        upstream_stage: ctx.upstream_stage,
+        downstream_stage: ctx.downstream_stage,
+        evaluated_at: Utc::now(),
+        details,
     }
 }
 
@@ -307,55 +372,30 @@ impl Contract for TransportContract {
     }
 
     fn verify(&self, ctx: &ContractContext<'_>) -> ContractResult {
-        let writer_count = ctx
-            .write_state
-            .get::<WriterCount>()
-            .map(|c| c.0)
-            .unwrap_or(0);
-        let reader_count = ctx
-            .read_state
-            .get::<ReaderCount>()
-            .map(|c| c.0)
-            .unwrap_or(0);
-
-        if writer_count == reader_count {
-            ContractResult::Passed(ContractEvidence {
-                contract_name: self.contract_name(),
-                upstream_stage: ctx.upstream_stage,
-                downstream_stage: ctx.downstream_stage,
-                verified_at: Utc::now(),
-                details: JsonValue::Object(
-                    [
-                        ("writer_seq".to_string(), JsonValue::from(writer_count)),
-                        ("reader_seq".to_string(), JsonValue::from(reader_count)),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-            })
-        } else {
-            ContractResult::Failed(ContractViolation {
+        let advertised = ctx.write_state.get::<WriterCount>().map(|c| SeqNo(c.0));
+        let consumed = ctx.read_state.get::<ReaderCount>().map_or(0, |c| c.0);
+        let details = ContractEvidenceDetails::Transport {
+            advertised_writer_seq: advertised,
+            consumed_count: Count(consumed),
+        };
+        let evidence = contract_evidence(self.contract_name(), ctx, details.clone());
+        match advertised {
+            None => ContractResult::Pending {
+                reason: PendingReason::WriterAdvertisementUnavailable,
+                evidence,
+            },
+            Some(written) if written.0 == consumed => ContractResult::Passed(evidence),
+            Some(written) => ContractResult::Failed(ContractViolation {
                 contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 detected_at: Utc::now(),
                 cause: ViolationCause::SeqDivergence {
-                    advertised: Some(SeqNo(writer_count)),
-                    reader: SeqNo(reader_count),
+                    advertised: Some(written),
+                    reader: SeqNo(consumed),
                 },
-                details: JsonValue::Object(
-                    [
-                        ("writer_seq".to_string(), JsonValue::from(writer_count)),
-                        ("reader_seq".to_string(), JsonValue::from(reader_count)),
-                        (
-                            "delta".to_string(),
-                            JsonValue::from(writer_count as i64 - reader_count as i64),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-            })
+                details,
+            }),
         }
     }
 }
@@ -367,6 +407,7 @@ impl Contract for TransportContract {
 /// Internal writer-side state for SourceContract.
 #[derive(Debug, Default)]
 struct SourceWriterState {
+    declaration_received: bool,
     expected_count: Option<u64>,
     eof_writer_seq: Option<u64>,
 }
@@ -374,10 +415,8 @@ struct SourceWriterState {
 /// Verifies that a finite source's declared expectations (when configured)
 /// match what it ultimately reports at EOF.
 ///
-/// This contract is intentionally conservative for 081b:
-/// - If no `expected_count` is ever observed, it always passes.
-/// - If `expected_count` is present and an EOF with `writer_seq` is seen,
-///   it fails only when the two disagree.
+/// A received declaration without an expectation makes the check inapplicable.
+/// Missing declarations or production counts leave verification pending.
 pub struct SourceContract;
 
 impl Default for SourceContract {
@@ -399,19 +438,21 @@ impl Contract for SourceContract {
         Self::NAME
     }
 
+    fn event_scope(&self) -> ContractEventScope {
+        ContractEventScope::SourceProduction
+    }
+
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {
         use crate::event::payloads::flow_control_payload::FlowControlPayload;
 
         if let ChainPayload::FlowControl(payload) = &event.payload {
             match payload {
-                FlowControlPayload::SourceContract {
-                    expected_count: Some(count),
-                    ..
-                } => {
+                FlowControlPayload::SourceContract { expected_count, .. } => {
                     let state = ctx
                         .state
                         .get_or_insert_with::<SourceWriterState, _>(SourceWriterState::default);
-                    state.expected_count = Some(count.0);
+                    state.declaration_received = true;
+                    state.expected_count = expected_count.map(|count| count.0);
                 }
                 FlowControlPayload::Eof {
                     writer_seq: Some(seq),
@@ -432,64 +473,43 @@ impl Contract for SourceContract {
     }
 
     fn verify(&self, ctx: &ContractContext<'_>) -> ContractResult {
-        let state = match ctx.write_state.get::<SourceWriterState>() {
-            Some(s) => s,
-            None => {
-                // No writer-side evidence; treat as pass for now.
-                return ContractResult::Passed(ContractEvidence {
-                    contract_name: self.contract_name(),
-                    upstream_stage: ctx.upstream_stage,
-                    downstream_stage: ctx.downstream_stage,
-                    verified_at: Utc::now(),
-                    details: JsonValue::String(
-                        "no source_contract / EOF evidence observed".to_string(),
-                    ),
-                });
-            }
+        let empty = SourceWriterState::default();
+        let state = ctx.write_state.get::<SourceWriterState>().unwrap_or(&empty);
+        let details = ContractEvidenceDetails::Source {
+            declaration_received: state.declaration_received,
+            expected_count: state.expected_count.map(Count),
+            produced_count: state.eof_writer_seq.map(Count),
         };
-
-        match (state.expected_count, state.eof_writer_seq) {
-            (Some(expected), Some(observed)) if expected != observed => {
-                ContractResult::Failed(ContractViolation {
-                    contract_name: self.contract_name(),
-                    upstream_stage: ctx.upstream_stage,
-                    downstream_stage: ctx.downstream_stage,
-                    detected_at: Utc::now(),
-                    cause: ViolationCause::Other("source_expected_count_mismatch".into()),
-                    details: JsonValue::Object(
-                        [
-                            ("expected_count".to_string(), JsonValue::from(expected)),
-                            ("observed_writer_seq".to_string(), JsonValue::from(observed)),
-                            (
-                                "delta".to_string(),
-                                JsonValue::from(observed as i64 - expected as i64),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect(),
-                    ),
-                })
-            }
-            _ => ContractResult::Passed(ContractEvidence {
+        let evidence = contract_evidence(self.contract_name(), ctx, details.clone());
+        if !state.declaration_received {
+            return ContractResult::Pending {
+                reason: PendingReason::ProducerDeclarationUnavailable,
+                evidence,
+            };
+        }
+        let Some(expected) = state.expected_count else {
+            return ContractResult::Skipped {
+                reason: SkippedReason::NoProductionExpectation,
+                evidence,
+            };
+        };
+        let Some(observed) = state.eof_writer_seq else {
+            return ContractResult::Pending {
+                reason: PendingReason::ProductionCountUnavailable,
+                evidence,
+            };
+        };
+        if expected == observed {
+            ContractResult::Passed(evidence)
+        } else {
+            ContractResult::Failed(ContractViolation {
                 contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
-                verified_at: Utc::now(),
-                details: JsonValue::Object(
-                    [
-                        (
-                            "expected_count".to_string(),
-                            JsonValue::from(state.expected_count.unwrap_or(0)),
-                        ),
-                        (
-                            "observed_writer_seq".to_string(),
-                            JsonValue::from(state.eof_writer_seq.unwrap_or(0)),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-            }),
+                detected_at: Utc::now(),
+                cause: ViolationCause::Other("source_expected_count_mismatch".into()),
+                details,
+            })
         }
     }
 }
@@ -604,30 +624,23 @@ impl Contract for DeliveryContract {
 
     fn verify(&self, ctx: &ContractContext<'_>) -> ContractResult {
         let st = self.state.lock().expect("DeliveryContract state poisoned");
-
-        let missing_count = st.pending.len();
-        let orphan_count = st.orphan_deliveries as usize;
-
-        let mut missing_sample: Vec<EventId> = st.pending.iter().take(100).copied().collect();
-        missing_sample.sort();
-
-        if missing_count == 0 && orphan_count == 0 {
-            ContractResult::Passed(ContractEvidence {
-                contract_name: self.contract_name(),
-                upstream_stage: ctx.upstream_stage,
-                downstream_stage: ctx.downstream_stage,
-                verified_at: Utc::now(),
-                details: json!({
-                    "consumed_total": st.consumed_total,
-                    "receipted_total": st.receipted_total,
-                    "pending_peak": st.pending_peak,
-                    "buffered_count": st.buffered_count,
-                    "has_failures": st.failed_count > 0,
-                    "success_count": st.success_count,
-                    "partial_count": st.partial_count,
-                    "failed_count": st.failed_count,
-                }),
-            })
+        let mut missing_event_ids: Vec<_> = st.pending.iter().copied().collect();
+        missing_event_ids.sort();
+        missing_event_ids.truncate(100);
+        let details = ContractEvidenceDetails::Delivery {
+            consumed_total: st.consumed_total,
+            receipted_total: st.receipted_total,
+            pending_peak: st.pending_peak,
+            buffered_count: st.buffered_count,
+            success_count: st.success_count,
+            partial_count: st.partial_count,
+            failed_count: st.failed_count,
+            missing_count: st.pending.len(),
+            orphan_count: st.orphan_deliveries,
+            missing_event_ids,
+        };
+        if st.pending.is_empty() && st.orphan_deliveries == 0 {
+            ContractResult::Passed(contract_evidence(self.contract_name(), ctx, details))
         } else {
             ContractResult::Failed(ContractViolation {
                 contract_name: self.contract_name(),
@@ -635,21 +648,10 @@ impl Contract for DeliveryContract {
                 downstream_stage: ctx.downstream_stage,
                 detected_at: Utc::now(),
                 cause: ViolationCause::DeliveryMismatch {
-                    missing_deliveries: missing_count,
-                    orphan_deliveries: orphan_count,
+                    missing_deliveries: st.pending.len(),
+                    orphan_deliveries: st.orphan_deliveries as usize,
                 },
-                details: json!({
-                    "consumed_total": st.consumed_total,
-                    "receipted_total": st.receipted_total,
-                    "pending_peak": st.pending_peak,
-                    "buffered_count": st.buffered_count,
-                    "missing_count": missing_count,
-                    "orphan_count": orphan_count,
-                    "missing_event_ids": missing_sample
-                        .iter()
-                        .map(|id| id.to_string())
-                        .collect::<Vec<_>>(),
-                }),
+                details,
             })
         }
     }
@@ -735,6 +737,27 @@ impl DivergenceContract {
         }
     }
 
+    fn evidence_details(
+        &self,
+        st: &DivergenceState,
+        evaluated_predicates: Vec<DivergencePredicate>,
+    ) -> ContractEvidenceDetails {
+        ContractEvidenceDetails::Divergence {
+            scc_id: self.scc_id,
+            window_seconds: self.thresholds.window.as_secs(),
+            elapsed_ms: st
+                .window_start
+                .map(|start| start.elapsed().as_millis() as u64),
+            evaluated_predicates,
+            data_events: st.data_events,
+            flow_control_signals: st.flow_control_signals,
+            signal_to_data_ratio_threshold: self.thresholds.signal_to_data_ratio,
+            max_signals_when_no_data: self.thresholds.max_signals_when_no_data,
+            max_cycle_depth: self.thresholds.max_cycle_depth,
+            max_cycle_depth_observed: st.max_cycle_depth_observed,
+        }
+    }
+
     fn check_signal_to_data_ratio(
         &self,
         ctx: &ContractContext<'_>,
@@ -755,12 +778,8 @@ impl DivergenceContract {
                         threshold: self.thresholds.max_signals_when_no_data as f64,
                         window_seconds,
                     },
-                    details: json!({
-                        "window_seconds": self.thresholds.window.as_secs(),
-                        "flow_control_signals": st.flow_control_signals,
-                        "data_events": st.data_events,
-                        "max_signals_when_no_data": self.thresholds.max_signals_when_no_data,
-                    }),
+                    details: self
+                        .evidence_details(st, vec![DivergencePredicate::SignalsWhenNoData]),
                 });
             }
             return None;
@@ -779,13 +798,7 @@ impl DivergenceContract {
                     threshold: self.thresholds.signal_to_data_ratio,
                     window_seconds,
                 },
-                details: json!({
-                    "window_seconds": self.thresholds.window.as_secs(),
-                    "flow_control_signals": st.flow_control_signals,
-                    "data_events": st.data_events,
-                    "observed_ratio": observed_ratio,
-                    "threshold_ratio": self.thresholds.signal_to_data_ratio,
-                }),
+                details: self.evidence_details(st, vec![DivergencePredicate::SignalToDataRatio]),
             });
         }
 
@@ -809,11 +822,7 @@ impl DivergenceContract {
                     threshold: self.thresholds.max_cycle_depth as f64,
                     window_seconds: None,
                 },
-                details: json!({
-                    "scc_id": self.scc_id.to_string(),
-                    "max_cycle_depth_observed": st.max_cycle_depth_observed,
-                    "max_cycle_depth": self.thresholds.max_cycle_depth,
-                }),
+                details: self.evidence_details(st, vec![DivergencePredicate::CycleDepth]),
             });
         }
         None
@@ -867,29 +876,17 @@ impl Contract for DivergenceContract {
             .state
             .lock()
             .expect("DivergenceContract state poisoned");
-        let observed_ratio = if st.data_events == 0 {
-            None
-        } else {
-            Some(st.flow_control_signals as f64 / st.data_events as f64)
-        };
-
-        ContractResult::Passed(ContractEvidence {
-            contract_name: self.contract_name(),
-            upstream_stage: ctx.upstream_stage,
-            downstream_stage: ctx.downstream_stage,
-            verified_at: Utc::now(),
-            details: json!({
-                "scc_id": self.scc_id.to_string(),
-                "window_seconds": self.thresholds.window.as_secs(),
-                "signal_to_data_ratio_threshold": self.thresholds.signal_to_data_ratio,
-                "max_signals_when_no_data": self.thresholds.max_signals_when_no_data,
-                "max_cycle_depth": self.thresholds.max_cycle_depth,
-                "data_events_observed_in_window": st.data_events,
-                "flow_control_signals_observed_in_window": st.flow_control_signals,
-                "signal_to_data_ratio_observed": observed_ratio,
-                "max_cycle_depth_observed": st.max_cycle_depth_observed,
-            }),
-        })
+        // This contract evaluates predicates through check_progress. EOF has
+        // never introduced another admission check; the final snapshot alone
+        // cannot prove a predicate was evaluated for this observation window.
+        ContractResult::Pending {
+            reason: PendingReason::EvaluationUnavailable,
+            evidence: contract_evidence(
+                self.contract_name(),
+                ctx,
+                self.evidence_details(&st, vec![]),
+            ),
+        }
     }
 
     fn check_progress(&self, ctx: &ContractContext<'_>) -> Option<ContractViolation> {
@@ -932,6 +929,7 @@ mod tests {
     use crate::event::types::SeqNo;
     use crate::event::{ChainEventFactory, ConsumptionProgressEventParams};
     use crate::{CycleDepth, WriterId};
+    use serde_json::json;
 
     fn dummy_ctx() -> (ContractWriteContext, ContractReadContext, StageId, StageId) {
         let upstream_stage = StageId::new();
@@ -939,6 +937,152 @@ mod tests {
         let write_ctx = ContractWriteContext::new(upstream_stage);
         let read_ctx = ContractReadContext::new(downstream_stage, upstream_stage);
         (write_ctx, read_ctx, upstream_stage, downstream_stage)
+    }
+
+    fn evaluate(
+        contract: &dyn Contract,
+        write: &ContractWriteContext,
+        read: &ContractReadContext,
+    ) -> ContractResult {
+        contract.verify(&ContractContext {
+            upstream_stage: write.writer_stage,
+            downstream_stage: read.reader_stage,
+            write_state: &write.state,
+            read_state: &read.state,
+        })
+    }
+
+    #[test]
+    fn transport_keeps_missing_advertisement_distinct_from_known_zero() {
+        use crate::event::payloads::flow_control_payload::FlowControlPayload;
+        for consumed in [0, 10] {
+            let contract = TransportContract::new();
+            let (mut write, mut read, upstream, _) = dummy_ctx();
+            for _ in 0..consumed {
+                contract.on_read(
+                    &ChainEventFactory::data_event(
+                        upstream.into(),
+                        "item",
+                        std::num::NonZeroU32::MIN,
+                        json!({}),
+                    ),
+                    &mut read,
+                );
+            }
+            assert!(
+                matches!(evaluate(&contract, &write, &read), ContractResult::Pending {
+                reason: PendingReason::WriterAdvertisementUnavailable,
+                evidence: ContractEvidence { details: ContractEvidenceDetails::Transport { advertised_writer_seq: None, consumed_count: Count(count) }, .. }
+            } if count == consumed)
+            );
+            let mut eof = ChainEventFactory::eof_event(upstream.into(), true);
+            let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+                &mut eof.payload
+            else {
+                unreachable!()
+            };
+            *writer_seq = Some(SeqNo(0));
+            contract.on_write(&eof, &mut write);
+            let result = evaluate(&contract, &write, &read);
+            assert_eq!(matches!(result, ContractResult::Passed(_)), consumed == 0);
+            assert_eq!(matches!(result, ContractResult::Failed(_)), consumed != 0);
+        }
+    }
+
+    #[test]
+    fn source_requires_a_declaration_and_the_original_production_count() {
+        use crate::event::payloads::flow_control_payload::FlowControlPayload;
+        use crate::event::types::{JournalIndex, JournalPath};
+        for expected in [None, Some(Count(10))] {
+            let contract = SourceContract::new();
+            let (mut write, read, upstream, _) = dummy_ctx();
+            assert!(matches!(
+                evaluate(&contract, &write, &read),
+                ContractResult::Pending {
+                    reason: PendingReason::ProducerDeclarationUnavailable,
+                    ..
+                }
+            ));
+            let declaration = ChainEventFactory::source_contract_event(
+                upstream.into(),
+                crate::event::SourceContractEventParams {
+                    expected_count: expected,
+                    source_id: upstream,
+                    route: None,
+                    journal_path: JournalPath("source".into()),
+                    journal_index: JournalIndex(0),
+                    writer_seq: None,
+                    vector_clock: None,
+                },
+            );
+            contract.on_write(&declaration, &mut write);
+            if expected.is_none() {
+                assert!(matches!(
+                    evaluate(&contract, &write, &read),
+                    ContractResult::Skipped {
+                        reason: SkippedReason::NoProductionExpectation,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    evaluate(&contract, &write, &read),
+                    ContractResult::Pending {
+                        reason: PendingReason::ProductionCountUnavailable,
+                        ..
+                    }
+                ));
+                let mut eof = ChainEventFactory::eof_event(upstream.into(), true);
+                let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+                    &mut eof.payload
+                else {
+                    unreachable!()
+                };
+                *writer_seq = Some(SeqNo(10));
+                contract.on_write(&eof, &mut write);
+                assert!(matches!(
+                    evaluate(&contract, &write, &read),
+                    ContractResult::Passed(ContractEvidence {
+                        details: ContractEvidenceDetails::Source {
+                            produced_count: Some(Count(10)),
+                            ..
+                        },
+                        ..
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn final_divergence_snapshot_does_not_add_a_new_policy_check() {
+        let contract = DivergenceContract::with_thresholds(
+            crate::SccId::from(crate::Ulid::new()),
+            DivergenceThresholds {
+                max_signals_when_no_data: 0,
+                ..DivergenceThresholds::default()
+            },
+        );
+        let (write, mut read, upstream, downstream) = dummy_ctx();
+        contract.on_read(&ChainEventFactory::drain_event(upstream.into()), &mut read);
+        assert!(matches!(
+            evaluate(&contract, &write, &read),
+            ContractResult::Pending {
+                reason: PendingReason::EvaluationUnavailable,
+                ..
+            }
+        ));
+        let violation = contract
+            .check_progress(&ContractContext {
+                upstream_stage: upstream,
+                downstream_stage: downstream,
+                write_state: &write.state,
+                read_state: &read.state,
+            })
+            .expect("the existing progress evaluator detects the violation");
+        assert!(
+            matches!(violation.details, ContractEvidenceDetails::Divergence { evaluated_predicates, flow_control_signals: 1, .. } if evaluated_predicates == vec![DivergencePredicate::SignalsWhenNoData])
+        );
     }
 
     #[test]
@@ -1022,7 +1166,20 @@ mod tests {
             write_state: &write_ctx.state,
             read_state: &read_ctx.state,
         };
-        assert!(matches!(contract.verify(&ctx), ContractResult::Passed(_)));
+        assert!(matches!(
+            contract.verify(&ctx),
+            ContractResult::Passed(ContractEvidence {
+                details: ContractEvidenceDetails::Delivery {
+                    consumed_total: 1,
+                    receipted_total: 1,
+                    failed_count: 1,
+                    success_count: 0,
+                    missing_count: 0,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1192,6 +1349,13 @@ mod tests {
         let progress = ChainEventFactory::consumption_progress_event(
             crate::WriterId::from(upstream),
             ConsumptionProgressEventParams {
+                scope: obzenflow_core::contracts::SubscriptionScope {
+                    upstream,
+                    reader: downstream,
+                    selection: obzenflow_core::contracts::SubscriptionSelection::All,
+                },
+                consumed_count: Count(0),
+                receipts: None,
                 reader_seq: SeqNo(1),
                 last_event_id: None,
                 vector_clock: None,
@@ -1249,6 +1413,13 @@ mod tests {
         let progress = ChainEventFactory::consumption_progress_event(
             crate::WriterId::from(upstream),
             ConsumptionProgressEventParams {
+                scope: obzenflow_core::contracts::SubscriptionScope {
+                    upstream,
+                    reader: downstream,
+                    selection: obzenflow_core::contracts::SubscriptionSelection::All,
+                },
+                consumed_count: Count(0),
+                receipts: None,
                 reader_seq: SeqNo(0),
                 last_event_id: None,
                 vector_clock: None,
@@ -1289,6 +1460,13 @@ mod tests {
         let progress = ChainEventFactory::consumption_progress_event(
             crate::WriterId::from(upstream),
             ConsumptionProgressEventParams {
+                scope: obzenflow_core::contracts::SubscriptionScope {
+                    upstream,
+                    reader: downstream,
+                    selection: obzenflow_core::contracts::SubscriptionSelection::All,
+                },
+                consumed_count: Count(0),
+                receipts: None,
                 reader_seq: SeqNo(0),
                 last_event_id: None,
                 vector_clock: None,

@@ -18,9 +18,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath};
-use obzenflow_core::event::{
-    ChainEventFactory, ChainPayload, ConsumptionFinalEventParams, SourceContractEventParams,
-};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, SourceContractEventParams};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
@@ -640,13 +638,15 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
                     writer_id: writer_id_field,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,
+                    writer_seq_by_event_type_complete,
                     last_event_id,
                     ..
                 }) = &mut eof_event.payload
                 {
                     *writer_id_field = Some(writer_id);
                     *writer_seq = Some(authored_writer_seq);
-                    *eof_writer_seq_by_event_type = writer_seq_by_event_type;
+                    *eof_writer_seq_by_event_type = writer_seq_by_event_type.clone();
+                    *writer_seq_by_event_type_complete = true;
                     *last_event_id = authored_last_event_id;
                 }
 
@@ -660,19 +660,14 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
                 };
                 eof_event = runtime_context.clone().attach_to(eof_event);
 
-                // Emit consumption_final for the source itself (writer-side contract)
-                let mut final_event = ChainEventFactory::consumption_final_event(
+                // Publish the source's own production totals at its EOF frontier.
+                let mut final_event = ChainEventFactory::flow_signal_event(
                     writer_id,
-                    ConsumptionFinalEventParams {
-                        pass: true, // sources are authoritative on what they wrote
-                        consumed_count: Count(authored_writer_seq.0),
-                        expected_count: None, // unknown until config plumbing (010)
-                        eof_seen: true,
-                        last_event_id: None, // unknown here
-                        reader_seq: authored_writer_seq,
-                        advertised_writer_seq: Some(authored_writer_seq), // = what we wrote
-                        advertised_vector_clock: None,                    // unavailable here
-                        failure_reason: None,
+                    FlowControlPayload::ProductionFinal {
+                        produced_count: Count(authored_writer_seq.0),
+                        produced_by_event_type: writer_seq_by_event_type,
+                        end_kind: eof_kind,
+                        last_event_id: authored_last_event_id,
                     },
                 );
 
@@ -705,14 +700,14 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
                 .await
                 .map_err(|e| {
                     obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to send source consumption_final: {e}"
+                        "Failed to send source production_finalized: {e}"
                     ))
                 })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     emitted,
-                    "Finite source sent EOF and consumption_final"
+                    "Finite source sent EOF and production_finalized"
                 );
                 Ok(())
             }

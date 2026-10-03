@@ -14,6 +14,9 @@ use crate::stages::common::stage_handle::StageMilestone;
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::system_payload::{
+    PipelineLifecycleEvent as PipelineFact, SystemPayload as SystemFact,
+};
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::{Journal, SystemId};
 use std::sync::{atomic::Ordering, Arc};
@@ -139,7 +142,10 @@ pub async fn startup_waits_for_achieved_transitions_with_zero_child_journal_read
         .await
         .unwrap()
         .iter()
-        .any(|r| r.event_type_name() == "system.pipeline.running"));
+        .any(|r| matches!(
+            &r.payload,
+            SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
+        )));
     // Sources may complete before the parent observes their retained startup acknowledgement.
     source_results.acknowledge(StageMilestone::Started);
     wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
@@ -154,15 +160,19 @@ pub async fn startup_waits_for_achieved_transitions_with_zero_child_journal_read
     assert_eq!(source_journal.reader_calls.load(Ordering::Relaxed), 0);
     assert_eq!(sink_journal.reader_calls.load(Ordering::Relaxed), 0);
     let rows = pipeline_journal.read_all_unordered().await.unwrap();
-    let types: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
     assert!(
-        types
-            .iter()
-            .position(|t| *t == "system.pipeline.starting")
+        rows.iter()
+            .position(|row| matches!(
+                &row.payload,
+                SystemFact::PipelineLifecycle(PipelineFact::Starting)
+            ))
             .unwrap()
-            < types
+            < rows
                 .iter()
-                .position(|t| *t == "system.pipeline.running")
+                .position(|row| matches!(
+                    &row.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
+                ))
                 .unwrap()
     );
 }
@@ -186,7 +196,9 @@ pub async fn blocked_registration_preserves_cancellation_and_cleanup(
             fail: false,
         });
         let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-        journal.gate_event = Some("system.supervisor.registered");
+        journal.gate_event = Some(
+            |event| matches!(&event.payload, SystemFact::SupervisorRegistered { descriptor } if descriptor.kind == obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline),
+        );
         journal.gate = Some(gate.clone());
         let journal = Arc::new(journal);
         let (topology, source, sink) = source_sink_topology_with_source();
@@ -247,13 +259,16 @@ pub async fn blocked_registration_preserves_cancellation_and_cleanup(
         let rows = journal.read_all_unordered().await.unwrap();
         assert_eq!(
             rows.iter()
-                .filter(|r| r.event_type_name() == "system.supervisor.registered")
+                .filter(
+                    |r| matches!(&r.payload, SystemFact::SupervisorRegistered { descriptor } if descriptor.kind == obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline)
+                )
                 .count(),
             1
         );
         assert!(!rows.iter().any(|r| matches!(
-            r.event_type_name(),
-            "system.pipeline.ready_for_run" | "system.pipeline.running"
+            &r.payload,
+            SystemFact::PipelineLifecycle(PipelineFact::ReadyForRun { .. })
+                | SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
         )));
     }
 }
@@ -274,7 +289,12 @@ pub async fn blocked_ready_publication_exposes_pending_state_and_preserves_cance
         fail: false,
     });
     let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-    journal.gate_event = Some("system.pipeline.ready_for_run");
+    journal.gate_event = Some(|event| {
+        matches!(
+            &event.payload,
+            SystemFact::PipelineLifecycle(PipelineFact::ReadyForRun { .. })
+        )
+    });
     journal.gate = Some(gate.clone());
     let journal = Arc::new(journal);
     let (topology, source, sink) = source_sink_topology_with_source();
@@ -311,11 +331,15 @@ pub async fn blocked_ready_publication_exposes_pending_state_and_preserves_cance
     let rows = journal.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|r| r.event_type_name() == "system.pipeline.ready_for_run")
+            .filter(|r| matches!(
+                &r.payload,
+                SystemFact::PipelineLifecycle(PipelineFact::ReadyForRun { .. })
+            ))
             .count(),
         1
     );
-    assert!(!rows
-        .iter()
-        .any(|r| r.event_type_name() == "system.pipeline.running"));
+    assert!(!rows.iter().any(|r| matches!(
+        &r.payload,
+        SystemFact::PipelineLifecycle(PipelineFact::Running { .. })
+    )));
 }

@@ -497,13 +497,15 @@ async fn emit_poison_eof(
         writer_id: ref mut eof_writer,
         writer_seq,
         writer_seq_by_event_type: eof_writer_seq_by_event_type,
+        writer_seq_by_event_type_complete,
         last_event_id,
         ..
     }) = &mut event.payload
     {
         *eof_writer = Some(writer_id);
         *writer_seq = Some(authored_writer_seq);
-        *eof_writer_seq_by_event_type = writer_seq_by_event_type;
+        *eof_writer_seq_by_event_type = writer_seq_by_event_type.clone();
+        *writer_seq_by_event_type_complete = true;
         *last_event_id = authored_last_event_id;
     }
 

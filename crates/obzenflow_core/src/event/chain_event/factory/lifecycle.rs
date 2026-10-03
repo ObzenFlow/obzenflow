@@ -19,7 +19,9 @@ impl ChainEventFactory {
         payload: ExecutionPayload,
         lineage: crate::config::LineagePolicy,
     ) -> ChainEvent {
-        let event_type = payload.event_type();
+        let event_type = payload
+            .event_type(&parent.flow_context.stage_name)
+            .into_owned();
         let version = payload.payload_schema_version();
         Self::derived_event(
             writer_id,

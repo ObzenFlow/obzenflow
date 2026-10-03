@@ -9,7 +9,6 @@
 // Core modules
 pub mod causal;
 pub mod chain_event;
-pub mod constants;
 pub mod envelope;
 pub mod journal_event;
 pub mod journal_record;
@@ -17,6 +16,7 @@ pub mod observability;
 pub mod system_event;
 pub mod types;
 pub mod vector_clock;
+pub mod vocabulary;
 
 // Subdirectory modules
 pub mod context;

@@ -133,6 +133,8 @@ pub(super) enum StudioMessage<'a> {
         edge: ContractEdge<'a>,
         contract_name: &'a ContractName,
         status: &'a ContractResultStatusLabel,
+        phase: &'a obzenflow_core::contracts::ContractPhase,
+        result: &'a obzenflow_core::ContractResult,
         #[serde(skip_serializing_if = "Option::is_none")]
         cause: Option<&'a str>,
         #[serde(flatten)]

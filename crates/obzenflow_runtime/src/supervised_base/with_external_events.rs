@@ -302,6 +302,9 @@ where
     fn name(&self) -> &str {
         self.inner.name()
     }
+    fn event_prefix(&self) -> String {
+        self.inner.event_prefix()
+    }
 }
 
 #[async_trait::async_trait]
@@ -511,6 +514,9 @@ where
 
     fn name(&self) -> &str {
         self.inner.name()
+    }
+    fn event_prefix(&self) -> String {
+        self.inner.event_prefix()
     }
 }
 

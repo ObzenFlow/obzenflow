@@ -480,6 +480,7 @@ fn assert_source_journal(
         );
     }
     let ChainPayload::FlowControl(FlowControlPayload::Eof {
+        kind,
         writer_seq,
         writer_seq_by_event_type,
         last_event_id,
@@ -508,27 +509,34 @@ fn assert_source_journal(
             .map(|envelope| envelope.envelope.provenance.event.id)
     );
 
-    let final_contract = events
+    let production = events
         .iter()
         .find_map(|envelope| match &envelope.payload {
-            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
-                pass,
-                consumed_count,
-                eof_seen,
-                reader_seq,
-                advertised_writer_seq,
-                ..
-            }) => Some((
-                *pass,
-                consumed_count.0,
-                *eof_seen,
-                reader_seq.0,
-                advertised_writer_seq.map(|seq| seq.0),
-            )),
+            ChainPayload::FlowControl(FlowControlPayload::ProductionFinal {
+                produced_count,
+                produced_by_event_type,
+                end_kind,
+                last_event_id,
+            }) => {
+                assert_eq!(envelope.writer_id(), eof.writer_id());
+                Some((
+                    produced_count,
+                    produced_by_event_type,
+                    end_kind,
+                    last_event_id,
+                ))
+            }
             _ => None,
         })
-        .unwrap_or_else(|| panic!("{stage_name} authors its final consumption contract"));
-    assert_eq!(final_contract, (true, 2, true, 2, Some(2)));
+        .unwrap_or_else(|| panic!("{stage_name} authors its final production report"));
+    assert_eq!(production.0 .0, 2);
+    assert_eq!(production.1, writer_seq_by_event_type);
+    assert_eq!(production.2, kind);
+    assert_eq!(production.3, last_event_id);
+    assert!(!events.iter().any(|event| matches!(
+        event.payload,
+        ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+    )));
     writer
 }
 

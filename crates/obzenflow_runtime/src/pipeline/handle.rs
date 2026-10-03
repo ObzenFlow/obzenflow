@@ -329,7 +329,7 @@ impl FlowHandle {
 
     /// User-initiated stop request.
     ///
-    /// Natural source completion is observed through the system journal.
+    /// Natural source completion is observed through the source supervisor handles.
     pub async fn stop(&self) -> Result<(), FlowError> {
         self.stop_cancel().await
     }

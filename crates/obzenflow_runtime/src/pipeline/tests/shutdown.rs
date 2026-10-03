@@ -11,6 +11,9 @@ use crate::pipeline::fsm::PipelineFsmEvent as E;
 use crate::pipeline::PipelineState as S;
 use crate::supervised_base::ChannelBuilder;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::system_payload::{
+    PipelineLifecycleEvent as PipelineFact, SystemPayload as SystemFact,
+};
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::{Journal, SystemId};
 use std::sync::{atomic::Ordering, Arc};
@@ -304,10 +307,10 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
                 .unwrap()
                 .iter()
                 .any(|row| matches!(
-                    row.event_type_name(),
-                    "system.pipeline.failed"
-                        | "system.pipeline.cancelled"
-                        | "system.pipeline.completed"
+                    &row.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })
+                        | SystemFact::PipelineLifecycle(PipelineFact::Cancelled { .. })
+                        | SystemFact::PipelineLifecycle(PipelineFact::Completed { .. })
                 )));
         }
     }
@@ -366,13 +369,17 @@ pub async fn failure_remains_observable_while_child_cleanup_is_blocked(
     let rows = journal.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|r| r.event_type_name() == "system.pipeline.failed")
+            .filter(|r| matches!(
+                &r.payload,
+                SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })
+            ))
             .count(),
         1
     );
-    assert!(!rows
-        .iter()
-        .any(|r| r.event_type_name() == "system.pipeline.cancelled"));
+    assert!(!rows.iter().any(|r| matches!(
+        &r.payload,
+        SystemFact::PipelineLifecycle(PipelineFact::Cancelled { .. })
+    )));
 }
 
 pub async fn contract_failure_cause_survives_child_observation_order(
@@ -486,7 +493,17 @@ pub async fn terminal_publication_is_owned_until_settlement_and_failure_is_retai
             fail,
         });
         let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-        journal.terminal_append = Some(gate.clone());
+        journal.gate_event = Some(|event| {
+            matches!(
+                &event.payload,
+                SystemFact::PipelineLifecycle(
+                    PipelineFact::Completed { .. }
+                        | PipelineFact::Cancelled { .. }
+                        | PipelineFact::Failed { .. }
+                )
+            )
+        });
+        journal.gate = Some(gate.clone());
         let journal = Arc::new(journal);
         let (topology, source, sink) = source_sink_topology_with_source();
         let mut ctx = test_context(topology, system_id, journal.clone());
@@ -523,7 +540,10 @@ pub async fn terminal_publication_is_owned_until_settlement_and_failure_is_retai
         let rows = journal.read_all_unordered().await.unwrap();
         assert_eq!(
             rows.iter()
-                .filter(|r| r.event_type_name() == "system.pipeline.completed")
+                .filter(|r| matches!(
+                    &r.payload,
+                    SystemFact::PipelineLifecycle(PipelineFact::Completed { .. })
+                ))
                 .count(),
             usize::from(!fail)
         );

@@ -160,6 +160,55 @@ async fn eof_kinds(run_dir: &Path, stage_key: &str) -> Vec<EofKind> {
     kinds_of(&replay_testkit::read_stage_envelopes_appended(run_dir, stage_key).await)
 }
 
+async fn assert_source_production_frontier(run_dir: &Path, expected_kind: EofKind) {
+    let records = replay_testkit::read_stage_envelopes_appended(run_dir, "ticks").await;
+    let finals: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.payload,
+                ChainPayload::FlowControl(FlowControlPayload::ProductionFinal { .. })
+            )
+        })
+        .collect();
+    assert_eq!(finals.len(), 1);
+    let final_record = finals[0];
+    let ChainPayload::FlowControl(FlowControlPayload::ProductionFinal {
+        produced_count,
+        produced_by_event_type,
+        end_kind,
+        last_event_id: production_last,
+    }) = &final_record.payload
+    else {
+        unreachable!()
+    };
+    let eof = records
+        .iter()
+        .find(|record| record.is_eof() && record.writer_id() == final_record.writer_id())
+        .unwrap();
+    let ChainPayload::FlowControl(FlowControlPayload::Eof {
+        kind,
+        writer_seq,
+        writer_seq_by_event_type,
+        writer_seq_by_event_type_complete,
+        last_event_id,
+        ..
+    }) = &eof.payload
+    else {
+        unreachable!()
+    };
+    assert_eq!(*kind, expected_kind);
+    assert_eq!(end_kind, kind);
+    assert_eq!(Some(produced_count.0), writer_seq.map(|seq| seq.0));
+    assert!(*writer_seq_by_event_type_complete);
+    assert_eq!(produced_by_event_type, writer_seq_by_event_type);
+    assert_eq!(production_last, last_event_id);
+    let payload = final_record.payload();
+    for absent in ["consumed_count", "reader_seq", "pass"] {
+        assert!(payload.get(absent).is_none());
+    }
+}
+
 fn kinds_of(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<EofKind> {
     envelopes
         .iter()
@@ -300,6 +349,7 @@ async fn truncated_replay_suppresses_finalization_and_records_the_kind() {
         vec![EofKind::Truncated],
         "replay of a cancelled archive synthesizes exactly one Truncated EOF"
     );
+    assert_source_production_frontier(&candidate, EofKind::Truncated).await;
 
     // End-of-input finalization is suppressed: no final aggregate, and the
     // stateful stage's authored EOF carries the folded Truncated kind.
@@ -423,6 +473,7 @@ async fn clean_archive_replay_still_finalizes_naturally() {
     replay_run(&journal_base, &baseline, replay_delivered.clone()).await;
     let candidate = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(eof_kinds(&candidate, "ticks").await, vec![EofKind::Natural]);
+    assert_source_production_frontier(&candidate, EofKind::Natural).await;
     assert_eq!(
         data_rows(&candidate, "summer", SumResult::event_type_name().as_str(),).await,
         1,
