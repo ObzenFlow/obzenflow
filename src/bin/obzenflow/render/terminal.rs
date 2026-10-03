@@ -115,12 +115,13 @@ impl TerminalRenderer {
         } else {
             ""
         };
+        let attribution = match &relation.forwarded_author {
+            Some(author) => format!("{author}{inputs} (forwarded by {})", header.reporter),
+            None => format!("{}{inputs}", header.reporter),
+        };
         let relation_spans = [
             Span::new(relation.output, Role::Output),
-            Span::new(
-                format!(" ← {}{inputs}{replay}{error}", header.reporter),
-                Role::Normal,
-            ),
+            Span::new(format!(" ← {attribution}{replay}{error}"), Role::Normal),
         ];
         if matches!(self.options.mode, OutputMode::Compact) {
             let line = format!(
@@ -154,10 +155,13 @@ impl TerminalRenderer {
         )?;
         self.spans(output, &palette, &relation_spans)?;
         writeln!(output, "{}", self.clock(&view.clock(), &header))?;
-        writeln!(
+        self.spans(
             output,
-            "payload schema version: {}",
-            view.payload_schema_version()
+            &palette,
+            &[Span::new(
+                format!("payload schema version: {}", view.payload_schema_version()),
+                Role::Muted,
+            )],
         )?;
         if let Some(message) = relation.processing_error {
             for line in wrap_fields(

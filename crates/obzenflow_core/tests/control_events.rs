@@ -148,7 +148,7 @@ fn test_control_event_type_strings() {
 
     // Test EOF event type string
     let eof_event = ChainEventFactory::eof_event(writer_id, true);
-    assert_eq!(eof_event.event_type(), "runtime.stream.end_declared");
+    assert_eq!(eof_event.event_type(), "runtime.stream.eof_declared");
     assert!(eof_event.is_control());
     assert!(eof_event.is_eof());
 
@@ -298,7 +298,7 @@ fn test_control_event_backward_compatibility() {
     let events = vec![
         (
             ChainEventFactory::eof_event(writer_id, true),
-            "runtime.stream.end_declared",
+            "runtime.stream.eof_declared",
         ),
         (
             ChainEventFactory::drain_event(writer_id),
@@ -383,5 +383,5 @@ fn test_direct_chain_event_construction() {
 
     assert!(event.is_control());
     assert!(event.is_eof());
-    assert_eq!(event.event_type(), "runtime.stream.end_declared");
+    assert_eq!(event.event_type(), "runtime.stream.eof_declared");
 }

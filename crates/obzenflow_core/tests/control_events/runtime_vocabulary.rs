@@ -31,14 +31,14 @@ fn assert_chain(event: ChainEvent, name: &str, kind: &str) {
 }
 
 #[test]
-fn stream_and_subscription_wire_names_are_unchanged() {
+fn stream_and_subscription_wire_names_match_the_contract() {
     let stage = StageId::new();
     let scope =
         json!({"upstream": stage, "reader": StageId::new(), "selection": {"selection": "all"}});
     for (payload, name) in [
         (
             json!({"flow_control_type":"eof", "kind":"natural", "timestamp":1, "writer_seq_by_event_type_complete":false}),
-            "runtime.stream.end_declared",
+            "runtime.stream.eof_declared",
         ),
         (
             json!({"flow_control_type":"watermark", "timestamp":1}),

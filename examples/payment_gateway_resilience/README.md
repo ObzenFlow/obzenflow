@@ -55,7 +55,7 @@ Framework occurrences identify their author and what that author observed:
 | `control.consumption_final`, subscriber-authored | `runtime.subscription.consumption_finalized`: reads, optional receipt frontier, selection and effective policy for one subscription. |
 | `execution.contract.result` | `runtime.contract.verification_pending`: verification is incomplete; `phase` distinguishes progress from final evaluation. |
 | `execution.contract.pass` | `runtime.contract.policy_accepted`: policy permits continuation, including configured warnings. The verification finding remains separate. |
-| `control.eof` | `runtime.stream.end_declared`: an upstream declaration, preserving natural, poison or truncated ending. |
+| `control.eof` | `runtime.stream.eof_declared`: an upstream declaration, preserving natural, poison or truncated ending. |
 | `system.metrics.drained` | `supervisor.runtime.metrics_aggregator.finalization.completed`: the aggregator reports reader shutdown and publication of its available current buffer. |
 
 A pipeline observation trusts the child reports it received. These occurrences do

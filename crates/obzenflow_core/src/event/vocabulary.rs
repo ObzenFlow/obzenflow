@@ -12,16 +12,18 @@ macro_rules! event_names {
     (@names $prefix:expr; $($name:ident => $suffix:literal),+ $(,)?) => {
         $(pub const $name: &str = concat!($prefix, ".", $suffix);)+
     };
-    ($($family:ident => $subject:literal { $($name:ident => $suffix:literal),+ $(,)? }),+ $(,)?) => {
+    ($prefix_name:ident => $prefix:literal; $($family:ident => $subject:literal { $($name:ident => $suffix:literal),+ $(,)? }),+ $(,)?) => {
+        pub const $prefix_name: &str = $prefix;
         $(pub mod $family {
-            event_names!(@names concat!("runtime.", $subject); $($name => $suffix),+);
+            event_names!(@names concat!($prefix, $subject); $($name => $suffix),+);
         })+
     };
 }
 
 event_names! {
+    RUNTIME_PREFIX => "runtime.";
     stream => "stream" {
-        END_DECLARED => "end_declared",
+        EOF_DECLARED => "eof_declared",
         WATERMARK_DECLARED => "watermark_declared",
         CATCH_UP_COMPLETED => "catch_up_completed",
         CHECKPOINT_DECLARED => "checkpoint_declared",

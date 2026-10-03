@@ -8,7 +8,12 @@
 
 use super::*;
 use crate::render::event_counts::JournalEventCounts;
-use obzenflow_core::event::vocabulary::supervisor::{METRICS_NAME, PIPELINE_NAME};
+use obzenflow_core::event::vocabulary::{
+    supervisor::{METRICS_NAME, PIPELINE_NAME},
+    RUNTIME_PREFIX,
+};
+use obzenflow_core::event::EventKind;
+use obzenflow_core::{EventDescriptor, WriterId};
 
 const JOURNAL_INDENT: usize = 4;
 const TABLE_INDENT: usize = 6;
@@ -41,6 +46,8 @@ impl Renderer {
             "Journals with no displayed entries remain in the inventory above.",
             "Each journal has one owner; an owner can have several journals.",
             "Runtime readers show framework wiring; CLI/Studio can also observe journal histories.",
+            "Event labels use kind/name@version; framework names omit runtime. and supervisor identity.",
+            "Delivery labels omit the repeated delivery. prefix. Full names remain in records/JSONL.",
         ] {
             self.summary_line(output, MUTED, line)?;
         }
@@ -128,19 +135,11 @@ impl Renderer {
             RunJournalKind::System => {
                 let name = self.summary_owner_name(&manifest.pipeline_writer_id, PIPELINE_NAME);
                 self.summary_line(output, HEADING, &format!("Supervisor: {name}"))?;
-                let mut inputs = Vec::new();
-                if !manifest.stages.is_empty() {
-                    inputs.push("stage data journals (supervision)".to_owned());
-                }
-                inputs.push(format!("{} (self)", manifest.system_journal_file));
-                if let Some(metrics) = &manifest.metrics_journals {
-                    inputs.push(metrics.coordination_journal_file.clone());
-                }
                 self.summary_indented(
                     output,
                     BODY,
                     2,
-                    &format!("Reads from: {}", inputs.join(", ")),
+                    "Observes: child acknowledgements and results (supervisor handles)",
                 )?;
             }
             RunJournalKind::MetricsCoordination | RunJournalKind::MetricsExport => {
@@ -205,16 +204,14 @@ impl Renderer {
         journal: &RunJournal,
         manifest: &RunManifest,
     ) -> Result<(), Error> {
-        let pipeline = self.summary_owner_name(&manifest.pipeline_writer_id, PIPELINE_NAME);
         let metrics = manifest
             .metrics_journals
             .as_ref()
             .map(|metrics| self.summary_owner_name(&metrics.writer_id, METRICS_NAME));
-        let (file, purpose, mut readers) = match journal.kind {
+        let (file, purpose) = match journal.kind {
             RunJournalKind::System => (
                 &manifest.system_journal_file,
                 "pipeline lifecycle and coordination",
-                vec![format!("{pipeline} (self)")],
             ),
             RunJournalKind::MetricsCoordination | RunJournalKind::MetricsExport => {
                 let metrics = manifest
@@ -224,15 +221,10 @@ impl Renderer {
                 if journal.kind == RunJournalKind::MetricsCoordination {
                     (
                         &metrics.coordination_journal_file,
-                        "lifecycle and parent coordination",
-                        vec![pipeline.to_owned()],
+                        "metrics lifecycle and finalization",
                     )
                 } else {
-                    (
-                        &metrics.export_journal_file,
-                        "export notices and freshness",
-                        vec![],
-                    )
+                    (&metrics.export_journal_file, "export notices and freshness")
                 }
             }
             RunJournalKind::Data | RunJournalKind::Error => {
@@ -248,28 +240,22 @@ impl Renderer {
                     (
                         &stage.data_journal_file,
                         "data, control and stage lifecycle",
-                        vec![pipeline.to_owned()],
                     )
                 } else {
-                    (&stage.error_journal_file, "processing errors", vec![])
+                    (&stage.error_journal_file, "processing errors")
                 }
             }
         };
-        if matches!(
+        let readers = if matches!(
             journal.kind,
             RunJournalKind::System | RunJournalKind::Data | RunJournalKind::Error
         ) {
-            if let Some(metrics) = metrics {
-                readers.push(metrics.to_owned());
-            }
-        }
+            metrics.unwrap_or("—")
+        } else {
+            "—"
+        };
         self.summary_indented(output, HEADING, JOURNAL_INDENT, file)?;
         self.summary_indented(output, BODY, TABLE_INDENT, &format!("Purpose: {purpose}"))?;
-        let readers = if readers.is_empty() {
-            "—".into()
-        } else {
-            readers.join(", ")
-        };
         self.summary_indented(
             output,
             BODY,
@@ -284,66 +270,79 @@ impl Renderer {
         output: &mut impl Write,
         counts: &JournalEventCounts,
     ) -> Result<(), Error> {
-        // These are presentation groups within one physical journal. Keep the
-        // writer ID in the key even when two recorded authors share a name.
-        let mut groups = BTreeMap::<_, Vec<CountRow<'_>>>::new();
-        for ((descriptor, writer), count) in &counts.event_types {
-            let kind = descriptor.event_kind.as_str();
-            let event = descriptor.event_type.as_str();
-            let version = descriptor.payload_schema_version.to_string();
-            let writer = writer.to_string();
-            let namespace = event.split_once('.').map_or("", |(namespace, _)| namespace);
-            groups
-                .entry((
-                    self.context.writer_name(&writer).to_owned(),
-                    writer,
-                    kind,
-                    namespace,
-                ))
-                .or_default()
-                .push(CountRow {
-                    event,
-                    version,
-                    count: *count,
-                });
-        }
-
-        let mut previous_writer = None;
-        let mut previous_kind = None;
-        for ((author, writer, kind, _), mut rows) in groups {
-            // Retain the existing lexical descriptor order, independently of
-            // the typed map's enum and numeric version ordering.
-            rows.sort_by_cached_key(|row| format!("{}@{}", row.event, row.version));
-            writeln!(output)?;
-            if previous_writer.as_ref() != Some(&writer) {
-                let author_type = self
-                    .context
-                    .supervisors
-                    .get(&writer)
-                    .map_or("Not recorded", |descriptor| descriptor.kind.label());
-                self.summary_indented(
+        let mut rows: Vec<_> = counts
+            .event_types
+            .iter()
+            .map(|((descriptor, writer), count)| {
+                let event = self.summary_event_label(descriptor, writer);
+                let author = self.context.writer_name(&writer.to_string()).to_owned();
+                (event, author, writer, count)
+            })
+            .collect();
+        // Keep the owner's events first, followed by forwarded authors, in one
+        // table. Writer identity remains a counting key and tie-breaker.
+        let forwarded = |writer: &WriterId| {
+            counts
+                .journal
+                .stage
+                .as_ref()
+                .is_some_and(|stage| *writer != stage.id.into())
+        };
+        rows.sort_by(|left, right| {
+            (forwarded(left.2), &left.0, &left.1, left.2).cmp(&(
+                forwarded(right.2),
+                &right.0,
+                &right.1,
+                right.2,
+            ))
+        });
+        let count_width = rows
+            .iter()
+            .map(|row| row.3.to_string().len())
+            .max()
+            .unwrap_or(0)
+            .max(5);
+        let available = self.width.saturating_sub(TABLE_INDENT + count_width + 4);
+        let author_width = rows
+            .iter()
+            .map(|row| safe_text(&row.1).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(6)
+            .min((available / 3).max(1));
+        let event_width = rows
+            .iter()
+            .map(|row| safe_text(&row.0).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(5)
+            .min(available.saturating_sub(author_width).max(1));
+        self.summary_write(
+            output,
+            MUTED,
+            &format!(
+                "{:TABLE_INDENT$}{:>count_width$}  {:<event_width$}  Author",
+                "", "Count", "Event"
+            ),
+        )?;
+        for (event, author, _, count) in rows {
+            let events = event_name_lines(&safe_text(&event), event_width);
+            let authors = cell_lines(&safe_text(&author), author_width);
+            let count = count.to_string();
+            for index in 0..events.len().max(authors.len()) {
+                let count = if index == 0 { count.as_str() } else { "" };
+                let event = events.get(index).map_or("", String::as_str);
+                let author = authors.get(index).map_or("", String::as_str);
+                self.summary_write(
                     output,
                     BODY,
-                    TABLE_INDENT,
-                    &format!("Author: {author} ({author_type})"),
+                    format!(
+                        "{:TABLE_INDENT$}{count:>count_width$}  {event:<event_width$}  {author}",
+                        ""
+                    )
+                    .trim_end(),
                 )?;
-                previous_writer = Some(writer);
-                previous_kind = None;
             }
-            if previous_kind != Some(kind) {
-                self.summary_indented(output, BODY, TABLE_INDENT, &format!("Kind: {kind}"))?;
-                previous_kind = Some(kind);
-            }
-            let prefix = shared_event_prefix(&rows);
-            let heading = if prefix.is_empty() {
-                "Event prefix: —".to_owned()
-            } else {
-                format!("Event prefix: {}", safe_text(prefix))
-            };
-            for line in event_name_lines(&heading, self.width.saturating_sub(TABLE_INDENT)) {
-                self.summary_write(output, BODY, &format!("{:TABLE_INDENT$}{line}", ""))?;
-            }
-            self.event_group_table(output, prefix, &rows)?;
         }
         if counts.omitted > 0 {
             self.summary_indented(
@@ -359,80 +358,40 @@ impl Renderer {
         Ok(())
     }
 
-    fn event_group_table(
-        &self,
-        output: &mut impl Write,
-        prefix: &str,
-        rows: &[CountRow<'_>],
-    ) -> Result<(), Error> {
-        let count_width = rows
-            .iter()
-            .map(|row| row.count.to_string().len())
-            .max()
-            .unwrap_or(0)
-            .max(5);
-        let version_width = rows
-            .iter()
-            .map(|row| row.version.len())
-            .max()
-            .unwrap_or(0)
-            .max(7);
-        let event_width = rows
-            .iter()
-            .map(|row| safe_text(&row.event[prefix.len()..]).chars().count())
-            .max()
-            .unwrap_or(0)
-            .max(5)
-            .min(
-                self.width
-                    .saturating_sub(TABLE_INDENT + count_width + version_width + 4)
-                    .max(1),
-            );
-        self.summary_write(
-            output,
-            MUTED,
-            &format!(
-                "{:TABLE_INDENT$}{:>count_width$}  {:<event_width$}  {:>version_width$}",
-                "", "Count", "Event", "Version"
-            ),
-        )?;
-        for row in rows {
-            let event = safe_text(&row.event[prefix.len()..]);
-            let count = row.count.to_string();
-            for (index, line) in event_name_lines(&event, event_width).iter().enumerate() {
-                let (count, version) = if index == 0 {
-                    (count.as_str(), row.version.as_str())
+    fn summary_event_label(&self, descriptor: &EventDescriptor, writer: &WriterId) -> String {
+        let kind = descriptor.event_kind;
+        let name = descriptor.event_type.as_str();
+        // Application names remain verbatim, even when they resemble a
+        // framework namespace. Shortening affects only this human table.
+        let short = match kind {
+            EventKind::Execution | EventKind::FlowSignal | EventKind::System => {
+                if let Some(suffix) = name.strip_prefix(RUNTIME_PREFIX) {
+                    suffix.to_owned()
+                } else if let Some(suffix) = self
+                    .context
+                    .supervisors
+                    .get(&writer.to_string())
+                    .and_then(|supervisor| {
+                        name.strip_prefix(&format!("{}.", supervisor.event_prefix()))
+                    })
+                {
+                    format!("supervisor.{suffix}")
                 } else {
-                    ("", "")
-                };
-                self.summary_write(output, BODY, format!(
-                    "{:TABLE_INDENT$}{count:>count_width$}  {line:<event_width$}  {version:>version_width$}", ""
-                ).trim_end())?;
+                    name.to_owned()
+                }
             }
-        }
-        Ok(())
+            EventKind::Delivery => name
+                .strip_prefix(&format!("{}.", kind.as_str()))
+                .unwrap_or(name)
+                .to_owned(),
+            _ => name.to_owned(),
+        };
+        format!(
+            "{}/{short}@{}",
+            kind.as_str(),
+            descriptor.payload_schema_version
+        )
     }
-}
-
-struct CountRow<'a> {
-    event: &'a str,
-    version: String,
-    count: u64,
-}
-
-/// Factor only complete, literal dot-separated segments shared by the rows.
-/// Joining this prefix and the displayed suffix recovers the original name.
-fn shared_event_prefix<'a>(rows: &[CountRow<'a>]) -> &'a str {
-    let first = rows[0].event;
-    let mut prefix = first.rfind('.').map_or("", |end| &first[..=end]);
-    for row in &rows[1..] {
-        while !row.event.starts_with(prefix) {
-            prefix = prefix[..prefix.len() - 1]
-                .rfind('.')
-                .map_or("", |end| &prefix[..=end]);
-        }
-    }
-    prefix
 }
 
 /// Prefer name boundaries to splitting words. An individual segment longer

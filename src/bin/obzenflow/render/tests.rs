@@ -185,6 +185,7 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
         (&source, "sensor.value@unit/reading", 10),
         (&source, "sensor.value@unit/reading", 1),
         (&source, "sensor.value", 1),
+        (&source, "runtime.source.production_declared", 1),
         (&second_author, "sensor.value@unit/reading", 1),
     ] {
         let mut record = author.clone();
@@ -213,12 +214,13 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
         text.lines().all(|line| line.chars().count() <= 90),
         "{text}"
     );
+    assert!(!text.contains("Author:") && !text.contains("Event prefix:"));
     assert_eq!(
-        text.matches("Author: shared (Transform)").count(),
-        2,
-        "{text}"
+        text.lines()
+            .filter(|line| line.trim_start().starts_with("Count "))
+            .count(),
+        1
     );
-    assert_eq!(text.matches("Event prefix: sensor.").count(), 2, "{text}");
     let summary = text.split_once("\nAPPLICATION STAGES\n").unwrap().1;
     let rows: Vec<_> = summary
         .lines()
@@ -230,11 +232,12 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
     assert_eq!(
         rows,
         [
-            vec!["1", "value", "1"],
-            vec!["1", "value@unit/reading", "1"],
-            vec!["1", "value@unit/reading", "10"],
-            vec!["1", "value@unit/reading", "2"],
-            vec!["1", "value@unit/reading", "1"],
+            vec!["1", "fact/runtime.source.production_declared@1", "shared"],
+            vec!["1", "fact/sensor.value@1", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@1", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@10", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@2", "shared"],
+            vec!["1", "fact/sensor.value@unit/reading@1", "shared"],
         ]
     );
 }
@@ -334,12 +337,14 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
             "pipeline does not consume error journals"
         );
         if width == 90 {
-            assert_eq!(transform_group.matches("Event prefix: sensor.").count(), 2);
-            assert_eq!(transform_group.matches("Kind: fact").count(), 2);
+            assert_eq!(transform_group.matches("fact/sensor.reading@1").count(), 2);
             assert_eq!(
                 transform_group
                     .lines()
-                    .filter(|line| line.trim() == "Author: thermometer (Not recorded)")
+                    .filter(|line| {
+                        line.contains("fact/sensor.reading@1")
+                            && line.trim_end().ends_with("thermometer")
+                    })
                     .count(),
                 2
             );

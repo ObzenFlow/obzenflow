@@ -107,6 +107,51 @@ fn json_body(text: &str) -> Value {
 }
 
 #[test]
+fn forwarded_declarations_show_the_author_and_forwarding_stage() {
+    let mut source = fact(1, 100, &[], json!({}));
+    source.kind = RunRecordKind::FlowSignal;
+    if let RunRecordData::Chain(row) = &mut source.record {
+        row.payload = ChainPayload::FlowControl(
+            serde_json::from_value(json!({
+                "flow_control_type": "source_contract", "source_id": id(1),
+                "journal_path": format!("stage_{}", id(1)), "journal_index": 0
+            }))
+            .unwrap(),
+        );
+        row.envelope.provenance.event.event_kind = row.payload.kind();
+        row.envelope.provenance.event.event_type = row
+            .payload
+            .framework_event_type("thermometer")
+            .unwrap()
+            .into();
+    }
+    let mut forwarded = source.clone();
+    forwarded.journal = fact(2, 101, &[], json!({})).journal;
+    let original = serde_json::to_value(&forwarded).unwrap();
+    for compact in [false, true] {
+        let mut renderer = renderer();
+        renderer.include_runtime = true;
+        renderer.compact = compact;
+        let own = render_record(&mut renderer, &source);
+        assert!(own.contains("runtime.source.production_declared ← thermometer"));
+        assert!(!own.contains("forwarded by"));
+        let text = render_record(&mut renderer, &forwarded);
+        assert!(
+            text.contains(
+                "runtime.source.production_declared ← thermometer (forwarded by classify)"
+            ),
+            "{text}"
+        );
+        if !compact {
+            assert!(text.contains("RUNTIME (stage: classify, journal: 2)"));
+        }
+        renderer.jsonl = true;
+        let jsonl = render_record(&mut renderer, &forwarded);
+        assert_eq!(serde_json::from_str::<Value>(&jsonl).unwrap(), original);
+    }
+}
+
+#[test]
 fn consumption_progress_projects_useful_fields_into_a_json_body() {
     let record = progress();
     let original = serde_json::to_value(&record).unwrap();

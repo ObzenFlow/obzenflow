@@ -5,7 +5,7 @@
 //! Borrowed presentation adapters. Projection never mutates evidence or writes
 //! output. Human fields are resolved at render time; JSONL only needs source().
 
-use super::context::{clock, event_type, Context};
+use super::context::{clock, event_type, record_writer_id, Context};
 use obzenflow::journal::read::*;
 use obzenflow::journal::ProcessingStatus;
 use obzenflow_core::event::CausalCoordinate;
@@ -56,6 +56,7 @@ pub(super) enum InputsView<'a> {
 
 pub(super) struct RelationView<'a> {
     pub output: &'a str,
+    pub forwarded_author: Option<String>,
     pub inputs: InputsView<'a>,
     pub replay: ReplayNote,
     pub processing_error: Option<&'a str>,
@@ -155,6 +156,13 @@ impl<'a> EventView<'a> {
         };
         RelationView {
             output: event_type(self.record),
+            forwarded_author: self.record.journal.stage.as_ref().and_then(|stage| {
+                let author = record_writer_id(self.record);
+                // Prior-run writer IDs are explained by replay provenance;
+                // they do not establish a forwarding hop in this run.
+                (!replayed(self.record) && author != stage.id.into())
+                    .then(|| self.context.writer_name(&author.to_string()).to_owned())
+            }),
             inputs,
             replay: replay_note(self.record),
             processing_error: fact_error(self.record),

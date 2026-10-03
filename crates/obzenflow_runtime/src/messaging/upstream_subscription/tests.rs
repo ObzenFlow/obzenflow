@@ -4124,7 +4124,7 @@ async fn recorded_heads_deliver_before_any_live_head() {
     // B seals: its EOF (generation 0) still precedes a2 (generation 1).
     journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
     let sixth = expect_delivery(&mut subscription).await;
-    assert_eq!(sixth.event_type(), vocabulary::stream::END_DECLARED);
+    assert_eq!(sixth.event_type(), vocabulary::stream::EOF_DECLARED);
     let seventh = expect_delivery(&mut subscription).await;
     assert_eq!(seventh.event_type(), "a2");
     assert_eq!(
@@ -4202,7 +4202,7 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
 
     // B's delivered EOF counts as vacuously crossed (F17).
     let third = expect_delivery(&mut subscription).await;
-    assert_eq!(third.event_type(), vocabulary::stream::END_DECLARED);
+    assert_eq!(third.event_type(), vocabulary::stream::EOF_DECLARED);
     assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
 
     // EOF crossing is per-reader, never global: a pair where only B sealed
@@ -4216,7 +4216,7 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
     let first = expect_delivery(&mut lagging).await;
     assert_eq!(first.event_type(), "a1");
     let second = expect_delivery(&mut lagging).await;
-    assert_eq!(second.event_type(), vocabulary::stream::END_DECLARED);
+    assert_eq!(second.event_type(), vocabulary::stream::EOF_DECLARED);
     assert!(
         !lagging.all_readers_caught_up(ReaderGeneration(1)),
         "only B is EOF-exhausted; A has not crossed"
@@ -4360,9 +4360,9 @@ async fn seq_merge_orders_by_admission_seq_not_arrival() {
             "b1",
             "a1",
             "b2",
-            vocabulary::stream::END_DECLARED,
+            vocabulary::stream::EOF_DECLARED,
             "a2",
-            vocabulary::stream::END_DECLARED
+            vocabulary::stream::EOF_DECLARED
         ],
         "delivery follows admission sequence with position-inherited control"
     );

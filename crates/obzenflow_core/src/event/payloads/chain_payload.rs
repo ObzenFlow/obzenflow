@@ -61,7 +61,7 @@ impl ChainPayload {
             Self::Delivery(payload) => Some(payload.event_type().into()),
             Self::FlowControl(payload) => Some(
                 match payload {
-                    FlowControlPayload::Eof { .. } => vocabulary::stream::END_DECLARED,
+                    FlowControlPayload::Eof { .. } => vocabulary::stream::EOF_DECLARED,
                     FlowControlPayload::Watermark { .. } => vocabulary::stream::WATERMARK_DECLARED,
                     FlowControlPayload::CatchUpComplete { .. } => {
                         vocabulary::stream::CATCH_UP_COMPLETED
