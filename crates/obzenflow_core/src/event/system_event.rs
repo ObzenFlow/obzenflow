@@ -69,7 +69,7 @@ impl SystemEvent {
             id: EventId::new(),
             writer_id,
             event_kind: EventKind::System,
-            event_type: event.event_type().to_string(),
+            event_type: event.event_type().into_owned(),
             payload_schema_version: SystemPayload::SCHEMA_VERSION,
             timestamp: current_timestamp(),
         };
@@ -272,7 +272,7 @@ impl JournalEvent for SystemEvent {
     }
 
     fn event_type_name(&self) -> &str {
-        self.payload.event_type()
+        &self.envelope.provenance.event.event_type
     }
 }
 

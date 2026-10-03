@@ -17,6 +17,10 @@ use crate::pipeline::tests::support::{
 use crate::pipeline::PipelineState;
 use crate::supervised_base::{ChannelBuilder, SupervisorHandle};
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::system_payload::{
+    MetricsCoordinationEvent as MetricsFact, PipelineLifecycleEvent as PipelineFact,
+    SystemPayload as SystemFact,
+};
 use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::{
     ChainEvent, MetricsCoordinationEvent, SystemEvent, SystemEventFactory, SystemPayload,
@@ -182,7 +186,13 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
     let mut metrics_journals =
         crate::pipeline::tests::support::new_metrics_journals(&mut *journals);
     let mut gated = ControlledJournal::new(metrics_journals.coordination.clone());
-    gated.metrics_ready_append = Some(metrics_gate.clone());
+    gated.gate_event = Some(|event| {
+        matches!(
+            &event.payload,
+            SystemFact::MetricsCoordination(MetricsFact::Ready)
+        )
+    });
+    gated.gate = Some(metrics_gate.clone());
     metrics_journals.coordination = Arc::new(gated);
     let coordination = metrics_journals.coordination.clone();
     let (topology, source, sink) = source_sink_topology_with_source();
@@ -243,7 +253,10 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
     let rows = coordination.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|row| row.event_type_name() == "system.metrics.ready")
+            .filter(|row| matches!(
+                &row.payload,
+                SystemFact::MetricsCoordination(MetricsFact::Ready)
+            ))
             .count(),
         1
     );
@@ -252,7 +265,10 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event_type_name() == "system.pipeline.drained"));
+        .any(|row| matches!(
+            &row.payload,
+            SystemFact::PipelineLifecycle(PipelineFact::Drained)
+        )));
 }
 
 pub async fn metrics_preparation_is_passive_and_cancellation_prevents_late_installation(
@@ -478,7 +494,10 @@ pub async fn late_metrics_bootstrap_selects_current_values_without_stage_eof(
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event_type_name() == "system.metrics.drained"));
+        .any(|row| matches!(
+            &row.payload,
+            SystemFact::MetricsCoordination(MetricsFact::Drained)
+        )));
 }
 
 pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
@@ -534,7 +553,10 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
         .await
         .unwrap()
         .iter()
-        .any(|event| event.event_type_name() == "system.metrics.drained"));
+        .any(|event| matches!(
+            &event.payload,
+            SystemFact::MetricsCoordination(MetricsFact::Drained)
+        )));
     system_journal
         .append(
             SystemEventFactory::new(system_id).pipeline_not_started(),

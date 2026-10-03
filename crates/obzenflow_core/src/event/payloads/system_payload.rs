@@ -6,6 +6,7 @@
 
 use crate::event::types::DurationMs;
 use crate::event::vector_clock::VectorClock;
+use crate::event::vocabulary;
 use crate::id::{StageId, StageKey};
 use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
 use crate::metrics::FlowLifecycleMetricsSnapshot;
@@ -152,16 +153,25 @@ pub enum ContractResultStatusLabel {
     Passed,
     Failed,
     Pending,
-    Healthy,
+    Skipped,
 }
 
 impl ContractResultStatusLabel {
+    pub const fn event_type(self) -> &'static str {
+        match self {
+            Self::Passed => vocabulary::contract::VERIFICATION_PASSED,
+            Self::Failed => vocabulary::contract::VERIFICATION_FAILED,
+            Self::Pending => vocabulary::contract::VERIFICATION_PENDING,
+            Self::Skipped => vocabulary::contract::VERIFICATION_SKIPPED,
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Passed => "passed",
             Self::Failed => "failed",
             Self::Pending => "pending",
-            Self::Healthy => "healthy",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -180,7 +190,7 @@ impl std::str::FromStr for ContractResultStatusLabel {
             "passed" => Ok(Self::Passed),
             "failed" => Ok(Self::Failed),
             "pending" => Ok(Self::Pending),
-            "healthy" => Ok(Self::Healthy),
+            "skipped" => Ok(Self::Skipped),
             _ => Err(()),
         }
     }
@@ -239,6 +249,35 @@ pub enum PipelineLifecycleEvent {
     },
 }
 
+impl PipelineLifecycleEvent {
+    pub fn event_type(&self) -> String {
+        use super::supervisor_descriptor::{supervisor_event_type, SupervisionMode};
+        use vocabulary::supervisor;
+
+        let occurrence = match self {
+            Self::Starting => supervisor::START_ACCEPTED,
+            Self::ReadyForRun { .. } => supervisor::READY_FOR_RUN,
+            Self::Running { .. } => supervisor::SOURCES_STARTED,
+            Self::StopAdmitted { admission } => match admission {
+                PipelineStopAdmission::Graceful { .. } => supervisor::GRACEFUL_STOP_ACCEPTED,
+                PipelineStopAdmission::Cancel { .. } => supervisor::CANCEL_ACCEPTED,
+            },
+            Self::NotStarted => supervisor::NOT_STARTED,
+            Self::AllStagesCompleted { .. } => supervisor::ALL_STAGES_COMPLETED,
+            Self::Draining { .. } => supervisor::DRAIN_STARTED,
+            Self::Drained => supervisor::FINAL_MARKER_PUBLISHED,
+            Self::Completed { .. } => supervisor::COMPLETED,
+            Self::Failed { .. } => supervisor::FAILED,
+            Self::Cancelled { .. } => supervisor::CANCELLED,
+        };
+        supervisor_event_type(
+            supervisor::PIPELINE_NAME,
+            SupervisionMode::SelfSupervised,
+            occurrence,
+        )
+    }
+}
+
 /// Durable stop admission. Runtime monotonic deadlines are deliberately absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -271,35 +310,41 @@ pub enum MetricsCoordinationEvent {
     },
 }
 
+impl MetricsCoordinationEvent {
+    pub fn event_type(&self) -> String {
+        use super::supervisor_descriptor::{supervisor_event_type, SupervisionMode};
+        use vocabulary::supervisor::{self, command};
+
+        let (author, occurrence) = match self {
+            // The payload family does not determine its author.
+            Self::DrainRequested => (
+                supervisor::PIPELINE_NAME,
+                command::FINALIZE_METRICS_REQUESTED,
+            ),
+            Self::Ready => (supervisor::METRICS_NAME, supervisor::READY),
+            Self::Drained => (
+                supervisor::METRICS_NAME,
+                supervisor::FINAL_SNAPSHOT_PUBLISHED,
+            ),
+            Self::Shutdown => (
+                supervisor::METRICS_NAME,
+                supervisor::REFRESH_READERS_STOPPED,
+            ),
+            Self::Exported { .. } => (supervisor::METRICS_NAME, supervisor::snapshot::PUBLISHED),
+        };
+        supervisor_event_type(author, SupervisionMode::SelfSupervised, occurrence)
+    }
+}
+
 impl SystemPayload {
     pub const SCHEMA_VERSION: std::num::NonZeroU32 = std::num::NonZeroU32::MIN;
 
-    pub fn event_type(&self) -> &'static str {
+    pub fn event_type(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            SystemPayload::SupervisorRegistered { .. } => "system.supervisor.registered",
-            SystemPayload::PipelineLifecycle(event) => match event {
-                PipelineLifecycleEvent::Starting => "system.pipeline.starting",
-                PipelineLifecycleEvent::ReadyForRun { .. } => "system.pipeline.ready_for_run",
-                PipelineLifecycleEvent::Running { .. } => "system.pipeline.running",
-                PipelineLifecycleEvent::StopAdmitted { .. } => "system.pipeline.stop_admitted",
-                PipelineLifecycleEvent::NotStarted => "system.pipeline.not_started",
-                PipelineLifecycleEvent::AllStagesCompleted { .. } => {
-                    "system.pipeline.all_stages_completed"
-                }
-                PipelineLifecycleEvent::Draining { .. } => "system.pipeline.draining",
-                PipelineLifecycleEvent::Drained => "system.pipeline.drained",
-                PipelineLifecycleEvent::Completed { .. } => "system.pipeline.completed",
-                PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
-                PipelineLifecycleEvent::Cancelled { .. } => "system.pipeline.cancelled",
-            },
-            SystemPayload::MetricsCoordination(event) => match event {
-                MetricsCoordinationEvent::Ready => "system.metrics.ready",
-                MetricsCoordinationEvent::DrainRequested => "system.metrics.drain_requested",
-                MetricsCoordinationEvent::Drained => "system.metrics.drained",
-                MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
-                MetricsCoordinationEvent::Exported { .. } => "system.metrics.exported",
-            },
-            SystemPayload::IngressRefusal { .. } => "system.ingress.refusal",
+            Self::SupervisorRegistered { descriptor } => descriptor.registered_event_type().into(),
+            Self::PipelineLifecycle(event) => event.event_type().into(),
+            Self::MetricsCoordination(event) => event.event_type().into(),
+            Self::IngressRefusal { .. } => "system.ingress.refusal".into(),
         }
     }
 }

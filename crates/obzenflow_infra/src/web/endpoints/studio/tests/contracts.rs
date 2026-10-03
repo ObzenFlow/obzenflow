@@ -101,6 +101,18 @@ async fn contract_result_envelope(upstream: StageId, reader: StageId) -> ChainJo
                     feed_role: Some(SystemFeedRole::Input),
                     contract_name: ContractName::from("DeliveryContract"),
                     status: ContractResultStatusLabel::Pending,
+                    phase: obzenflow_core::contracts::ContractPhase::Progress,
+                    result: Box::new(obzenflow_core::ContractResult::Pending {
+                        reason: obzenflow_core::contracts::PendingReason::ProgressOnly,
+                        evidence: obzenflow_core::ContractEvidence {
+                            contract_name: ContractName::from("DeliveryContract"),
+                            upstream_stage: upstream,
+                            downstream_stage: reader,
+                            evaluated_at: chrono::Utc::now(),
+                            details: obzenflow_core::contracts::ContractEvidenceDetails::Progress,
+                        },
+                    }),
+
                     cause: None,
                     reader_seq: Some(SeqNo(7)),
                     advertised_writer_seq: Some(SeqNo(9)),
@@ -195,6 +207,18 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
                     feed_role: Some(SystemFeedRole::Input),
                     contract_name: ContractName::from("DeliveryContract"),
                     status: ContractResultStatusLabel::Pending,
+                    phase: obzenflow_core::contracts::ContractPhase::Progress,
+                    result: Box::new(obzenflow_core::ContractResult::Pending {
+                        reason: obzenflow_core::contracts::PendingReason::ProgressOnly,
+                        evidence: obzenflow_core::ContractEvidence {
+                            contract_name: ContractName::from("DeliveryContract"),
+                            upstream_stage: upstream,
+                            downstream_stage: reader,
+                            evaluated_at: chrono::Utc::now(),
+                            details: obzenflow_core::contracts::ContractEvidenceDetails::Progress,
+                        },
+                    }),
+
                     cause: None,
                     reader_seq: Some(SeqNo(7)),
                     advertised_writer_seq: Some(SeqNo(9)),

@@ -30,6 +30,7 @@ impl ChainEventFactory {
                 writer_id: Some(writer_id),
                 writer_seq: None,
                 writer_seq_by_event_type: Default::default(),
+                writer_seq_by_event_type_complete: false,
                 vector_clock: None,
                 last_event_id: None,
             }),
@@ -136,6 +137,9 @@ impl ChainEventFactory {
         params: ConsumptionProgressEventParams,
     ) -> ChainEvent {
         let ConsumptionProgressEventParams {
+            scope,
+            consumed_count,
+            receipts,
             reader_seq,
             last_event_id,
             vector_clock,
@@ -149,6 +153,9 @@ impl ChainEventFactory {
         Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
+                scope,
+                consumed_count,
+                receipts,
                 reader_seq,
                 last_event_id,
                 vector_clock,
@@ -185,6 +192,8 @@ impl ChainEventFactory {
         params: ConsumptionFinalEventParams,
     ) -> ChainEvent {
         let ConsumptionFinalEventParams {
+            scope,
+            receipts,
             pass,
             consumed_count,
             expected_count,
@@ -198,6 +207,8 @@ impl ChainEventFactory {
         Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
+                scope,
+                receipts,
                 pass,
                 consumed_count,
                 expected_count,

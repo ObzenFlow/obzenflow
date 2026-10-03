@@ -24,6 +24,7 @@ use crate::{
     supervised_base::{BuilderError, ChannelBuilder, HandleBuilder, SupervisorTaskBuilder},
 };
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::vocabulary::supervisor::PIPELINE_NAME;
 use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::factory::RunSubstrateState;
@@ -451,7 +452,7 @@ impl PipelineBuilder {
             state_watcher.clone(),
             operational_failure.clone(),
         );
-        let supervisor_task = SupervisorTaskBuilder::new("pipeline_supervisor")
+        let supervisor_task = SupervisorTaskBuilder::new(PIPELINE_NAME)
             .with_publications(publications.clone())
             .spawn_self_supervised(supervisor, PipelineFsmState::Created, pipeline_context);
 

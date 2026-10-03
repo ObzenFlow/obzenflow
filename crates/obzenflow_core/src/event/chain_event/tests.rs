@@ -14,6 +14,33 @@ use crate::WriterId;
 use serde_json::json;
 
 #[test]
+fn stage_occurrence_descriptor_is_bound_to_the_canonical_context_name() {
+    let stage = StageId::new();
+    let mut event = ChainEventFactory::stage_running(stage.into(), stage);
+    let mut context = event.flow_context.clone();
+    context.stage_name = "orders.v2/é".into();
+    event = event.with_flow_context(context);
+    assert_eq!(
+        event.event_type(),
+        "supervisor.stage.orders%2Ev2%2F%C3%A9.ready"
+    );
+    let value = serde_json::to_value(event).unwrap();
+    assert!(serde_json::from_value::<ChainEvent>(value.clone()).is_ok());
+    for wrong in [
+        "supervisor.stage.orders.v2/é.ready",
+        "lifecycle.stage.running",
+        "supervisor.stage.other.ready",
+    ] {
+        let mut invalid = value.clone();
+        invalid["envelope"]["provenance"]["event"]["event_type"] = json!(wrong);
+        assert!(serde_json::from_value::<ChainEvent>(invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("event descriptor does not match payload"));
+    }
+}
+
+#[test]
 fn test_factory_creation() {
     let writer_id = WriterId::from(StageId::new());
     let event = ChainEventFactory::data_event(
@@ -121,7 +148,7 @@ fn catch_up_complete_round_trips_and_classifies_re_admit() {
         generation: ReaderGeneration(1),
         stage_key: StageKey("tx_source".into()),
     };
-    assert!(!payload.is_reader_telemetry());
+    assert!(!payload.is_reporting_telemetry());
 
     let json = serde_json::to_value(&payload).expect("payload should serialize");
     assert_eq!(json["flow_control_type"], "catch_up_complete");
@@ -147,7 +174,7 @@ fn catch_up_complete_round_trips_and_classifies_re_admit() {
         },
     )
     .with_new_correlation();
-    assert_eq!(event.event_type(), "control.catch_up_complete");
+    assert_eq!(event.event_type(), "runtime.stream.catch_up_completed");
     assert_eq!(event.replay_disposition(), ReplayDisposition::ReAdmit);
     assert!(event.is_source_replayable());
 }
@@ -162,5 +189,5 @@ fn test_flow_signals() {
 
     let drain = ChainEventFactory::drain_event(writer_id);
     assert!(drain.is_control());
-    assert_eq!(drain.event_type(), "control.drain");
+    assert_eq!(drain.event_type(), "runtime.stream.drain_requested");
 }

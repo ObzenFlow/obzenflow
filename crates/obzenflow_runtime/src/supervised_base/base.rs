@@ -54,6 +54,19 @@ pub trait Supervisor {
     /// The actual supervisor family, independent of its task name or event types.
     fn supervisor_kind(&self) -> SupervisorKind;
 
+    /// Shared canonical namespace for this author's existing publications.
+    fn event_prefix(&self) -> String {
+        let mode = if self.supervisor_kind().is_runtime() {
+            SupervisionMode::SelfSupervised
+        } else {
+            SupervisionMode::HandlerSupervised
+        };
+        obzenflow_core::event::payloads::supervisor_descriptor::supervisor_event_prefix(
+            self.name(),
+            mode,
+        )
+    }
+
     /// The owner selects its canonical journal and authors its registration fact.
     /// The runner invokes this only for an FSM-selected Register action.
     fn registration(
@@ -77,6 +90,14 @@ pub(crate) fn register<S: Supervisor>(
         kind: supervisor.supervisor_kind(),
         supervision,
     };
+    if descriptor.event_prefix() != supervisor.event_prefix() {
+        return Box::pin(async {
+            Err(
+                std::io::Error::other("supervisor naming contract disagrees with registration")
+                    .into(),
+            )
+        });
+    }
     if let Err(error) = descriptor.validate(&writer) {
         return Box::pin(async move { Err(std::io::Error::other(error).into()) });
     }

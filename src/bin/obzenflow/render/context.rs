@@ -298,6 +298,10 @@ pub(super) fn event_type(record: &RunRecord) -> &str {
 }
 
 pub(super) fn descriptor_label(record: &RunRecord) -> String {
+    event_descriptor(record).to_string()
+}
+
+pub(super) fn event_descriptor(record: &RunRecord) -> obzenflow_core::EventDescriptor {
     let (event_kind, payload_schema_version) = match &record.record {
         RunRecordData::Chain(row) => (
             row.envelope.provenance.event.event_kind,
@@ -313,7 +317,6 @@ pub(super) fn descriptor_label(record: &RunRecord) -> String {
         event_type: event_type(record).into(),
         payload_schema_version,
     }
-    .to_string()
 }
 
 pub(super) fn event_id(record: &RunRecord) -> String {
@@ -346,8 +349,12 @@ pub(super) fn clock(record: &RunRecord) -> &BTreeMap<CausalCoordinate, u64> {
 }
 
 pub(super) fn writer_id(record: &RunRecord) -> String {
+    record_writer_id(record).to_string()
+}
+
+pub(super) fn record_writer_id(record: &RunRecord) -> obzenflow_core::WriterId {
     match &record.record {
-        RunRecordData::Chain(row) => row.writer_id().to_string(),
-        RunRecordData::System(row) => row.writer_id().to_string(),
+        RunRecordData::Chain(row) => *row.writer_id(),
+        RunRecordData::System(row) => *row.writer_id(),
     }
 }

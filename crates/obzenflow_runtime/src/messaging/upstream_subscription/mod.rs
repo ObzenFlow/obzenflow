@@ -453,22 +453,6 @@ where
         }
     }
 
-    fn progress_last_event_id(&self, progress: &ReaderProgress) -> Option<EventId> {
-        if self.uses_receipt_watermark() {
-            progress.last_receipted_event_id
-        } else {
-            progress.last_event_id
-        }
-    }
-
-    fn progress_vector_clock(&self, progress: &ReaderProgress) -> Option<VectorClock> {
-        if self.uses_receipt_watermark() {
-            progress.last_receipted_vector_clock.clone()
-        } else {
-            progress.last_vector_clock.clone()
-        }
-    }
-
     fn has_selected_event_type_filter(&self, stage_id: StageId) -> bool {
         self.selected_event_types_by_stage
             .get(&stage_id)
@@ -487,24 +471,14 @@ where
             .unwrap_or(true)
     }
 
-    fn selected_writer_seq_for_reader(&self, reader_index: usize, stage_id: StageId) -> SeqNo {
-        if self.has_selected_event_type_filter(stage_id) {
-            self.selected_data_seq_by_reader
-                .get(reader_index)
-                .copied()
-                .unwrap_or(SeqNo(0))
-        } else {
-            SeqNo(0)
-        }
-    }
-
     fn selected_writer_seq_from_eof_map(
         &self,
         stage_id: StageId,
         writer_seq_by_event_type: &BTreeMap<obzenflow_core::EventDescriptor, SeqNo>,
+        complete: bool,
     ) -> Option<SeqNo> {
         let selected = self.selected_event_types_by_stage.get(&stage_id)?;
-        if selected.is_empty() || writer_seq_by_event_type.is_empty() {
+        if selected.is_empty() || !complete {
             return None;
         }
 

@@ -10,17 +10,17 @@ use crate::event::types::{
     Count, DurationMs, JournalIndex, JournalPath, ReaderGeneration, RouteKey, SeqNo, ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
+use crate::event::vocabulary;
 use crate::id::StageKey;
 use crate::StageId;
 use crate::WriterId;
-use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Whether an EOF represents normal source exhaustion, a poison/forced close,
 /// or replay exhaustion of an archive with no committed EOF (FLOWIP-095k).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EofKind {
     Natural,
@@ -60,48 +60,6 @@ impl EofKind {
         } else {
             self
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for EofKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct EofKindVisitor;
-
-        impl Visitor<'_> for EofKindVisitor {
-            type Value = EofKind;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter
-                    .write_str("`natural`, `poison`, `truncated`, or legacy EOF natural boolean")
-            }
-
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(EofKind::from_natural(value))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                match value {
-                    "natural" => Ok(EofKind::Natural),
-                    "poison" => Ok(EofKind::Poison),
-                    "truncated" => Ok(EofKind::Truncated),
-                    other => Err(E::unknown_variant(
-                        other,
-                        &["natural", "poison", "truncated"],
-                    )),
-                }
-            }
-        }
-
-        deserializer.deserialize_any(EofKindVisitor)
     }
 }
 
@@ -178,7 +136,6 @@ pub enum FlowControlPayload {
     /// End of data stream
     #[serde(rename = "eof")]
     Eof {
-        #[serde(alias = "natural")]
         kind: EofKind,
         #[serde(default = "current_timestamp")]
         timestamp: u64,
@@ -192,6 +149,8 @@ pub enum FlowControlPayload {
             with = "crate::event::types::descriptor_counts"
         )]
         writer_seq_by_event_type: BTreeMap<crate::EventDescriptor, SeqNo>,
+        /// True even for a complete empty frontier. False means unavailable.
+        writer_seq_by_event_type_complete: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         vector_clock: Option<VectorClock>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,9 +217,21 @@ pub enum FlowControlPayload {
         vector_clock: Option<VectorClock>,
     },
 
+    /// Producer-authored totals at the same committed frontier as its EOF.
+    ProductionFinal {
+        produced_count: Count,
+        #[serde(with = "crate::event::types::descriptor_counts")]
+        produced_by_event_type: BTreeMap<crate::EventDescriptor, SeqNo>,
+        end_kind: EofKind,
+        last_event_id: Option<crate::EventId>,
+    },
+
     /// Subscriber progress update
     #[serde(rename = "consumption_progress")]
     ConsumptionProgress {
+        scope: crate::contracts::SubscriptionScope,
+        consumed_count: Count,
+        receipts: Option<crate::contracts::SubscriptionReceipts>,
         reader_seq: SeqNo,
         #[serde(skip_serializing_if = "Option::is_none")]
         last_event_id: Option<crate::event::types::EventId>,
@@ -288,6 +259,8 @@ pub enum FlowControlPayload {
     /// Subscriber finalized consumption for an upstream
     #[serde(rename = "consumption_final")]
     ConsumptionFinal {
+        scope: crate::contracts::SubscriptionScope,
+        receipts: Option<crate::contracts::SubscriptionReceipts>,
         pass: bool,
         consumed_count: Count,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,6 +296,24 @@ pub enum FlowControlPayload {
 }
 
 impl FlowControlPayload {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Eof { .. } => vocabulary::stream::EOF_DECLARED,
+            Self::Watermark { .. } => vocabulary::stream::WATERMARK_DECLARED,
+            Self::CatchUpComplete { .. } => vocabulary::stream::CATCH_UP_COMPLETED,
+            Self::Checkpoint { .. } => vocabulary::stream::CHECKPOINT_DECLARED,
+            Self::Drain => vocabulary::stream::DRAIN_REQUESTED,
+            Self::PipelineAbort { .. } => vocabulary::pipeline::ABORT_REQUESTED,
+            Self::SourceContract { .. } => vocabulary::source::CONTRACT_DECLARED,
+            Self::ConsumptionProgress { .. } => vocabulary::subscription::PROGRESS_REPORTED,
+            Self::ConsumptionGap { .. } => vocabulary::subscription::GAP_DETECTED,
+            Self::ProductionFinal { .. } => vocabulary::source::PRODUCTION_FINALIZED,
+            Self::ConsumptionFinal { .. } => vocabulary::subscription::CONSUMPTION_FINALIZED,
+            Self::ReaderStalled { .. } => vocabulary::subscription::STALL_DETECTED,
+            Self::AtLeastOnceViolation { .. } => vocabulary::subscription::AT_LEAST_ONCE_VIOLATED,
+        }
+    }
+
     pub fn eof_kind(&self) -> Option<EofKind> {
         match self {
             Self::Eof { kind, .. } => Some(*kind),
@@ -341,10 +332,10 @@ impl FlowControlPayload {
     /// drain, watermarks, checkpoints, pipeline abort, source contracts)
     /// participates in transport order: it is delivered to downstream
     /// subscriptions and takes per-reader ordinals in the canonical
-    /// deterministic merge. Reader telemetry (consumption progress, gaps,
-    /// finals, stalls, at-least-once violations) is consumption observability
+    /// deterministic merge. Production and subscription reports (progress, gaps,
+    /// finals, stalls, at-least-once violations) are observability
     /// emitted at wall-clock-gated times, so its journal positions are not a
-    /// function of stream content; it is excluded from `TransportOnly`
+    /// function of stream content; they are excluded from `TransportOnly`
     /// delivery so per-reader ordinals stay a pure function of the per-input
     /// streams across live, replay, and resume.
     ///
@@ -354,11 +345,12 @@ impl FlowControlPayload {
     ///
     /// Deliberately an exhaustive match with no wildcard arm: adding a new
     /// variant must force a lane decision here.
-    pub fn is_reader_telemetry(&self) -> bool {
+    pub fn is_reporting_telemetry(&self) -> bool {
         match self {
             Self::ConsumptionProgress { .. }
             | Self::ConsumptionGap { .. }
             | Self::ConsumptionFinal { .. }
+            | Self::ProductionFinal { .. }
             | Self::ReaderStalled { .. }
             | Self::AtLeastOnceViolation { .. } => true,
             Self::Eof { .. }

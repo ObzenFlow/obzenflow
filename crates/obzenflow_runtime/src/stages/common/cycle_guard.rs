@@ -135,6 +135,7 @@ impl CycleGuard {
             FlowControlPayload::ConsumptionProgress { .. }
             | FlowControlPayload::ConsumptionGap { .. }
             | FlowControlPayload::ConsumptionFinal { .. }
+            | FlowControlPayload::ProductionFinal { .. }
             | FlowControlPayload::ReaderStalled { .. }
             | FlowControlPayload::AtLeastOnceViolation { .. } => {
                 unreachable!(

@@ -165,7 +165,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
 
         // Create supervisor (private - not exposed)
         let supervisor = JournalSinkSupervisor {
-            name: format!("sink_{}", self.config.stage_name),
+            name: self.config.stage_name.clone(),
             stage_id: self.config.stage_id,
             subscription: None,
             _marker: std::marker::PhantomData,

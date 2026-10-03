@@ -5,7 +5,7 @@
 //! Borrowed presentation adapters. Projection never mutates evidence or writes
 //! output. Human fields are resolved at render time; JSONL only needs source().
 
-use super::context::{clock, event_type, Context};
+use super::context::{clock, event_type, record_writer_id, Context};
 use obzenflow::journal::read::*;
 use obzenflow::journal::ProcessingStatus;
 use obzenflow_core::event::CausalCoordinate;
@@ -56,6 +56,7 @@ pub(super) enum InputsView<'a> {
 
 pub(super) struct RelationView<'a> {
     pub output: &'a str,
+    pub forwarded_author: Option<String>,
     pub inputs: InputsView<'a>,
     pub replay: ReplayNote,
     pub processing_error: Option<&'a str>,
@@ -155,6 +156,13 @@ impl<'a> EventView<'a> {
         };
         RelationView {
             output: event_type(self.record),
+            forwarded_author: self.record.journal.stage.as_ref().and_then(|stage| {
+                let author = record_writer_id(self.record);
+                // Prior-run writer IDs are explained by replay provenance;
+                // they do not establish a forwarding hop in this run.
+                (!replayed(self.record) && author != stage.id.into())
+                    .then(|| self.context.writer_name(&author.to_string()).to_owned())
+            }),
             inputs,
             replay: replay_note(self.record),
             processing_error: fact_error(self.record),
@@ -312,10 +320,14 @@ fn gloss(record: &RunRecord) -> &'static str {
             ChainPayload::Execution(ExecutionPayload::EffectRecoveryAbandoned(_)) => "Recorded effect recovery was abandoned; this row is not a new effect invocation.",
             ChainPayload::Execution(ExecutionPayload::AccumulatorProgress { .. }) => "Stateful stage folded inputs into its accumulated state.",
             ChainPayload::Execution(ExecutionPayload::JoinReferenceProgress { .. }) => "Join stage accumulated reference inputs for matching later stream records.",
-            ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Drained { .. })) => "This stage finished draining; whole-run coverage is tracked separately.",
-            ChainPayload::Execution(ExecutionPayload::StageLifecycle(_)) => "The stage recorded a lifecycle transition.",
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Drained { .. })) => "This stage reported that it finished draining.",
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(_)) => "The stage reported a lifecycle milestone or outcome from its own perspective.",
+            ChainPayload::Execution(ExecutionPayload::ContractResult { .. }) => "The evaluator records a scoped verification outcome and the evidence available at this phase.",
+            ChainPayload::Execution(ExecutionPayload::ContractStatus { .. }) => "The consuming stage records its effective policy decision; acceptance does not imply verification passed.",
             ChainPayload::Execution(_) => "The runtime recorded execution evidence, such as admission, retry or backpressure.",
-            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress { .. }) => "Progress is the recorded input consumption or receipt sequence, not a journal append counter. Input and advertised clocks do not establish that the reader has caught up.",
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress { .. }) => "The subscriber reports its consumed count and, when tracked, a separate terminal-receipt frontier. Producer advertisements retain their own attribution.",
+            ChainPayload::FlowControl(FlowControlPayload::ProductionFinal { .. }) => "The source reports its production frontier and end kind; downstream consumption and delivery are separate observations.",
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. }) => "The subscriber finalized its scoped observations and effective policy verdict; verification may still be pending or failed.",
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => "This journal recorded an end-of-input signal; it does not by itself settle the whole run.",
             ChainPayload::FlowControl(_) => "A flow signal coordinates delivery or progress between stages.",
             ChainPayload::Delivery(delivery) => match &delivery.result {
@@ -329,12 +341,12 @@ fn gloss(record: &RunRecord) -> &'static str {
         },
         RunRecordData::System(row) if matches!(row.payload, SystemPayload::PipelineLifecycle(_)) && *row.writer_id() != record.run.pipeline_writer_id => "This lifecycle row is from another writer; it does not establish this run's pipeline outcome.",
         RunRecordData::System(row) => match &row.payload {
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained) => "Pipeline drain was recorded; follow still verifies that every stage journal has been consumed.",
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained) => "The pipeline published its final marker; journal reader coverage is tracked separately.",
             SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed { .. }) => "Pipeline completion was recorded; drain and reader coverage are separate evidence.",
             SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed { .. }) => "Pipeline failure was recorded; successful inspection does not mean execution succeeded.",
             SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Cancelled { .. }) => "Pipeline cancellation was recorded; the viewer can still inspect committed evidence.",
             SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::NotStarted) => "The application closed this run before execution started.",
-            SystemPayload::PipelineLifecycle(_) => "The pipeline recorded a lifecycle transition.",
+            SystemPayload::PipelineLifecycle(_) => "The pipeline recorded its own lifecycle observation or admitted command.",
             _ => "A system component recorded coordination or lifecycle evidence.",
         },
     }

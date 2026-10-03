@@ -260,7 +260,7 @@ where
             return true;
         }
         if let ChainPayload::FlowControl(payload) = &chain_event.payload {
-            if payload.is_reader_telemetry() {
+            if payload.is_reporting_telemetry() {
                 return true;
             }
         }
@@ -520,6 +520,7 @@ where
             reader_index,
             stage_id,
             contract_chain_event,
+            original_chain_event,
             reader_seq_for_contracts,
         );
 
@@ -582,7 +583,7 @@ where
     /// writer count rather than the upstream's raw count.
     fn normalized_eof_for_contracts(
         &self,
-        reader_index: usize,
+        _reader_index: usize,
         stage_id: StageId,
         original: Option<&ChainEvent>,
         is_eof: bool,
@@ -591,17 +592,19 @@ where
             return None;
         }
         let chain_event = original?;
-        let selected_writer_seq = self.selected_writer_seq_for_reader(reader_index, stage_id);
         let mut normalized = chain_event.clone();
         if let ChainPayload::FlowControl(FlowControlPayload::Eof {
             writer_seq,
             writer_seq_by_event_type,
+            writer_seq_by_event_type_complete,
             ..
         }) = &mut normalized.payload
         {
-            *writer_seq = self
-                .selected_writer_seq_from_eof_map(stage_id, writer_seq_by_event_type)
-                .or(Some(selected_writer_seq));
+            *writer_seq = self.selected_writer_seq_from_eof_map(
+                stage_id,
+                writer_seq_by_event_type,
+                *writer_seq_by_event_type_complete,
+            );
         }
         Some(normalized)
     }
@@ -682,18 +685,23 @@ where
             if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                 writer_seq,
                 writer_seq_by_event_type,
+                writer_seq_by_event_type_complete,
                 vector_clock,
                 ..
             }) = &chain_event.payload
             {
                 if self.eof_authored_by_upstream(chain_event, stage_id) {
                     progress.advertised_writer_seq = *writer_seq;
+                    progress.advertised_vector_clock = vector_clock.clone();
                     progress.last_vector_clock = vector_clock.clone();
                     if let Some(by_type) = self
                         .advertised_writer_seq_by_reader_event_type
                         .get_mut(reader_index)
                     {
-                        by_type.replace_from_eof(writer_seq_by_event_type);
+                        by_type.replace_from_eof(
+                            writer_seq_by_event_type,
+                            *writer_seq_by_event_type_complete,
+                        );
                     }
                 }
             }
@@ -718,6 +726,7 @@ where
         reader_index: usize,
         stage_id: StageId,
         contract_chain_event: Option<&ChainEvent>,
+        original_chain_event: Option<&ChainEvent>,
         reader_seq_for_contracts: Option<SeqNo>,
     ) {
         let (Some(chain_event), Some(reader_stage)) = (
@@ -739,6 +748,7 @@ where
             // physical delivery on that edge.
             chain.on_edge_delivery(
                 chain_event,
+                original_chain_event.unwrap_or(chain_event),
                 reader_stage,
                 reader_seq,
                 stage_id,
@@ -806,29 +816,27 @@ where
             }
             ChainPayload::FlowControl(FlowControlPayload::Eof {
                 writer_seq_by_event_type,
+                writer_seq_by_event_type_complete: true,
                 ..
-            }) if !writer_seq_by_event_type.is_empty() => {
+            }) => {
                 let feed_writes: Vec<(usize, SeqNo)> = self
                     .contract_feed_chains
                     .get(reader_index)
                     .into_iter()
                     .flat_map(|chains| chains.iter().enumerate())
-                    .filter_map(|(feed_index, feed_chain)| {
-                        let mut matched = false;
+                    .map(|(feed_index, feed_chain)| {
                         let total = writer_seq_by_event_type
                             .iter()
                             .filter(|(event_type, _)| {
-                                let is_match = Self::selected_feed_matches_event_type(
+                                Self::selected_feed_matches_event_type(
                                     &feed_chain.metadata,
                                     event_type,
-                                );
-                                matched |= is_match;
-                                is_match
+                                )
                             })
                             .fold(0_u64, |sum, (_, writer_seq)| {
                                 sum.saturating_add(writer_seq.0)
                             });
-                        matched.then_some((feed_index, SeqNo(total)))
+                        (feed_index, SeqNo(total))
                     })
                     .collect();
 

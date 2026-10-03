@@ -49,6 +49,9 @@ pub(in crate::render) enum BodyView<'a> {
 pub(in crate::render) struct ProgressView<'a> {
     #[serde(flatten)]
     input: InputView<'a>,
+    scope: &'a obzenflow_core::contracts::SubscriptionScope,
+    consumed_count: obzenflow_core::event::types::Count,
+    receipts: &'a Option<obzenflow_core::contracts::SubscriptionReceipts>,
     reader_seq: SeqNo,
     eof_seen: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,6 +169,9 @@ impl<'a> BodyView<'a> {
         match &record.record {
             RunRecordData::Chain(row) => match &row.payload {
                 ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
+                    scope,
+                    consumed_count,
+                    receipts,
                     reader_seq,
                     last_event_id: _,
                     vector_clock: _,
@@ -177,6 +183,9 @@ impl<'a> BodyView<'a> {
                     stalled_since,
                 }) => Self::ConsumptionProgress(ProgressView {
                     input: InputView::from_reader(reader_path, *reader_index, context),
+                    scope,
+                    consumed_count: *consumed_count,
+                    receipts,
                     reader_seq: *reader_seq,
                     eof_seen: *eof_seen,
                     advertised_writer_seq: *advertised_writer_seq,

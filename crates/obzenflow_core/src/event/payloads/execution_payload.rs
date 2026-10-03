@@ -17,6 +17,7 @@ use crate::event::observability::{HttpPullState, WaitReason};
 use crate::event::provenance::ExecutionAccounting;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::{Count, DurationMs};
+use crate::event::vocabulary;
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::StageId;
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,8 @@ pub enum ExecutionPayload {
         feed_role: Option<SystemFeedRole>,
         contract_name: ContractName,
         status: ContractResultStatusLabel,
+        phase: crate::contracts::ContractPhase,
+        result: Box<crate::ContractResult>,
         /// Stable category label (e.g. "seq_divergence", "content_mismatch", "other")
         #[serde(skip_serializing_if = "Option::is_none")]
         cause: Option<String>,
@@ -76,6 +79,7 @@ pub enum ExecutionPayload {
         advertised_writer_seq: Option<crate::event::types::SeqNo>,
     },
     StageLifecycle(StageLifecycleFact),
+    #[serde(rename = "resilience_occurrence")]
     CircuitBreaker(CircuitBreakerFact),
     RateLimiter(RateLimiterFact),
     Backpressure(BackpressureFact),
@@ -126,6 +130,16 @@ pub enum ReplayLifecycleEvent {
     },
 }
 
+impl ReplayLifecycleEvent {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Started { .. } => vocabulary::replay::STARTED,
+            Self::Completed { .. } => vocabulary::replay::COMPLETED,
+            Self::ResumedLive { .. } => vocabulary::replay::LIVE_RESUMED,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "stage_state", rename_all = "snake_case")]
 pub enum StageLifecycleFact {
@@ -164,6 +178,20 @@ pub enum StageLifecycleFact {
 }
 
 impl StageLifecycleFact {
+    pub fn event_type(&self, stage_name: &str) -> String {
+        use super::supervisor_descriptor::{supervisor_event_type, SupervisionMode};
+
+        let occurrence = match self {
+            Self::Running { .. } => vocabulary::supervisor::READY,
+            Self::Draining { .. } => vocabulary::supervisor::DRAIN_STARTED,
+            Self::Drained { .. } => vocabulary::supervisor::DRAIN_COMPLETED,
+            Self::Completed { .. } => vocabulary::supervisor::COMPLETED,
+            Self::Cancelled { .. } => vocabulary::supervisor::CANCELLED,
+            Self::Failed { .. } => vocabulary::supervisor::FAILED,
+        };
+        supervisor_event_type(stage_name, SupervisionMode::HandlerSupervised, occurrence)
+    }
+
     pub fn stage_id(&self) -> StageId {
         match self {
             Self::Running { stage_id }
@@ -259,6 +287,35 @@ pub enum CircuitBreakerFact {
     },
 }
 
+impl CircuitBreakerFact {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Opened { .. }
+            | Self::StateChanged {
+                to_state: CircuitState::Open,
+                ..
+            } => vocabulary::circuit_breaker::OPENED,
+            Self::Closed { .. }
+            | Self::StateChanged {
+                to_state: CircuitState::Closed,
+                ..
+            } => vocabulary::circuit_breaker::CLOSED,
+            Self::HalfOpen { .. }
+            | Self::StateChanged {
+                to_state: CircuitState::HalfOpen,
+                ..
+            } => vocabulary::circuit_breaker::HALF_OPEN_ENTERED,
+            Self::Rejected { .. } => vocabulary::circuit_breaker::ADMISSION_REJECTED,
+            Self::AttemptSettled { .. } => vocabulary::circuit_breaker::CALL_CLASSIFIED,
+            Self::RetryScheduled { .. } => vocabulary::retry::SCHEDULED,
+            Self::RetrySucceeded { .. } => vocabulary::retry::SUCCEEDED,
+            Self::RetryExhausted { .. } => vocabulary::retry::EXHAUSTED,
+            Self::RetryStoppedNonRetryable { .. } => vocabulary::retry::STOPPED_NON_RETRYABLE,
+            Self::RecoveryCompleted { .. } => vocabulary::resilience::ATTEMPTS_REPORTED,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RateLimiterFact {
@@ -276,6 +333,16 @@ pub enum RateLimiterFact {
         old_rate: f64,
         new_rate: f64,
     },
+}
+
+impl RateLimiterFact {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Delayed { .. } => vocabulary::rate_limiter::WAIT_STARTED,
+            Self::ModeChange { .. } => vocabulary::rate_limiter::MODE_CHANGED,
+            Self::ConfigChanged { .. } => vocabulary::rate_limiter::CONFIGURATION_CHANGED,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,39 +431,26 @@ impl ExecutionPayload {
         }
     }
 
-    pub fn event_type(&self) -> &'static str {
-        match self {
-            Self::ReplayLifecycle(_) => "execution.replay.lifecycle",
-            Self::SupervisorRegistered { .. } => "execution.supervisor.registered",
+    pub fn event_type(&self, stage_name: &str) -> std::borrow::Cow<'static, str> {
+        let name = match self {
+            Self::ReplayLifecycle(event) => event.event_type(),
+            Self::SupervisorRegistered { descriptor } => {
+                return descriptor.registered_event_type().into()
+            }
             Self::SupervisorCommandDiscarded { .. } => "execution.supervisor.command_discarded",
             Self::SourceCleanupFailed { .. } => "execution.source.cleanup_failed",
             Self::ContractStatus { pass, .. } => {
                 if *pass {
-                    "execution.contract.pass"
+                    vocabulary::contract::CONTINUATION_ALLOWED
                 } else {
-                    "execution.contract.fail"
+                    vocabulary::contract::CONTINUATION_DENIED
                 }
             }
-            Self::ContractResult { status, .. } => match status {
-                ContractResultStatusLabel::Passed => "execution.contract.result.passed",
-                ContractResultStatusLabel::Failed => "execution.contract.result.failed",
-                ContractResultStatusLabel::Pending => "execution.contract.result.pending",
-                ContractResultStatusLabel::Healthy => "execution.contract.result",
-            },
-            Self::StageLifecycle(fact) => match fact {
-                StageLifecycleFact::Running { .. } => "lifecycle.stage.running",
-                StageLifecycleFact::Draining { .. } => "lifecycle.stage.draining",
-                StageLifecycleFact::Drained { .. } => "lifecycle.stage.drained",
-                StageLifecycleFact::Completed { .. } => "lifecycle.stage.completed",
-                StageLifecycleFact::Cancelled { .. } => "lifecycle.stage.cancelled",
-                StageLifecycleFact::Failed { .. } => "lifecycle.stage.failed",
-            },
-            Self::CircuitBreaker(CircuitBreakerFact::StateChanged { .. }) => {
-                "lifecycle.middleware.circuit_breaker.state_changed"
-            }
-            Self::CircuitBreaker(_) => "lifecycle.middleware.circuit_breaker",
-            Self::RateLimiter(_) => "lifecycle.middleware.rate_limiter",
-            Self::Backpressure(_) => "lifecycle.backpressure",
+            Self::ContractResult { status, .. } => status.event_type(),
+            Self::StageLifecycle(fact) => return fact.event_type(stage_name).into(),
+            Self::CircuitBreaker(fact) => fact.event_type(),
+            Self::RateLimiter(fact) => fact.event_type(),
+            Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourcePollError(_) => "source.poll_error",
             Self::HttpPullState(_) => "source.http_pull_state",
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
@@ -412,7 +466,8 @@ impl ExecutionPayload {
             Self::EffectRecoveryAbandoned(_) => {
                 super::effect_payload::EFFECT_RECOVERY_ABANDONED_EVENT_TYPE
             }
-        }
+        };
+        name.into()
     }
 
     /// The existing effect protocol charges these physical rows. Other execution
@@ -514,9 +569,11 @@ mod tests {
     fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
         use crate::event::types::SeqNo;
         use serde_json::json;
+        let upstream = StageId::new();
+        let reader = StageId::new();
         let payload = ExecutionPayload::ContractResult {
-            upstream: StageId::new(),
-            reader: StageId::new(),
+            upstream,
+            reader,
             selected_event_type: Some(crate::EventDescriptor {
                 event_kind: crate::event::payloads::chain_payload::EventKind::Fact,
                 event_type: "test.selected".into(),
@@ -524,7 +581,18 @@ mod tests {
             }),
             feed_role: Some(SystemFeedRole::Reference),
             contract_name: ContractName::from("TransportContract"),
-            status: ContractResultStatusLabel::Healthy,
+            status: ContractResultStatusLabel::Pending,
+            phase: crate::contracts::ContractPhase::Progress,
+            result: Box::new(crate::ContractResult::Pending {
+                reason: crate::contracts::PendingReason::ProgressOnly,
+                evidence: crate::ContractEvidence {
+                    contract_name: ContractName::from("TransportContract"),
+                    upstream_stage: upstream,
+                    downstream_stage: reader,
+                    evaluated_at: chrono::Utc::now(),
+                    details: crate::contracts::ContractEvidenceDetails::Progress,
+                },
+            }),
             cause: None,
             reader_seq: Some(SeqNo(3)),
             advertised_writer_seq: Some(SeqNo(5)),
@@ -537,7 +605,22 @@ mod tests {
         );
         assert_eq!(serialized["feed_role"], "reference");
         assert_eq!(serialized["contract_name"], "TransportContract");
-        assert_eq!(serialized["status"], "healthy");
+        assert_eq!(serialized["status"], "pending");
+
+        let record =
+            crate::event::ChainEventFactory::execution_event(reader.into(), payload.clone());
+        assert_eq!(record.event_type(), "runtime.contract.verification_pending");
+        let encoded = serde_json::to_value(record).unwrap();
+        assert!(serde_json::from_value::<crate::ChainEvent>(encoded.clone()).is_ok());
+        for (field, value) in [
+            ("status", json!("passed")),
+            ("contract_name", json!("OtherContract")),
+            ("reader", json!(StageId::new())),
+        ] {
+            let mut invalid = encoded.clone();
+            invalid["payload"][field] = value;
+            assert!(serde_json::from_value::<crate::ChainEvent>(invalid).is_err());
+        }
 
         let decoded: ExecutionPayload = serde_json::from_value(json!({
             "execution_type": "contract_result",
@@ -546,7 +629,9 @@ mod tests {
             "selected_event_type": serialized["selected_event_type"].clone(),
             "feed_role": "reference",
             "contract_name": "TransportContract",
-            "status": "healthy",
+            "status": "pending",
+            "phase": "progress",
+            "result": serialized["result"].clone(),
             "reader_seq": 3,
             "advertised_writer_seq": 5
         }))
@@ -570,7 +655,7 @@ mod tests {
                 );
                 assert_eq!(feed_role, Some(SystemFeedRole::Reference));
                 assert_eq!(contract_name.as_str(), "TransportContract");
-                assert_eq!(status, ContractResultStatusLabel::Healthy);
+                assert_eq!(status, ContractResultStatusLabel::Pending);
             }
             other => panic!("expected ContractResult, got {other:?}"),
         }

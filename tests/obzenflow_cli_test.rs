@@ -158,6 +158,94 @@ fn latest_run_dir(base: &Path) -> PathBuf {
     entries.pop().expect("run should have produced an archive")
 }
 
+fn event_table(
+    text: &str,
+    heading: &str,
+    registered: &std::collections::BTreeMap<
+        String,
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    >,
+) -> std::collections::BTreeMap<(String, String, String), usize> {
+    let body = text.split_once(&format!("\n    {heading}\n")).unwrap().1;
+    let mut columns = None;
+    let mut entries: Vec<(usize, String, String)> = Vec::new();
+    for line in body
+        .lines()
+        .take_while(|line| line.is_empty() || line.starts_with("      "))
+    {
+        if line.trim_start().starts_with("Count ") {
+            assert!(columns.is_none(), "one table header per journal");
+            columns = Some((line.find("Event").unwrap(), line.find("Author").unwrap()));
+        } else if let Some((event_start, author_start)) = columns {
+            if line.is_empty() {
+                continue;
+            }
+            let event = line
+                .get(event_start..author_start.min(line.len()))
+                .unwrap_or_default()
+                .trim();
+            let author = line.get(author_start..).unwrap_or_default().trim();
+            if let Ok(count) = line[..event_start].trim().parse::<usize>() {
+                entries.push((count, event.into(), author.into()));
+            } else {
+                let (_, previous_event, previous_author) =
+                    entries.last_mut().expect("wrapped row has a count");
+                previous_event.push_str(event);
+                previous_author.push_str(author);
+            }
+        }
+    }
+    // Independently expand the documented display abbreviations, then compare
+    // the full descriptor/author populations with the actual journal records.
+    entries
+        .into_iter()
+        .map(|(count, event, author)| {
+            let descriptor = registered
+                .values()
+                .find(|descriptor| descriptor.name == author)
+                .unwrap();
+            let (kind, name) = event.split_once('/').unwrap();
+            let subject = match descriptor.kind {
+                obzenflow::journal::read::SupervisorKind::Pipeline => "flow.",
+                obzenflow::journal::read::SupervisorKind::MetricsAggregator => "metrics.",
+                _ => "stage.",
+            };
+            let expanded = if matches!(kind, "execution" | "system") && name.starts_with(subject) {
+                format!(
+                    "{kind}/{}.{}",
+                    descriptor.event_prefix(),
+                    name.strip_prefix(subject).unwrap()
+                )
+            } else if matches!(kind, "execution" | "flow_signal")
+                && matches!(
+                    name.split('.').next().unwrap(),
+                    "stream"
+                        | "pipeline"
+                        | "replay"
+                        | "source"
+                        | "subscription"
+                        | "contract"
+                        | "circuit_breaker"
+                        | "retry"
+                        | "resilience"
+                        | "rate_limiter"
+                        | "backpressure"
+                )
+            {
+                format!("{kind}/runtime.{name}")
+            } else if kind == "delivery" {
+                format!("delivery/delivery.{name}")
+            } else {
+                event
+            };
+            (
+                (expanded, author, descriptor.kind.label().to_owned()),
+                count,
+            )
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_writer_columns_use_journaled_registration() {
     use obzenflow::journal::read::{RunRecordData, SupervisionMode, SupervisorKind, SystemPayload};
@@ -248,9 +336,26 @@ async fn runtime_writer_columns_use_journaled_registration() {
             .split_once("Supervisor: metrics_aggregator\n")
             .unwrap();
         assert!(pipeline.contains("\n    system.log\n"));
-        assert!(!pipeline.contains("system.metrics.exported"));
+        assert!(!pipeline.contains("supervisor.runtime.metrics_aggregator."));
         assert!(metrics.contains("\n    metrics-coordination.log\n"));
         assert!(metrics.contains("\n    metrics-export.log\n"));
+        let unwrapped = |section: &str| section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let pipeline_text = unwrapped(pipeline);
+        assert!(pipeline_text
+            .contains("Observes: child acknowledgements and results (supervisor handles)"));
+        assert!(!pipeline_text.contains("Reads from:"));
+        assert!(pipeline_text.contains("Runtime readers: metrics_aggregator"));
+        let metrics_text = unwrapped(metrics);
+        assert!(metrics_text
+            .contains("Reads from: stage data/error journals, system.log (metrics tails)"));
+        assert_eq!(metrics_text.matches("Runtime readers: —").count(), 2);
+        assert_eq!(
+            unwrapped(application)
+                .matches("Runtime readers: metrics_aggregator")
+                .count(),
+            2
+        );
+        assert!(!unwrapped(table).contains("Runtime readers: pipeline_supervisor"));
         assert_eq!(
             metrics
                 .lines()
@@ -264,16 +369,37 @@ async fn runtime_writer_columns_use_journaled_registration() {
             .join(" ")
             .contains("across 7 journals."));
         if width == 90 {
-            assert!(metrics
-                .lines()
-                .any(|line| line.contains("system.metrics.exported")
-                    && line.contains("metrics_aggregator")
-                    && line.contains("MetricsAggregator")));
-            assert!(pipeline
-                .lines()
-                .any(|line| line.contains("system.metrics.drain_requested")
-                    && line.contains("pipeline_supervisor")
-                    && line.contains("Pipeline")));
+            assert!(!pipeline.contains("Event prefix:"));
+            assert!(!pipeline.contains("Author:"));
+            assert!(pipeline.lines().any(|line| line
+                .contains("system/flow.command.finalize_metrics.requested@1")
+                && line.trim_end().ends_with("pipeline_supervisor")));
+            assert!(pipeline.contains("system/flow.ready_for_run@1"));
+            assert!(pipeline.contains("system/flow.start_accepted@1"));
+            assert!(pipeline.contains("system/flow.completed@1"));
+            assert!(!metrics.contains("Event prefix:"));
+            assert!(metrics.lines().any(|line| line
+                .contains("system/metrics.refresh_readers_stopped@1")
+                && line.trim_end().ends_with("metrics_aggregator")));
+            assert!(metrics.contains("system/metrics.ready@1"));
+            assert!(metrics.contains("system/metrics.final_snapshot_published@1"));
+            assert!(application.contains("execution/stage.ready@1"));
+            assert!(application.contains("execution/stage.completed@1"));
+            let metrics_rows = event_table(metrics, "metrics-export.log", &registered);
+            assert!(
+                metrics_rows.contains_key(&(
+                    "system/supervisor.runtime.metrics_aggregator.snapshot.published@1".into(),
+                    "metrics_aggregator".into(),
+                    "MetricsAggregator".into(),
+                )),
+                "{metrics_rows:?}"
+            );
+            let pipeline_rows = event_table(pipeline, "system.log", &registered);
+            assert!(pipeline_rows.contains_key(&(
+                "system/supervisor.runtime.pipeline_supervisor.command.finalize_metrics.requested@1".into(),
+                "pipeline_supervisor".into(),
+                "Pipeline".into(),
+            )), "{pipeline_rows:?}");
         }
         assert!(!table.contains("Not recorded"));
     }
@@ -839,7 +965,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "  Data subscribers: cancelled_orders, manual_review, paid_orders\n",
         "  Data subscribers: —\n",
         "  Owns:\n    ",
-        "      Runtime readers: pipeline_supervisor\n",
+        "      Runtime readers: —\n",
         "Each stage writes business outputs to its own data journal for subscribers to read.",
         "- Forwarded control signals keep their original Author.",
         "- EOF from all required upstreams lets a supervisor drain and complete.",
@@ -859,11 +985,25 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             numbers["paid_orders"]
         )));
     assert!(!human.contains("RUNTIME"));
-    assert!(!human.contains("system.metrics.exported"));
+    assert!(!human.contains("supervisor.runtime.metrics_aggregator.snapshot.published"));
     let (verbose, _) = show(&baseline, &["--include-runtime"]);
     assert_eq!(journal_numbers(&verbose), numbers);
     assert!(verbose.contains("RUNTIME"));
-    assert!(verbose.contains("control.eof") && !human.contains("control.eof"));
+    for label in [
+        "flow_signal/source.contract_declared@1",
+        "execution/contract.continuation_allowed@1",
+        "execution/circuit_breaker.call_classified@1",
+        "execution/resilience.attempts_reported@1",
+    ] {
+        assert!(verbose.contains(label), "missing occurrence label {label}");
+    }
+    assert!(!verbose.contains("Runtime readers: pipeline_supervisor"));
+    assert!(!verbose.contains("Runtime readers: metrics_aggregator"));
+    assert!(
+        verbose.contains("runtime.stream.eof_declared")
+            && verbose.contains("flow_signal/stream.eof_declared@1")
+            && !human.contains("runtime.stream.eof_declared")
+    );
     // This demo's keyed effect records successful domain facts. Explicit
     // attempt-start records belong to affine effects, not every physical call.
     assert!(
@@ -1024,43 +1164,6 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         })
         .count();
     assert!(selected < rows.len(), "fixture includes runtime evidence");
-    fn event_table(
-        text: &str,
-        heading: &str,
-    ) -> std::collections::BTreeMap<(String, String, String), usize> {
-        let body = text.split_once(&format!("\n    {heading}\n")).unwrap().1;
-        let mut lines = body
-            .lines()
-            .skip_while(|line| !line.trim_start().starts_with("Count "));
-        let header = lines.next().expect("event count table header");
-        let descriptor_start = header.find("Descriptor").unwrap();
-        let writer_start = header.find("Author").unwrap();
-        let kind_start = header.find("Author type").unwrap();
-        let mut entries: Vec<(usize, [String; 3])> = Vec::new();
-        for line in lines.take_while(|line| !line.is_empty()) {
-            let cells = [
-                line.get(descriptor_start..writer_start.min(line.len()))
-                    .unwrap_or_default()
-                    .trim(),
-                line.get(writer_start..kind_start.min(line.len()))
-                    .unwrap_or_default()
-                    .trim(),
-                line.get(kind_start..).unwrap_or_default().trim(),
-            ];
-            if let Ok(count) = line[..descriptor_start].trim().parse::<usize>() {
-                entries.push((count, cells.map(str::to_owned)));
-            } else {
-                let (_, previous) = entries.last_mut().expect("wrapped row has a count");
-                for (cell, continuation) in previous.iter_mut().zip(cells) {
-                    cell.push_str(continuation);
-                }
-            }
-        }
-        entries
-            .into_iter()
-            .map(|(count, [descriptor, writer, kind])| ((descriptor, writer, kind), count))
-            .collect()
-    }
     let mut expected_journals = std::collections::BTreeMap::<
         String,
         std::collections::BTreeMap<(String, String, String), usize>,
@@ -1070,11 +1173,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .iter()
         .filter_map(|row| match &row.record {
             RunRecordData::System(record) => match &record.payload {
-                obzenflow::journal::read::SystemPayload::SupervisorRegistered { descriptor } => Some((record.writer_id().to_string(), descriptor)),
+                obzenflow::journal::read::SystemPayload::SupervisorRegistered { descriptor } => Some((record.writer_id().to_string(), descriptor.clone())),
                 _ => None,
             },
             RunRecordData::Chain(record) => match &record.payload {
-                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some((record.writer_id().to_string(), descriptor)),
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some((record.writer_id().to_string(), descriptor.clone())),
                 _ => None,
             },
         })
@@ -1127,7 +1230,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             RunRecordData::Chain(record) => record.writer_id().to_string(),
             RunRecordData::System(record) => record.writer_id().to_string(),
         };
-        let descriptor = registrations[&writer];
+        let descriptor = &registrations[&writer];
         let writer_name = stage_names
             .get(&writer)
             .copied()
@@ -1158,13 +1261,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
     for (heading, expected) in &expected_journals {
         assert_eq!(
-            &event_table(&verbose, heading),
+            &event_table(&verbose, heading, &registrations),
             expected,
             "{heading} counts only its own journal entries, regardless of writer or payload stage"
         );
     }
     for (heading, expected) in &displayed_journals {
-        assert_eq!(&event_table(&human, heading), expected);
+        assert_eq!(&event_table(&human, heading, &registrations), expected);
     }
     assert_eq!(
         displayed_journals
@@ -1184,18 +1287,19 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             "empty journals stay in the inventory only"
         );
     }
-    let system_counts = event_table(&verbose, "system.log");
+    let system_counts = event_table(&verbose, "system.log", &registrations);
     assert_eq!(system_counts.values().sum::<usize>(), system_count);
     for event_type in [
-        "execution/lifecycle.stage.running@1",
-        "execution/lifecycle.stage.completed@1",
-        "execution/execution.contract.pass@1",
+        ".ready@1",
+        ".completed@1",
+        "execution/runtime.contract.continuation_allowed@1",
     ] {
         assert_eq!(
             expected_journals
                 .values()
                 .flat_map(|counts| counts.iter())
-                .filter(|((kind, _, _), _)| kind == event_type)
+                .filter(|((kind, _, _), _)| kind.starts_with("execution/")
+                    && kind.ends_with(event_type))
                 .map(|(_, count)| count)
                 .sum::<usize>(),
             7
@@ -1206,7 +1310,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .all(|(_, _, author_type)| author_type == "Pipeline"));
     assert_eq!(
         system_counts[&(
-            "system/system.pipeline.completed@1".into(),
+            "system/supervisor.runtime.pipeline_supervisor.completed@1".into(),
             "pipeline_supervisor".into(),
             "Pipeline".into()
         )],
@@ -1217,11 +1321,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             .as_str()
             .unwrap()
     };
-    let manual_review = event_table(&verbose, data_file("manual_review"));
+    let manual_review = event_table(&verbose, data_file("manual_review"), &registrations);
     for source in ["store_orders", "web_orders"] {
         assert_eq!(
             manual_review[&(
-                "flow_signal/control.source_contract@1".into(),
+                "flow_signal/runtime.source.contract_declared@1".into(),
                 source.into(),
                 "FiniteSource".into()
             )],
@@ -1230,7 +1334,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         );
     }
     assert_eq!(
-        event_table(&verbose, data_file("validate_order"))[&(
+        event_table(&verbose, data_file("validate_order"), &registrations)[&(
             "fact/order.cancelled@1".into(),
             "validate_order".into(),
             "Transform".into()
@@ -1238,7 +1342,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         1
     );
     assert_eq!(
-        event_table(&verbose, data_file("authorize_payment"))[&(
+        event_table(&verbose, data_file("authorize_payment"), &registrations)[&(
             "fact/order.cancelled@1".into(),
             "authorize_payment".into(),
             "Transform".into()
@@ -1315,6 +1419,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .unwrap();
     let replay = latest_run_dir(temp.path());
     assert_ne!(baseline, replay);
+    let (replay_runtime, _) = show(&replay, &["--include-runtime"]);
+    assert!(replay_runtime.contains("execution/replay.started@1"));
+    assert!(replay_runtime.contains("execution/replay.completed@1"));
     let (human, _) = show(&replay, &[]);
     assert_fact_origins(&human);
     assert!(

@@ -19,6 +19,7 @@ use futures::{FutureExt, Stream};
 use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisionMode, SupervisorDescriptor, SupervisorKind,
 };
+use obzenflow_core::event::vocabulary::supervisor::PIPELINE_NAME;
 use obzenflow_core::event::{CommandDiscardDisposition, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_fsm::{FsmAction, FsmError};
@@ -49,7 +50,7 @@ impl PipelineSupervisor {
         failure: OperationalFailure,
     ) -> Self {
         Self {
-            name: "pipeline_supervisor".into(),
+            name: PIPELINE_NAME.into(),
             system_id,
             startup_mode: crate::bootstrap::bootstrap_config().startup_mode,
             controls,

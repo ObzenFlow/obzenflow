@@ -52,28 +52,13 @@ impl ChainPayload {
         }
     }
 
-    pub fn framework_event_type(&self) -> Option<&'static str> {
+    pub fn framework_event_type(&self, stage_name: &str) -> Option<std::borrow::Cow<'static, str>> {
         match self {
             Self::Fact(_) => None,
-            Self::CompositeData(payload) => Some(payload.event_type()),
-            Self::Execution(payload) => Some(payload.event_type()),
-            Self::Delivery(payload) => Some(payload.event_type()),
-            Self::FlowControl(payload) => Some(match payload {
-                FlowControlPayload::Eof { .. } => "control.eof",
-                FlowControlPayload::Watermark { .. } => "control.watermark",
-                FlowControlPayload::CatchUpComplete { .. } => "control.catch_up_complete",
-                FlowControlPayload::Checkpoint { .. } => "control.checkpoint",
-                FlowControlPayload::Drain => "control.drain",
-                FlowControlPayload::PipelineAbort { .. } => "control.pipeline_abort",
-                FlowControlPayload::SourceContract { .. } => "control.source_contract",
-                FlowControlPayload::ConsumptionProgress { .. } => "control.consumption_progress",
-                FlowControlPayload::ConsumptionGap { .. } => "control.consumption_gap",
-                FlowControlPayload::ConsumptionFinal { .. } => "control.consumption_final",
-                FlowControlPayload::ReaderStalled { .. } => "control.reader_stalled",
-                FlowControlPayload::AtLeastOnceViolation { .. } => {
-                    "control.at_least_once_violation"
-                }
-            }),
+            Self::CompositeData(payload) => Some(payload.event_type().into()),
+            Self::Execution(payload) => Some(payload.event_type(stage_name)),
+            Self::Delivery(payload) => Some(payload.event_type().into()),
+            Self::FlowControl(payload) => Some(payload.event_type().into()),
         }
     }
 
@@ -112,8 +97,12 @@ impl ChainPayload {
                 ))
             }
         };
-        if payload
-            .framework_event_type()
+        // Stage names are validated against recorded flow context at the journal boundary.
+        if !matches!(
+            payload,
+            Self::Execution(ExecutionPayload::StageLifecycle(_))
+        ) && payload
+            .framework_event_type("")
             .is_some_and(|expected| expected != event_type)
         {
             return Err(<serde_json::Error as serde::de::Error>::custom(
@@ -125,6 +114,26 @@ impl ChainPayload {
     }
 
     pub fn validate_semantics(&self) -> Result<(), serde_json::Error> {
+        if let Self::Execution(ExecutionPayload::ContractResult {
+            upstream,
+            reader,
+            contract_name,
+            status,
+            result,
+            ..
+        }) = self
+        {
+            let (name, result_upstream, result_reader) = result.subject();
+            if name != contract_name
+                || result_upstream != *upstream
+                || result_reader != *reader
+                || result.status() != *status
+            {
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "contract result disagrees with its subject or status",
+                ));
+            }
+        }
         match self {
             Self::Delivery(payload) => payload
                 .validate()
@@ -245,6 +254,7 @@ impl ChainPayload {
                 | FlowControlPayload::ConsumptionProgress { .. }
                 | FlowControlPayload::ConsumptionGap { .. }
                 | FlowControlPayload::ConsumptionFinal { .. }
+                | FlowControlPayload::ProductionFinal { .. }
                 | FlowControlPayload::ReaderStalled { .. }
                 | FlowControlPayload::AtLeastOnceViolation { .. } => ReplayDisposition::ReAuthor,
             },

@@ -453,28 +453,28 @@ impl SelectedDataSeqByEventType {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct AdvertisedWriterSeqByEventType {
+    complete: bool,
     by_event_type: BTreeMap<obzenflow_core::EventDescriptor, SeqNo>,
 }
 
 impl AdvertisedWriterSeqByEventType {
-    pub(super) fn is_empty(&self) -> bool {
-        self.by_event_type.is_empty()
-    }
-
     pub(super) fn replace_from_eof(
         &mut self,
         writer_seq_by_event_type: &BTreeMap<obzenflow_core::EventDescriptor, SeqNo>,
+        complete: bool,
     ) {
+        self.complete = complete;
         self.by_event_type = writer_seq_by_event_type.clone();
     }
 
     pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> Option<SeqNo> {
-        let mut matches = self
+        if !self.complete {
+            return None;
+        }
+        let matches = self
             .by_event_type
             .iter()
-            .filter(|(event_type, _)| feed.matches_descriptor(event_type))
-            .peekable();
-        matches.peek()?;
+            .filter(|(event_type, _)| feed.matches_descriptor(event_type));
         Some(matches.fold(SeqNo(0), |total, (_, seq)| {
             SeqNo(total.0.saturating_add(seq.0))
         }))
@@ -506,15 +506,18 @@ mod selected_feed_sequence_tests {
         reader.increment(other_kind.clone());
         assert_eq!(reader.seq_for_feed(&feed), SeqNo(2));
         let mut advertised = AdvertisedWriterSeqByEventType::default();
-        advertised.replace_from_eof(&BTreeMap::from([
-            (v1, SeqNo(2)),
-            (v2, SeqNo(99)),
-            (other_kind, SeqNo(8)),
-        ]));
+        advertised.replace_from_eof(
+            &BTreeMap::from([(v1, SeqNo(2)), (v2, SeqNo(99)), (other_kind, SeqNo(8))]),
+            true,
+        );
         assert_eq!(advertised.seq_for_feed(&feed), Some(SeqNo(2)));
         let absent =
             SelectedFeedMetadata::new(descriptor("typed.fact", 3), SelectedFeedRole::Input);
-        assert_eq!(advertised.seq_for_feed(&absent), None);
+        assert_eq!(advertised.seq_for_feed(&absent), Some(SeqNo(0)));
+        advertised.replace_from_eof(&BTreeMap::new(), false);
+        assert_eq!(advertised.seq_for_feed(&feed), None);
+        advertised.replace_from_eof(&BTreeMap::new(), true);
+        assert_eq!(advertised.seq_for_feed(&feed), Some(SeqNo(0)));
     }
 }
 
@@ -545,6 +548,7 @@ pub struct ReaderProgress {
     pub reader_seq: SeqNo,
     pub receipted_seq: SeqNo,
     pub advertised_writer_seq: Option<SeqNo>,
+    pub advertised_vector_clock: Option<VectorClock>,
     pub last_event_id: Option<obzenflow_core::EventId>,
     pub last_vector_clock: Option<VectorClock>,
     pub last_receipted_event_id: Option<EventId>,
@@ -562,7 +566,7 @@ pub struct ReaderProgress {
 
     /// Last reader_seq for which we emitted a mid-flight ContractResult heartbeat.
     ///
-    /// This is used to avoid emitting redundant `"healthy"` contract results on
+    /// This is used to avoid emitting redundant pending contract results on
     /// every wall-clock tick when no new data has been consumed on the edge.
     pub last_contract_result_seq: SeqNo,
 
@@ -584,6 +588,7 @@ impl ReaderProgress {
             reader_seq: SeqNo(0),
             receipted_seq: SeqNo(0),
             advertised_writer_seq: None,
+            advertised_vector_clock: None,
             last_event_id: None,
             last_vector_clock: None,
             last_receipted_event_id: None,
