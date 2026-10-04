@@ -20,8 +20,7 @@ use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::transform::strategies::MapTyped;
 
@@ -71,15 +70,8 @@ impl InlineSink for NullSink {
         SinkDescription::method(DeliveryMethod::Custom("Null".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: Item,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Null".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: Item) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

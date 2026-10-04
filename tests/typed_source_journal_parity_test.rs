@@ -17,6 +17,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::stages::sink::SinkWriteFailure;
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     InfiniteSourceConnector, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
@@ -271,16 +272,10 @@ impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages:
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
-    async fn write(
-        &mut self,
-        input: T,
-        context: obzenflow_runtime::stages::sink::SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        let _ = (input, context);
+    async fn write(&mut self, input: T) -> Result<(), SinkWriteFailure> {
+        let _ = input;
         (self.select)(&self.count).fetch_add(1, Ordering::SeqCst);
-        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
-        ))
+        Ok(())
     }
 }
 

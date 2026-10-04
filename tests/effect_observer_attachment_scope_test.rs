@@ -17,8 +17,8 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{EffectObserver, EffectObserverContext};
 use obzenflow_runtime::stages::SourceError;
@@ -161,16 +161,9 @@ impl InlineSink for CountingSink {
         ))
     }
 
-    async fn write(
-        &mut self,
-        _event: Self::Input,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: Self::Input) -> Result<(), SinkWriteFailure> {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("effect-observer-scope-test".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

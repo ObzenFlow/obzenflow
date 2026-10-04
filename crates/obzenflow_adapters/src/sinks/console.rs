@@ -11,12 +11,11 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt,
-    SinkConnector, SinkDescription, SinkOperationError, SinkOperationResult, SinkTerminalOutcome,
+    PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt, SinkConnector,
+    SinkDescription, SinkOperationError, SinkOperationResult, SinkTerminalOutcome,
     SinkWriteContext, SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult,
     SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::io::{self, Write};
 use std::marker::PhantomData;
@@ -522,6 +521,7 @@ fn is_wide(code: u32) -> bool {
 pub struct ConsoleSink<T, F = JsonFormatter> {
     formatter: F,
     destination: OutputDestination,
+    label_replays: bool,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -533,6 +533,7 @@ where
         Self {
             formatter: self.formatter.clone(),
             destination: self.destination,
+            label_replays: self.label_replays,
             _phantom: PhantomData,
         }
     }
@@ -543,6 +544,7 @@ impl<T, F> std::fmt::Debug for ConsoleSink<T, F> {
         f.debug_struct("ConsoleSink")
             .field("type", &std::any::type_name::<T>())
             .field("destination", &self.destination)
+            .field("label_replays", &self.label_replays)
             .finish()
     }
 }
@@ -557,6 +559,7 @@ where
         Self {
             formatter,
             destination: OutputDestination::Stdout,
+            label_replays: false,
             _phantom: PhantomData,
         }
     }
@@ -573,6 +576,7 @@ where
         TableConsoleSink {
             formatter: self.formatter,
             destination: self.destination,
+            label_replays: self.label_replays,
             max_rows: 256,
             max_bytes: 64 * 1024,
         }
@@ -580,6 +584,12 @@ where
 }
 
 impl<T, F> ConsoleSink<T, F> {
+    /// Prefix reconstructed deliveries with `[replay] ` without changing their payloads.
+    pub fn label_replays(mut self) -> Self {
+        self.label_replays = true;
+        self
+    }
+
     pub fn to_stderr(mut self) -> Self {
         self.destination = OutputDestination::Stderr;
         self
@@ -587,18 +597,57 @@ impl<T, F> ConsoleSink<T, F> {
 }
 
 #[async_trait]
-impl<T, F> InlineSink for ConsoleSink<T, F>
+impl<T, F> SinkConnector for ConsoleSink<T, F>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    T: TypedPayload + Send + Sync + 'static,
     F: Formatter<T> + 'static,
 {
     type Input = T;
+    type Writer = ConsoleWriter<T, F>;
 
     fn describe(&self) -> SinkDescription {
         self.destination.description()
     }
 
-    async fn write(&mut self, input: T, _context: SinkWriteContext) -> SinkWriteResult {
+    async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
+        Ok(ConsoleWriter {
+            formatter: self.formatter.clone(),
+            destination: self.destination,
+            label_replays: self.label_replays,
+            poisoned: false,
+            _phantom: PhantomData,
+            #[cfg(test)]
+            output: None,
+        })
+    }
+}
+
+/// One immediate console execution, opened by [`ConsoleSink`].
+pub struct ConsoleWriter<T, F> {
+    formatter: F,
+    destination: OutputDestination,
+    label_replays: bool,
+    poisoned: bool,
+    _phantom: PhantomData<fn() -> T>,
+    #[cfg(test)]
+    output: Option<std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>>,
+}
+
+#[async_trait]
+impl<T, F> SinkWriter for ConsoleWriter<T, F>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    F: Formatter<T> + 'static,
+{
+    type Input = T;
+
+    async fn write(&mut self, input: T, context: SinkWriteContext) -> SinkWriteResult {
+        if self.poisoned {
+            return Err(SinkWriteFailure::poisoned(
+                SinkWritePhase::Execute,
+                SinkOperationError::other("console writer is poisoned"),
+            ));
+        }
         let output = self.formatter.format(&input).map_err(|error| {
             SinkWriteFailure::current_only(
                 SinkWritePhase::Encode,
@@ -610,7 +659,19 @@ where
                 SinkTerminalOutcome::success_via(DeliveryMethod::Noop, Some(0)).with_items(0)
             }
             ConsoleOutput::Text(frame) => {
-                let bytes = self.destination.write_frame(&frame).map_err(|error| {
+                let frame = label_frame(
+                    frame,
+                    self.label_replays && context.delivery().is_replayed(),
+                );
+                #[cfg(test)]
+                let result = match &self.output {
+                    Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
+                    None => self.destination.write_frame(&frame),
+                };
+                #[cfg(not(test))]
+                let result = self.destination.write_frame(&frame);
+                let bytes = result.map_err(|error| {
+                    self.poisoned = true;
                     SinkWriteFailure::poisoned(
                         SinkWritePhase::Execute,
                         SinkOperationError::other(error.to_string()),
@@ -621,16 +682,38 @@ where
         };
         Ok(SinkWriteReport::terminal(outcome))
     }
+
+    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
+        if self.poisoned {
+            return Err(SinkOperationError::other("console writer is poisoned"));
+        }
+        Ok(SinkWriterLifecycleReport::default())
+    }
+}
+
+fn label_frame(frame: String, replayed: bool) -> String {
+    if replayed {
+        format!("[replay] {frame}")
+    } else {
+        frame
+    }
 }
 
 /// Reusable table configuration. Opening it never copies another writer's rows.
 pub struct TableConsoleSink<T, E> {
     formatter: TableFormatter<T, E>,
     destination: OutputDestination,
+    label_replays: bool,
     max_rows: usize,
     max_bytes: usize,
 }
 impl<T, E> TableConsoleSink<T, E> {
+    /// Label reconstructed frames and keep replayed and live rows in separate frames.
+    pub fn label_replays(mut self) -> Self {
+        self.label_replays = true;
+        self
+    }
+
     pub fn to_stderr(mut self) -> Self {
         self.destination = OutputDestination::Stderr;
         self
@@ -649,6 +732,7 @@ impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TableConsoleSink")
             .field("formatter", &self.formatter)
+            .field("label_replays", &self.label_replays)
             .field("max_rows", &self.max_rows)
             .field("max_bytes", &self.max_bytes)
             .finish()
@@ -658,6 +742,8 @@ impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
 pub struct TableConsoleWriter<T, E> {
     formatter: TableFormatter<T, E>,
     destination: OutputDestination,
+    label_replays: bool,
+    replayed: bool,
     rows: Vec<(Vec<String>, PendingSinkInput)>,
     prepared_bytes: usize,
     max_rows: usize,
@@ -682,6 +768,8 @@ where
         Ok(TableConsoleWriter {
             formatter: self.formatter.clone(),
             destination: self.destination,
+            label_replays: self.label_replays,
+            replayed: false,
             rows: Vec::new(),
             prepared_bytes: 0,
             max_rows: self.max_rows,
@@ -711,6 +799,7 @@ impl<T, E> TableConsoleWriter<T, E> {
             &borrowed,
             self.formatter.max_col_width,
         );
+        let frame = label_frame(frame, self.label_replays && self.replayed);
         #[cfg(test)]
         let result = match &self.output {
             Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
@@ -773,8 +862,10 @@ where
             ));
         }
         let mut receipts = Vec::new();
+        let replayed = context.delivery().is_replayed();
         if self.rows.len() >= self.max_rows
             || bytes > self.max_bytes.saturating_sub(self.prepared_bytes)
+            || (self.label_replays && self.replayed != replayed)
         {
             receipts = self
                 .flush_pending()
@@ -786,6 +877,7 @@ where
                 })?
                 .0;
         }
+        self.replayed = replayed;
         self.rows.push((row, context.defer()));
         self.prepared_bytes += bytes;
         if self.rows.len() >= self.max_rows || self.prepared_bytes >= self.max_bytes {
@@ -826,7 +918,7 @@ where
 mod tests {
     use super::*;
     use obzenflow_core::event::{ChainPayload, JournalRecord};
-    use obzenflow_core::{JournalWriterId, StageId};
+    use obzenflow_core::{JournalWriterId, MiddlewareExecutionScope, StageId};
     use obzenflow_runtime::messaging::DeliveredRecord;
     use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
     use serde::{Deserialize, Serialize};
@@ -888,6 +980,25 @@ mod tests {
                 Ok(())
             }
         }
+    }
+    async fn immediate<F>(
+        connector: &ConsoleSink<TestEvent, F>,
+        output: Arc<Mutex<OutputState>>,
+    ) -> SinkWriterAdapter<ConsoleWriter<TestEvent, F>>
+    where
+        F: Formatter<TestEvent> + 'static,
+    {
+        let stage = StageId::new();
+        let mut writer = connector
+            .open(SinkWriterInitContext::new(
+                stage,
+                "console".into(),
+                "test".into(),
+            ))
+            .await
+            .unwrap();
+        writer.output = Some(Arc::new(Mutex::new(Box::new(Output(output)))));
+        SinkWriterAdapter::new(writer, stage, connector.describe().default_method().clone())
     }
     async fn table<E>(
         connector: &TableConsoleSink<TestEvent, E>,
@@ -967,23 +1078,190 @@ mod tests {
                 Ok(ConsoleOutput::Empty)
             }
         }
-        let connector = ConsoleSink::<TestEvent, _>::new(Empty);
-        let stage = StageId::new();
-        let writer = SinkConnector::open(
-            &connector,
-            SinkWriterInitContext::new(stage, "empty".into(), "test".into()),
-        )
-        .await
-        .unwrap();
-        let mut adapter = SinkWriterAdapter::new(writer, stage, DeliveryMethod::ConsoleStdout);
+        let connector = ConsoleSink::<TestEvent, _>::new(Empty).label_replays();
+        let output = Arc::new(Mutex::new(OutputState::default()));
+        let mut adapter = immediate(&connector, output.clone()).await;
         let report = adapter
-            .consume_committed_report(input("ignored"), Default::default())
+            .consume_committed_report(
+                input("ignored"),
+                MiddlewareExecutionScope::StrictReplayHandler,
+            )
             .await
             .unwrap();
         assert_eq!(report.primary.delivery_method, DeliveryMethod::Noop);
         assert_eq!(report.primary.items_delivered, Some(0));
         assert_eq!(report.primary.bytes_processed, Some(0));
         assert!(report.commit_receipts.is_empty());
+        assert!(output.lock().unwrap().bytes.is_empty());
+        assert_eq!(output.lock().unwrap().writes, 0);
+    }
+
+    #[tokio::test]
+    async fn immediate_replay_labels_are_opt_in_and_keep_destination_and_byte_evidence() {
+        for labelled in [false, true] {
+            let connector = ConsoleSink::new(|event: &TestEvent| event.value.clone()).to_stderr();
+            let connector = if labelled {
+                connector.label_replays()
+            } else {
+                connector
+            };
+            let output = Arc::new(Mutex::new(OutputState::default()));
+            let mut writer = immediate(&connector, output.clone()).await;
+            let archived = writer
+                .consume_committed_report(
+                    input("archived"),
+                    MiddlewareExecutionScope::StrictReplayHandler,
+                )
+                .await
+                .unwrap();
+            let live = writer
+                .consume_committed_report(input("fresh"), Default::default())
+                .await
+                .unwrap();
+            let expected = if labelled {
+                "[replay] archived\nfresh\n"
+            } else {
+                "archived\nfresh\n"
+            };
+            assert_eq!(output.lock().unwrap().bytes, expected.as_bytes());
+            assert_eq!(
+                archived.primary.delivery_method,
+                DeliveryMethod::ConsoleStderr
+            );
+            assert_eq!(
+                archived.primary.bytes_processed,
+                Some(if labelled { 18 } else { 9 })
+            );
+            assert_eq!(archived.primary.items_delivered, Some(1));
+            assert_eq!(live.primary.delivery_method, DeliveryMethod::ConsoleStderr);
+            assert_eq!(live.primary.bytes_processed, Some(6));
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_uncertain_output_poisoning_prevents_retry() {
+        let connector = ConsoleSink::new(|event: &TestEvent| event.value.clone());
+        let output = Arc::new(Mutex::new(OutputState {
+            fail_flush: true,
+            ..Default::default()
+        }));
+        let mut writer = immediate(&connector, output.clone()).await;
+        assert!(writer
+            .consume_committed_report(input("once"), Default::default())
+            .await
+            .is_err());
+        let writes = output.lock().unwrap().writes;
+        assert!(writer
+            .consume_committed_report(input("again"), Default::default())
+            .await
+            .is_err());
+        assert!(writer.flush_report().await.is_err());
+        assert!(writer.drain_report().await.is_err());
+        drop(writer);
+        assert_eq!(output.lock().unwrap().writes, writes);
+    }
+
+    #[tokio::test]
+    async fn buffered_replay_labels_preserve_conversion_and_separate_live_frames() {
+        for label_before_buffering in [false, true] {
+            let connector =
+                ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
+                    vec![event.value.clone()]
+                }))
+                .to_stderr();
+            let connector = if label_before_buffering {
+                connector.label_replays().buffered()
+            } else {
+                connector.buffered().label_replays()
+            };
+            let output = Arc::new(Mutex::new(OutputState::default()));
+            let mut writer = table(&connector, output.clone()).await;
+            let replay = input("archived");
+            let replay_ref = replay.commitment();
+            let live = input("fresh");
+            let live_ref = live.commitment();
+            let first = writer
+                .consume_committed_report(replay, MiddlewareExecutionScope::ResumeHandler)
+                .await
+                .unwrap();
+            assert!(first.commit_receipts.is_empty());
+            assert!(output.lock().unwrap().bytes.is_empty());
+            let transition = writer
+                .consume_committed_report(live, Default::default())
+                .await
+                .unwrap();
+            assert_eq!(transition.commit_receipts.len(), 1);
+            assert_eq!(transition.commit_receipts[0].subject.input, replay_ref);
+            assert_eq!(
+                transition.commit_receipts[0].payload.delivery_method,
+                DeliveryMethod::ConsoleStderr
+            );
+            let replay_frame_length = {
+                let state = output.lock().unwrap();
+                let frame = std::str::from_utf8(&state.bytes).unwrap();
+                assert!(frame.starts_with("[replay] "));
+                assert!(frame.contains("archived"));
+                assert!(!frame.contains("fresh"));
+                state.bytes.len()
+            };
+            let completion = writer.drain_report().await.unwrap();
+            assert_eq!(completion.commit_receipts.len(), 1);
+            assert_eq!(completion.commit_receipts[0].subject.input, live_ref);
+            assert_eq!(
+                completion.commit_receipts[0].payload.delivery_method,
+                DeliveryMethod::ConsoleStderr
+            );
+            let state = output.lock().unwrap();
+            let live_frame = std::str::from_utf8(&state.bytes[replay_frame_length..]).unwrap();
+            assert!(!live_frame.contains("[replay]"));
+            assert!(live_frame.contains("fresh"));
+            assert_eq!(state.flushes, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_boundary_keeps_both_receipts_when_the_live_row_fills_its_batch() {
+        let connector = ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
+            vec![event.value.clone()]
+        }))
+        .label_replays()
+        .buffered()
+        .batch_limits(
+            std::num::NonZeroUsize::new(10).unwrap(),
+            std::num::NonZeroUsize::new(4).unwrap(),
+        );
+        let output = Arc::new(Mutex::new(OutputState::default()));
+        let mut writer = table(&connector, output.clone()).await;
+        let archived = input("a");
+        let archived_ref = archived.commitment();
+        let live = input("bbbb");
+        let live_ref = live.commitment();
+        let report = writer
+            .consume_committed_report(archived, MiddlewareExecutionScope::ResumeHandler)
+            .await
+            .unwrap();
+        assert!(report.commit_receipts.is_empty());
+        let report = writer
+            .consume_committed_report(live, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(report.commit_receipts.len(), 2);
+        assert_eq!(report.commit_receipts[0].subject.input, archived_ref);
+        assert_eq!(report.commit_receipts[1].subject.input, live_ref);
+        {
+            let state = output.lock().unwrap();
+            let frames = std::str::from_utf8(&state.bytes).unwrap();
+            assert_eq!(frames.matches("[replay] ").count(), 1);
+            assert!(frames.starts_with("[replay] "));
+            assert!(frames.contains("bbbb"));
+            assert_eq!(state.flushes, 2);
+        }
+        assert!(writer
+            .drain_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
     }
     #[tokio::test]
     async fn table_receipts_follow_output_and_keep_exact_reconvergent_subjects() {

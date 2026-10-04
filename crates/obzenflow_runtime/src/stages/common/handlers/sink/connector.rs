@@ -34,8 +34,8 @@
 //! redelivery classification describes semantics only; the archive gate remains a
 //! runtime decision.
 
-use super::error::{SinkOperationResult, SinkWriteResult};
-use super::typed::{SinkWriteContext, SinkWriter, SinkWriterLifecycleReport};
+use super::error::{SinkOperationResult, SinkWriteFailure, SinkWriteResult};
+use super::typed::{SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriter};
 use crate::effects::SinkRedeliverySafety;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -186,17 +186,19 @@ pub trait SinkConnector: Send + Sync + Sized + 'static {
     async fn open(&self, context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer>;
 }
 
-/// Small, already-configured sink tier for in-process integrations.
+/// Small, already-configured sink tier for immediate delivery.
 ///
-/// `InlineSink` deliberately combines configuration and execution when there
-/// is no meaningful resource-opening lifecycle to separate. The blanket
-/// implementations below still lower it through the canonical connector and
-/// writer roles. Resource-owning integrations should implement
+/// A successful write delivers one input, with no measured byte count, using
+/// the configured description. The runtime supplies its terminal receipt.
+/// The blanket implementations below lower this tier through the canonical
+/// connector and writer roles. Integrations needing delivery provenance,
+/// per-attempt accounting, partial outcomes, buffering, or resource lifecycle
+/// should implement
 /// [`SinkConnector`] on a separate configuration type and return their writer
 /// from `open`.
 ///
 /// `Clone` is the opening boundary for this tier. A clone must not share
-/// transient buffer, transaction, or pending-input state with its source.
+/// transient mutable execution state with its source.
 /// Shared handles may represent the external destination itself, as in a test
 /// probe backed by an `Arc`.
 #[async_trait]
@@ -206,15 +208,11 @@ pub trait InlineSink: Clone + Send + Sync + 'static {
     /// Describe any fixed receipt defaults and redelivery classification.
     fn describe(&self) -> SinkDescription;
 
-    async fn write(&mut self, input: Self::Input, context: SinkWriteContext) -> SinkWriteResult;
-
-    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        Ok(SinkWriterLifecycleReport::default())
-    }
-
-    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        self.flush().await
-    }
+    /// Deliver this input completely before returning success.
+    ///
+    /// Failure classification is preserved for runtime supervision; an uncertain
+    /// destination outcome must still poison the writer.
+    async fn write(&mut self, input: Self::Input) -> Result<(), SinkWriteFailure>;
 }
 
 #[async_trait]
@@ -224,16 +222,11 @@ where
 {
     type Input = I::Input;
 
-    async fn write(&mut self, input: Self::Input, context: SinkWriteContext) -> SinkWriteResult {
-        InlineSink::write(self, input, context).await
-    }
-
-    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        InlineSink::flush(self).await
-    }
-
-    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        InlineSink::drain(self).await
+    async fn write(&mut self, input: Self::Input, _context: SinkWriteContext) -> SinkWriteResult {
+        InlineSink::write(self, input).await?;
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success(None).with_items(1),
+        ))
     }
 }
 

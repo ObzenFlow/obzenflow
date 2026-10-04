@@ -179,14 +179,8 @@ impl sinks::InlineSink for Pure {
         sinks::SinkDescription::method(sinks::DeliveryMethod::Noop)
     }
 
-    async fn write(
-        &mut self,
-        _input: Fact,
-        _context: sinks::SinkWriteContext,
-    ) -> sinks::SinkWriteResult {
-        Ok(sinks::SinkWriteReport::terminal(
-            sinks::SinkTerminalOutcome::success_via(sinks::DeliveryMethod::Noop, None),
-        ))
+    async fn write(&mut self, _input: Fact) -> Result<(), sinks::SinkWriteFailure> {
+        Ok(())
     }
 }
 

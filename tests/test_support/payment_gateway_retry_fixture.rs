@@ -22,6 +22,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::stages::sink::SinkWriteFailure;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -257,15 +258,9 @@ impl<T: obzenflow_core::TypedPayload + Clone + Send + Sync + 'static>
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
-    async fn write(
-        &mut self,
-        input: T,
-        context: obzenflow_runtime::stages::sink::SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        let _ = (input, context);
-        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
-        ))
+    async fn write(&mut self, input: T) -> Result<(), SinkWriteFailure> {
+        let _ = input;
+        Ok(())
     }
 }
 

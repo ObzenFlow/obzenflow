@@ -32,7 +32,9 @@ use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
 };
-use obzenflow_runtime::stages::common::handlers::{SourceError, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    SinkWriteFailure, SourceError, TypedFiniteSourceHandler,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
@@ -854,16 +856,9 @@ impl obzenflow_runtime::stages::sink::InlineSink for CollectRows {
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
-    async fn write(
-        &mut self,
-        input: Row,
-        context: obzenflow_runtime::stages::sink::SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        let _ = context;
+    async fn write(&mut self, input: Row) -> Result<(), SinkWriteFailure> {
         self.delivered.lock().unwrap().push(input);
-        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
-        ))
+        Ok(())
     }
 }
 

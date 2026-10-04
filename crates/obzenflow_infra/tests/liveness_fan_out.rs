@@ -15,8 +15,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedAsyncFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedAsyncFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -177,15 +177,8 @@ where
         SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _input: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _input: T) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

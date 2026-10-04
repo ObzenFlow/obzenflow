@@ -45,7 +45,7 @@ use super::domain::*;
 use super::handlers::Checkbook;
 use obzenflow::flow::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::RateLimiterBuilder;
+use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{HostedIngressSource, IngressDecoder};
 use obzenflow::stages::{joins, sinks};
@@ -86,8 +86,6 @@ pub fn build_flow(
             },
         );
         let checkbook_handler = Checkbook;
-        let accounts_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
-        let tx_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
         let printer_sink = sinks::ConsoleSink::<CheckbookSnapshot, _>::new(
             SnapshotTableFormatter::new(
                 &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
@@ -150,11 +148,11 @@ pub fn build_flow(
                 // Ingestion
                 accounts = async_infinite_source!(
                     AccountOpened => accounts_source,
-                    ingress with accounts_route_limiter
+                    ingress with rate_limit(10.0)
                 );
                 tx = async_infinite_source!(
                     LedgerEntry => tx_source,
-                    ingress with tx_route_limiter
+                    ingress with rate_limit(50.0)
                 );
 
                 // Processing

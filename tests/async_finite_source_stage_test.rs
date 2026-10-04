@@ -13,8 +13,8 @@ use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    SourceObservationSink, TypedAsyncFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, SourceObservationSink,
+    TypedAsyncFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
 use obzenflow_runtime::stages::SourceError;
@@ -100,19 +100,12 @@ impl InlineSink for CollectSink {
         SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        event: AsyncTestEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: AsyncTestEvent) -> Result<(), SinkWriteFailure> {
         self.events
             .lock()
             .unwrap()
             .push(event.to_event(WriterId::from(StageId::new())));
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

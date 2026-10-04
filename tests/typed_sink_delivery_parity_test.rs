@@ -19,7 +19,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkBufferedOutcome, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    InlineSink, SinkBufferedOutcome, SinkDescription, SinkWriteContext, SinkWriteFailure,
     SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::common::HandlerError;
@@ -139,14 +139,8 @@ impl InlineSink for NamedDestination {
         .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn write(
-        &mut self,
-        _input: Self::Input,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success(None).with_items(1),
-        ))
+    async fn write(&mut self, _input: Self::Input) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 
@@ -448,13 +442,26 @@ async fn buffered_csv_and_named_sink_have_live_replay_journal_parity() {
 struct InvalidBufferedSink;
 
 #[async_trait]
-impl InlineSink for InvalidBufferedSink {
+impl obzenflow_runtime::stages::sink::SinkConnector for InvalidBufferedSink {
     type Input = SinkRecord;
+    type Writer = Self;
 
     fn describe(&self) -> SinkDescription {
         SinkDescription::method(DeliveryMethod::Noop)
             .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::SinkWriter for InvalidBufferedSink {
+    type Input = SinkRecord;
 
     async fn write(
         &mut self,
@@ -543,19 +550,11 @@ impl InlineSink for FailingSink {
         }
     }
 
-    async fn write(
-        &mut self,
-        _input: Self::Input,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Err(
-            obzenflow_runtime::stages::sink::SinkWriteFailure::current_only(
-                obzenflow_runtime::stages::sink::SinkWritePhase::Execute,
-                obzenflow_runtime::stages::sink::SinkOperationError::other(
-                    "intentional sink failure",
-                ),
-            ),
-        )
+    async fn write(&mut self, _input: Self::Input) -> Result<(), SinkWriteFailure> {
+        Err(SinkWriteFailure::current_only(
+            obzenflow_runtime::stages::sink::SinkWritePhase::Execute,
+            obzenflow_runtime::stages::sink::SinkOperationError::other("intentional sink failure"),
+        ))
     }
 }
 

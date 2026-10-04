@@ -27,9 +27,10 @@
 //! implement [`SinkConnector`](super::connector::SinkConnector) and return a
 //! stage-local [`SinkWriter`](super::typed::SinkWriter). A small integration
 //! implements [`InlineSink`](super::connector::InlineSink), with a required
-//! description of its normal delivery method and a typed `write` operation.
-//! The connector's description supplies inherited receipt metadata; an outcome
-//! can explicitly override its method when an individual attempt differs.
+//! description and an input-only `write` operation. Inline success delivers
+//! one input with an unmeasured byte count; the runtime authors its receipt.
+//! Writers retain delivery provenance, deferred settlement and richer outcomes,
+//! including per-attempt overrides of the connector's receipt metadata.
 //!
 //! ```ignore
 //! let shipping = ShippingConnector::new(queue_config);

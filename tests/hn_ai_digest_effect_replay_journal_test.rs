@@ -70,8 +70,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
@@ -559,19 +558,12 @@ impl InlineSink for CollectOut {
             .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn write(
-        &mut self,
-        output: DigestOut,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, output: DigestOut) -> Result<(), SinkWriteFailure> {
         self.outputs
             .lock()
             .expect("output collector lock")
             .push(output);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("FLOWIP-128g fixture".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

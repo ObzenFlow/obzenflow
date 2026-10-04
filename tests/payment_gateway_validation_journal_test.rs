@@ -179,32 +179,33 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
         BTreeSet::from(["cancelled_orders", "paid_orders"])
     );
 
-    // Both named console destinations deliver one item
-    // without measuring its byte count. Verify the persisted fields.
+    // Both console destinations deliver one item and measure their real output.
     for delivery in deliveries {
         assert_eq!(
             delivery.pointer("/payload/items_delivered"),
             Some(&serde_json::json!(1))
         );
-        assert_eq!(
-            delivery.pointer("/payload/bytes_processed"),
-            Some(&serde_json::Value::Null)
-        );
+        assert!(delivery
+            .pointer("/payload/bytes_processed")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|bytes| bytes > 0));
     }
 }
 
 // Runtime adapter regression belongs to framework integration coverage.
 mod shipping_adapter {
 
-    use crate::support::deliveries::ShippingHandoff;
+    use crate::support::console::format_shipping;
     use crate::support::domain::{PaymentAuthorized, TrafficPhase};
     use obzenflow::schema::{StageId, TypedPayload, WriterId};
-    use obzenflow::stages::sinks::{DeliveryMethod, DeliveryResult};
+    use obzenflow::stages::sinks::{
+        ConsoleSink, DeliveryMethod, DeliveryResult, SinkConnector, SinkWriterInitContext,
+    };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
 
     #[tokio::test]
-    async fn inline_shipping_sink_reports_its_real_console_write() {
+    async fn shipping_sink_reports_its_real_console_write() {
         let authorized = PaymentAuthorized {
             order_id: "order-1".to_string(),
             customer_id: "customer-1".to_string(),
@@ -212,6 +213,7 @@ mod shipping_adapter {
             phase: TrafficPhase::Warmup,
             authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
         };
+        let expected_bytes = (format_shipping(&authorized).len() + 1) as u64;
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             PaymentAuthorized::event_type_name(),
@@ -219,8 +221,16 @@ mod shipping_adapter {
             serde_json::to_value(authorized).expect("serialize payment"),
         );
         let stage_id = StageId::new();
-        let mut adapter =
-            SinkWriterAdapter::new(ShippingHandoff, stage_id, DeliveryMethod::ConsoleStdout);
+        let connector = ConsoleSink::new(format_shipping).label_replays();
+        let writer = connector
+            .open(SinkWriterInitContext::new(
+                stage_id,
+                "paid_orders".into(),
+                "shipping_adapter".into(),
+            ))
+            .await
+            .expect("open console writer");
+        let mut adapter = SinkWriterAdapter::new(writer, stage_id, DeliveryMethod::ConsoleStdout);
         let report = adapter
             .consume_committed_report(
                 obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event)
@@ -239,6 +249,6 @@ mod shipping_adapter {
             DeliveryMethod::ConsoleStdout
         ));
         assert_eq!(report.primary.items_delivered, Some(1));
-        assert_eq!(report.primary.bytes_processed, None);
+        assert_eq!(report.primary.bytes_processed, Some(expected_bytes));
     }
 }

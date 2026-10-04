@@ -16,6 +16,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
+use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
@@ -1429,26 +1430,18 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         #[derive(Clone, Debug)]
         struct DiscardOutputHandler {}
         #[async_trait::async_trait]
-        impl obzenflow_runtime::stages::sink::InlineSink for DiscardOutputHandler {
+        impl InlineSink for DiscardOutputHandler {
             type Input = Item;
-            fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-                obzenflow_runtime::stages::sink::SinkDescription::method(
+            fn describe(&self) -> SinkDescription {
+                SinkDescription::method(
                     obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 )
                 .with_redelivery_safety(
                     obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat,
                 )
             }
-            async fn write(
-                &mut self,
-                input: Item,
-                context: obzenflow_runtime::stages::sink::SinkWriteContext,
-            ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-                let _ = (input, context);
-                Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                    obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
-                        .with_items(1),
-                ))
+            async fn write(&mut self, _input: Item) -> Result<(), SinkWriteFailure> {
+                Ok(())
             }
         }
         let output_handler = DiscardOutputHandler {};
@@ -1666,26 +1659,18 @@ async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
             #[derive(Clone, Debug)]
             struct DiscardOutput {}
             #[async_trait::async_trait]
-            impl obzenflow_runtime::stages::sink::InlineSink for DiscardOutput {
+            impl InlineSink for DiscardOutput {
                 type Input = Item;
-                fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-                    obzenflow_runtime::stages::sink::SinkDescription::method(
+                fn describe(&self) -> SinkDescription {
+                    SinkDescription::method(
                         obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                     )
                     .with_redelivery_safety(
                         obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat,
                     )
                 }
-                async fn write(
-                    &mut self,
-                    input: Item,
-                    context: obzenflow_runtime::stages::sink::SinkWriteContext,
-                ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-                    let _ = (input, context);
-                    Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                        obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
-                            .with_items(1),
-                    ))
+                async fn write(&mut self, _input: Item) -> Result<(), SinkWriteFailure> {
+                    Ok(())
                 }
             }
             let output = DiscardOutput {};
@@ -1946,10 +1931,10 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
             }
         }
         #[async_trait::async_trait]
-        impl obzenflow_runtime::stages::sink::InlineSink for CountComposedDeliveries {
+        impl InlineSink for CountComposedDeliveries {
             type Input = Item;
-            fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-                obzenflow_runtime::stages::sink::SinkDescription::method(
+            fn describe(&self) -> SinkDescription {
+                SinkDescription::method(
                     obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
                         "test_observer".into(),
                     ),
@@ -1958,16 +1943,9 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
                     obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat,
                 )
             }
-            async fn write(
-                &mut self,
-                _input: Item,
-                _context: obzenflow_runtime::stages::sink::SinkWriteContext,
-            ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+            async fn write(&mut self, _input: Item) -> Result<(), SinkWriteFailure> {
                 self.progress.sink.fetch_add(1, Ordering::Relaxed);
-                Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                    obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
-                        .with_items(1),
-                ))
+                Ok(())
             }
         }
         let output_handler = CountComposedDeliveries {

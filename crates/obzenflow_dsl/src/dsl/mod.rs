@@ -158,9 +158,8 @@
 //! use async_trait::async_trait;
 //! use obzenflow_core::event::schema::TypedPayload;
 //! use obzenflow_dsl::sink;
-//! use obzenflow_runtime::stages::common::handler_error::HandlerError;
 //! use obzenflow_runtime::stages::common::handlers::{
-//!     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+//!     InlineSink, SinkDescription, SinkWriteFailure,
 //! };
 //! use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 //! use serde::{Deserialize, Serialize};
@@ -180,14 +179,8 @@
 //!     fn describe(&self) -> SinkDescription {
 //!         SinkDescription::method(DeliveryMethod::Noop)
 //!     }
-//!     async fn write(
-//!         &mut self,
-//!         _input: Out,
-//!         _ctx: SinkWriteContext,
-//!     ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-//!         Ok(SinkWriteReport::terminal(
-//!             SinkTerminalOutcome::success(None),
-//!         ))
+//!     async fn write(&mut self, _input: Out) -> Result<(), SinkWriteFailure> {
+//!         Ok(())
 //!     }
 //! }
 //!

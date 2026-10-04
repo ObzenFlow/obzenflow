@@ -1748,6 +1748,7 @@ mod tests {
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
     use obzenflow_dsl::{flow, sink, source};
+    use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2129,10 +2130,10 @@ mod tests {
                 #[derive(Clone, Debug)]
                 struct DiscardOutput {}
                 #[async_trait::async_trait]
-                impl obzenflow_runtime::stages::sink::InlineSink for DiscardOutput {
+                impl InlineSink for DiscardOutput {
                     type Input = ProjectionInput;
-                    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-                        obzenflow_runtime::stages::sink::SinkDescription::method(
+                    fn describe(&self) -> SinkDescription {
+                        SinkDescription::method(
                             obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                         )
                         .with_redelivery_safety(
@@ -2141,14 +2142,9 @@ mod tests {
                     }
                     async fn write(
                         &mut self,
-                        input: ProjectionInput,
-                        context: obzenflow_runtime::stages::sink::SinkWriteContext,
-                    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-                        let _ = (input, context);
-                        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
-                                .with_items(1),
-                        ))
+                        _input: ProjectionInput,
+                    ) -> Result<(), SinkWriteFailure> {
+                        Ok(())
                     }
                 }
                 let output = DiscardOutput {};

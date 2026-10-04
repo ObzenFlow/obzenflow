@@ -15,9 +15,8 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome,
-    SinkWriteContext, SinkWriteReport, TypedFiniteSourceHandler, TypedJoinHandler,
-    TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, JoinObserver, JoinObserverContext,
@@ -123,15 +122,8 @@ impl InlineSink for NoopSink {
         SinkDescription::method(DeliveryMethod::Noop)
     }
 
-    async fn write(
-        &mut self,
-        _input: Joined,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+    async fn write(&mut self, _input: Joined) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 
@@ -478,16 +470,9 @@ impl InlineSink for CountsHandlerOutputs {
         )
     }
 
-    async fn write(
-        &mut self,
-        _input: HandlerOutput,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _input: HandlerOutput) -> Result<(), SinkWriteFailure> {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -657,16 +642,9 @@ impl InlineSink for CountsConcurrentOutputs {
         )
     }
 
-    async fn write(
-        &mut self,
-        _input: ConcurrentOutput,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _input: ConcurrentOutput) -> Result<(), SinkWriteFailure> {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+        Ok(())
     }
 }
 

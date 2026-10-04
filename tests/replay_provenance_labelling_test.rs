@@ -293,7 +293,7 @@ impl EffectfulTransformHandler for AuthorizePayment {
 }
 
 // ---------------------------------------------------------------------------
-// Named InlineSink probes
+// Named writer probes
 // through the canonical `sink!(In => handler)` arm, recording each
 // delivery's payload and provenance
 // ---------------------------------------------------------------------------
@@ -305,10 +305,11 @@ struct DeliveryProbe<T: TypedPayload + Clone + Send + Sync + 'static> {
     deliveries: Probe<T>,
 }
 #[async_trait::async_trait]
-impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages::sink::InlineSink
+impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages::sink::SinkConnector
     for DeliveryProbe<T>
 {
     type Input = T;
+    type Writer = Self;
     fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
         obzenflow_runtime::stages::sink::SinkDescription::method(
             obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
@@ -317,6 +318,21 @@ impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages:
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages::sink::SinkWriter
+    for DeliveryProbe<T>
+{
+    type Input = T;
+
     async fn write(
         &mut self,
         input: T,

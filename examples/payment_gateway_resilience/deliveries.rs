@@ -2,94 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Named typed shipping destination.
+//! Passive application diagnostics for terminal deliveries.
 
-use super::console;
-use super::domain::{CancelledOrder, PaymentAuthorizationUnavailable, PaymentAuthorized};
-use async_trait::async_trait;
-use obzenflow::middleware::{SinkDeliveryObserver, SinkDeliveryObserverContext};
-use obzenflow::stages::sinks::DeliveryMethod;
-use obzenflow::stages::sinks::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+use super::domain::PaymentAuthorizationUnavailable;
+use obzenflow::middleware::{
+    SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
+    SinkDeliveryObserverOutcome,
 };
-
-/// Small in-process shipping handoff used by the demo.
-#[derive(Clone, Debug, Default)]
-pub struct ShippingHandoff;
-
-#[async_trait]
-impl InlineSink for ShippingHandoff {
-    type Input = PaymentAuthorized;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::ConsoleStdout)
-    }
-
-    async fn write(
-        &mut self,
-        authorized: PaymentAuthorized,
-        context: SinkWriteContext,
-    ) -> obzenflow::stages::sinks::SinkWriteResult {
-        console::send_to_shipping(authorized, context.delivery().provenance());
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success(None).with_items(1),
-        ))
-    }
-}
-
-/// Console record of a cancelled order, including its delivery provenance.
-#[derive(Clone, Debug, Default)]
-pub struct RecordCancelled;
-
-#[async_trait]
-impl InlineSink for RecordCancelled {
-    type Input = CancelledOrder;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::ConsoleStdout)
-    }
-
-    async fn write(
-        &mut self,
-        cancelled: CancelledOrder,
-        context: SinkWriteContext,
-    ) -> obzenflow::stages::sinks::SinkWriteResult {
-        console::record_cancelled_order(cancelled, context.delivery().provenance());
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success(None).with_items(1),
-        ))
-    }
-}
-
-/// Console handoff for authorizations that require manual review.
-#[derive(Clone, Debug, Default)]
-pub struct RecordUnavailable;
-
-#[async_trait]
-impl InlineSink for RecordUnavailable {
-    type Input = PaymentAuthorizationUnavailable;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::ConsoleStdout)
-    }
-
-    async fn write(
-        &mut self,
-        unavailable: PaymentAuthorizationUnavailable,
-        context: SinkWriteContext,
-    ) -> obzenflow::stages::sinks::SinkWriteResult {
-        tracing::info!(
-            operation = "payment.authorization",
-            handoff_kind = "manual_review",
-            order_id = %unavailable.order_id,
-            "authorization queued for manual review"
-        );
-        console::record_authorization_unavailable(unavailable, context.delivery().provenance());
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success(None).with_items(1),
-        ))
-    }
-}
+use obzenflow::schema::TypedPayload;
 
 /// Emits an application diagnostic after the runtime classifies a shipping
 /// delivery. It receives an immutable view and cannot alter settlement.
@@ -101,6 +21,33 @@ impl SinkDeliveryObserver for ShippingDeliveryLog {
             stage = ctx.stage_name(),
             outcome = ?ctx.outcome(),
             "shipping delivery observed"
+        );
+    }
+}
+
+/// Record manual-review routing only after console output succeeds. Previously
+/// the diagnostic ran before output and could claim a handoff that then failed.
+/// This observer does not deliver another item or alter the delivery receipt.
+pub struct ManualReviewDeliveryLog;
+
+impl SinkDeliveryObserver for ManualReviewDeliveryLog {
+    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+        if !matches!(
+            ctx.outcome(),
+            SinkDeliveryObserverOutcome::Attempted {
+                result: SinkDeliveryAttemptResult::ReportedSuccess
+            }
+        ) {
+            return;
+        }
+        let Ok(unavailable) = PaymentAuthorizationUnavailable::try_from_event(ctx.input()) else {
+            return;
+        };
+        tracing::info!(
+            operation = "payment.authorization",
+            handoff_kind = "manual_review",
+            order_id = %unavailable.order_id,
+            "authorization queued for manual review"
         );
     }
 }

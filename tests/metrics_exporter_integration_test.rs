@@ -23,8 +23,7 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -153,18 +152,11 @@ impl InlineSink for CountingSink {
         SinkDescription::method(DeliveryMethod::Custom("count".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: MetricEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: MetricEvent) -> Result<(), SinkWriteFailure> {
         if let Ok(mut count) = self.count.lock() {
             *count += 1;
         }
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("count".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -187,16 +179,9 @@ impl InlineSink for SleepingSink {
         SinkDescription::method(DeliveryMethod::Custom("sleep".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: MetricEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: MetricEvent) -> Result<(), SinkWriteFailure> {
         sleep(self.sleep_per_event).await;
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("sleep".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

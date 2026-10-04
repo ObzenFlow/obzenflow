@@ -14,8 +14,8 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedFiniteSourceHandler,
+    TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::observer::{StatefulObserver, StatefulObserverContext};
 use obzenflow_runtime::stages::SourceError;
@@ -151,21 +151,12 @@ where
         )
     }
 
-    async fn write(
-        &mut self,
-        input: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, input: T) -> Result<(), SinkWriteFailure> {
         self.events
             .lock()
             .unwrap()
             .push(input.to_event(WriterId::from(StageId::new())));
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "collect".to_string(),
-            ),
-            None,
-        )))
+        Ok(())
     }
 }
 

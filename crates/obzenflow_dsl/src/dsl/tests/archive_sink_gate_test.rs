@@ -13,8 +13,8 @@ mod tests {
     use obzenflow_runtime::bootstrap::ReplayVerb;
     use obzenflow_runtime::effects::SinkRedeliverySafety;
     use obzenflow_runtime::stages::sink::{
-        SinkConnector, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-        SinkWriter, SinkWriterInitContext,
+        InlineSink, SinkConnector, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+        SinkWriteFailure, SinkWriteReport, SinkWriter, SinkWriterInitContext,
     };
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
@@ -84,10 +84,10 @@ mod tests {
         safety: Option<SinkRedeliverySafety>,
     }
     #[async_trait::async_trait]
-    impl obzenflow_runtime::stages::sink::InlineSink for DiscardInput {
+    impl InlineSink for DiscardInput {
         type Input = SinkInput;
-        fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-            let description = obzenflow_runtime::stages::sink::SinkDescription::method(
+        fn describe(&self) -> SinkDescription {
+            let description = SinkDescription::method(
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
             );
             match self.safety {
@@ -95,15 +95,8 @@ mod tests {
                 None => description,
             }
         }
-        async fn write(
-            &mut self,
-            input: SinkInput,
-            context: obzenflow_runtime::stages::sink::SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-            let _ = (input, context);
-            Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
-            ))
+        async fn write(&mut self, _input: SinkInput) -> Result<(), SinkWriteFailure> {
+            Ok(())
         }
     }
     fn sink_descriptor(
@@ -113,7 +106,7 @@ mod tests {
         let connector = DiscardInput {
             safety: delivery_safety,
         };
-        let description = connector.describe();
+        let description = SinkConnector::describe(&connector);
         Box::new(SinkDescriptor {
             name: name.to_string(),
             connector,

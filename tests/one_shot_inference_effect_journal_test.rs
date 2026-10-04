@@ -36,7 +36,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InferenceHandler, InlineSink, SinkDescription, SinkTerminalOutcome,
+    EffectfulTransformHandler, InferenceHandler, SinkDescription, SinkTerminalOutcome,
     SinkWriteContext, SinkWriteReport,
 };
 #[cfg(feature = "test-support")]
@@ -331,13 +331,26 @@ struct CollectBrief {
 }
 
 #[async_trait]
-impl InlineSink for CollectBrief {
+impl obzenflow_runtime::stages::sink::SinkConnector for CollectBrief {
     type Input = DecisionBrief;
+    type Writer = Self;
 
     fn describe(&self) -> SinkDescription {
         SinkDescription::method(DeliveryMethod::Custom("CollectBrief".to_string()))
             .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::SinkWriter for CollectBrief {
+    type Input = DecisionBrief;
 
     async fn write(
         &mut self,

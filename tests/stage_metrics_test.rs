@@ -15,8 +15,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -112,18 +111,11 @@ impl InlineSink for CollectorSink {
         SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        event: MetricEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: MetricEvent) -> Result<(), SinkWriteFailure> {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

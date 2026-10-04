@@ -20,8 +20,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
@@ -128,11 +127,7 @@ impl InlineSink for LatencySink {
         SinkDescription::method(DeliveryMethod::Noop)
     }
 
-    async fn write(
-        &mut self,
-        event: BenchEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: BenchEvent) -> Result<(), SinkWriteFailure> {
         self.received.fetch_add(1, Ordering::Relaxed);
         if event.event_id >= WARMUP_EVENT_COUNT {
             let now = SystemTime::now()
@@ -146,10 +141,7 @@ impl InlineSink for LatencySink {
                     .push(Duration::from_nanos((now - event.emit_time_nanos) as u64));
             }
         }
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+        Ok(())
     }
 }
 

@@ -27,8 +27,8 @@ use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedFiniteSourceHandler,
+    TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
@@ -147,15 +147,8 @@ impl InlineSink for NullSink {
         SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: IngestSummary,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: IngestSummary) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

@@ -13,6 +13,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+use obzenflow_runtime::stages::sink::SinkWriteFailure;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -348,21 +349,15 @@ impl obzenflow_runtime::stages::sink::InlineSink for GatedDelivery {
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
-    async fn write(
-        &mut self,
-        input: Tick,
-        context: obzenflow_runtime::stages::sink::SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        let _ = (input, context);
+    async fn write(&mut self, input: Tick) -> Result<(), SinkWriteFailure> {
+        let _ = input;
         self.progress.sink_entered.fetch_add(1, Ordering::Relaxed);
         if let Some(gate) = &self.gate {
             self.progress.blocked.notify_one();
             gate.acquire().await.unwrap().forget();
         }
         self.progress.sink_returned.fetch_add(1, Ordering::Relaxed);
-        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
-        ))
+        Ok(())
     }
 }
 

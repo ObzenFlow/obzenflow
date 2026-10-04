@@ -28,7 +28,6 @@
 //! - /health and /ready endpoints for monitoring
 
 use anyhow::Result;
-use async_trait::async_trait;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow::env::env_var_or;
 use obzenflow::flow::backpressure::enforced;
@@ -36,11 +35,7 @@ use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::DeliveryMethod;
-use obzenflow::stages::sinks::SinkRedeliverySafety;
-use obzenflow::stages::sinks::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-};
+use obzenflow::stages::sinks::{ConsoleSink, DiscardSink};
 use obzenflow::stages::sources::SourceError;
 use obzenflow::stages::sources::TypedFiniteSourceHandler;
 use obzenflow::stages::transforms::TryMapTyped;
@@ -187,38 +182,6 @@ impl TypedPayload for EventCountState {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Simple sink that consumes all events (simulates Kafka/S3 persistence)
-/// Framework metrics at /metrics show how many events were processed
-#[derive(Clone, Debug)]
-struct CompletionSink;
-
-impl CompletionSink {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl InlineSink for CompletionSink {
-    type Input = ProcessedEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("InMemory".to_string()))
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(
-        &mut self,
-        _event: ProcessedEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow::stages::sinks::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("InMemory".to_string()),
-            Some(1),
-        )))
-    }
-}
-
 fn main() -> Result<()> {
     // Operator-tunable event volume through the framework env helpers, so the
     // load varies without a code change (default 100k).
@@ -299,8 +262,11 @@ pub(crate) fn flow_definition_with_outage_interval(
             },
         )
         .emit_on_eof();
-        let summary_sink_handler = PrintSummary { total_events };
-        let completion_sink_handler = CompletionSink::new();
+        let summary_sink_handler = ConsoleSink::new(move |summary: &EventCountState| {
+            format_summary(summary, total_events)
+        });
+        // Keep the terminal branch for throughput accounting without claiming persistence.
+        let completion_sink_handler = DiscardSink::<ProcessedEvent>::new();
 
         Ok(flow! {
             name: "prometheus_demo",
@@ -336,47 +302,21 @@ pub(crate) fn flow_definition_with_outage_interval(
     })
 }
 
-#[derive(Clone, Debug)]
-struct PrintSummary {
-    total_events: usize,
-}
-
-#[async_trait::async_trait]
-impl obzenflow::stages::sinks::InlineSink for PrintSummary {
-    type Input = EventCountState;
-
-    fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
-        obzenflow::stages::sinks::SinkDescription::method(
-            obzenflow::stages::sinks::DeliveryMethod::ConsoleStdout,
-        )
-        .with_redelivery_safety(obzenflow::stages::sinks::SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(
-        &mut self,
-        summary: EventCountState,
-        _context: obzenflow::stages::sinks::SinkWriteContext,
-    ) -> obzenflow::stages::sinks::SinkWriteResult {
-        let total_events = self.total_events;
-        let count = summary.event_count;
-        let errors = total_events.saturating_sub(count);
-
-        println!();
-        println!("=====================================");
-        println!("📊 Business-Level Event Count (FLOWIP-080j):");
-        println!("   Successfully processed: {count} events");
-        println!(
-                        "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)"
-                    );
-        println!("=====================================");
-        println!();
-        println!("💡 Key Improvement:");
-        println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
-        println!("   Type-safe accumulation with zero ChainEvent manipulation!");
-        println!();
-        println!("=====================================");
-        Ok(obzenflow::stages::sinks::SinkWriteReport::terminal(
-            obzenflow::stages::sinks::SinkTerminalOutcome::success(None).with_items(1),
-        ))
-    }
+fn format_summary(summary: &EventCountState, total_events: usize) -> String {
+    let count = summary.event_count;
+    let errors = total_events.saturating_sub(count);
+    format!(
+        concat!(
+            "\n=====================================\n",
+            "📊 Business-Level Event Count (FLOWIP-080j):\n",
+            "   Successfully processed: {count} events\n",
+            "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)\n",
+            "=====================================\n\n",
+            "💡 Key Improvement:\n",
+            "   59-line EventCounter StatefulHandler → ReduceTyped helper\n",
+            "   Type-safe accumulation with zero ChainEvent manipulation!\n\n",
+            "====================================="
+        ),
+        count = count, total_events = total_events, errors = errors
+    )
 }

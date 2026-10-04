@@ -1136,6 +1136,93 @@ mod tests {
         assert_eq!(report.primary.bytes_processed, Some(7));
     }
 
+    #[derive(Clone)]
+    struct Immediate {
+        failure: Option<SinkWriteFailure>,
+    }
+
+    #[async_trait]
+    impl super::super::connector::InlineSink for Immediate {
+        type Input = Input;
+
+        fn describe(&self) -> super::super::connector::SinkDescription {
+            super::super::connector::SinkDescription::method(DeliveryMethod::ConsoleStdout)
+        }
+
+        async fn write(&mut self, _input: Input) -> Result<(), SinkWriteFailure> {
+            self.failure.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_success_settles_one_input_with_configured_method_and_unmeasured_bytes() {
+        use super::super::connector::InlineSink;
+
+        let sink = Immediate { failure: None };
+        let method = sink.describe().default_method().clone();
+        let mut adapter = SinkWriterAdapter::new(sink, StageId::new(), method);
+        let mut report = adapter.consume_test(event(1)).await.unwrap();
+
+        assert!(matches!(
+            report.primary.result,
+            DeliveryResult::Success { .. }
+        ));
+        assert_eq!(
+            report.primary.delivery_method,
+            DeliveryMethod::ConsoleStdout
+        );
+        assert_eq!(report.primary.items_delivered, Some(1));
+        assert_eq!(report.primary.bytes_processed, None);
+        assert!(report.commit_receipts.is_empty());
+        report.commit_settlements().unwrap();
+        assert!(lock_pending_registry(&adapter.registry).phases.is_empty());
+        assert!(adapter
+            .flush_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
+        assert!(adapter
+            .drain_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn inline_failure_preserves_classification_and_revokes_current_settlement() {
+        use super::super::error::SinkWritePhase;
+
+        for failure in [
+            SinkWriteFailure::current_only(
+                SinkWritePhase::Encode,
+                SinkOperationError::validation("invalid input"),
+            ),
+            SinkWriteFailure::poisoned(
+                SinkWritePhase::Execute,
+                SinkOperationError::remote("uncertain output"),
+            ),
+        ] {
+            let mut adapter = SinkWriterAdapter::new(
+                Immediate {
+                    failure: Some(failure.clone()),
+                },
+                StageId::new(),
+                DeliveryMethod::ConsoleStdout,
+            );
+            let error = adapter.consume_test(event(1)).await.unwrap_err();
+            let HandlerError::SinkWrite(actual) = error else {
+                panic!("expected the authored write failure")
+            };
+            assert_eq!(actual.disposition(), failure.disposition());
+            assert_eq!(actual.phase(), failure.phase());
+            assert_eq!(actual.error().kind(), failure.error().kind());
+            assert_eq!(actual.error().detail(), failure.error().detail());
+            assert!(lock_pending_registry(&adapter.registry).phases.is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn buffered_capability_lowers_to_the_original_parent() {
         let pending = Arc::new(Mutex::new(Vec::new()));

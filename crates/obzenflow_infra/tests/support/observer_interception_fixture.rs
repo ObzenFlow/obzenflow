@@ -17,8 +17,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, SinkDeliveryObserver, SinkDeliveryObserverContext,
@@ -221,17 +221,10 @@ impl InlineSink for ShippingHandoff {
         SinkDescription::method(DeliveryMethod::Custom("shipping-handoff".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        order: ShippingReady,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, order: ShippingReady) -> Result<(), SinkWriteFailure> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         tracing::info!(order_id = order.order_id, "shipping accepted order");
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("shipping-handoff".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

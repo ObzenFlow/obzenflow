@@ -26,7 +26,7 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt,
-    SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteReport,
     SinkWriterLifecycleReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
@@ -167,16 +167,9 @@ impl InlineSink for CountingSink {
         SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: DeliveryTestEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: DeliveryTestEvent) -> Result<(), SinkWriteFailure> {
         self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -209,15 +202,31 @@ impl<T> BufferedCountingSink<T> {
 }
 
 #[async_trait]
-impl<T> InlineSink for BufferedCountingSink<T>
+impl<T> obzenflow_runtime::stages::sink::SinkConnector for BufferedCountingSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
+    type Writer = Self;
 
     fn describe(&self) -> SinkDescription {
         SinkDescription::method(DeliveryMethod::Custom("BufferedCount".to_string()))
     }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> obzenflow_runtime::stages::sink::SinkWriter for BufferedCountingSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
 
     async fn write(
         &mut self,

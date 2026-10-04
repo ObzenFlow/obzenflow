@@ -10,14 +10,11 @@
 //! `error_processor` reports exactly 50 Unknown errors and no Domain errors.
 
 use anyhow::Result;
-use async_trait::async_trait;
-use obzenflow_core::{event::payloads::delivery_payload::DeliveryMethod, TypedPayload};
+use obzenflow_adapters::sinks::DiscardSink;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 
@@ -277,36 +274,6 @@ fn error_prone_transform() -> TryMapTyped<
     })
 }
 
-/// Simple sink that acknowledges all events.
-#[derive(Clone, Debug)]
-struct CompletionSink;
-
-impl CompletionSink {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl InlineSink for CompletionSink {
-    type Input = ProcessedEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("InMemory".to_string()))
-    }
-
-    async fn write(
-        &mut self,
-        _event: ProcessedEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("InMemory".to_string()),
-            Some(1),
-        )))
-    }
-}
-
 #[tokio::test]
 async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     let started = std::time::Instant::now();
@@ -327,7 +294,7 @@ async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
         // high_volume_source -> error_processor -> completion_sink.
         let source = HighVolumeSource::new(CI_EVENT_LIMIT);
         let transform = error_prone_transform();
-        let sink = CompletionSink::new();
+        let sink = DiscardSink::<ProcessedEvent>::new();
 
         Ok(flow! {
             name: "prometheus_error_kinds",

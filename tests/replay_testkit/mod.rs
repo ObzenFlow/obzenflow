@@ -18,6 +18,7 @@ use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecor
 use obzenflow_core::id::StageId;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::WriterId;
+use obzenflow_runtime::stages::sink::SinkWriteFailure;
 #[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::DeliveredOrderProjection;
 use std::collections::HashMap;
@@ -305,14 +306,8 @@ impl<T: obzenflow_core::TypedPayload + Send + Sync + 'static>
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn write(
-        &mut self,
-        _input: T,
-        _context: obzenflow_runtime::stages::sink::SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
-        ))
+    async fn write(&mut self, _input: T) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 
@@ -347,16 +342,10 @@ impl<T: obzenflow_core::TypedPayload + Send + Sync + 'static>
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
-    async fn write(
-        &mut self,
-        _input: T,
-        _context: obzenflow_runtime::stages::sink::SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _input: T) -> Result<(), SinkWriteFailure> {
         self.counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
-        ))
+        Ok(())
     }
 }
 

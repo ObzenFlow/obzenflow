@@ -36,9 +36,8 @@ use obzenflow_runtime::stages::common::handlers::source::traits::{
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkInputOrder,
-    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriteResult, StatefulEmission,
-    TransformHandler, TypedJoinHandler, TypedStatefulHandler, TypedStatefulHandlerAdapter,
-    TypedTransformHandler, TypedTransformHandlerAdapter,
+    SinkWriteFailure, StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
+    TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
@@ -1596,14 +1595,11 @@ where
         obzenflow_runtime::stages::sink::SinkDescription::method(DeliveryMethod::Noop)
     }
 
-    async fn write(&mut self, _input: In, _context: SinkWriteContext) -> SinkWriteResult {
+    async fn write(&mut self, _input: In) -> Result<(), SinkWriteFailure> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));
         }
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+        Ok(())
     }
 }
 

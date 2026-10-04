@@ -18,10 +18,7 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::sink::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    SinkWriteResult,
-};
+use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -348,9 +345,7 @@ impl InlineSink for DiscardTicks {
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
-    async fn write(&mut self, _input: Tick, _context: SinkWriteContext) -> SinkWriteResult {
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success(None).with_items(1),
-        ))
+    async fn write(&mut self, _input: Tick) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }

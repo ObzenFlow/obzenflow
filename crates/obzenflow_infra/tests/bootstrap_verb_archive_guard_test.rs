@@ -16,6 +16,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
+use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,23 +48,15 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
         #[derive(Clone, Debug)]
         struct DiscardGuardSink {}
         #[async_trait::async_trait]
-        impl obzenflow_runtime::stages::sink::InlineSink for DiscardGuardSink {
+        impl InlineSink for DiscardGuardSink {
             type Input = GuardEvent;
-            fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-                obzenflow_runtime::stages::sink::SinkDescription::method(
+            fn describe(&self) -> SinkDescription {
+                SinkDescription::method(
                     obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 )
             }
-            async fn write(
-                &mut self,
-                input: GuardEvent,
-                context: obzenflow_runtime::stages::sink::SinkWriteContext,
-            ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-                let _ = (input, context);
-                Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                    obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
-                        .with_items(1),
-                ))
+            async fn write(&mut self, _input: GuardEvent) -> Result<(), SinkWriteFailure> {
+                Ok(())
             }
         }
         let guard_sink = DiscardGuardSink {};

@@ -17,8 +17,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -187,15 +187,8 @@ where
         SinkDescription::method(DeliveryMethod::Custom("Memory".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Memory".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

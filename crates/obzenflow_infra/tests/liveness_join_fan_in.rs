@@ -14,8 +14,8 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure,
+    TypedAsyncFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::stages::{LivenessSnapshots, SourceError};
 use serde::{Deserialize, Serialize};
@@ -156,15 +156,8 @@ impl InlineSink for NoopSink {
         SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _input: EnrichedRecord,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _input: EnrichedRecord) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

@@ -21,8 +21,8 @@ use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafet
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulStatefulHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedAsyncInfiniteSourceHandler,
+    EffectfulStatefulHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -290,15 +290,8 @@ impl InlineSink for NoopSink {
         SinkDescription::method(DeliveryMethod::Noop)
     }
 
-    async fn write(
-        &mut self,
-        _input: Self::Input,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+    async fn write(&mut self, _input: Self::Input) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

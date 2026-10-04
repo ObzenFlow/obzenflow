@@ -15,8 +15,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -128,18 +127,11 @@ impl InlineSink for MetricsSink {
         SinkDescription::method(DeliveryMethod::Custom("collect".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        event: CircuitMetricEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: CircuitMetricEvent) -> Result<(), SinkWriteFailure> {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("collect".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

@@ -1723,6 +1723,7 @@ mod configured_sink_tests {
     use obzenflow_runtime::runtime_config::{
         CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate, SINK_HANDLER_KEY,
     };
+    use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1736,46 +1737,30 @@ mod configured_sink_tests {
         #[derive(Clone, Debug)]
         struct DiscardConsoleSink {}
         #[async_trait::async_trait]
-        impl obzenflow_runtime::stages::sink::InlineSink for DiscardConsoleSink {
+        impl InlineSink for DiscardConsoleSink {
             type Input = Output;
-            fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-                obzenflow_runtime::stages::sink::SinkDescription::method(
+            fn describe(&self) -> SinkDescription {
+                SinkDescription::method(
                     obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 )
             }
-            async fn write(
-                &mut self,
-                input: Output,
-                context: obzenflow_runtime::stages::sink::SinkWriteContext,
-            ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-                let _ = (input, context);
-                Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                    obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
-                        .with_items(1),
-                ))
+            async fn write(&mut self, _input: Output) -> Result<(), SinkWriteFailure> {
+                Ok(())
             }
         }
         let console_sink = DiscardConsoleSink {};
         #[derive(Clone, Debug)]
         struct DiscardPostgresSink {}
         #[async_trait::async_trait]
-        impl obzenflow_runtime::stages::sink::InlineSink for DiscardPostgresSink {
+        impl InlineSink for DiscardPostgresSink {
             type Input = Output;
-            fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
-                obzenflow_runtime::stages::sink::SinkDescription::method(
+            fn describe(&self) -> SinkDescription {
+                SinkDescription::method(
                     obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 )
             }
-            async fn write(
-                &mut self,
-                input: Output,
-                context: obzenflow_runtime::stages::sink::SinkWriteContext,
-            ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-                let _ = (input, context);
-                Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
-                    obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None)
-                        .with_items(1),
-                ))
+            async fn write(&mut self, _input: Output) -> Result<(), SinkWriteFailure> {
+                Ok(())
             }
         }
         let postgres_sink = DiscardPostgresSink {};

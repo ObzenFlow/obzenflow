@@ -54,8 +54,11 @@
 //! like [`crate::stages::transforms::map`] for simple one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
-//! [`crate::stages::sinks::InlineSink`] for a small integration, or configure a
-//! [`crate::stages::sinks::SinkConnector`] that opens a stage-local writer.
+//! [`crate::stages::sinks::InlineSink`] for immediate delivery: receive the input,
+//! perform the application operation and return `Ok(())` or a typed failure.
+//! Implement [`crate::stages::sinks::SinkConnector`] and
+//! [`crate::stages::sinks::SinkWriter`] for resource lifecycle, buffering,
+//! provenance or measured output. The framework owns delivery journalling.
 //! Built-in destinations expose one constructor or builder. Pass the configured
 //! binding to `sink!`.
 //!

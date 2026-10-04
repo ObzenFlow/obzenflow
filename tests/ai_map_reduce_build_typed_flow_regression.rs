@@ -38,8 +38,8 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler, TypedJoinHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
+    TypedJoinHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
@@ -270,15 +270,8 @@ where
         SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 
@@ -302,17 +295,10 @@ impl InlineSink for CountingOutSink {
         SinkDescription::method(DeliveryMethod::Custom("CountingOut".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        out: BuildOnlyOut,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, out: BuildOnlyOut) -> Result<(), SinkWriteFailure> {
         self.delivered.fetch_add(1, Ordering::SeqCst);
         self.total.store(out.total, Ordering::SeqCst);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("CountingOut".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

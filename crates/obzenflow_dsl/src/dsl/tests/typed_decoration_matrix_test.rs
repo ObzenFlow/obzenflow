@@ -10,7 +10,6 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::{BoundedBindingEvidence, ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
         transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
@@ -22,9 +21,9 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         EffectfulStatefulHandler, EffectfulTransformHandler, InlineSink, JoinReferenceView,
-        SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
-        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        SinkWriteFailure, StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
@@ -294,15 +293,8 @@ mod tests {
             )
         }
 
-        async fn write(
-            &mut self,
-            _input: Out,
-            _context: SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-                DeliveryMethod::Noop,
-                None,
-            )))
+        async fn write(&mut self, _input: Out) -> Result<(), SinkWriteFailure> {
+            Ok(())
         }
     }
 

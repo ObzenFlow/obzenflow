@@ -454,8 +454,9 @@ struct DeliveryProbe {
     delivered: Delivered,
 }
 #[async_trait::async_trait]
-impl obzenflow_runtime::stages::sink::InlineSink for DeliveryProbe {
+impl obzenflow_runtime::stages::sink::SinkConnector for DeliveryProbe {
     type Input = HookOutput;
+    type Writer = Self;
     fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
         obzenflow_runtime::stages::sink::SinkDescription::method(
             obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
@@ -464,6 +465,19 @@ impl obzenflow_runtime::stages::sink::InlineSink for DeliveryProbe {
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::SinkWriter for DeliveryProbe {
+    type Input = HookOutput;
+
     async fn write(
         &mut self,
         input: HookOutput,
