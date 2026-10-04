@@ -4,50 +4,39 @@
 
 //! Passive application diagnostics for terminal deliveries.
 
-use super::domain::PaymentAuthorizationUnavailable;
-use obzenflow::middleware::{
-    SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
-    SinkDeliveryObserverOutcome,
-};
-use obzenflow::schema::TypedPayload;
+use super::domain::{PaymentAuthorizationUnavailable, PaymentAuthorized};
+use obzenflow::middleware::{ObserverResult, SinkDeliveryObserver, SinkDeliveryObserverContext};
 
 /// Emits an application diagnostic after the runtime classifies a shipping
 /// delivery. It receives an immutable view and cannot alter settlement.
 pub struct ShippingDeliveryLog;
 
 impl SinkDeliveryObserver for ShippingDeliveryLog {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+    type Input = PaymentAuthorized;
+
+    fn on_attempt(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
         tracing::info!(
             stage = ctx.stage_name(),
             outcome = ?ctx.outcome(),
             "shipping delivery observed"
         );
+        Ok(())
     }
 }
 
-/// Record manual-review routing only after console output succeeds. Previously
-/// the diagnostic ran before output and could claim a handoff that then failed.
-/// This observer does not deliver another item or alter the delivery receipt.
+/// Log the manual-review notice after console delivery succeeds.
 pub struct ManualReviewDeliveryLog;
 
 impl SinkDeliveryObserver for ManualReviewDeliveryLog {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
-        if !matches!(
-            ctx.outcome(),
-            SinkDeliveryObserverOutcome::Attempted {
-                result: SinkDeliveryAttemptResult::ReportedSuccess
-            }
-        ) {
-            return;
-        }
-        let Ok(unavailable) = PaymentAuthorizationUnavailable::try_from_event(ctx.input()) else {
-            return;
-        };
+    type Input = PaymentAuthorizationUnavailable;
+
+    fn on_delivered(&self, unavailable: &Self::Input) -> ObserverResult {
         tracing::info!(
             operation = "payment.authorization",
             handoff_kind = "manual_review",
             order_id = %unavailable.order_id,
-            "authorization queued for manual review"
+            "manual-review record written to console"
         );
+        Ok(())
     }
 }

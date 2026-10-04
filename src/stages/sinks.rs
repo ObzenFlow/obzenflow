@@ -75,16 +75,19 @@
 //! | Integration | Entry point |
 //! |---|---|
 //! | Console | [`ConsoleSink::new`] with a pure formatter |
-//! | Buffered console table | `ConsoleSink::new(TableFormatter::new(columns, extractor)).buffered()` |
+//! | Batched console table | `ConsoleSink::new(TableFormatter::new(columns, extractor)).batch_size(256)?` |
 //! | Structured diagnostics | [`TracingSink::new`] with a synchronous tracing emitter |
 //! | Intentional discard | [`DiscardSink::new`] |
 //! | CSV or TSV | [`CsvSink::builder`] |
 //! | PostgreSQL | `postgres::PostgresSink::builder` (`postgres` feature) |
 //!
-//! TSV is a CSV builder setting, `.tab_delimited()`. Table buffering consumes
-//! console configuration and moves its formatter and stdout/stderr selection
-//! into isolated writers; [`TableConsoleSink::batch_limits`] configures size
-//! limits. There is no timed flush guarantee.
+//! TSV is a CSV builder setting, `.tab_delimited()`. [`ConsoleSink::batch_size`]
+//! requires a positive row limit and moves the formatter, destination and replay
+//! labels into isolated table writers. Batches also have a default 64 KiB cap on
+//! prepared UTF-8 cell text, configurable through [`TableConsoleSink::batch_byte_limit`].
+//! This excludes rendered table overhead and allocation overhead; an oversized
+//! row is rejected. Thresholds or runtime flush/drain trigger output, with replay
+//! label changes forming another boundary. There is no timed flush guarantee.
 //!
 //! ## Console sinks
 //!
@@ -166,9 +169,10 @@
 pub use obzenflow_adapters::sinks::csv::CsvWriter;
 /// Built-in destinations, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{
-    ConsoleFormatError, ConsoleOutput, ConsoleSink, ConsoleWriter, CsvProjection, CsvSink,
-    CsvSinkBuilder, DebugFormatter, DiscardSink, Formatter, JsonFormatter, JsonPrettyFormatter,
-    OutputDestination, SnapshotTableFormatter, TableConsoleSink, TableFormatter, TracingSink,
+    ConsoleConfigError, ConsoleFormatError, ConsoleOutput, ConsoleSink, ConsoleWriter,
+    CsvProjection, CsvSink, CsvSinkBuilder, DebugFormatter, DiscardSink, Formatter, JsonFormatter,
+    JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter, TableConsoleSink,
+    TableFormatter, TracingSink,
 };
 
 pub use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};

@@ -513,6 +513,10 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     /// Observe-only middleware hooks for sink delivery.
     pub observers: StageObserverBundle,
 
+    /// Original input scope and position retained until its terminal receipt.
+    pub(crate) pending_delivery_observations:
+        HashMap<obzenflow_core::event::JournalCommitRef, super::SinkDeliveryObservation>,
+
     /// Durable per-stage signal-strategy scratch (FLOWIP-115c).
     pub processing_context: ProcessingContext,
 
@@ -1184,7 +1188,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         .subscription
         .as_mut()
         .map(|subscription| subscription.take_receipt_settlement(&mut ctx.contract_state));
-    let settlement = publication::commit(async move {
+    let (written, settlement) = publication::commit(async move {
         let event = super::with_committed_receipt_snapshot(evt, &instrumentation);
         let written = data_journal
             .append(
@@ -1199,13 +1203,15 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
                 instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
             }
         }
-        Ok(settlement)
+        Ok((written, settlement))
     })
     .await
     .map_err(|error| FsmError::HandlerError(error.to_string()))?;
     if let (Some(subscription), Some(settlement)) = (ctx.subscription.as_mut(), settlement) {
         subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
     }
+
+    super::observe_committed_delivery(ctx, parent_envelope, &written);
 
     Ok(())
 }
@@ -1316,7 +1322,14 @@ mod tests {
         upstream_id: StageId,
     }
 
-    fn fixture(probe: Arc<Probe>) -> Fixture {
+    struct FixtureResources {
+        resources: super::JournalSinkResources<AuditSink>,
+        data: Arc<TestJournal<ChainEvent>>,
+        upstream: Arc<TestJournal<ChainEvent>>,
+        upstream_id: StageId,
+    }
+
+    fn fixture_resources(probe: Arc<Probe>) -> FixtureResources {
         let stage_id = StageId::new();
         let upstream_id = StageId::new();
         let upstream = Arc::new(TestJournal::new(JournalOwner::stage(upstream_id)));
@@ -1354,6 +1367,7 @@ mod tests {
             ),
             sink_delivery_boundary: None,
             observers: Default::default(),
+            pending_delivery_observations: HashMap::new(),
             processing_context: Default::default(),
             backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
             backpressure_readers: HashMap::new(),
@@ -1367,6 +1381,22 @@ mod tests {
             stage_id.into(),
             &resources.runtime_execution,
         );
+        FixtureResources {
+            resources,
+            data,
+            upstream,
+            upstream_id,
+        }
+    }
+
+    fn fixture(probe: Arc<Probe>) -> Fixture {
+        let FixtureResources {
+            resources,
+            data,
+            upstream,
+            upstream_id,
+        } = fixture_resources(probe);
+        let stage_id = resources.stage_id;
         let context = JournalSinkContext::new(resources);
         let supervisor = JournalSinkSupervisor::<AuditSink> {
             name: "sink_audit_sink".into(),
@@ -1401,6 +1431,197 @@ mod tests {
             upstream,
             upstream_id,
         }
+    }
+
+    #[derive(Default)]
+    struct DeliveryProbe {
+        calls: std::sync::Mutex<
+            Vec<(
+                obzenflow_core::event::JournalCommitRef,
+                crate::messaging::upstream_subscription::StageInputPosition,
+                ChainEvent,
+            )>,
+        >,
+    }
+
+    impl crate::stages::observer::SinkDeliveryObserver for DeliveryProbe {
+        fn on_delivered(
+            &self,
+            ctx: &crate::stages::observer::SinkDeliverySuccessContext<'_>,
+        ) -> crate::stages::observer::ObserverResult {
+            self.calls.lock().unwrap().push((
+                ctx.receipt().subject.input,
+                ctx.stage_input_position(),
+                ctx.input().clone(),
+            ));
+            Ok(())
+        }
+    }
+
+    fn observe_deliveries(
+        resources: &mut super::JournalSinkResources<AuditSink>,
+    ) -> Arc<DeliveryProbe> {
+        use crate::stages::observer::{
+            ObserverBinding, ObserverTarget, StageObserverBindings, StageObserverBundle,
+        };
+        let probe = Arc::new(DeliveryProbe::default());
+        let mut bindings = StageObserverBindings::default();
+        bindings.push(ObserverBinding::sink_delivery("deliveries", probe.clone()).unwrap());
+        resources.observers = StageObserverBundle::compose_checked(
+            &resources.stage_name,
+            ObserverTarget::Sink,
+            bindings,
+        )
+        .unwrap();
+        resources.writer_id = Some(resources.stage_id.into());
+        probe
+    }
+
+    fn retain_observed_input(
+        resources: &mut super::JournalSinkResources<AuditSink>,
+        input: &crate::messaging::DeliveredRecord<ChainPayload>,
+        position: u64,
+        scope: obzenflow_core::MiddlewareExecutionScope,
+    ) {
+        resources.pending_delivery_observations.insert(
+            input.commitment(),
+            super::super::SinkDeliveryObservation {
+                scope,
+                position: crate::messaging::upstream_subscription::StageInputPosition(position),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_receipt_observers_keep_exact_input_scope_after_live_handoff() {
+        use crate::messaging::upstream_subscription::StageInputPosition;
+        use obzenflow_core::MiddlewareExecutionScope;
+
+        let mut resources = fixture_resources(Arc::new(Probe::default())).resources;
+        let probe = observe_deliveries(&mut resources);
+        // Model buffered reconstruction inputs settling after the stage's
+        // handoff. Looking up stage_scope now would incorrectly observe them.
+        assert_eq!(
+            resources.runtime_execution.stage_scope(resources.stage_id),
+            MiddlewareExecutionScope::LiveHandler,
+        );
+        let ancestor = ChainEventFactory::data_event(
+            StageId::new().into(),
+            "observer.input",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({"value": "retained input"}),
+        );
+        let mut inputs = Vec::new();
+        for (index, scope) in [
+            MiddlewareExecutionScope::StrictReplayHandler,
+            MiddlewareExecutionScope::ResumeHandler,
+            MiddlewareExecutionScope::LiveHandler,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Forwarding the same authored event through different journals
+            // preserves its EventId but creates distinct receipt subjects.
+            let input = crate::testing::causal_fixture::committed_input(
+                obzenflow_core::JournalWriterId::new(),
+                ancestor.clone(),
+            );
+            assert_eq!(*input.id(), ancestor.id);
+            let input = crate::messaging::DeliveredRecord::from(input);
+            retain_observed_input(&mut resources, &input, index as u64 + 1, scope);
+            inputs.push(input);
+        }
+        assert_eq!(resources.pending_delivery_observations.len(), 3);
+        for input in &inputs {
+            super::journal_commit_receipt(
+                &mut resources,
+                input,
+                DeliveryOutcome::success(DeliveryMethod::ConsoleStdout, None),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(resources.pending_delivery_observations.is_empty());
+        let calls = probe.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, inputs[2].commitment());
+        assert_eq!(calls[0].1, StageInputPosition(3));
+        assert_eq!(
+            calls[0].2.payload.contract_body().unwrap()["value"],
+            "retained input"
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_delivery_is_observed_before_a_later_receipt_append_fails() {
+        use obzenflow_core::MiddlewareExecutionScope;
+
+        let mut resources = fixture_resources(Arc::new(Probe::default())).resources;
+        let probe = observe_deliveries(&mut resources);
+        let fail_appends = Arc::new(AtomicBool::new(false));
+        let data = Arc::new(
+            TestJournal::new(JournalOwner::stage(resources.stage_id))
+                .with_append_failure(fail_appends.clone()),
+        );
+        resources.data_journal = data.clone();
+        let inputs = (1..=2)
+            .map(|position| {
+                let input = crate::messaging::DeliveredRecord::from(
+                    crate::testing::causal_fixture::committed_input(
+                        obzenflow_core::JournalWriterId::new(),
+                        ChainEventFactory::data_event(
+                            StageId::new().into(),
+                            "observer.input",
+                            std::num::NonZeroU32::MIN,
+                            serde_json::json!({"position": position}),
+                        ),
+                    ),
+                );
+                retain_observed_input(
+                    &mut resources,
+                    &input,
+                    position,
+                    MiddlewareExecutionScope::LiveHandler,
+                );
+                input
+            })
+            .collect::<Vec<_>>();
+
+        let (entered, release) = data.block_next_append();
+        let first_input = inputs[0].clone();
+        let task = tokio::spawn(async move {
+            let result = super::journal_commit_receipt(
+                &mut resources,
+                &first_input,
+                DeliveryOutcome::success(DeliveryMethod::ConsoleStdout, None),
+            )
+            .await;
+            (resources, result)
+        });
+        entered.notified().await;
+        assert!(probe.calls.lock().unwrap().is_empty());
+        release.notify_one();
+        let (mut resources, first_result) = task.await.unwrap();
+        first_result.unwrap();
+        assert_eq!(probe.calls.lock().unwrap().len(), 1);
+        assert_eq!(probe.calls.lock().unwrap()[0].0, inputs[0].commitment());
+
+        fail_appends.store(true, Ordering::SeqCst);
+        let second_result = super::journal_commit_receipt(
+            &mut resources,
+            &inputs[1],
+            DeliveryOutcome::success(DeliveryMethod::ConsoleStdout, None),
+        )
+        .await;
+        assert!(second_result.is_err());
+        assert_eq!(probe.calls.lock().unwrap().len(), 1);
+        assert_eq!(data.read_all_unordered().await.unwrap().len(), 1);
+        assert!(!resources
+            .pending_delivery_observations
+            .contains_key(&inputs[0].commitment()));
+        assert!(resources
+            .pending_delivery_observations
+            .contains_key(&inputs[1].commitment()));
     }
 
     async fn activate(fixture: &Fixture) {

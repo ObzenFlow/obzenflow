@@ -916,6 +916,15 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         stage_input_position,
         subscription.last_delivered_generation(),
     );
+    if ctx.observers.has_sink_delivery() {
+        ctx.pending_delivery_observations.insert(
+            envelope.commitment(),
+            super::super::SinkDeliveryObservation {
+                scope,
+                position: observer_input_position,
+            },
+        );
+    }
     let boundary = ctx.sink_delivery_boundary.clone();
     let input = envelope.clone();
 
@@ -1339,5 +1348,6 @@ async fn journal_delivery_receipt<
     })
     .await?;
     subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
+    super::super::observe_committed_delivery(ctx, parent_envelope, &written);
     Ok(written.into())
 }

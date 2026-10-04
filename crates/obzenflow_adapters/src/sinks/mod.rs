@@ -12,9 +12,9 @@ pub mod postgres;
 pub mod tracing;
 
 pub use console::{
-    ConsoleFormatError, ConsoleOutput, ConsoleSink, ConsoleWriter, DebugFormatter, Formatter,
-    JsonFormatter, JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter,
-    TableConsoleSink, TableFormatter,
+    ConsoleConfigError, ConsoleFormatError, ConsoleOutput, ConsoleSink, ConsoleWriter,
+    DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
+    SnapshotTableFormatter, TableConsoleSink, TableFormatter,
 };
 
 pub use csv::{CsvProjection, CsvSink, CsvSinkBuilder};

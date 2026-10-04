@@ -151,6 +151,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             control_strategy,
             sink_delivery_boundary,
             observers,
+            pending_delivery_observations: Default::default(),
             processing_context:
                 crate::stages::common::control_strategies::ProcessingContext::default(),
             backpressure_writer: self.resources.backpressure_writer.clone(),

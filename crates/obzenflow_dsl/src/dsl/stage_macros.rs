@@ -2812,7 +2812,7 @@ macro_rules! __obzenflow_sink_typed {
     // ── exact input, real handler (facade call anchoring) ──
     //
     // Like joins, sink facade helpers often need the contract type injected to avoid
-    // turbofish/annotations at the call site (e.g., `sinks::ConsoleSink::new(sinks::JsonFormatter)` and `sinks::ConsoleSink::new(sinks::TableFormatter::new(...)).buffered()`).
+    // turbofish/annotations at the call site (e.g., `sinks::ConsoleSink::new(sinks::JsonFormatter)` and `sinks::ConsoleSink::new(sinks::TableFormatter::new(...)).batch_size(256)?`).
 
     // ── exact input, real handler ──
     //

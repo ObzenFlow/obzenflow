@@ -20,6 +20,28 @@ use obzenflow::stages::sources;
 use obzenflow::stages::{joins, sinks};
 
 pub fn run_example() -> Result<()> {
+    let printer_handler =
+        sinks::ConsoleSink::<CarrierStatistics, _>::new(sinks::TableFormatter::new(
+            &["status", "carrier", "avg_delay", "flights"],
+            |stats: &CarrierStatistics| {
+                let status = if stats.average_delay < 10.0 {
+                    "🟢"
+                } else if stats.average_delay < 30.0 {
+                    "🟡"
+                } else {
+                    "🔴"
+                };
+
+                vec![
+                    status.to_string(),
+                    stats.carrier.clone(),
+                    format!("{:.1} min", stats.average_delay),
+                    stats.flight_count.to_string(),
+                ]
+            },
+        ))
+        .batch_size(256)?;
+
     FlowApplication::builder().run_blocking(FlowDefinition::materialize(
         move |_runtime_config| {
             let carriers_handler = sources::ValuesSource::new(fixtures::carriers());
@@ -44,27 +66,6 @@ pub fn run_example() -> Result<()> {
                     },
                 );
             let aggregator_handler = CarrierAggregator;
-            let printer_handler =
-                sinks::ConsoleSink::<CarrierStatistics, _>::new(sinks::TableFormatter::new(
-                    &["status", "carrier", "avg_delay", "flights"],
-                    |stats: &CarrierStatistics| {
-                        let status = if stats.average_delay < 10.0 {
-                            "🟢"
-                        } else if stats.average_delay < 30.0 {
-                            "🟡"
-                        } else {
-                            "🔴"
-                        };
-
-                        vec![
-                            status.to_string(),
-                            stats.carrier.clone(),
-                            format!("{:.1} min", stats.average_delay),
-                            stats.flight_count.to_string(),
-                        ]
-                    },
-                ))
-                .buffered();
 
             Ok(flow! {
                 name: "flight_delays",

@@ -21,9 +21,9 @@ pub use composition::{
 pub use ports::{
     EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
     HandlerObserverContext, JoinDeliverySnapshot, JoinObserver, JoinObserverContext,
-    JoinObserverOccurrence, JoinSide, JoinSignalKind, JoinSignalSnapshot,
-    SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
-    SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
-    SourcePollObserverOutcome, StageLifecycleObserver, StageLifecycleObserverContext,
-    StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
+    JoinObserverOccurrence, JoinSide, JoinSignalKind, JoinSignalSnapshot, ObserverError,
+    ObserverResult, SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
+    SinkDeliveryObserverOutcome, SinkDeliverySuccessContext, SourcePollObserver,
+    SourcePollObserverContext, SourcePollObserverOutcome, StageLifecycleObserver,
+    StageLifecycleObserverContext, StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
 };

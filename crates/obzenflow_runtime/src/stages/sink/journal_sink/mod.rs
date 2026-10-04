@@ -19,11 +19,67 @@ pub mod fsm;
 pub mod handle;
 pub mod supervisor;
 
+use crate::messaging::upstream_subscription::StageInputPosition;
+use crate::messaging::DeliveredRecord;
+use crate::stages::common::handlers::UnifiedSinkHandler;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::observer::dispatch::run_sink_delivered_observers;
+use crate::stages::observer::SinkDeliverySuccessContext;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{
-    DeliveryOutcome, DeliveryPayload, DeliverySubject, SinkAuditPayload, SinkLifecycleOperation,
+    DeliveryOutcome, DeliveryPayload, DeliveryResult, DeliverySubject, SinkAuditPayload,
+    SinkLifecycleOperation,
 };
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{ChainEvent, WriterId};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
+use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, WriterId};
+
+/// Dispatch provenance belongs to the input, not to the later write or
+/// lifecycle operation that happens to settle a buffered receipt.
+#[derive(Clone, Copy)]
+pub(crate) struct SinkDeliveryObservation {
+    pub scope: MiddlewareExecutionScope,
+    pub position: StageInputPosition,
+}
+
+/// Called after the journal append and subscription settlement both succeed.
+/// Retire terminal metadata even for outcomes that do not notify observers.
+pub(super) fn observe_committed_delivery<H: UnifiedSinkHandler>(
+    ctx: &mut fsm::JournalSinkResources<H>,
+    parent: &DeliveredRecord<ChainPayload>,
+    written: &JournalRecord<ChainPayload>,
+) {
+    if ctx.pending_delivery_observations.is_empty() {
+        return;
+    }
+    let ChainPayload::Delivery(receipt) = &written.payload else {
+        return;
+    };
+    if matches!(receipt.result, DeliveryResult::Buffered { .. }) {
+        return;
+    }
+    let Some(observation) = ctx
+        .pending_delivery_observations
+        .remove(&receipt.subject.input)
+    else {
+        return;
+    };
+    let input = parent.authored();
+    let flow_context = make_flow_context(
+        &ctx.flow_name,
+        &ctx.flow_id.to_string(),
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Sink,
+    );
+    let observation_context = SinkDeliverySuccessContext::new(
+        ctx.flow_id,
+        &flow_context,
+        &input,
+        observation.position,
+        receipt,
+    );
+    run_sink_delivered_observers(&ctx.observers, observation.scope, &observation_context);
+}
 
 /// Create a sink-authored delivery event at the final journal boundary.
 ///

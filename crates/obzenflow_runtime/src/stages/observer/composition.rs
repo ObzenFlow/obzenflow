@@ -15,9 +15,10 @@ use obzenflow_core::ChainEvent;
 
 use super::ports::{
     EffectObserver, EffectObserverContext, HandlerObserver, HandlerObserverContext, JoinObserver,
-    JoinObserverContext, SinkDeliveryObserver, SinkDeliveryObserverContext, SourcePollObserver,
-    SourcePollObserverContext, StageLifecycleObserver, StageLifecycleObserverContext,
-    StatefulObserver, StatefulObserverContext,
+    JoinObserverContext, ObserverResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
+    SinkDeliverySuccessContext, SourcePollObserver, SourcePollObserverContext,
+    StageLifecycleObserver, StageLifecycleObserverContext, StatefulObserver,
+    StatefulObserverContext,
 };
 
 /// A runtime-owned ordinary observer surface.
@@ -391,6 +392,17 @@ impl<T: ?Sized> ObserverChild<T> {
             warn_quarantined(self.label, stage, surface, phase);
         }
     }
+
+    fn invoke_result<F>(&self, stage: &str, surface: &'static str, phase: &'static str, invoke: F)
+    where
+        F: FnOnce(&T) -> ObserverResult,
+    {
+        if self.quarantined.load(Ordering::Acquire) {
+            return;
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| invoke(self.observer.as_ref())));
+        quarantine_failure(&self.quarantined, self.label, stage, surface, phase, result);
+    }
 }
 
 pub(crate) struct HardenedObserverPort<T: ?Sized> {
@@ -438,6 +450,62 @@ impl<T: ?Sized> HardenedObserverPort<T> {
         {
             warn_quarantined("observer-composite", stage, surface, phase);
         }
+    }
+
+    pub(crate) fn invoke_result<F>(
+        &self,
+        stage: &str,
+        surface: &'static str,
+        phase: &'static str,
+        invoke: F,
+    ) where
+        F: FnOnce(&T) -> ObserverResult,
+    {
+        if self.quarantined.load(Ordering::Acquire) {
+            return;
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| invoke(self.observer.as_ref())));
+        quarantine_failure(
+            &self.quarantined,
+            "observer-composite",
+            stage,
+            surface,
+            phase,
+            result,
+        );
+    }
+}
+
+fn quarantine_failure(
+    quarantined: &AtomicBool,
+    label: &'static str,
+    stage: &str,
+    surface: &'static str,
+    phase: &'static str,
+    result: std::thread::Result<ObserverResult>,
+) {
+    if matches!(&result, Ok(Ok(())))
+        || quarantined
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+    match result {
+        Ok(Err(error)) => {
+            let _ = catch_unwind(AssertUnwindSafe(move || {
+                tracing::warn!(
+                    observer = label,
+                    stage,
+                    surface,
+                    phase,
+                    error = %error,
+                    "observer failed and was quarantined for the remainder of the stage run"
+                );
+            }));
+        }
+        Err(_) => warn_quarantined(label, stage, surface, phase),
+        Ok(Ok(())) => unreachable!("successful observer results return before quarantine"),
     }
 }
 
@@ -626,15 +694,28 @@ impl EffectObserver for EffectObserverChain {
 struct SinkDeliveryObserverChain(Vec<ObserverChild<dyn SinkDeliveryObserver>>);
 
 impl SinkDeliveryObserver for SinkDeliveryObserverChain {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+    fn after_sink_delivery_checked(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
         for child in &self.0 {
-            child.invoke(
+            child.invoke_result(
                 ctx.stage_name(),
                 "sink_delivery",
                 "after_sink_delivery",
-                |observer| observer.after_sink_delivery(ctx),
+                |observer| observer.after_sink_delivery_checked(ctx),
             );
         }
+        Ok(())
+    }
+
+    fn on_delivered(&self, ctx: &SinkDeliverySuccessContext<'_>) -> ObserverResult {
+        for child in &self.0 {
+            child.invoke_result(
+                ctx.stage_name(),
+                "sink_delivery",
+                "on_delivered",
+                |observer| observer.on_delivered(ctx),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1229,6 +1310,141 @@ mod tests {
 
         assert_eq!(panics.calls.load(Ordering::SeqCst), 1);
         assert_eq!(counts.0.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn sink_observer_error_and_panic_share_quarantine_across_both_hooks() {
+        use crate::stages::observer::dispatch::{
+            run_sink_delivered_observers, run_sink_delivery_observers,
+        };
+        use crate::stages::observer::{SinkDeliveryAttemptResult, SinkDeliveryObserverOutcome};
+        use obzenflow_core::event::payloads::delivery_payload::{
+            DeliveryMethod, DeliveryOutcome, DeliveryPayload, DeliverySubject,
+        };
+        use obzenflow_core::MiddlewareExecutionScope;
+
+        #[derive(Debug)]
+        struct PanickingErrorDrop;
+
+        impl std::fmt::Display for PanickingErrorDrop {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("diagnostic error whose destructor panics")
+            }
+        }
+
+        impl std::error::Error for PanickingErrorDrop {}
+
+        impl Drop for PanickingErrorDrop {
+            fn drop(&mut self) {
+                panic!("observer error destructor panic");
+            }
+        }
+
+        struct Probe {
+            fail_at: Option<&'static str>,
+            panic: bool,
+            panic_on_error_drop: bool,
+            calls: Mutex<Vec<&'static str>>,
+        }
+        impl Probe {
+            fn record(&self, hook: &'static str) -> ObserverResult {
+                self.calls.lock().unwrap().push(hook);
+                if self.fail_at == Some(hook) {
+                    assert!(!self.panic, "observer diagnostic panic");
+                    if self.panic_on_error_drop {
+                        return Err(Box::new(PanickingErrorDrop));
+                    }
+                    return Err("observer diagnostic failure".into());
+                }
+                Ok(())
+            }
+        }
+        impl SinkDeliveryObserver for Probe {
+            fn after_sink_delivery_checked(
+                &self,
+                _ctx: &SinkDeliveryObserverContext<'_>,
+            ) -> ObserverResult {
+                self.record("attempt")
+            }
+
+            fn on_delivered(&self, _ctx: &SinkDeliverySuccessContext<'_>) -> ObserverResult {
+                self.record("delivered")
+            }
+        }
+
+        for fail_at in ["attempt", "delivered"] {
+            for (panic, panic_on_error_drop) in [(false, false), (true, false), (false, true)] {
+                let failing = Arc::new(Probe {
+                    fail_at: Some(fail_at),
+                    panic,
+                    panic_on_error_drop,
+                    calls: Mutex::default(),
+                });
+                let sibling = Arc::new(Probe {
+                    fail_at: None,
+                    panic: false,
+                    panic_on_error_drop: false,
+                    calls: Mutex::default(),
+                });
+                let mut builder = StageObserverBundleBuilder::default();
+                builder.push_sink_delivery("failing", failing.clone());
+                builder.push_sink_delivery("sibling", sibling.clone());
+                let bundle = builder.build();
+                let (flow_id, flow_context, input) = context();
+                let parent = crate::testing::causal_fixture::committed_input(
+                    obzenflow_core::JournalWriterId::new(),
+                    input.clone(),
+                );
+                let receipt = DeliveryPayload {
+                    subject: DeliverySubject::from_record(&parent),
+                    outcome: DeliveryOutcome::success(DeliveryMethod::ConsoleStdout, None),
+                };
+                let ctx = SinkDeliverySuccessContext::new(
+                    flow_id,
+                    &flow_context,
+                    &input,
+                    StageInputPosition(1),
+                    &receipt,
+                );
+                let warnings = Arc::new(AtomicUsize::new(0));
+                tracing::subscriber::with_default(
+                    CountingWarningSubscriber {
+                        warnings: warnings.clone(),
+                    },
+                    || {
+                        for _ in 0..2 {
+                            run_sink_delivery_observers(
+                                &bundle,
+                                flow_id,
+                                &flow_context,
+                                MiddlewareExecutionScope::LiveHandler,
+                                &input,
+                                StageInputPosition(1),
+                                SinkDeliveryObserverOutcome::Attempted {
+                                    result: SinkDeliveryAttemptResult::ReportedSuccess,
+                                },
+                            );
+                            run_sink_delivered_observers(
+                                &bundle,
+                                MiddlewareExecutionScope::LiveHandler,
+                                &ctx,
+                            );
+                        }
+                    },
+                );
+                let expected = if fail_at == "attempt" {
+                    vec!["attempt"]
+                } else {
+                    vec!["attempt", "delivered"]
+                };
+                assert_eq!(*failing.calls.lock().unwrap(), expected);
+                assert_eq!(
+                    *sibling.calls.lock().unwrap(),
+                    ["attempt", "delivered", "attempt", "delivered"],
+                );
+                assert_eq!(warnings.load(Ordering::SeqCst), 1);
+            }
+        }
     }
 
     #[test]

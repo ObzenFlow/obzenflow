@@ -208,29 +208,32 @@ async fn observer_interception_non_interference() {
         (
             without_observers.snapshot.effect_callbacks,
             without_observers.snapshot.delivery_callbacks,
+            without_observers.snapshot.delivered_callbacks,
             without_observers.snapshot.lifecycle_callbacks,
             without_observers.snapshot.panicking_callbacks,
         ),
-        (0, 0, 0, 0)
+        (0, 0, 0, 0, 0)
     );
     assert_eq!(
         (
             observers.snapshot.effect_callbacks,
             observers.snapshot.delivery_callbacks,
+            observers.snapshot.delivered_callbacks,
             observers.snapshot.lifecycle_callbacks,
             observers.snapshot.panicking_callbacks,
         ),
-        (ORDER_COUNT, ORDER_COUNT, 2, 0),
-        "observer treatment must observe every effect and delivery plus both sink lifecycle phases"
+        (ORDER_COUNT, ORDER_COUNT, ORDER_COUNT, 2, 0),
+        "observer treatment must observe every effect, attempt and committed delivery plus both sink lifecycle phases"
     );
     assert_eq!(
         (
             panicking_observer.snapshot.effect_callbacks,
             panicking_observer.snapshot.delivery_callbacks,
+            panicking_observer.snapshot.delivered_callbacks,
             panicking_observer.snapshot.lifecycle_callbacks,
             panicking_observer.snapshot.panicking_callbacks,
         ),
-        (ORDER_COUNT, ORDER_COUNT, 2, 1),
+        (ORDER_COUNT, ORDER_COUNT, ORDER_COUNT, 2, 1),
         "the panicking attachment is quarantined while its siblings continue"
     );
 
@@ -308,6 +311,7 @@ async fn observer_interception_non_interference() {
                 sink_writes: ORDER_COUNT,
                 effect_callbacks: 0,
                 delivery_callbacks: 0,
+                delivered_callbacks: 0,
                 lifecycle_callbacks: 0,
                 panicking_callbacks: 0,
             },

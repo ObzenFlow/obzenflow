@@ -5,17 +5,26 @@
 //! Runtime-owned, observe-only stage interception ports.
 //!
 //! The runtime constructs every context and lends only immutable execution
-//! views. Ordinary observers return no value and receive no framework writer,
-//! control boundary, continuation, executor, resolver, or settlement handle.
+//! views. Observer results describe observer health only; observers receive no
+//! framework writer, control boundary, continuation, executor, resolver, or
+//! settlement handle.
 
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{ChainEvent, FlowId, StageId};
+
+/// A diagnostic failure in an observer, never a failure of the observed work.
+pub type ObserverError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Returning an error warns and quarantines this observer attachment for the
+/// remainder of the stage run. It does not change or retry the observed work.
+pub type ObserverResult = Result<(), ObserverError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinSide {
@@ -398,6 +407,70 @@ pub struct SinkDeliveryObserverContext<'a> {
     outcome: SinkDeliveryObserverOutcome,
 }
 
+/// A full-success receipt that has been journalled for this exact input.
+///
+/// The runtime omits `Noop` receipts and reconstruction inputs. Buffered inputs
+/// reach this hook only when a later write, flush, or drain commits their
+/// successful terminal receipt. The callback is best-effort diagnostics, not a
+/// durable handoff: a crash after journal commit may prevent notification.
+pub struct SinkDeliverySuccessContext<'a> {
+    flow_id: FlowId,
+    flow_context: &'a FlowContext,
+    input: &'a ChainEvent,
+    stage_input_position: StageInputPosition,
+    receipt: &'a DeliveryPayload,
+}
+
+impl<'a> SinkDeliverySuccessContext<'a> {
+    pub(crate) fn new(
+        flow_id: FlowId,
+        flow_context: &'a FlowContext,
+        input: &'a ChainEvent,
+        stage_input_position: StageInputPosition,
+        receipt: &'a DeliveryPayload,
+    ) -> Self {
+        Self {
+            flow_id,
+            flow_context,
+            input,
+            stage_input_position,
+            receipt,
+        }
+    }
+
+    pub fn flow_name(&self) -> &str {
+        &self.flow_context.flow_name
+    }
+
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.flow_context.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        &self.flow_context.stage_name
+    }
+
+    pub fn stage_type(&self) -> StageType {
+        self.flow_context.stage_type
+    }
+
+    pub fn input(&self) -> &ChainEvent {
+        self.input
+    }
+
+    pub fn stage_input_position(&self) -> StageInputPosition {
+        self.stage_input_position
+    }
+
+    pub fn receipt(&self) -> &DeliveryPayload {
+        self.receipt
+    }
+}
+
 impl<'a> SinkDeliveryObserverContext<'a> {
     pub(crate) fn new(
         flow_id: FlowId,
@@ -528,7 +601,22 @@ pub trait EffectObserver: Send + Sync {
 }
 
 pub trait SinkDeliveryObserver: Send + Sync {
+    /// Observe the current input attempt, including buffered and failed attempts.
+    /// This is not a notification for later deferred receipt settlements.
     fn after_sink_delivery(&self, _ctx: &SinkDeliveryObserverContext<'_>) {}
+
+    /// Health-reporting bridge used by typed authoring adapters. Existing raw
+    /// observers keep their unit-returning attempt hook through this default.
+    fn after_sink_delivery_checked(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
+        self.after_sink_delivery(ctx);
+        Ok(())
+    }
+
+    /// Observe each newly committed full-success, non-Noop receipt, using the
+    /// original input even when a later write or lifecycle operation settled it.
+    fn on_delivered(&self, _ctx: &SinkDeliverySuccessContext<'_>) -> ObserverResult {
+        Ok(())
+    }
 }
 
 pub trait StageLifecycleObserver: Send + Sync {

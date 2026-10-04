@@ -20,6 +20,17 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 
+const DEFAULT_TABLE_BATCH_BYTE_LIMIT: usize = 64 * 1024;
+
+/// Invalid console table batching configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConsoleConfigError {
+    #[error("console table batch size must be greater than zero")]
+    InvalidBatchSize,
+    #[error("console table batch byte limit must be greater than zero")]
+    InvalidBatchByteLimit,
+}
+
 /// Output destination for `ConsoleSink`.
 #[derive(Clone, Copy, Debug, Default)]
 pub enum OutputDestination {
@@ -570,16 +581,27 @@ where
     T: TypedPayload + Send + Sync + 'static,
     E: Fn(&T) -> Vec<String> + Send + Sync + Clone,
 {
-    /// Buffer table rows in each stage-local writer until a size limit or drain.
-    /// Defaults to 256 rows and 64 KiB of prepared cell bytes; there is no timer.
-    pub fn buffered(self) -> TableConsoleSink<T, E> {
-        TableConsoleSink {
+    /// Combine up to `rows` inputs into each console table. `rows` must be positive.
+    ///
+    /// Each stage-local writer also limits batches to 64 KiB of prepared UTF-8
+    /// cell text by default; use [`TableConsoleSink::batch_byte_limit`] to change
+    /// that cap. It excludes headers, padding and allocation overhead. A single
+    /// row larger than the cap is rejected, even if display formatting clips it.
+    ///
+    /// A full batch prints immediately. Runtime flush/drain prints a final
+    /// partial batch; replay-labelled batches also flush at provenance changes.
+    /// There is no timer, so a continuing stream below its limits can retain rows.
+    pub fn batch_size(self, rows: usize) -> Result<TableConsoleSink<T, E>, ConsoleConfigError> {
+        if rows == 0 {
+            return Err(ConsoleConfigError::InvalidBatchSize);
+        }
+        Ok(TableConsoleSink {
             formatter: self.formatter,
             destination: self.destination,
             label_replays: self.label_replays,
-            max_rows: 256,
-            max_bytes: 64 * 1024,
-        }
+            max_rows: rows,
+            max_bytes: DEFAULT_TABLE_BATCH_BYTE_LIMIT,
+        })
     }
 }
 
@@ -699,7 +721,8 @@ fn label_frame(frame: String, replayed: bool) -> String {
     }
 }
 
-/// Reusable table configuration. Opening it never copies another writer's rows.
+/// Reusable table configuration selected by [`ConsoleSink::batch_size`].
+/// Opening it never copies another writer's rows.
 pub struct TableConsoleSink<T, E> {
     formatter: TableFormatter<T, E>,
     destination: OutputDestination,
@@ -718,14 +741,16 @@ impl<T, E> TableConsoleSink<T, E> {
         self.destination = OutputDestination::Stderr;
         self
     }
-    pub fn batch_limits(
-        mut self,
-        rows: std::num::NonZeroUsize,
-        bytes: std::num::NonZeroUsize,
-    ) -> Self {
-        self.max_rows = rows.get();
-        self.max_bytes = bytes.get();
-        self
+    /// Limit a batch's prepared UTF-8 cell text to `bytes`, which must be positive.
+    ///
+    /// The default is 64 KiB. This cap excludes table headers, borders, padding
+    /// and allocation overhead. A row exceeding it is rejected before output.
+    pub fn batch_byte_limit(mut self, bytes: usize) -> Result<Self, ConsoleConfigError> {
+        if bytes == 0 {
+            return Err(ConsoleConfigError::InvalidBatchByteLimit);
+        }
+        self.max_bytes = bytes;
+        Ok(self)
     }
 }
 impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
@@ -1161,18 +1186,35 @@ mod tests {
         assert_eq!(output.lock().unwrap().writes, writes);
     }
 
+    #[test]
+    fn table_batch_configuration_rejects_zero_limits() {
+        let connector = || {
+            ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
+                vec![event.value.clone()]
+            }))
+        };
+        assert!(matches!(
+            connector().batch_size(0),
+            Err(ConsoleConfigError::InvalidBatchSize)
+        ));
+        assert!(matches!(
+            connector().batch_size(1).unwrap().batch_byte_limit(0),
+            Err(ConsoleConfigError::InvalidBatchByteLimit)
+        ));
+    }
+
     #[tokio::test]
-    async fn buffered_replay_labels_preserve_conversion_and_separate_live_frames() {
-        for label_before_buffering in [false, true] {
+    async fn batched_replay_labels_preserve_conversion_and_separate_live_frames() {
+        for label_before_batching in [false, true] {
             let connector =
                 ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
                     vec![event.value.clone()]
                 }))
                 .to_stderr();
-            let connector = if label_before_buffering {
-                connector.label_replays().buffered()
+            let connector = if label_before_batching {
+                connector.label_replays().batch_size(256).unwrap()
             } else {
-                connector.buffered().label_replays()
+                connector.batch_size(256).unwrap().label_replays()
             };
             let output = Arc::new(Mutex::new(OutputState::default()));
             let mut writer = table(&connector, output.clone()).await;
@@ -1225,11 +1267,10 @@ mod tests {
             vec![event.value.clone()]
         }))
         .label_replays()
-        .buffered()
-        .batch_limits(
-            std::num::NonZeroUsize::new(10).unwrap(),
-            std::num::NonZeroUsize::new(4).unwrap(),
-        );
+        .batch_size(10)
+        .unwrap()
+        .batch_byte_limit(4)
+        .unwrap();
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;
         let archived = input("a");
@@ -1269,11 +1310,10 @@ mod tests {
             ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
                 vec![e.value.clone()]
             }))
-            .buffered()
-            .batch_limits(
-                std::num::NonZeroUsize::new(2).unwrap(),
-                std::num::NonZeroUsize::new(1024).unwrap(),
-            );
+            .batch_size(2)
+            .unwrap()
+            .batch_byte_limit(1024)
+            .unwrap();
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;
         let first = input("first");
@@ -1318,11 +1358,10 @@ mod tests {
             ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
                 vec![e.value.clone()]
             }))
-            .buffered()
-            .batch_limits(
-                std::num::NonZeroUsize::new(10).unwrap(),
-                std::num::NonZeroUsize::new(3).unwrap(),
-            );
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(3)
+            .unwrap();
         let one = Arc::new(Mutex::new(OutputState::default()));
         let two = Arc::new(Mutex::new(OutputState::default()));
         let mut first = table(&connector, one.clone()).await;
@@ -1362,11 +1401,10 @@ mod tests {
             ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
                 vec![e.value.clone()]
             }))
-            .buffered()
-            .batch_limits(
-                std::num::NonZeroUsize::new(10).unwrap(),
-                std::num::NonZeroUsize::new(4).unwrap(),
-            );
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(4)
+            .unwrap();
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;
         writer
@@ -1407,11 +1445,10 @@ mod tests {
             ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
                 vec![e.value.clone()]
             }))
-            .buffered()
-            .batch_limits(
-                std::num::NonZeroUsize::new(10).unwrap(),
-                std::num::NonZeroUsize::new(4).unwrap(),
-            );
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(4)
+            .unwrap();
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;
         let first = input("a");
@@ -1472,11 +1509,10 @@ mod tests {
             ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
                 vec![e.value.clone()]
             }))
-            .buffered()
-            .batch_limits(
-                std::num::NonZeroUsize::new(10).unwrap(),
-                std::num::NonZeroUsize::new(4).unwrap(),
-            );
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(4)
+            .unwrap();
         let first_frame = format!(
             "{}\n",
             text(
@@ -1535,7 +1571,8 @@ mod tests {
                 vec![e.value.clone()]
             }))
             .to_stderr()
-            .buffered();
+            .batch_size(256)
+            .unwrap();
         assert_eq!(
             connector.describe().default_method(),
             &DeliveryMethod::ConsoleStderr

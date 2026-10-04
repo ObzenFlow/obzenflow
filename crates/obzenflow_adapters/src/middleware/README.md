@@ -5,32 +5,37 @@ They attach at defined runtime boundaries.
 
 ## Observers
 
-Observers receive immutable views and return nothing. The supported surfaces
+Observers receive immutable views. The supported surfaces
 are source polling, handlers, stateful processing, joins, effects, sink delivery,
 and stage lifecycle.
 
 An observer cannot change outputs, settlement, or framework journals through
 its callback. Callbacks run for live work and are suppressed during replay.
 Each attachment has its own unwind boundary: its first panic quarantines it for
-the rest of the stage run. This does not isolate blocking, process termination,
+the rest of the stage run. Sink observers also return `ObserverResult`; an error
+warns and quarantines only that attachment, without changing delivery or its receipt.
+Other observer surfaces retain unit callbacks. This does not isolate blocking, process termination,
 or side effects performed through application-owned capabilities.
 
-For example, an application can log delivery results:
+For example, given an application's `Order` payload, a typed sink observer can
+log each input after its successful non-Noop delivery receipt is committed:
 
 ```rust,ignore
 use obzenflow::middleware::{
-    sink_delivery_observer, SinkDeliveryObserver, SinkDeliveryObserverContext,
+    sink_delivery_observer, ObserverResult, SinkDeliveryObserver,
 };
 
 struct DeliveryTrace;
 
 impl SinkDeliveryObserver for DeliveryTrace {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+    type Input = Order;
+
+    fn on_delivered(&self, order: &Order) -> ObserverResult {
         tracing::info!(
-            stage = ctx.stage_name(),
-            outcome = ?ctx.outcome(),
-            "sink delivery classified"
+            order_id = %order.id,
+            "order delivered"
         );
+        Ok(())
     }
 }
 
@@ -38,6 +43,11 @@ let observer = sink_delivery_observer("delivery-trace", DeliveryTrace);
 ```
 
 Pass the resulting attachment in the sink's `observers: [...]` clause.
+Flow construction checks its input type against the sink connector's input.
+For buffered sinks, the callback follows each original input's eventual receipt,
+including receipts committed during flush or drain. Use the optional
+`on_attempt(&SinkDeliveryObserverContext) -> ObserverResult` hook for attempt
+classifications, including buffering, failure and rejection.
 Application diagnostics use ordinary Rust tools such as `tracing`.
 
 ## Control policies

@@ -2117,6 +2117,20 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
 
         let sink_policy_factories = self.sink_policies;
         let observer_factories = self.observers;
+        for factory in &observer_factories {
+            if let Some((observer_input, observer_input_name)) = factory.sink_observer_input_type()
+            {
+                if observer_input != std::any::TypeId::of::<C::Input>() {
+                    return Err(format!(
+                        "sink observer '{}' expects input '{observer_input_name}', but sink '{}' consumes '{}'",
+                        factory.label(),
+                        config.name,
+                        std::any::type_name::<C::Input>(),
+                    )
+                    .into());
+                }
+            }
+        }
         let control_strategy = create_default_signal_strategy();
 
         // Create instrumentation configuration
@@ -4175,8 +4189,18 @@ mod observer_placement_negative_tests {
     impl JoinObserver for NoopObserver {}
     impl SourcePollObserver for NoopObserver {}
     impl SinkDeliveryObserver for NoopObserver {}
+    impl obzenflow_adapters::middleware::SinkDeliveryObserver for NoopObserver {
+        type Input = ObserverInput;
+    }
     impl StageLifecycleObserver for NoopObserver {}
     impl EffectObserver for NoopObserver {}
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct ObserverInput;
+
+    impl obzenflow_core::TypedPayload for ObserverInput {
+        const EVENT_TYPE: &'static str = "observer_placement.input";
+    }
 
     /// An observer factory used to prove the planner reaches typed materialization.
     struct LoudObserverFactory;
