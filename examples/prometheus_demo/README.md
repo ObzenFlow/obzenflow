@@ -3,8 +3,9 @@
 Observe Prometheus metrics while a flow exercises circuit breaking and
 backpressure.
 
-The flow processes inputs, counts successful results and prints a summary.
-The framework supplies each stage's metrics automatically.
+The flow processes inputs, counts successful results and prints that recorded
+count. The summary has the same meaning during replay, even when the configured
+input count changes. The framework supplies source and error metrics automatically.
 
 Run from the repository root with port 9090 available. This configuration hosts
 `/metrics` and waits for Play:

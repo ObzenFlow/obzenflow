@@ -78,6 +78,11 @@ changed source and incomplete coverage cannot pass. Installing the pinned
 `cargo-nextest` version from `.config/validation.toml` is required for native
 Nextest lanes. CI installs that same pinned release.
 
+Update an existing installation with `cargo nextest self update --version 0.9.146`.
+This release includes the macOS concurrent capture-pipe inheritance fix: an
+unrelated test could otherwise keep a finished test's output pipe open and cause
+a false leak failure. The 200 ms leak deadline and failure policy remain unchanged.
+
 Every PR update requires the six correctness lanes and the existing formatting,
 Clippy and policy checks. Pushes to `main` and manual CI dispatches also require the
 complete performance lane. Changes claiming performance improvements or changing

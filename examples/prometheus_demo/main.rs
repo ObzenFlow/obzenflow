@@ -256,9 +256,7 @@ pub(crate) fn flow_definition_with_outage_interval(
             },
         )
         .emit_on_eof();
-        let summary_sink_handler = ConsoleSink::new(move |summary: &EventCountState| {
-            format_summary(summary, total_events)
-        });
+        let summary_sink_handler = ConsoleSink::new(format_summary);
 
         Ok(flow! {
             name: "prometheus_demo",
@@ -292,20 +290,15 @@ pub(crate) fn flow_definition_with_outage_interval(
     })
 }
 
-fn format_summary(summary: &EventCountState, total_events: usize) -> String {
+fn format_summary(summary: &EventCountState) -> String {
     let count = summary.event_count;
-    let errors = total_events.saturating_sub(count);
     format!(
         concat!(
             "\n=====================================\n",
             "📊 Processing summary:\n",
             "   Successfully processed: {count} events\n",
-            "   Generated: {total_events} events\n",
-            "   Errors: {errors} (routed to error journal)\n",
             "====================================="
         ),
-        count = count,
-        total_events = total_events,
-        errors = errors
+        count = count
     )
 }

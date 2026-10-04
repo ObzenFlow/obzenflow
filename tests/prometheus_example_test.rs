@@ -950,9 +950,11 @@ mod managed_lifecycle_regressions {
             })
             .expect("terminal execution is visible before listener close");
         let payload: serde_json::Value = serde_json::from_str(&frames[completed].data).unwrap();
+        // Flow output counts inputs consumed by terminal sinks: this topology
+        // delivers one aggregate summary, not each intermediate success.
         assert_eq!(
             payload["metrics"],
-            serde_json::json!({"events_in_total": count, "events_out_total": count - count / 100 + 1, "errors_total": count / 100})
+            serde_json::json!({"events_in_total": count, "events_out_total": 1, "errors_total": count / 100})
         );
         assert!(completed < frames.len() - 1);
         assert_eq!(
@@ -1293,6 +1295,9 @@ mod managed_lifecycle_regressions {
         count: u64,
         intervals: Option<(u64, u64)>,
     ) {
+        use obzenflow_core::event::payloads::delivery_payload::{
+            DeliveryMethod, DeliveryPayload, DeliveryResult,
+        };
         use obzenflow_core::event::{chain_event::ChainPayload, SystemEvent, SystemPayload};
         use obzenflow_infra::journal::disk::log_record::LogRecord;
         use std::collections::BTreeSet;
@@ -1512,7 +1517,19 @@ enabled = {prometheus}
         let mut journal_by_writer = std::collections::HashMap::new();
         let mut event_ids = BTreeSet::new();
         let mut parents = Vec::new();
-        let mut receipts = 0;
+        let receipt_output = |receipt: &DeliveryPayload| {
+            assert!(matches!(receipt.result, DeliveryResult::Success { .. }));
+            assert_eq!(receipt.delivery_method, DeliveryMethod::ConsoleStdout);
+            assert_eq!(receipt.items_delivered, Some(1));
+            assert!(receipt.bytes_processed.is_some_and(|bytes| bytes > 0));
+            (
+                receipt.destination.clone(),
+                receipt.delivery_method.clone(),
+                receipt.items_delivered,
+                receipt.bytes_processed,
+            )
+        };
+        let mut receipts = Vec::new();
         let mut inputs = BTreeSet::new();
         let mut successes = BTreeSet::new();
         let mut errors = BTreeSet::new();
@@ -1547,9 +1564,9 @@ enabled = {prometheus}
             };
             event_ids.insert(event.id);
             parents.extend(event.causality.parent_ids.iter().copied());
-            if matches!(&event.payload, ChainPayload::Delivery(_)) {
+            if let ChainPayload::Delivery(receipt) = &event.payload {
                 assert_eq!(event.flow_context.stage_name, "summary_sink");
-                receipts += 1;
+                receipts.push(receipt_output(receipt));
             }
             if let ChainPayload::Fact(payload) = &event.payload {
                 // Error routing retains the failed parent's source context.
@@ -1581,7 +1598,7 @@ enabled = {prometheus}
         );
         assert_eq!(errors, (0..count).step_by(100).collect());
         assert_eq!(summaries, [count - count / 100]);
-        assert_eq!(receipts, 1);
+        assert_eq!(receipts.len(), 1);
         assert!(
             parents.iter().all(|parent| event_ids.contains(parent)),
             "all committed business parents resolve"
@@ -1799,6 +1816,7 @@ enabled = {prometheus}
         // This example performs no live external I/O; zero configured source
         // inputs force the proof to reconstruct the recorded 100-input archive.
         let replay_model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+        let replay_root = dir.join("replay");
         FlowApplication::builder()
             .with_config_file(replay_config)
             .with_cli_args(vec![
@@ -1809,12 +1827,41 @@ enabled = {prometheus}
             ])
             .with_log_level(LogLevel::Error)
             .run_async(inject_snapshots(
-                prometheus_demo::flow_definition(0, dir.join("replay")),
+                prometheus_demo::flow_definition(0, replay_root.clone()),
                 replay_model.clone(),
             ))
             .await
             .expect("certified replay must report zero differences (verification exit code 0)");
         assert_final_example_metrics(&replay_model, count);
+
+        // Business verification excludes delivery receipts. Inspect the real
+        // console delivery too: changed live configuration must not change the
+        // recorded summary's measured output or claimed delivery.
+        let replay_runs: Vec<_> = std::fs::read_dir(replay_root.join("flows"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect();
+        assert_eq!(replay_runs.len(), 1);
+        let mut replay_snapshot = obzenflow_infra::journal::read::open_disk_run(&replay_runs[0])
+            .await
+            .unwrap();
+        let mut replay_receipts = Vec::new();
+        while let Some(record) = replay_snapshot.next().await.unwrap() {
+            if let RunRecordData::Chain(row) = record.record {
+                if let ChainPayload::Delivery(receipt) = &row.payload {
+                    assert_eq!(
+                        row.envelope.provenance.event.flow_context.stage_name,
+                        "summary_sink"
+                    );
+                    replay_receipts.push(receipt_output(receipt));
+                }
+            }
+        }
+        assert_eq!(
+            replay_receipts, receipts,
+            "replay must deliver the recorded summary independently of the live source configuration"
+        );
     }
 
     // Capture the production diagnostic at the bind boundary. This private
