@@ -3,6 +3,9 @@
 Observe Prometheus metrics while a flow exercises circuit breaking and
 backpressure.
 
+The flow processes inputs, counts successful results and prints a summary.
+The framework supplies each stage's metrics automatically.
+
 Run from the repository root with port 9090 available. This configuration hosts
 `/metrics` and waits for Play:
 

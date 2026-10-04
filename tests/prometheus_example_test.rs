@@ -71,7 +71,6 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
     for (from, to) in [
         ("high_volume_source", "error_processor"),
         ("error_processor", "event_counter"),
-        ("error_processor", "completion_sink"),
         ("event_counter", "summary_sink"),
     ] {
         let from = StageKey::from(from);
@@ -169,7 +168,10 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
                 }
             }
         }
-        receipts += usize::from(matches!(event.payload, ChainPayload::Delivery(_)));
+        if matches!(event.payload, ChainPayload::Delivery(_)) {
+            assert_eq!(event.flow_context.stage_name, "summary_sink");
+            receipts += 1;
+        }
     }
     inputs.sort_unstable();
     assert_eq!(
@@ -178,7 +180,7 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
         "source recovery must not lose or duplicate inputs"
     );
     assert_eq!(summaries, [990]);
-    assert_eq!(receipts, 991);
+    assert_eq!(receipts, 1);
 }
 
 /// Source that generates a high-volume stream with a deterministic error pattern.
@@ -290,8 +292,7 @@ async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     );
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
-        // Build a minimal flow that mirrors the Prometheus example's core path:
-        // high_volume_source -> error_processor -> completion_sink.
+        // Isolate the source and fallible transform for the error-kind assertion.
         let source = HighVolumeSource::new(CI_EVENT_LIMIT);
         let transform = error_prone_transform();
         let sink = DiscardSink::<ProcessedEvent>::new();
@@ -677,6 +678,7 @@ interval_ms = 250
                         .or_default() += 1;
                 }
                 ChainPayload::Delivery(receipt) => {
+                    assert_eq!(event.flow_context.stage_name, "summary_sink");
                     deliveries += 1;
                     content.as_object_mut().unwrap().remove("processed_at");
                     let input = committed_inputs
@@ -712,20 +714,15 @@ interval_ms = 250
         }
         assert_eq!(production_reports.get("high_volume_source"), Some(&1));
         assert!(!final_contracts.contains_key("high_volume_source"));
-        for name in [
-            "error_processor",
-            "event_counter",
-            "completion_sink",
-            "summary_sink",
-        ] {
+        for name in ["error_processor", "event_counter", "summary_sink"] {
             assert!(
                 final_contracts.get(name).copied().unwrap_or_default() > 0,
                 "{name} must author a final contract with its own context"
             );
         }
         assert_eq!(
-            deliveries, 991,
-            "both sinks must retain every delivery receipt"
+            deliveries, 1,
+            "the summary must retain its delivery receipt"
         );
         assert_eq!(inputs, (0..1_000).collect());
         assert_eq!(
@@ -1050,6 +1047,7 @@ mod managed_lifecycle_regressions {
             count - count / 100
         );
         assert_eq!(snapshot.events_emitted_total[&id("event_counter")], 1);
+        assert_eq!(snapshot.event_counts[&id("summary_sink")], 1);
         let text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
             .render(&view)
             .unwrap();
@@ -1550,6 +1548,7 @@ enabled = {prometheus}
             event_ids.insert(event.id);
             parents.extend(event.causality.parent_ids.iter().copied());
             if matches!(&event.payload, ChainPayload::Delivery(_)) {
+                assert_eq!(event.flow_context.stage_name, "summary_sink");
                 receipts += 1;
             }
             if let ChainPayload::Fact(payload) = &event.payload {
@@ -1582,7 +1581,7 @@ enabled = {prometheus}
         );
         assert_eq!(errors, (0..count).step_by(100).collect());
         assert_eq!(summaries, [count - count / 100]);
-        assert_eq!(receipts, count - count / 100 + 1);
+        assert_eq!(receipts, 1);
         assert!(
             parents.iter().all(|parent| event_ids.contains(parent)),
             "all committed business parents resolve"
@@ -1654,7 +1653,7 @@ enabled = {prometheus}
                 _ => None,
             })
             .collect();
-        assert_eq!(passed_feeds.len(), 4);
+        assert_eq!(passed_feeds.len(), 3);
         assert!(!execution_facts.iter().any(|fact| matches!(fact,
             ExecutionPayload::ContractStatus { pass: false, .. } |
             ExecutionPayload::ContractResult { status: obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel::Failed, .. }

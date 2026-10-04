@@ -2,20 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Prometheus Demo with FlowApplication Framework (FLOWIP-080h, 080j & 082a)
+//! Prometheus metrics demo
 //!
 //! Processes a configurable volume of events (default 100,000) demonstrating:
 //! - Source-intake rate limiting middleware
 //! - Circuit-breaker opening, failed probing, and recovery during source outages
-//! - Enforced backpressure across the fan-out
-//! - Fan-out topology pattern (one stage to multiple downstream stages)
-//! - ReduceTyped for type-safe event counting (FLOWIP-080j)
-//! - TypedPayload for strongly-typed events (FLOWIP-082a)
+//! - Enforced backpressure between stages
+//! - Counting successfully processed events
+//! - Strongly typed events
 //! - Prometheus metrics via /metrics endpoint
-//!
-//! **FLOWIP-080h Update**: Replaced 38-line ErrorProneTransform struct with Map helper
-//! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
-//! **FLOWIP-082a Update**: Added TypedPayload with EVENT_TYPE and SCHEMA_VERSION constants
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host
 //!
@@ -35,7 +30,7 @@ use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::{ConsoleSink, DiscardSink};
+use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources::SourceError;
 use obzenflow::stages::sources::TypedFiniteSourceHandler;
 use obzenflow::stages::transforms::TryMapTyped;
@@ -196,8 +191,7 @@ fn main() -> Result<()> {
                     "Source-intake rate limiting middleware",
                     "Source outages with five-second circuit-breaker cooldowns",
                     "Enforced backpressure (64 events per edge)",
-                    "Fan-out topology (processor -> counter + sink)",
-                    "StatefulHandler for business-level counting",
+                    "Counting successfully processed events",
                     "Framework Prometheus metrics",
                 ],
             )
@@ -265,8 +259,6 @@ pub(crate) fn flow_definition_with_outage_interval(
         let summary_sink_handler = ConsoleSink::new(move |summary: &EventCountState| {
             format_summary(summary, total_events)
         });
-        // Keep the terminal branch for throughput accounting without claiming persistence.
-        let completion_sink_handler = DiscardSink::<ProcessedEvent>::new();
 
         Ok(flow! {
             name: "prometheus_demo",
@@ -289,13 +281,11 @@ pub(crate) fn flow_definition_with_outage_interval(
                 error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
                 event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
                 summary_sink = sink!(EventCountState => summary_sink_handler);
-                completion_sink = sink!(ProcessedEvent => completion_sink_handler);
             },
 
             topology: {
                 high_volume_source |> error_processor;
                 error_processor |> event_counter;
-                error_processor |> completion_sink;
                 event_counter |> summary_sink;
             }
         })
@@ -308,15 +298,14 @@ fn format_summary(summary: &EventCountState, total_events: usize) -> String {
     format!(
         concat!(
             "\n=====================================\n",
-            "📊 Business-Level Event Count (FLOWIP-080j):\n",
+            "📊 Processing summary:\n",
             "   Successfully processed: {count} events\n",
-            "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)\n",
-            "=====================================\n\n",
-            "💡 Key Improvement:\n",
-            "   59-line EventCounter StatefulHandler → ReduceTyped helper\n",
-            "   Type-safe accumulation with zero ChainEvent manipulation!\n\n",
+            "   Generated: {total_events} events\n",
+            "   Errors: {errors} (routed to error journal)\n",
             "====================================="
         ),
-        count = count, total_events = total_events, errors = errors
+        count = count,
+        total_events = total_events,
+        errors = errors
     )
 }
