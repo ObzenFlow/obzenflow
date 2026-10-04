@@ -788,18 +788,19 @@ where
         }
         self.rows.push((row, context.defer()));
         self.prepared_bytes += bytes;
-        if receipts.is_empty()
-            && (self.rows.len() >= self.max_rows || self.prepared_bytes >= self.max_bytes)
-        {
-            receipts = self
-                .flush_pending()
-                .map_err(|error| {
-                    SinkWriteFailure::poisoned(
-                        SinkWritePhase::Execute,
-                        SinkOperationError::other(error.to_string()),
-                    )
-                })?
-                .0;
+        if self.rows.len() >= self.max_rows || self.prepared_bytes >= self.max_bytes {
+            // The incoming row can fill a batch of its own after a preflush.
+            // Preserve the earlier batch's receipts when settling this one.
+            receipts.extend(
+                self.flush_pending()
+                    .map_err(|error| {
+                        SinkWriteFailure::poisoned(
+                            SinkWritePhase::Execute,
+                            SinkOperationError::other(error.to_string()),
+                        )
+                    })?
+                    .0,
+            );
         }
         Ok(
             SinkWriteReport::buffered(SinkBufferedOutcome::accepted(Some(bytes as u64)))
@@ -861,6 +862,7 @@ mod tests {
         flushes: usize,
         fail_after: Option<usize>,
         fail_flush: bool,
+        fail_on_flush: Option<usize>,
     }
     struct Output(Arc<Mutex<OutputState>>);
     impl Write for Output {
@@ -880,7 +882,7 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             let mut state = self.0.lock().unwrap();
             state.flushes += 1;
-            if state.fail_flush {
+            if state.fail_flush || state.fail_on_flush == Some(state.flushes) {
                 Err(io::Error::other("injected flush failure"))
             } else {
                 Ok(())
@@ -1121,6 +1123,133 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn byte_limit_flushes_full_row_after_flushing_earlier_batch() {
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .buffered()
+            .batch_limits(
+                std::num::NonZeroUsize::new(10).unwrap(),
+                std::num::NonZeroUsize::new(4).unwrap(),
+            );
+        let output = Arc::new(Mutex::new(OutputState::default()));
+        let mut writer = table(&connector, output.clone()).await;
+        let first = input("a");
+        let second = input("bbbb");
+        let first_ref = first.commitment();
+        let second_ref = second.commitment();
+
+        let report = writer
+            .consume_committed_report(first, Default::default())
+            .await
+            .unwrap();
+        assert!(report.commit_receipts.is_empty());
+        assert!(output.lock().unwrap().bytes.is_empty());
+
+        let report = writer
+            .consume_committed_report(second, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(report.commit_receipts.len(), 2);
+        assert_eq!(report.commit_receipts[0].subject.input, first_ref);
+        assert_eq!(report.commit_receipts[1].subject.input, second_ref);
+        for receipt in &report.commit_receipts {
+            assert!(matches!(
+                receipt.payload.result,
+                obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Success { .. }
+            ));
+            assert_eq!(
+                receipt.payload.delivery_method,
+                DeliveryMethod::ConsoleStdout
+            );
+        }
+        {
+            let state = output.lock().unwrap();
+            assert_eq!(state.flushes, 2);
+            let printed = std::str::from_utf8(&state.bytes).unwrap();
+            assert!(printed.contains("bbbb"));
+        }
+        let writes = output.lock().unwrap().writes;
+        assert!(writer
+            .flush_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
+        assert!(writer
+            .drain_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
+        drop(writer);
+        assert_eq!(output.lock().unwrap().writes, writes);
+    }
+
+    #[tokio::test]
+    async fn byte_limit_second_frame_failure_poisoned_without_cleanup_retry() {
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .buffered()
+            .batch_limits(
+                std::num::NonZeroUsize::new(10).unwrap(),
+                std::num::NonZeroUsize::new(4).unwrap(),
+            );
+        let first_frame = format!(
+            "{}\n",
+            text(
+                connector
+                    .formatter
+                    .format(&TestEvent { value: "a".into() })
+                    .unwrap()
+            )
+        );
+        for fail_flush in [false, true] {
+            let output = Arc::new(Mutex::new(OutputState {
+                fail_after: (!fail_flush).then_some(first_frame.len() + 2),
+                fail_on_flush: fail_flush.then_some(2),
+                ..Default::default()
+            }));
+            let mut writer = table(&connector, output.clone()).await;
+            writer
+                .consume_committed_report(input("a"), Default::default())
+                .await
+                .unwrap();
+            let error = writer
+                .consume_committed_report(input("bbbb"), Default::default())
+                .await
+                .unwrap_err();
+            let obzenflow_runtime::stages::common::HandlerError::SinkWrite(error) = error else {
+                panic!("expected second-frame output failure")
+            };
+            assert_eq!(error.phase(), SinkWritePhase::Execute);
+            assert_eq!(
+                error.disposition(),
+                obzenflow_runtime::stages::common::handlers::SinkWriteFailureDisposition::Poisoned
+            );
+            let (writes, flushes) = {
+                let state = output.lock().unwrap();
+                assert!(state.bytes.starts_with(first_frame.as_bytes()));
+                assert!(state.bytes.len() > first_frame.len());
+                assert_eq!(state.flushes, if fail_flush { 2 } else { 1 });
+                (state.writes, state.flushes)
+            };
+            assert!(writer
+                .consume_committed_report(input("c"), Default::default())
+                .await
+                .is_err());
+            assert!(writer.flush_report().await.is_err());
+            assert!(writer.drain_report().await.is_err());
+            drop(writer);
+            let state = output.lock().unwrap();
+            assert_eq!((state.writes, state.flushes), (writes, flushes));
+        }
+    }
+
     #[tokio::test]
     async fn descriptor_mismatch_reaches_no_writer_output() {
         let connector =
