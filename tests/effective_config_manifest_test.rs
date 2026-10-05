@@ -481,6 +481,10 @@ fn checked_schema_v3_studio_fixture_is_a_complete_run_manifest() {
         .expect("Studio fixture must carry effective-config evidence");
     assert_eq!(evidence.schema_version, 2);
     assert_eq!(evidence.values.len(), 2);
+    assert!(evidence
+        .values
+        .iter()
+        .all(|row| row.key_path == CIRCUIT_BREAKER_MINIMUM_CALLS_KEY));
     assert_ne!(
         evidence.values[0].resolved_for,
         evidence.values[1].resolved_for

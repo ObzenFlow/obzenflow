@@ -1092,7 +1092,10 @@ mod tests {
             bindings[0].operation,
             obzenflow_topology::MiddlewareOperation::Ingress
         );
-        assert_eq!(bindings[0].configuration["events_per_second"], 10.0);
+        assert_eq!(
+            bindings[0].configuration["middleware.rate_limiter.events_per_second"],
+            serde_json::json!({ "value": 10.0, "source": "dsl", "scope": "stage:source" })
+        );
     }
 
     fn unique_journal_dir(prefix: &str) -> PathBuf {

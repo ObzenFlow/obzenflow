@@ -8,9 +8,9 @@
 
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareHints,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_core::{FlowId, TypedPayload};
@@ -18,9 +18,8 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::{
     disk_journals, memory_journals, DiskJournalFactory, MemoryJournalFactory,
 };
-use obzenflow_runtime::stages::observer::StageLifecycleObserver;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,38 +112,27 @@ async fn pre_substrate_failure_carries_no_run_state() {
     ));
 }
 
-// A middleware pair claiming the same topology config slot fails the build
-// after the factory seam, which makes it the cheapest deterministic
-// post-substrate failure (same shape as middleware_topology_slot_collision_test).
-#[derive(Debug)]
-struct NoopObserver;
-impl StageLifecycleObserver for NoopObserver {}
+// This declaration is valid through configuration and topology planning. Its
+// runtime resource fails only when the source observer is materialised, after
+// the journal factory has selected the substrate and created the run directory.
+const RESOURCE_FAILURE: &str = "observer resource unavailable during materialisation";
 
-struct FamilyA;
-struct FamilyB;
-
-#[derive(Clone)]
-struct SlotFactory {
+struct FailingObserverFactory {
     label: &'static str,
-    key: MiddlewareOverrideKey,
-    slot: TopologyMiddlewareConfigSlot,
+    materialisations: Arc<AtomicUsize>,
 }
 
-impl MiddlewareFactory for SlotFactory {
+impl MiddlewareFactory for FailingObserverFactory {
     fn label(&self) -> &'static str {
         self.label
     }
 
     fn override_key(&self) -> MiddlewareOverrideKey {
-        self.key
+        MiddlewareOverrideKey::of::<Self>(self.label)
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
         MiddlewareDeclaration::observer(self.label, vec![MiddlewareSurfaceKind::StageLifecycle])
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        Some(self.slot)
     }
 
     fn materialize(
@@ -155,49 +143,33 @@ impl MiddlewareFactory for SlotFactory {
         validate_attachment_request(&self.declaration(), &request).map_err(|err| {
             MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
         })?;
-        match request.surface.kind() {
-            MiddlewareSurfaceKind::StageLifecycle => Ok(
-                MiddlewareSurfaceAttachment::stage_lifecycle_observer(Arc::new(NoopObserver)),
-            ),
-            other => Err(MiddlewareFactoryError::materialization_failed(
-                self.label(),
-                &context.config.name,
-                std::io::Error::other(format!("unsupported observer surface {other:?}")),
-            )),
-        }
+        self.materialisations.fetch_add(1, Ordering::SeqCst);
+        Err(MiddlewareFactoryError::materialization_failed(
+            self.label(),
+            &context.config.name,
+            std::io::Error::other(RESOURCE_FAILURE),
+        ))
     }
 
     fn safety_level(&self) -> MiddlewareSafety {
         MiddlewareSafety::Safe
     }
-
-    fn hints(&self) -> MiddlewareHints {
-        MiddlewareHints::default()
-    }
-
-    fn config_snapshot(&self) -> Option<serde_json::Value> {
-        Some(json!({"label": self.label}))
-    }
 }
 
-fn colliding_flow(name: &'static str, base: std::path::PathBuf) -> obzenflow_dsl::FlowDefinition {
+fn failing_materialization_flow(
+    name: &'static str,
+    base: std::path::PathBuf,
+    materialisations: Arc<AtomicUsize>,
+) -> obzenflow_dsl::FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         Ok(flow! {
             name: "post_substrate_failure",
             journals: disk_journals(base),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with {
-                    SlotFactory {
-                        label: name,
-                        key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
-                        slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
-                    },
-                    SlotFactory {
-                        label: "slot.b",
-                        key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
-                        slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
-                    }
+                src = source!(TestEvent => placeholder!() with FailingObserverFactory {
+                    label: name,
+                    materialisations,
                 });
                 snk = sink!(TestEvent => placeholder!());
             },
@@ -209,16 +181,45 @@ fn colliding_flow(name: &'static str, base: std::path::PathBuf) -> obzenflow_dsl
     })
 }
 
+fn assert_materialization_failure(
+    failure: &obzenflow_dsl::FlowBuildFailure,
+    materialisations: &AtomicUsize,
+    label: &str,
+) {
+    assert_eq!(
+        materialisations.load(Ordering::SeqCst),
+        1,
+        "the valid plan must reach runtime materialisation exactly once"
+    );
+    assert!(
+        matches!(
+            &failure.error,
+            obzenflow_dsl::dsl::FlowBuildError::StageCreationFailed { stage_name, .. }
+                if stage_name == "src"
+        ),
+        "the failure must occur during stage creation: {failure:?}"
+    );
+    let message = failure.to_string();
+    assert!(message.contains(RESOURCE_FAILURE), "{message}");
+    assert!(message.contains(label), "{message}");
+}
+
 /// A build that fails after substrate selection carries the durable locator, so
 /// the failure footer can still name the partial journals on disk.
 #[tokio::test]
 async fn post_substrate_failure_carries_the_durable_locator() {
     let base = tempfile::tempdir().expect("tempdir");
-    let failure = colliding_flow("slot.a", base.path().to_path_buf())
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .err()
-        .expect("slot collision must fail the build");
+    let materialisations = Arc::new(AtomicUsize::new(0));
+    let failure = failing_materialization_flow(
+        "resource.a",
+        base.path().to_path_buf(),
+        materialisations.clone(),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .err()
+    .expect("runtime observer resource must fail the build");
+    assert_materialization_failure(&failure, &materialisations, "resource.a");
 
     match failure.run.as_ref().and_then(|s| s.locator()) {
         Some(locator) => {
@@ -243,24 +244,43 @@ async fn concurrent_failing_builds_carry_independent_run_state() {
     let base_a = tempfile::tempdir().expect("tempdir a");
     let base_b = tempfile::tempdir().expect("tempdir b");
 
+    let materialisations_a = Arc::new(AtomicUsize::new(0));
+    let materialisations_b = Arc::new(AtomicUsize::new(0));
     let (a, b) = tokio::join!(
-        colliding_flow("slot.a", base_a.path().to_path_buf())
-            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()),
-        colliding_flow("slot.a", base_b.path().to_path_buf())
-            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()),
+        failing_materialization_flow(
+            "resource.a",
+            base_a.path().to_path_buf(),
+            materialisations_a.clone()
+        )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()),
+        failing_materialization_flow(
+            "resource.b",
+            base_b.path().to_path_buf(),
+            materialisations_b.clone()
+        )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()),
     );
 
-    let locator_a = a
-        .err()
-        .and_then(|f| f.run.and_then(|s| s.locator().cloned()))
+    let failure_a = a.err().expect("build a must fail materialisation");
+    let failure_b = b.err().expect("build b must fail materialisation");
+    assert_materialization_failure(&failure_a, &materialisations_a, "resource.a");
+    assert_materialization_failure(&failure_b, &materialisations_b, "resource.b");
+    let locator_a = failure_a
+        .run
+        .as_ref()
+        .and_then(|state| state.locator())
         .expect("build a must carry its locator");
-    let locator_b = b
-        .err()
-        .and_then(|f| f.run.and_then(|s| s.locator().cloned()))
+    let locator_b = failure_b
+        .run
+        .as_ref()
+        .and_then(|state| state.locator())
         .expect("build b must carry its locator");
 
     assert!(locator_a.path().starts_with(base_a.path()));
     assert!(locator_b.path().starts_with(base_b.path()));
+    assert!(locator_a.path().is_dir());
+    assert!(locator_b.path().is_dir());
+    assert_ne!(locator_a.path(), locator_b.path());
 }
 
 /// A successful disk build reports Durable, and the manifest is persisted

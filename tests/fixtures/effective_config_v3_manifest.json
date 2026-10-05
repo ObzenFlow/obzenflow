@@ -1,5 +1,5 @@
 {
-  "journal_schema_version": "15.0",
+  "journal_schema_version": "16.0",
 
   "obzenflow_version": "0.1.0",
   "flow_id": "flow_01J00000000000000000000000",
@@ -50,7 +50,7 @@
     "schema_version": 2,
     "values": [
       {
-        "key_path": "effects.resilience.breaker.minimum_calls",
+        "key_path": "middleware.circuit_breaker.minimum_calls",
         "resolved_for": {
           "kind": "effect",
           "stage": "authorize_payment",
@@ -64,7 +64,7 @@
         "value": 8
       },
       {
-        "key_path": "effects.resilience.breaker.minimum_calls",
+        "key_path": "middleware.circuit_breaker.minimum_calls",
         "resolved_for": {
           "kind": "effect",
           "stage": "authorize_payment",

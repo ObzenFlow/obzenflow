@@ -5,8 +5,8 @@
 //! FLOWIP-115b: end-to-end proof for the hook-bound middleware rails.
 //!
 //! A third-party control middleware declares `SourcePoll`, `Effect`, and
-//! `SinkDelivery` surfaces, is placed by the DSL binder through the public
-//! carrier, rejects one effect protected unit, and observes a live run plus
+//! `SinkDelivery` surfaces, supplies an explicit protected-operation intent for
+//! each attachment, is placed by the DSL binder through the public carrier, rejects one effect protected unit, and observes a live run plus
 //! strict replay of the same archive.
 
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -19,12 +19,12 @@ use obzenflow_adapters::middleware::{
     EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareAttachmentSite,
     MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOverrideKey,
-    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
-    MiddlewareSurfaceKind::SinkDelivery, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
-    ProtectedUnit, ProtectedUnitId, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
-    SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
-    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
-    SourcePollUnitId,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
+    MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
+    SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface, SinkDeliveryTarget,
+    SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx,
+    SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
 use obzenflow_core::event::{
@@ -82,13 +82,19 @@ struct HookProofFamily;
 struct HookProofFactory {
     counters: Arc<HookCounters>,
     reject_effect_value: u64,
+    intent: MiddlewareSurfaceKind,
 }
 
 impl HookProofFactory {
-    fn new(counters: Arc<HookCounters>, reject_effect_value: u64) -> Self {
+    fn new(
+        counters: Arc<HookCounters>,
+        reject_effect_value: u64,
+        intent: MiddlewareSurfaceKind,
+    ) -> Self {
         Self {
             counters,
             reject_effect_value,
+            intent,
         }
     }
 }
@@ -104,6 +110,7 @@ impl MiddlewareFactory for HookProofFactory {
 
     fn declaration(&self) -> MiddlewareDeclaration {
         MiddlewareDeclaration::control(self.label(), vec![SourcePoll, Effect, SinkDelivery])
+            .with_control_intent(self.intent)
     }
 
     fn materialize(
@@ -511,12 +518,12 @@ fn build_flow(
 
             stages: {
                 input = source!(HookInput => hook_source with {
-                    HookProofFactory::new(counters.clone(), 1)
+                    HookProofFactory::new(counters.clone(), 1, SourcePoll)
                 });
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1)) => hook_transform);
+                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with HookProofFactory::new(counters.clone(), 1, Effect) => hook_transform);
                 output = sink!(HookOutput => output_sink with {
-                    HookProofFactory::new(counters.clone(), 1)
+                    HookProofFactory::new(counters.clone(), 1, SinkDelivery)
                 });
             },
 
@@ -828,7 +835,7 @@ async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_repla
 #[test]
 fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let counters = Arc::new(HookCounters::default());
-    let factory = HookProofFactory::new(counters, 1);
+    let factory = HookProofFactory::new(counters.clone(), 1, Effect);
     let config = StageConfig {
         stage_id: StageId::new(),
         name: "validation_probe".to_string(),
@@ -875,7 +882,8 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         protected_unit: &sink_unit,
         authored_site: MiddlewareAttachmentSite::Implementation,
     };
-    assert!(validate_attachment_request(&factory.declaration(), &sink_request).is_ok());
+    let sink_factory = HookProofFactory::new(counters.clone(), 1, SinkDelivery);
+    assert!(validate_attachment_request(&sink_factory.declaration(), &sink_request).is_ok());
 
     let source_surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
         stage_id: config.stage_id,
@@ -890,7 +898,8 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         protected_unit: &source_unit,
         authored_site: MiddlewareAttachmentSite::Implementation,
     };
-    assert!(validate_attachment_request(&factory.declaration(), &source_request).is_ok());
+    let source_factory = HookProofFactory::new(counters, 1, SourcePoll);
+    assert!(validate_attachment_request(&source_factory.declaration(), &source_request).is_ok());
 }
 
 impl std::fmt::Debug for DeliveryProbe {

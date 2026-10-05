@@ -69,7 +69,10 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
             attachment.family == obzenflow_topology::MiddlewareFamily::CircuitBreaker
         })
         .unwrap();
-    assert_eq!(breaker.configuration["open_for_ms"], 5_000);
+    assert_eq!(
+        breaker.configuration["middleware.circuit_breaker.open_for_ms"],
+        serde_json::json!({ "value": 5_000, "source": "dsl", "scope": "stage:high_volume_source" })
+    );
     assert!(middleware
         .attachments
         .iter()

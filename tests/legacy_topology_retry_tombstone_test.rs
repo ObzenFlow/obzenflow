@@ -28,7 +28,11 @@ fn resolved_retry_attachment_round_trips_with_its_operation() {
             operation: MiddlewareOperation::Effect {
                 effect_type: "payments.authorize".into(),
             },
-            configuration: serde_json::json!({ "max_attempts": 3, "kind": "fixed", "fixed_delay_ms": 100 }),
+            configuration: serde_json::json!({
+                "middleware.retry.max_attempts": { "value": 3, "source": "dsl", "scope": "stage:payments" },
+                "middleware.retry.kind": { "value": "fixed", "source": "dsl", "scope": "stage:payments" },
+                "middleware.retry.fixed_delay_ms": { "value": 100, "source": "dsl", "scope": "stage:payments" },
+            }),
         }],
     };
     let encoded = serde_json::to_value(&expected).unwrap();

@@ -1485,8 +1485,9 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         })
         .unwrap();
     assert_eq!(
-        config.configuration["open_for_ms"], 1,
-        "the real factory snapshot reaches topology"
+        config.configuration["middleware.circuit_breaker.open_for_ms"],
+        serde_json::json!({ "value": 1, "source": "dsl", "scope": "stage:input" }),
+        "the resolved factory configuration and provenance reach topology"
     );
     let journal = handle.system_journal().unwrap();
     let stage_journals = handle.stage_journals();

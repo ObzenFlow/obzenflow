@@ -306,9 +306,15 @@ mod tests {
                                 obzenflow_topology::MiddlewareAuthoredSite::Implementation,
                             operation: obzenflow_topology::MiddlewareOperation::SourcePoll,
                             configuration: serde_json::json!({
-                                "events_per_second": 2.0,
-                                "burst_capacity": 5.0,
-                                "cost_per_attempt": 5.0,
+                                "middleware.rate_limiter.events_per_second": {
+                                    "value": 2.0, "source": "dsl", "scope": "stage:rate_limited"
+                                },
+                                "middleware.rate_limiter.burst_capacity": {
+                                    "value": 5.0, "source": "dsl", "scope": "stage:rate_limited"
+                                },
+                                "middleware.rate_limiter.cost_per_attempt": {
+                                    "value": 5.0, "source": "dsl", "scope": "stage:rate_limited"
+                                },
                             }),
                         }],
                     });
@@ -355,9 +361,18 @@ mod tests {
             rate_limiter.operation,
             obzenflow_topology::MiddlewareOperation::SourcePoll
         );
-        assert_eq!(rate_limiter.configuration["events_per_second"], 2.0);
-        assert_eq!(rate_limiter.configuration["burst_capacity"], 5.0);
-        assert_eq!(rate_limiter.configuration["cost_per_attempt"], 5.0);
+        assert_eq!(
+            rate_limiter.configuration["middleware.rate_limiter.events_per_second"]["value"],
+            2.0
+        );
+        assert_eq!(
+            rate_limiter.configuration["middleware.rate_limiter.burst_capacity"]["value"],
+            5.0
+        );
+        assert_eq!(
+            rate_limiter.configuration["middleware.rate_limiter.cost_per_attempt"]["value"],
+            5.0
+        );
     }
 
     #[tokio::test]

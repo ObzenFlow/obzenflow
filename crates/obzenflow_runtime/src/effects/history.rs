@@ -1661,7 +1661,7 @@ mod tests {
             matches!(
                 error,
                 EffectError::EffectProvenanceMismatch(ref message)
-                    if message.contains("AttemptSettled")
+                    if message.contains("lacks physical-call settlement evidence")
             ),
             "unexpected validation error: {error:?}"
         );
