@@ -1299,6 +1299,7 @@ mod managed_lifecycle_regressions {
             DeliveryMethod, DeliveryPayload, DeliveryResult,
         };
         use obzenflow_core::event::{chain_event::ChainPayload, SystemEvent, SystemPayload};
+        use obzenflow_core::TypedPayload;
         use obzenflow_infra::journal::disk::log_record::LogRecord;
         use std::collections::BTreeSet;
         use std::ffi::OsString;
@@ -1517,11 +1518,18 @@ enabled = {prometheus}
         let mut journal_by_writer = std::collections::HashMap::new();
         let mut event_ids = BTreeSet::new();
         let mut parents = Vec::new();
-        let receipt_output = |receipt: &DeliveryPayload| {
+        let expected_summary = format!(
+            "\n=====================================\n📊 Processing summary:\n   Successfully processed: {} events\n=====================================",
+            count - count / 100
+        );
+        let expected_live_bytes = format!("{expected_summary}\n").len() as u64;
+        let expected_replay_bytes = format!("[replay] {expected_summary}\n").len() as u64;
+        let receipt_output = |receipt: &DeliveryPayload, expected_bytes: u64| {
             assert!(matches!(receipt.result, DeliveryResult::Success { .. }));
             assert_eq!(receipt.delivery_method, DeliveryMethod::ConsoleStdout);
             assert_eq!(receipt.items_delivered, Some(1));
             assert!(receipt.bytes_processed.is_some_and(|bytes| bytes > 0));
+            assert_eq!(receipt.bytes_processed, Some(expected_bytes));
             (
                 receipt.destination.clone(),
                 receipt.delivery_method.clone(),
@@ -1534,6 +1542,7 @@ enabled = {prometheus}
         let mut successes = BTreeSet::new();
         let mut errors = BTreeSet::new();
         let mut summaries = Vec::new();
+        let mut summary_outputs = Vec::new();
         for line in reader.lines() {
             let line = line.unwrap();
             let event = match serde_json::from_str::<LogRecord<obzenflow_core::ChainEvent>>(&line) {
@@ -1566,7 +1575,7 @@ enabled = {prometheus}
             parents.extend(event.causality.parent_ids.iter().copied());
             if let ChainPayload::Delivery(receipt) = &event.payload {
                 assert_eq!(event.flow_context.stage_name, "summary_sink");
-                receipts.push(receipt_output(receipt));
+                receipts.push(receipt_output(receipt, expected_live_bytes));
             }
             if let ChainPayload::Fact(payload) = &event.payload {
                 // Error routing retains the failed parent's source context.
@@ -1582,7 +1591,12 @@ enabled = {prometheus}
                     "error_processor" => {
                         successes.insert(payload["id"].as_u64().unwrap());
                     }
-                    "event_counter" => summaries.push(payload["event_count"].as_u64().unwrap()),
+                    "event_counter" => {
+                        summaries.push(payload["event_count"].as_u64().unwrap());
+                        let summary = prometheus_demo::EventCountState::try_from_event(&event)
+                            .expect("recorded summary has the example's typed schema");
+                        summary_outputs.push(prometheus_demo::format_summary(&summary));
+                    }
                     _ => {}
                 }
             }
@@ -1598,6 +1612,7 @@ enabled = {prometheus}
         );
         assert_eq!(errors, (0..count).step_by(100).collect());
         assert_eq!(summaries, [count - count / 100]);
+        assert_eq!(summary_outputs, std::slice::from_ref(&expected_summary));
         assert_eq!(receipts.len(), 1);
         assert!(
             parents.iter().all(|parent| event_ids.contains(parent)),
@@ -1835,8 +1850,8 @@ enabled = {prometheus}
         assert_final_example_metrics(&replay_model, count);
 
         // Business verification excludes delivery receipts. Inspect the real
-        // console delivery too: changed live configuration must not change the
-        // recorded summary's measured output or claimed delivery.
+        // console delivery too: changed live configuration must preserve the
+        // recorded summary. Replay adds its label, and both frames include LF.
         let replay_runs: Vec<_> = std::fs::read_dir(replay_root.join("flows"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -1847,20 +1862,42 @@ enabled = {prometheus}
             .await
             .unwrap();
         let mut replay_receipts = Vec::new();
+        let mut replay_summaries = Vec::new();
+        let mut replay_summary_outputs = Vec::new();
         while let Some(record) = replay_snapshot.next().await.unwrap() {
             if let RunRecordData::Chain(row) = record.record {
-                if let ChainPayload::Delivery(receipt) = &row.payload {
-                    assert_eq!(
-                        row.envelope.provenance.event.flow_context.stage_name,
-                        "summary_sink"
-                    );
-                    replay_receipts.push(receipt_output(receipt));
+                let event = row.authored();
+                if let ChainPayload::Delivery(receipt) = &event.payload {
+                    assert_eq!(event.flow_context.stage_name, "summary_sink");
+                    replay_receipts.push(receipt_output(receipt, expected_replay_bytes));
+                }
+                if let ChainPayload::Fact(payload) = &event.payload {
+                    if event.flow_context.stage_name == "event_counter" {
+                        assert!(event.processing.status.is_success());
+                        replay_summaries.push(payload["event_count"].as_u64().unwrap());
+                        let summary = prometheus_demo::EventCountState::try_from_event(&event)
+                            .expect("replayed summary has the example's typed schema");
+                        replay_summary_outputs.push(prometheus_demo::format_summary(&summary));
+                    }
                 }
             }
         }
         assert_eq!(
-            replay_receipts, receipts,
+            replay_summaries, summaries,
             "replay must deliver the recorded summary independently of the live source configuration"
+        );
+        assert_eq!(replay_summary_outputs, summary_outputs);
+        let (destination, method, items, live_bytes) = &receipts[0];
+        assert_eq!(*live_bytes, Some(expected_live_bytes));
+        assert_eq!(
+            replay_receipts,
+            [(
+                destination.clone(),
+                method.clone(),
+                *items,
+                Some(expected_replay_bytes),
+            )],
+            "replay preserves delivery metadata and measures the replay label plus the complete summary and LF"
         );
     }
 

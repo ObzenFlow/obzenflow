@@ -168,7 +168,7 @@ fn error_prone_transform() -> TryMapTyped<
 
 /// State for business-level event counting (FLOWIP-080j)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct EventCountState {
+pub(crate) struct EventCountState {
     event_count: usize,
 }
 
@@ -290,7 +290,7 @@ pub(crate) fn flow_definition_with_outage_interval(
     })
 }
 
-fn format_summary(summary: &EventCountState) -> String {
+pub(crate) fn format_summary(summary: &EventCountState) -> String {
     let count = summary.event_count;
     format!(
         concat!(

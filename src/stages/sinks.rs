@@ -82,21 +82,27 @@
 //! | PostgreSQL | `postgres::PostgresSink::builder` (`postgres` feature) |
 //!
 //! TSV is a CSV builder setting, `.tab_delimited()`. [`ConsoleSink::batch_size`]
-//! requires a positive row limit and moves the formatter, destination and replay
-//! labels into isolated table writers. Batches also have a default 64 KiB cap on
+//! requires a positive row limit and moves the formatter and destination into
+//! isolated table writers. Batches also have a default 64 KiB cap on
 //! prepared UTF-8 cell text, configurable through [`TableConsoleSink::batch_byte_limit`].
 //! This excludes rendered table overhead and allocation overhead; an oversized
 //! row is rejected. Thresholds or runtime flush/drain trigger output, with replay
-//! label changes forming another boundary. There is no timed flush guarantee.
+//! provenance changes forming another boundary. There is no timed flush guarantee.
 //!
 //! ## Console sinks
 //!
 //! [`ConsoleSink`] prints events to stdout using a pluggable [`Formatter`].
 //! Built-in formatters include [`DebugFormatter`], [`JsonFormatter`],
 //! [`JsonPrettyFormatter`], and [`TableFormatter`].
-//! Use `.label_replays()` to let the adapter label replay output while keeping
-//! the formatter independent of runtime provenance. The adapter measures bytes
-//! and reports I/O failures; [`ConsoleOutput::Empty`] is an explicit no-op.
+//! Human-readable [`ConsoleOutput::Text`] is automatically labelled during replay
+//! and resume reconstruction. Formatters receive only application input.
+//! [`JsonFormatter`] and [`JsonPrettyFormatter`] use [`ConsoleOutput::Verbatim`]
+//! to preserve their encoded body without presentation labels. Custom formatters
+//! can use the same representation for output that must retain its exact body.
+//! Both representations retain the console's trailing newline. String-returning
+//! formatter functions produce human-readable text.
+//! The adapter owns stdout/stderr, measures successful bytes, and reports I/O
+//! failures; [`ConsoleOutput::Empty`] is an explicit no-op.
 //!
 //! ## CSV sinks
 //!

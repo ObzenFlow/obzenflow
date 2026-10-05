@@ -60,10 +60,20 @@ impl OutputDestination {
     }
 }
 
-/// Immediate formatting result. Empty is an intentional no-op with no I/O.
+/// A formatted frame and its presentation contract.
+///
+/// `Text` and `Verbatim` append one line feed and flush the destination, even
+/// for an empty body. Their receipt byte count includes that line feed and any
+/// framework replay label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsoleOutput {
+    /// Human-readable text. The console prefixes reconstructed frames with
+    /// `[replay] `, once per frame, using runtime delivery provenance.
     Text(String),
+    /// Preserve the body exactly, without replay annotations. Use for structured
+    /// output such as JSON or another format whose bytes belong to the formatter.
+    Verbatim(String),
+    /// Intentional zero-item no-op: no write, line feed, or flush.
     Empty,
 }
 
@@ -116,7 +126,7 @@ where
     T: Serialize,
 {
     fn format(&self, item: &T) -> Result<ConsoleOutput, ConsoleFormatError> {
-        Ok(ConsoleOutput::Text(serde_json::to_string(item)?))
+        Ok(ConsoleOutput::Verbatim(serde_json::to_string(item)?))
     }
 }
 
@@ -129,7 +139,7 @@ where
     T: Serialize,
 {
     fn format(&self, item: &T) -> Result<ConsoleOutput, ConsoleFormatError> {
-        Ok(ConsoleOutput::Text(serde_json::to_string_pretty(item)?))
+        Ok(ConsoleOutput::Verbatim(serde_json::to_string_pretty(item)?))
     }
 }
 
@@ -529,10 +539,12 @@ fn is_wide(code: u32) -> bool {
 }
 
 /// Typed console sink with a pluggable `Formatter`.
+///
+/// Human-readable frames are automatically labelled during reconstruction.
+/// [`ConsoleOutput::Verbatim`] preserves formatter-owned bodies, including JSON.
 pub struct ConsoleSink<T, F = JsonFormatter> {
     formatter: F,
     destination: OutputDestination,
-    label_replays: bool,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -544,7 +556,6 @@ where
         Self {
             formatter: self.formatter.clone(),
             destination: self.destination,
-            label_replays: self.label_replays,
             _phantom: PhantomData,
         }
     }
@@ -555,7 +566,6 @@ impl<T, F> std::fmt::Debug for ConsoleSink<T, F> {
         f.debug_struct("ConsoleSink")
             .field("type", &std::any::type_name::<T>())
             .field("destination", &self.destination)
-            .field("label_replays", &self.label_replays)
             .finish()
     }
 }
@@ -570,7 +580,6 @@ where
         Self {
             formatter,
             destination: OutputDestination::Stdout,
-            label_replays: false,
             _phantom: PhantomData,
         }
     }
@@ -589,7 +598,8 @@ where
     /// row larger than the cap is rejected, even if display formatting clips it.
     ///
     /// A full batch prints immediately. Runtime flush/drain prints a final
-    /// partial batch; replay-labelled batches also flush at provenance changes.
+    /// partial batch. Replayed and live rows always use separate frames, so a
+    /// provenance change flushes the preceding batch before buffering the row.
     /// There is no timer, so a continuing stream below its limits can retain rows.
     pub fn batch_size(self, rows: usize) -> Result<TableConsoleSink<T, E>, ConsoleConfigError> {
         if rows == 0 {
@@ -598,7 +608,6 @@ where
         Ok(TableConsoleSink {
             formatter: self.formatter,
             destination: self.destination,
-            label_replays: self.label_replays,
             max_rows: rows,
             max_bytes: DEFAULT_TABLE_BATCH_BYTE_LIMIT,
         })
@@ -606,12 +615,6 @@ where
 }
 
 impl<T, F> ConsoleSink<T, F> {
-    /// Prefix reconstructed deliveries with `[replay] ` without changing their payloads.
-    pub fn label_replays(mut self) -> Self {
-        self.label_replays = true;
-        self
-    }
-
     pub fn to_stderr(mut self) -> Self {
         self.destination = OutputDestination::Stderr;
         self
@@ -635,7 +638,6 @@ where
         Ok(ConsoleWriter {
             formatter: self.formatter.clone(),
             destination: self.destination,
-            label_replays: self.label_replays,
             poisoned: false,
             _phantom: PhantomData,
             #[cfg(test)]
@@ -648,7 +650,6 @@ where
 pub struct ConsoleWriter<T, F> {
     formatter: F,
     destination: OutputDestination,
-    label_replays: bool,
     poisoned: bool,
     _phantom: PhantomData<fn() -> T>,
     #[cfg(test)]
@@ -676,15 +677,16 @@ where
                 SinkOperationError::validation(error.to_string()),
             )
         })?;
-        let outcome = match output {
-            ConsoleOutput::Empty => {
-                SinkTerminalOutcome::success_via(DeliveryMethod::Noop, Some(0)).with_items(0)
-            }
+        let frame = match output {
             ConsoleOutput::Text(frame) => {
-                let frame = label_frame(
-                    frame,
-                    self.label_replays && context.delivery().is_replayed(),
-                );
+                Some(label_frame(frame, context.delivery().is_replayed()))
+            }
+            ConsoleOutput::Verbatim(frame) => Some(frame),
+            ConsoleOutput::Empty => None,
+        };
+        let outcome = match frame {
+            None => SinkTerminalOutcome::success_via(DeliveryMethod::Noop, Some(0)).with_items(0),
+            Some(frame) => {
                 #[cfg(test)]
                 let result = match &self.output {
                     Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
@@ -726,17 +728,10 @@ fn label_frame(frame: String, replayed: bool) -> String {
 pub struct TableConsoleSink<T, E> {
     formatter: TableFormatter<T, E>,
     destination: OutputDestination,
-    label_replays: bool,
     max_rows: usize,
     max_bytes: usize,
 }
 impl<T, E> TableConsoleSink<T, E> {
-    /// Label reconstructed frames and keep replayed and live rows in separate frames.
-    pub fn label_replays(mut self) -> Self {
-        self.label_replays = true;
-        self
-    }
-
     pub fn to_stderr(mut self) -> Self {
         self.destination = OutputDestination::Stderr;
         self
@@ -757,7 +752,6 @@ impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TableConsoleSink")
             .field("formatter", &self.formatter)
-            .field("label_replays", &self.label_replays)
             .field("max_rows", &self.max_rows)
             .field("max_bytes", &self.max_bytes)
             .finish()
@@ -767,7 +761,6 @@ impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
 pub struct TableConsoleWriter<T, E> {
     formatter: TableFormatter<T, E>,
     destination: OutputDestination,
-    label_replays: bool,
     replayed: bool,
     rows: Vec<(Vec<String>, PendingSinkInput)>,
     prepared_bytes: usize,
@@ -793,7 +786,6 @@ where
         Ok(TableConsoleWriter {
             formatter: self.formatter.clone(),
             destination: self.destination,
-            label_replays: self.label_replays,
             replayed: false,
             rows: Vec::new(),
             prepared_bytes: 0,
@@ -824,7 +816,7 @@ impl<T, E> TableConsoleWriter<T, E> {
             &borrowed,
             self.formatter.max_col_width,
         );
-        let frame = label_frame(frame, self.label_replays && self.replayed);
+        let frame = label_frame(frame, self.replayed);
         #[cfg(test)]
         let result = match &self.output {
             Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
@@ -890,7 +882,7 @@ where
         let replayed = context.delivery().is_replayed();
         if self.rows.len() >= self.max_rows
             || bytes > self.max_bytes.saturating_sub(self.prepared_bytes)
-            || (self.label_replays && self.replayed != replayed)
+            || self.replayed != replayed
         {
             receipts = self
                 .flush_pending()
@@ -966,10 +958,31 @@ mod tests {
         )
         .into()
     }
+    fn input_with_provenance(value: &str, replay_context: bool) -> DeliveredRecord<ChainPayload> {
+        let mut event = input(value).authored();
+        if replay_context {
+            event.replay_context = Some(obzenflow_core::event::provenance::ReplayContext {
+                original_event_id: event.id,
+                original_flow_id: "archived-flow".into(),
+                original_stage_id: StageId::new(),
+            });
+        }
+        JournalRecord::new(JournalWriterId::new(), event).into()
+    }
+    fn delivery_cases() -> [(MiddlewareExecutionScope, bool, bool); 4] {
+        [
+            (Default::default(), false, false),
+            (MiddlewareExecutionScope::StrictReplayHandler, false, true),
+            (MiddlewareExecutionScope::ResumeHandler, false, true),
+            (Default::default(), true, true),
+        ]
+    }
     fn text(output: ConsoleOutput) -> String {
         match output {
             ConsoleOutput::Text(value) => value,
-            ConsoleOutput::Empty => panic!("expected text"),
+            ConsoleOutput::Verbatim(_) | ConsoleOutput::Empty => {
+                panic!("expected human-readable text")
+            }
         }
     }
     #[derive(Default)]
@@ -1050,8 +1063,8 @@ mod tests {
             value: "hello".into(),
         };
         assert_eq!(
-            text(JsonFormatter.format(&item).unwrap()),
-            r#"{"value":"hello"}"#
+            JsonFormatter.format(&item).unwrap(),
+            ConsoleOutput::Verbatim(r#"{"value":"hello"}"#.into())
         );
         assert_eq!(
             text(DebugFormatter.format(&item).unwrap()),
@@ -1103,63 +1116,149 @@ mod tests {
                 Ok(ConsoleOutput::Empty)
             }
         }
-        let connector = ConsoleSink::<TestEvent, _>::new(Empty).label_replays();
-        let output = Arc::new(Mutex::new(OutputState::default()));
-        let mut adapter = immediate(&connector, output.clone()).await;
-        let report = adapter
-            .consume_committed_report(
-                input("ignored"),
-                MiddlewareExecutionScope::StrictReplayHandler,
-            )
-            .await
-            .unwrap();
-        assert_eq!(report.primary.delivery_method, DeliveryMethod::Noop);
-        assert_eq!(report.primary.items_delivered, Some(0));
-        assert_eq!(report.primary.bytes_processed, Some(0));
-        assert!(report.commit_receipts.is_empty());
-        assert!(output.lock().unwrap().bytes.is_empty());
-        assert_eq!(output.lock().unwrap().writes, 0);
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, _) in delivery_cases() {
+                let mut connector = ConsoleSink::<TestEvent, _>::new(Empty);
+                connector.destination = destination;
+                let output = Arc::new(Mutex::new(OutputState::default()));
+                let mut adapter = immediate(&connector, output.clone()).await;
+                let report = adapter
+                    .consume_committed_report(
+                        input_with_provenance("ignored", replay_context),
+                        scope,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(report.primary.delivery_method, DeliveryMethod::Noop);
+                assert_eq!(report.primary.items_delivered, Some(0));
+                assert_eq!(report.primary.bytes_processed, Some(0));
+                assert!(report.commit_receipts.is_empty());
+                let state = output.lock().unwrap();
+                assert!(state.bytes.is_empty());
+                assert_eq!((state.writes, state.flushes), (0, 0));
+            }
+        }
     }
 
     #[tokio::test]
-    async fn immediate_replay_labels_are_opt_in_and_keep_destination_and_byte_evidence() {
-        for labelled in [false, true] {
-            let connector = ConsoleSink::new(|event: &TestEvent| event.value.clone()).to_stderr();
-            let connector = if labelled {
-                connector.label_replays()
-            } else {
-                connector
-            };
-            let output = Arc::new(Mutex::new(OutputState::default()));
-            let mut writer = immediate(&connector, output.clone()).await;
-            let archived = writer
-                .consume_committed_report(
-                    input("archived"),
-                    MiddlewareExecutionScope::StrictReplayHandler,
-                )
-                .await
-                .unwrap();
-            let live = writer
-                .consume_committed_report(input("fresh"), Default::default())
-                .await
-                .unwrap();
-            let expected = if labelled {
-                "[replay] archived\nfresh\n"
-            } else {
-                "archived\nfresh\n"
-            };
-            assert_eq!(output.lock().unwrap().bytes, expected.as_bytes());
-            assert_eq!(
-                archived.primary.delivery_method,
-                DeliveryMethod::ConsoleStderr
-            );
-            assert_eq!(
-                archived.primary.bytes_processed,
-                Some(if labelled { 18 } else { 9 })
-            );
-            assert_eq!(archived.primary.items_delivered, Some(1));
-            assert_eq!(live.primary.delivery_method, DeliveryMethod::ConsoleStderr);
-            assert_eq!(live.primary.bytes_processed, Some(6));
+    async fn human_frames_automatically_label_replay_and_measure_actual_bytes() {
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, replayed) in delivery_cases() {
+                for body in ["first\nsecond\n", "", r#"{"value":"human text"}"#] {
+                    let mut connector = ConsoleSink::new(|event: &TestEvent| event.value.clone());
+                    connector.destination = destination;
+                    let output = Arc::new(Mutex::new(OutputState::default()));
+                    let mut writer = immediate(&connector, output.clone()).await;
+                    let report = writer
+                        .consume_committed_report(
+                            input_with_provenance(body, replay_context),
+                            scope,
+                        )
+                        .await
+                        .unwrap();
+                    let expected = if replayed {
+                        format!("[replay] {body}\n")
+                    } else {
+                        format!("{body}\n")
+                    };
+                    assert_eq!(
+                        report.primary.delivery_method,
+                        destination.delivery_method()
+                    );
+                    assert_eq!(report.primary.bytes_processed, Some(expected.len() as u64));
+                    assert_eq!(report.primary.items_delivered, Some(1));
+                    assert!(report.commit_receipts.is_empty());
+                    {
+                        let state = output.lock().unwrap();
+                        assert_eq!(state.bytes, expected.as_bytes());
+                        assert_eq!(state.flushes, 1, "multiline text is one frame");
+                    }
+                    // A reconstructed frame must not leave a label on the next live input.
+                    let live = writer
+                        .consume_committed_report(input("fresh"), Default::default())
+                        .await
+                        .unwrap();
+                    assert_eq!(live.primary.bytes_processed, Some(6));
+                    assert_eq!(
+                        output.lock().unwrap().bytes,
+                        format!("{expected}fresh\n").as_bytes()
+                    );
+                }
+            }
+        }
+    }
+
+    async fn assert_json_frames<F: Formatter<TestEvent> + 'static>(formatter: F, body: &str) {
+        let expected = format!("{body}\n");
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, _) in delivery_cases() {
+                let mut connector = ConsoleSink::new(formatter.clone());
+                connector.destination = destination;
+                let output = Arc::new(Mutex::new(OutputState::default()));
+                let mut writer = immediate(&connector, output.clone()).await;
+                let report = writer
+                    .consume_committed_report(input_with_provenance("héllo", replay_context), scope)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    report.primary.delivery_method,
+                    destination.delivery_method()
+                );
+                assert_eq!(report.primary.bytes_processed, Some(expected.len() as u64));
+                assert_eq!(report.primary.items_delivered, Some(1));
+                assert!(report.commit_receipts.is_empty());
+                let state = output.lock().unwrap();
+                assert_eq!(state.bytes, expected.as_bytes());
+                assert_eq!(state.flushes, 1);
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&state.bytes).unwrap(),
+                    serde_json::json!({"value": "héllo"})
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn json_frames_preserve_exact_live_and_replay_bytes() {
+        assert_json_frames(JsonFormatter, r#"{"value":"héllo"}"#).await;
+        assert_json_frames(JsonPrettyFormatter, "{\n  \"value\": \"héllo\"\n}").await;
+    }
+
+    #[tokio::test]
+    async fn custom_verbatim_preserves_literal_labels_newlines_and_empty_bodies() {
+        #[derive(Clone)]
+        struct Verbatim;
+        impl Formatter<TestEvent> for Verbatim {
+            fn format(&self, event: &TestEvent) -> Result<ConsoleOutput, ConsoleFormatError> {
+                Ok(ConsoleOutput::Verbatim(event.value.clone()))
+            }
+        }
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, _) in delivery_cases() {
+                for body in ["[replay] literal\nsecond line\n", "", r#"{"raw":true}"#] {
+                    let mut connector = ConsoleSink::new(Verbatim);
+                    connector.destination = destination;
+                    let output = Arc::new(Mutex::new(OutputState::default()));
+                    let mut writer = immediate(&connector, output.clone()).await;
+                    let report = writer
+                        .consume_committed_report(
+                            input_with_provenance(body, replay_context),
+                            scope,
+                        )
+                        .await
+                        .unwrap();
+                    let expected = format!("{body}\n");
+                    assert_eq!(
+                        report.primary.delivery_method,
+                        destination.delivery_method()
+                    );
+                    assert_eq!(report.primary.bytes_processed, Some(expected.len() as u64));
+                    assert_eq!(report.primary.items_delivered, Some(1));
+                    let state = output.lock().unwrap();
+                    assert_eq!(state.bytes, expected.as_bytes());
+                    assert_eq!(state.flushes, 1);
+                }
+            }
         }
     }
 
@@ -1204,59 +1303,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batched_replay_labels_preserve_conversion_and_separate_live_frames() {
-        for label_before_batching in [false, true] {
+    async fn batched_tables_separate_replayed_and_live_frames_in_both_directions() {
+        for replay_first in [false, true] {
             let connector =
                 ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
                     vec![event.value.clone()]
                 }))
-                .to_stderr();
-            let connector = if label_before_batching {
-                connector.label_replays().batch_size(256).unwrap()
+                .to_stderr()
+                .batch_size(256)
+                .unwrap();
+            let (first_scope, second_scope) = if replay_first {
+                (MiddlewareExecutionScope::ResumeHandler, Default::default())
             } else {
-                connector.batch_size(256).unwrap().label_replays()
+                (Default::default(), MiddlewareExecutionScope::ResumeHandler)
             };
             let output = Arc::new(Mutex::new(OutputState::default()));
             let mut writer = table(&connector, output.clone()).await;
-            let replay = input("archived");
-            let replay_ref = replay.commitment();
-            let live = input("fresh");
-            let live_ref = live.commitment();
+            let first_input = input("first");
+            let first_ref = first_input.commitment();
+            let second_input = input("second");
+            let second_ref = second_input.commitment();
             let first = writer
-                .consume_committed_report(replay, MiddlewareExecutionScope::ResumeHandler)
+                .consume_committed_report(first_input, first_scope)
                 .await
                 .unwrap();
             assert!(first.commit_receipts.is_empty());
             assert!(output.lock().unwrap().bytes.is_empty());
             let transition = writer
-                .consume_committed_report(live, Default::default())
+                .consume_committed_report(second_input, second_scope)
                 .await
                 .unwrap();
             assert_eq!(transition.commit_receipts.len(), 1);
-            assert_eq!(transition.commit_receipts[0].subject.input, replay_ref);
+            assert_eq!(transition.commit_receipts[0].subject.input, first_ref);
             assert_eq!(
                 transition.commit_receipts[0].payload.delivery_method,
                 DeliveryMethod::ConsoleStderr
             );
-            let replay_frame_length = {
+            assert_eq!(
+                transition.commit_receipts[0].payload.items_delivered,
+                Some(1)
+            );
+            assert_eq!(transition.commit_receipts[0].payload.bytes_processed, None);
+            let first_frame_length = {
                 let state = output.lock().unwrap();
                 let frame = std::str::from_utf8(&state.bytes).unwrap();
-                assert!(frame.starts_with("[replay] "));
-                assert!(frame.contains("archived"));
-                assert!(!frame.contains("fresh"));
+                assert_eq!(frame.starts_with("[replay] "), replay_first);
+                assert!(frame.contains("first"));
+                assert!(!frame.contains("second"));
                 state.bytes.len()
             };
             let completion = writer.drain_report().await.unwrap();
             assert_eq!(completion.commit_receipts.len(), 1);
-            assert_eq!(completion.commit_receipts[0].subject.input, live_ref);
+            assert_eq!(completion.commit_receipts[0].subject.input, second_ref);
             assert_eq!(
                 completion.commit_receipts[0].payload.delivery_method,
                 DeliveryMethod::ConsoleStderr
             );
+            assert_eq!(
+                completion.commit_receipts[0].payload.items_delivered,
+                Some(1)
+            );
+            assert_eq!(completion.commit_receipts[0].payload.bytes_processed, None);
             let state = output.lock().unwrap();
-            let live_frame = std::str::from_utf8(&state.bytes[replay_frame_length..]).unwrap();
-            assert!(!live_frame.contains("[replay]"));
-            assert!(live_frame.contains("fresh"));
+            let second_frame = std::str::from_utf8(&state.bytes[first_frame_length..]).unwrap();
+            assert_eq!(second_frame.starts_with("[replay] "), !replay_first);
+            assert!(second_frame.contains("second"));
+            assert!(!second_frame.contains("first"));
+            let audit = completion.audit_payload.unwrap();
+            assert_eq!(audit.bytes_processed, Some(second_frame.len() as u64));
+            assert_eq!(audit.items_delivered, Some(1));
             assert_eq!(state.flushes, 2);
         }
     }
@@ -1266,7 +1381,6 @@ mod tests {
         let connector = ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
             vec![event.value.clone()]
         }))
-        .label_replays()
         .batch_size(10)
         .unwrap()
         .batch_byte_limit(4)

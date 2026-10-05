@@ -128,9 +128,9 @@ pub fn assemble_flow(
         let web_orders_feed = sources::ValuesSource::new(scripted_web_orders);
         let store_orders_feed = sources::ValuesSource::new(scripted_store_orders);
         let validate_order = validation::ValidateOrder;
-        let shipping_handoff = ConsoleSink::new(console::format_shipping).label_replays();
-        let record_cancelled = ConsoleSink::new(console::format_cancelled).label_replays();
-        let record_unavailable = ConsoleSink::new(console::format_unavailable).label_replays();
+        let shipping_handoff = ConsoleSink::new(console::format_shipping);
+        let record_cancelled = ConsoleSink::new(console::format_cancelled);
+        let record_unavailable = ConsoleSink::new(console::format_unavailable);
 
         Ok(flow! {
             name: "payment_gateway_resilience_demo",
@@ -226,8 +226,7 @@ pub fn assemble_flow(
                 // and gateway declines). `InvalidOrder` and `PaymentDeclined`
                 // stay journal-recorded facts with no dedicated sink; this
                 // delivery carries the lifecycle consequence wherever it
-                // originated. Replay labelling is console configuration, never
-                // a reason to skip the write.
+                // originated. The console adapter labels reconstructed output.
                 cancelled_orders = sink!(CancelledOrder => record_cancelled, delivery: idempotent);
 
                 // Unavailable-authorization destination: failed gateway call or

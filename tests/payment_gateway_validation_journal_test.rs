@@ -221,7 +221,7 @@ mod shipping_adapter {
             serde_json::to_value(authorized).expect("serialize payment"),
         );
         let stage_id = StageId::new();
-        let connector = ConsoleSink::new(format_shipping).label_replays();
+        let connector = ConsoleSink::new(format_shipping);
         let writer = connector
             .open(SinkWriterInitContext::new(
                 stage_id,
