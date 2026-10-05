@@ -32,9 +32,9 @@ pub mod utils;
 pub use causal::{CausalCoordinate, CausalError, CausalFrontier, JournalClock, JournalCommitRef};
 pub use chain_event::{
     ChainEvent, ChainEventFactory, ChainPayload, CircuitBreakerAttemptSettledEventParams,
-    CircuitBreakerOpenedEventParams, CircuitBreakerRecoveryCompletedEventParams,
-    CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
-    CorrelationContext, SourceContractEventParams,
+    CircuitBreakerOpenedEventParams, CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams,
+    ConsumptionProgressEventParams, CorrelationContext, RecoveryCompletedEventParams,
+    SourceContractEventParams,
 };
 pub use envelope::EventEnvelope;
 pub use journal_event::JournalEvent;

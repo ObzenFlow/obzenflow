@@ -11,7 +11,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{rate_limit_with_burst, CircuitBreaker};
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
@@ -271,10 +271,11 @@ fn stage_id_with_middleware(
     topology
         .stages()
         .find(|stage| {
-            stage
-                .middleware
-                .as_ref()
-                .is_some_and(|m| m.stack.iter().any(|name| name == middleware_name))
+            stage.middleware.as_ref().is_some_and(|m| {
+                m.attachments
+                    .iter()
+                    .any(|attachment| attachment.label == middleware_name)
+            })
         })
         .map(|stage| StageIdExt::from_topology_id(stage.id))
         .ok_or_else(|| anyhow!("no stage found with middleware '{middleware_name}'"))
@@ -372,11 +373,11 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
         journals: disk_journals(unique_journal_dir("metrics_flow_id_labels")),
 
         stages: {
-            src = source!(MetricEvent => source with [
+            src = source!(MetricEvent => source with {
                 // No summaries/threshold crossings required; utilization is derived from bucket state.
-                rate_limit_with_burst(10_000.0, 10_000.0),
-                CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
-            ]);
+                rate_limit(10_000.0).burst_capacity(10_000.0),
+                circuit_breaker().consecutive_failures(10)
+            });
             trans = transform!(MetricEvent -> MetricEvent => transform);
             snk = sink!(MetricEvent => sink);
         },
@@ -539,9 +540,9 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
             // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!(MetricEvent => source with [
-                CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
-            ]);
+            src = source!(MetricEvent => source with {
+                circuit_breaker().consecutive_failures(10)
+            });
             // Drop downstream data outputs to keep journaling light; the circuit breaker
             // still observes successful source polling and emits a summary at 1000.
             trans = transform!(MetricEvent -> MetricEvent => transform);
@@ -622,13 +623,11 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         stages: {
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
             // First poll succeeds, second poll fails (Timeout), opening the breaker.
-            src = source!(MetricEvent => source with [
-                CircuitBreaker::builder()
+            src = source!(MetricEvent => source with {
+                circuit_breaker()
                     .consecutive_failures(1)
                     .open_for(Duration::from_millis(1))
-                    .build()
-                    .expect("source breaker")
-            ]);
+            });
             trans = transform!(MetricEvent -> MetricEvent => transform);
             snk = sink!(MetricEvent => sink);
         },
@@ -755,15 +754,13 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
         journals: disk_journals(unique_journal_dir("metrics_source_rate_based_cb")),
 
         stages: {
-            src = source!(MetricEvent => source with [
-                CircuitBreaker::builder()
+            src = source!(MetricEvent => source with {
+                circuit_breaker()
                     .count_window(2)
                     .minimum_calls(2)
                     .failure_rate_threshold(0.5)
                     .open_for(Duration::from_millis(1))
-                    .build()
-                    .expect("rate breaker")
-            ]);
+            });
             trans = transform!(MetricEvent -> MetricEvent => transform);
             snk = sink!(MetricEvent => sink);
         },
@@ -840,12 +837,12 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
         journals: disk_journals(unique_journal_dir("metrics_rl_exporter")),
 
         stages: {
-            src = source!(MetricEvent => source with [
+            src = source!(MetricEvent => source with {
                 // Force deterministic backpressure: small burst + low rate so at least
                 // one event must block while still allowing the run to complete
                 // within the metrics wait window on slower CI hosts.
-                rate_limit_with_burst(200.0, 1.0)
-            ]);
+                rate_limit(200.0).burst_capacity(1.0)
+            });
             // Drop downstream data outputs to keep journaling light; rate limiting
             // metrics are emitted from the source stage.
             trans = transform!(MetricEvent -> MetricEvent => transform);
@@ -1005,9 +1002,9 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
         journals: disk_journals(unique_journal_dir("metrics_cb_no_summary")),
 
         stages: {
-            src = source!(MetricEvent => source with [
-                CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
-            ]);
+            src = source!(MetricEvent => source with {
+                circuit_breaker().consecutive_failures(10)
+            });
             trans = transform!(MetricEvent -> MetricEvent => transform);
             snk = sink!(MetricEvent => sink);
         },
@@ -1081,11 +1078,11 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
         journals: disk_journals(unique_journal_dir("metrics_rl_no_summary")),
 
         stages: {
-            src = source!(MetricEvent => source with [
+            src = source!(MetricEvent => source with {
                 // High rate + high burst ensures no time-based (10s) or count-based (1000)
                 // WindowUtilization summary is *not* required for correct totals or utilization.
-                rate_limit_with_burst(10_000.0, 10_000.0)
-            ]);
+                rate_limit(10_000.0).burst_capacity(10_000.0)
+            });
             trans = transform!(MetricEvent -> MetricEvent => transform);
             snk = sink!(MetricEvent => sink);
         },

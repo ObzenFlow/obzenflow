@@ -2,25 +2,40 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Compatibility fixture for the independently published topology 0.5.1
-//! document. Runtime production of this field is retired; the published serde
-//! type must still round-trip an older document until the 119-series versioned
-//! topology boundary removes it.
+//! The current topology contract rejects the retired ordered-stack representation.
 
 #[test]
-fn legacy_topology_retry_member_round_trips_without_runtime_authority() {
-    let legacy = serde_json::json!({
+fn retired_topology_retry_member_is_rejected() {
+    let retired = serde_json::json!({
         "stack": ["retry"],
-        "retry": {
-            "max_attempts": 3,
-            "backoff": "fixed",
-            "base_delay_ms": 100
-        }
+        "retry": { "max_attempts": 3, "backoff": "fixed", "base_delay_ms": 100 }
     });
+    assert!(serde_json::from_value::<obzenflow_topology::MiddlewareInfo>(retired).is_err());
+}
 
-    let decoded: obzenflow_topology::MiddlewareInfo =
-        serde_json::from_value(legacy.clone()).expect("0.5.1 retry document deserialises");
-    let encoded = serde_json::to_value(decoded).expect("0.5.1 retry document serialises");
-
-    assert_eq!(encoded, legacy);
+#[test]
+fn resolved_retry_attachment_round_trips_with_its_operation() {
+    use obzenflow_topology::{
+        MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareFamily, MiddlewareInfo,
+        MiddlewareOperation,
+    };
+    let expected = MiddlewareInfo {
+        attachments: vec![MiddlewareAttachmentInfo {
+            key: "payments:authorize:retry".into(),
+            label: "retry".into(),
+            family: MiddlewareFamily::Retry,
+            authored_site: MiddlewareAuthoredSite::Implementation,
+            operation: MiddlewareOperation::Effect {
+                effect_type: "payments.authorize".into(),
+            },
+            configuration: serde_json::json!({ "max_attempts": 3, "kind": "fixed", "fixed_delay_ms": 100 }),
+        }],
+    };
+    let encoded = serde_json::to_value(&expected).unwrap();
+    assert!(encoded.get("stack").is_none());
+    assert!(encoded.get("retry").is_none());
+    assert_eq!(
+        serde_json::from_value::<MiddlewareInfo>(encoded).unwrap(),
+        expected
+    );
 }

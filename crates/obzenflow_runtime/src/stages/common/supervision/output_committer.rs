@@ -984,7 +984,9 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
     matches!(
         &event.payload,
         ChainPayload::Execution(
-            ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_)
+            ExecutionPayload::CircuitBreaker(_)
+                | ExecutionPayload::RateLimiter(_)
+                | ExecutionPayload::Recovery(_)
         )
     )
 }

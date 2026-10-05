@@ -283,8 +283,8 @@ fn renamed_facade_macros_and_constructors_compile() {
     let _ = of::flow::async_source!(Fact => placeholder!());
     let _ = infinite_source!(Fact => placeholder!());
     let _ = of::flow::async_infinite_source!(Fact => placeholder!());
-    let _ = effectful_transform!(Fact -> Fact => Pure, observers: []);
-    let _ = of::flow::effectful_stateful!(Fact -> Fact => Pure, observers: []);
+    let _ = effectful_transform!(Fact -> Fact => Pure);
+    let _ = of::flow::effectful_stateful!(Fact -> Fact => Pure);
     let _ = of::flow::transform!(Fact -> Fact => placeholder!());
     let _ = of::flow::stateful!(Fact -> Fact => placeholder!());
     let _ = of::flow::sink!(Fact => placeholder!());

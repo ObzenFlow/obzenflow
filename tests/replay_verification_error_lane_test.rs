@@ -123,9 +123,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
             stages: {
                 numbers = source!(Input => numbers_handler);
                 gate = effectful_transform!(
-                    Input -> { Accepted } => gate_handler,
-                    observers: []
-                );
+                    Input -> { Accepted } => gate_handler);
                 out = sink!(Accepted => out_handler);
             },
 

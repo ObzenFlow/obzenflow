@@ -994,7 +994,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_family_cannot_occupy_source_and_ingress_control_positions() {
+    async fn duplicate_limiters_resolving_to_hosted_ingress_are_rejected() {
         use obzenflow_adapters::middleware::rate_limit;
 
         let ingress = http_ingress(
@@ -1013,8 +1013,7 @@ mod tests {
 
                 stages: {
                     source = async_infinite_source!(
-                        PlacementPayload => hosted_source with [rate_limit(10.0)],
-                        ingress with rate_limit(10.0)
+                        PlacementPayload => hosted_source with { rate_limit(10.0), rate_limit(10.0) }
                     );
                     sink = sink!(PlacementPayload => placeholder!());
                 },
@@ -1034,23 +1033,18 @@ mod tests {
             failure.run.is_none(),
             "validation must precede substrate selection"
         );
-        let rendered = format!("{:?}", failure.error);
-        assert!(
-            matches!(
-                failure.error,
-                obzenflow_dsl::dsl::FlowBuildError::DuplicateStageMiddlewareFamily {
-                    stage_name,
-                    family_label: "rate_limiter",
-                    first_position: "source with",
-                    second_position: "ingress with",
-                } if stage_name == "source"
-            ),
-            "unexpected duplicate-position failure: {rendered}"
-        );
+        assert!(matches!(
+            failure.error,
+            obzenflow_dsl::dsl::FlowBuildError::MiddlewarePlan(_)
+        ));
+        let message = failure.error.to_string();
+        assert!(message.contains("source"), "{message}");
+        assert!(message.contains("rate_limiter"), "{message}");
+        assert!(message.contains("duplicate"), "{message}");
     }
 
     #[tokio::test]
-    async fn hosted_source_rejects_a_lone_drain_rate_limiter() {
+    async fn hosted_source_places_its_limiter_before_ingress_enqueue() {
         use obzenflow_adapters::middleware::rate_limit;
 
         let ingress = http_ingress(
@@ -1069,7 +1063,7 @@ mod tests {
 
                 stages: {
                     source = async_infinite_source!(
-                        PlacementPayload => hosted_source with [rate_limit(10.0)]
+                        PlacementPayload => hosted_source with rate_limit(10.0)
                     );
                     sink = sink!(PlacementPayload => placeholder!());
                 },
@@ -1082,17 +1076,23 @@ mod tests {
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await;
 
-        let failure = built.err().expect("a hosted drain limiter must fail");
-        match failure.error {
-            obzenflow_dsl::dsl::FlowBuildError::StageCreationFailed { stage_name, source } => {
-                assert_eq!(stage_name, "source");
-                assert_eq!(
-                    source.to_string(),
-                    "stage 'source' hosts an ingress route; attach its rate limiter as 'ingress with <policy>', not to the post-admission drain in 'with [...]' (FLOWIP-115s)"
-                );
-            }
-            other => panic!("expected hosted-drain stage failure, got {other:?}"),
-        }
+        let flow = built.expect("hosted context resolves the limiter to ingress");
+        let topology = flow.topology().expect("flow topology");
+        let source = topology
+            .stages()
+            .find(|stage| stage.name == "source")
+            .unwrap();
+        let bindings = &source.middleware.as_ref().unwrap().attachments;
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].family,
+            obzenflow_topology::MiddlewareFamily::RateLimiter
+        );
+        assert_eq!(
+            bindings[0].operation,
+            obzenflow_topology::MiddlewareOperation::Ingress
+        );
+        assert_eq!(bindings[0].configuration["events_per_second"], 10.0);
     }
 
     fn unique_journal_dir(prefix: &str) -> PathBuf {
@@ -1963,7 +1963,7 @@ mod tests {
     /// flow, not just the unit seams.
     #[tokio::test]
     async fn http_ingress_rate_limiter_writes_refusal_fact_through_running_flow() {
-        use obzenflow_adapters::middleware::rate_limit_with_burst;
+        use obzenflow_adapters::middleware::rate_limit;
         use obzenflow_core::TypedPayload;
         use serde::{Deserialize, Serialize};
 
@@ -2013,8 +2013,7 @@ mod tests {
                     // single burst token, the second is fail-fast rate-limited. The
                     // limiter routes to Ingress (AC42), not the internal source poll.
                     source = async_infinite_source!(
-                        OrderPayload => source,
-                        ingress with rate_limit_with_burst(0.001, 1.0)
+                        OrderPayload => source with rate_limit(0.001).burst_capacity(1.0)
                     );
                     sink = sink!(OrderPayload => sink);
                 },

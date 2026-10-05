@@ -5,7 +5,7 @@
 use super::{console, domain::*, handlers, sources::*};
 use obzenflow::flow::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::RateLimiterBuilder;
+use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::{joins, stateful};
 use std::path::PathBuf;
@@ -93,9 +93,9 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
                 );
 
                 per_order_printer = sink!(
-                    EnrichedOrderWithPromo => per_order_printer_handler with [
-                        RateLimiterBuilder::new(0.5).build()
-                    ]
+                    EnrichedOrderWithPromo => per_order_printer_handler with {
+                        rate_limit(0.5)
+                    }
                 );
 
                 catalog_stats = stateful!(

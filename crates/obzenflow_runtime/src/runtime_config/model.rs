@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn diff_identity_keeps_equal_key_and_scope_effect_points_separate() {
         let row = |effect_type: &str, value: u64| ResolvedValueDoc {
-            key_path: "effects.resilience.breaker.minimum_calls".to_string(),
+            key_path: "middleware.circuit_breaker.minimum_calls".to_string(),
             resolved_for: Some(ResolvedForDoc::Effect {
                 stage: "authorize_payment".to_string(),
                 effect_type: effect_type.to_string(),

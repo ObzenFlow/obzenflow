@@ -5,9 +5,8 @@
 //! Fixed effect-bound resilience aggregate (FLOWIP-115n).
 
 use super::circuit_breaker::{
-    CircuitBreaker, CircuitBreakerConfigError, CircuitBreakerFactory, CircuitBreakerFailureMode,
-    CircuitBreakerMiddleware, EffectAdmissionEpoch, EffectAdmissionFence, FailureClassification,
-    FailureWindow, Retry,
+    CircuitBreaker, CircuitBreakerConfigError, CircuitBreakerFactory, CircuitBreakerMiddleware,
+    EffectAdmissionEpoch, EffectAdmissionFence, FailureClassification, Retry,
 };
 use super::rate_limiter::{
     RateLimitReservation, RateLimiter, RateLimiterConfigError, RateLimiterMiddleware,
@@ -21,11 +20,11 @@ use crate::middleware::{
     PolicyAdmission,
 };
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
+    CircuitBreakerHealthClassification, RetryStopReason,
 };
 use obzenflow_core::event::{
-    ChainEventFactory, CircuitBreakerAttemptSettledEventParams,
-    CircuitBreakerRecoveryCompletedEventParams, EffectFailureCause,
+    ChainEventFactory, CircuitBreakerAttemptSettledEventParams, EffectFailureCause,
+    RecoveryCompletedEventParams,
 };
 #[cfg(feature = "test-support")]
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
@@ -38,16 +37,14 @@ use obzenflow_runtime::effects::{
     SingleUseEffectBoundaryReport, SingleUseEffectOperation,
 };
 use obzenflow_runtime::runtime_config::{
-    ConfigValue, DslConfigDefault, RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
-    RESILIENCE_BREAKER_COUNT_WINDOW_KEY, RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-    RESILIENCE_BREAKER_MINIMUM_CALLS_KEY, RESILIENCE_BREAKER_MODE_KEY,
-    RESILIENCE_BREAKER_OPEN_FOR_MS_KEY, RESILIENCE_BREAKER_PROBES_KEY,
-    RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-    RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY, RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-    RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY, RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
-    RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY, RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
-    RESILIENCE_RETRY_FIXED_DELAY_MS_KEY, RESILIENCE_RETRY_KIND_KEY,
-    RESILIENCE_RETRY_MAX_ATTEMPTS_KEY, RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
+    ConfigValue, DslConfigDefault, CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
+    CIRCUIT_BREAKER_COUNT_WINDOW_KEY, CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
+    CIRCUIT_BREAKER_PROBES_KEY, CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+    CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+    RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+    RATE_LIMITER_EVENTS_PER_SECOND_KEY, RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+    RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY, RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
 };
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use std::sync::Arc;
@@ -55,49 +52,10 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
 
-pub struct EffectResilience;
-pub struct EffectResilienceFamily;
-
-pub struct EffectResilienceBuilder {
-    breaker: CircuitBreaker,
-    retry: Option<Retry>,
-    rate_limiter: Option<RateLimiter>,
-}
-
-fn fixed_ai_breaker() -> CircuitBreaker {
-    CircuitBreaker::builder()
-        .consecutive_failures(5)
-        .open_for(Duration::from_secs(60))
-        .probes(1)
-        .build()
-        .expect("the fixed AI resilience breaker configuration is valid")
-}
-
-/// Fixed no-retry resilience policy for generated AI chat effects.
-///
-/// Map and finalise each receive their own instance: five consecutive
-/// unhealthy calls open the breaker for sixty seconds, with one half-open
-/// probe. Transport retries, if any, remain below the chat port contract.
-pub fn ai_resilience() -> Box<dyn MiddlewareFactory> {
-    EffectResilience::with_breaker(fixed_ai_breaker())
-        .build()
-        .expect("the fixed no-retry AI resilience configuration is valid")
-}
-
-/// Test-only policy with the same durable configuration as
-/// [`ai_resilience`] that rejects an affine recovery before `Start(m+1)`.
-#[cfg(feature = "test-support")]
-pub fn ai_recovery_rejecting_resilience_for_test() -> Box<dyn MiddlewareFactory> {
-    Box::new(EffectResilienceFactory {
-        breaker: fixed_ai_breaker(),
-        retry: None,
-        rate_limiter: None,
-        reject_affine_recovery_for_test: true,
-    })
-}
+pub(in crate::middleware::control) struct EffectResilienceFamily;
 
 #[derive(Debug, Error)]
-pub enum EffectResilienceConfigError {
+pub enum ControlConfigurationError {
     #[error(transparent)]
     CircuitBreaker(#[from] CircuitBreakerConfigError),
     #[error(transparent)]
@@ -110,131 +68,225 @@ pub enum EffectResilienceConfigError {
     ZeroAttemptStartWindow,
     #[error("fixed retry delay must be greater than zero")]
     ZeroFixedDelay,
+    #[error("retry kind must be 'fixed' or 'exponential', got '{kind}'")]
+    UnknownRetryKind { kind: String },
 }
 
-impl EffectResilience {
-    pub fn with_breaker(breaker: CircuitBreaker) -> EffectResilienceBuilder {
-        EffectResilienceBuilder {
-            breaker,
-            retry: None,
-            rate_limiter: None,
-        }
-    }
-}
-
-impl EffectResilienceBuilder {
-    pub fn retry(mut self, retry: Retry) -> Self {
-        self.retry = Some(retry);
-        self
-    }
-
-    pub fn rate_limit_each_attempt(mut self, rate_limiter: RateLimiter) -> Self {
-        self.rate_limiter = Some(rate_limiter);
-        self
-    }
-
-    pub fn build(self) -> Result<Box<dyn MiddlewareFactory>, EffectResilienceConfigError> {
-        if let Some(retry) = &self.retry {
-            validate_retry(retry)?;
-        }
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.validate()?;
-        }
-        Ok(Box::new(EffectResilienceFactory {
-            breaker: self.breaker,
-            retry: self.retry,
-            rate_limiter: self.rate_limiter,
-            #[cfg(feature = "test-support")]
-            reject_affine_recovery_for_test: false,
-        }))
-    }
-}
-
-fn validate_retry(retry: &Retry) -> Result<(), EffectResilienceConfigError> {
+pub(in crate::middleware::control) fn validate_retry(
+    retry: &Retry,
+) -> Result<(), ControlConfigurationError> {
     if retry.policy.max_attempts == 0 {
-        return Err(EffectResilienceConfigError::ZeroRetryAttempts);
+        return Err(ControlConfigurationError::ZeroRetryAttempts);
     }
     if retry.limits.max_single_delay.is_zero() {
-        return Err(EffectResilienceConfigError::ZeroMaxBackoff);
+        return Err(ControlConfigurationError::ZeroMaxBackoff);
     }
     if retry.limits.max_attempt_start_window.is_zero() {
-        return Err(EffectResilienceConfigError::ZeroAttemptStartWindow);
+        return Err(ControlConfigurationError::ZeroAttemptStartWindow);
     }
     if matches!(retry.policy.backoff, BackoffStrategy::Fixed { delay } if delay.is_zero()) {
-        return Err(EffectResilienceConfigError::ZeroFixedDelay);
+        return Err(ControlConfigurationError::ZeroFixedDelay);
     }
     Ok(())
 }
 
-struct EffectResilienceFactory {
-    breaker: CircuitBreaker,
-    retry: Option<Retry>,
-    rate_limiter: Option<RateLimiter>,
+#[derive(Clone)]
+pub(in crate::middleware::control) struct EffectPlanFactory {
+    pub(in crate::middleware::control) breaker: Option<CircuitBreaker>,
+    pub(in crate::middleware::control) retry: Option<Retry>,
+    pub(in crate::middleware::control) rate_limiter: Option<RateLimiter>,
+    pub(in crate::middleware::control) sites: Vec<(
+        super::composition::BuiltinControlFamily,
+        crate::middleware::MiddlewareAttachmentSite,
+    )>,
     #[cfg(feature = "test-support")]
-    reject_affine_recovery_for_test: bool,
+    pub(in crate::middleware::control) reject_affine_recovery_for_test: bool,
 }
 
-impl EffectResilienceFactory {
-    fn breaker_defaults(&self) -> Vec<DslConfigDefault> {
-        let mut defaults = Vec::new();
-        match &self.breaker.config.failure_mode {
-            CircuitBreakerFailureMode::Consecutive { max_failures } => {
-                defaults.push(default_text(RESILIENCE_BREAKER_MODE_KEY, "consecutive"));
-                defaults.push(default_u64(
-                    RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
-                    max_failures.get() as u64,
-                ));
-            }
-            CircuitBreakerFailureMode::RateBased {
-                window,
-                failure_rate_threshold,
-                slow_call_rate_threshold,
-                slow_call_duration_threshold,
-                minimum_calls,
-            } => {
-                defaults.push(default_text(RESILIENCE_BREAKER_MODE_KEY, "rate_based"));
-                let FailureWindow::Count { size } = window;
-                defaults.push(default_u64(
-                    RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
-                    *size as u64,
-                ));
-                defaults.push(default_u64(
-                    RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
-                    minimum_calls.get() as u64,
-                ));
-                if let Some(threshold) = failure_rate_threshold {
-                    defaults.push(default_f64(
-                        RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-                        threshold.get(),
-                    ));
-                }
-                if let Some(duration) = slow_call_duration_threshold {
-                    defaults.push(default_u64(
-                        RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY,
-                        duration_ms(*duration),
-                    ));
-                }
-                if let Some(threshold) = slow_call_rate_threshold {
-                    defaults.push(default_f64(
-                        RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-                        threshold.get(),
-                    ));
-                }
-            }
+pub(in crate::middleware::control) fn breaker_config_keys() -> Vec<&'static str> {
+    vec![
+        CIRCUIT_BREAKER_MODE_KEY,
+        CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
+        CIRCUIT_BREAKER_COUNT_WINDOW_KEY,
+        CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
+        CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+        CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+        CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+        CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
+        CIRCUIT_BREAKER_PROBES_KEY,
+        CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+    ]
+}
+
+pub(in crate::middleware::control) fn breaker_defaults(
+    value: &CircuitBreaker,
+) -> Vec<DslConfigDefault> {
+    let mut defaults = vec![
+        default_text(
+            CIRCUIT_BREAKER_MODE_KEY,
+            if value.consecutive_failures.is_some() {
+                "consecutive"
+            } else {
+                "rate_based"
+            },
+        ),
+        default_u64(CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, duration_ms(value.open_for)),
+        default_u64(CIRCUIT_BREAKER_PROBES_KEY, value.probes as u64),
+        DslConfigDefault {
+            key_path: CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+            value: ConfigValue::Bool(value.rate_limited_counts_as_failure),
+        },
+    ];
+    for (key, v) in [
+        (
+            CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
+            value.consecutive_failures,
+        ),
+        (CIRCUIT_BREAKER_COUNT_WINDOW_KEY, value.count_window),
+        (CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, value.minimum_calls),
+    ] {
+        if let Some(v) = v {
+            defaults.push(default_u64(key, v as u64));
         }
+    }
+    for (key, v) in [
+        (
+            CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+            value.failure_rate_threshold,
+        ),
+        (
+            CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+            value.slow_call_rate_threshold,
+        ),
+    ] {
+        if let Some(v) = v {
+            defaults.push(default_f64(key, v));
+        }
+    }
+    if let Some(v) = value.slow_call_duration {
         defaults.push(default_u64(
-            RESILIENCE_BREAKER_OPEN_FOR_MS_KEY,
-            duration_ms(self.breaker.config.open_for),
+            CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+            duration_ms(v),
         ));
-        defaults.push(default_u64(
-            RESILIENCE_BREAKER_PROBES_KEY,
-            self.breaker.config.probes.get() as u64,
-        ));
-        defaults.push(DslConfigDefault {
-            key_path: RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-            value: ConfigValue::Bool(self.breaker.config.rate_limited_counts_as_failure),
-        });
-        defaults
+    }
+    defaults
+}
+
+pub(in crate::middleware::control) fn resolve_breaker(
+    value: &CircuitBreaker,
+    view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
+) -> Result<super::circuit_breaker::ValidatedCircuitBreaker, CircuitBreakerConfigError> {
+    value.validate()?;
+    let mut resolved = value.clone();
+    let mode = text_value(view, CIRCUIT_BREAKER_MODE_KEY).unwrap_or(
+        if value.consecutive_failures.is_some() {
+            "consecutive"
+        } else {
+            "rate_based"
+        },
+    );
+    let checked_count =
+        |key, fallback| -> Result<Option<u32>, CircuitBreakerConfigError> {
+            match u64_value(view, key) {
+                Some(v) => u32::try_from(v).map(Some).map_err(|_| {
+                    CircuitBreakerConfigError::InvalidCount {
+                        field: key,
+                        value: v,
+                    }
+                }),
+                None => Ok(fallback),
+            }
+        };
+    match mode {
+        "consecutive" => {
+            resolved.consecutive_failures = checked_count(
+                CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
+                value.consecutive_failures,
+            )?;
+            resolved.count_window = None;
+            resolved.minimum_calls = None;
+            resolved.failure_rate_threshold = None;
+            resolved.slow_call_duration = None;
+            resolved.slow_call_rate_threshold = None;
+        }
+        "rate_based" => {
+            resolved.consecutive_failures = None;
+            resolved.count_window =
+                checked_count(CIRCUIT_BREAKER_COUNT_WINDOW_KEY, value.count_window)?;
+            resolved.minimum_calls =
+                checked_count(CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, value.minimum_calls)?;
+            resolved.failure_rate_threshold =
+                f64_value(view, CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY)
+                    .or(value.failure_rate_threshold);
+            resolved.slow_call_rate_threshold =
+                f64_value(view, CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY)
+                    .or(value.slow_call_rate_threshold);
+            resolved.slow_call_duration =
+                u64_value(view, CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY)
+                    .map(Duration::from_millis)
+                    .or(value.slow_call_duration);
+        }
+        _ => {
+            return Err(CircuitBreakerConfigError::UnknownMode {
+                value: mode.to_string(),
+            })
+        }
+    }
+    resolved.open_for = u64_value(view, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY)
+        .map(Duration::from_millis)
+        .unwrap_or(value.open_for);
+    resolved.probes =
+        checked_count(CIRCUIT_BREAKER_PROBES_KEY, Some(value.probes))?.unwrap_or(value.probes);
+    resolved.rate_limited_counts_as_failure =
+        bool_value(view, CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY)
+            .unwrap_or(value.rate_limited_counts_as_failure);
+    resolved.validate()
+}
+
+impl EffectPlanFactory {
+    pub(in crate::middleware::control) fn empty() -> Self {
+        Self {
+            breaker: None,
+            retry: None,
+            rate_limiter: None,
+            sites: Vec::new(),
+            #[cfg(feature = "test-support")]
+            reject_affine_recovery_for_test: false,
+        }
+    }
+    #[cfg(test)]
+    pub(in crate::middleware::control) fn with_breaker(breaker: CircuitBreaker) -> Self {
+        let mut plan = Self::empty();
+        plan.breaker = Some(breaker);
+        plan
+    }
+    #[cfg(test)]
+    pub(in crate::middleware::control) fn retry(mut self, retry: Retry) -> Self {
+        self.retry = Some(retry);
+        self
+    }
+    #[cfg(test)]
+    pub(in crate::middleware::control) fn rate_limit_each_attempt(
+        mut self,
+        limiter: RateLimiter,
+    ) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+    #[cfg(test)]
+    pub(in crate::middleware::control) fn build(
+        self,
+    ) -> Result<Box<dyn MiddlewareFactory>, ControlConfigurationError> {
+        if let Some(value) = &self.breaker {
+            value.validate()?;
+        }
+        if let Some(value) = &self.retry {
+            validate_retry(value)?;
+        }
+        if let Some(value) = &self.rate_limiter {
+            value.validate()?;
+        }
+        Ok(Box::new(self))
     }
 
     fn retry_defaults(&self) -> Vec<DslConfigDefault> {
@@ -243,236 +295,98 @@ impl EffectResilienceFactory {
         };
         let mut defaults = match retry.policy.backoff {
             BackoffStrategy::Fixed { delay } => vec![
-                default_text(RESILIENCE_RETRY_KIND_KEY, "fixed"),
-                default_u64(RESILIENCE_RETRY_FIXED_DELAY_MS_KEY, duration_ms(delay)),
+                default_text(RETRY_KIND_KEY, "fixed"),
+                default_u64(RETRY_FIXED_DELAY_MS_KEY, duration_ms(delay)),
             ],
             BackoffStrategy::Exponential { .. } => {
-                vec![default_text(RESILIENCE_RETRY_KIND_KEY, "exponential")]
+                vec![default_text(RETRY_KIND_KEY, "exponential")]
             }
         };
         defaults.extend([
+            default_u64(RETRY_MAX_ATTEMPTS_KEY, retry.policy.max_attempts as u64),
             default_u64(
-                RESILIENCE_RETRY_MAX_ATTEMPTS_KEY,
-                retry.policy.max_attempts as u64,
-            ),
-            default_u64(
-                RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
+                RETRY_MAX_BACKOFF_MS_KEY,
                 duration_ms(retry.limits.max_single_delay),
             ),
             default_u64(
-                RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+                RETRY_ATTEMPT_START_WINDOW_MS_KEY,
                 duration_ms(retry.limits.max_attempt_start_window),
             ),
         ]);
         defaults
     }
-
-    fn limiter_defaults(&self) -> Vec<DslConfigDefault> {
-        let Some(limiter) = &self.rate_limiter else {
-            return Vec::new();
-        };
-        let mut defaults = vec![
-            default_f64(
-                RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-                limiter.events_per_second,
-            ),
-            default_f64(
-                RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
-                limiter.cost_per_attempt,
-            ),
-        ];
-        if let Some(burst) = limiter.burst_capacity {
-            defaults.push(default_f64(
-                RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
-                burst,
-            ));
-        }
-        defaults
-    }
-
-    fn resolved_breaker(
-        &self,
-        view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
-    ) -> Result<CircuitBreaker, CircuitBreakerConfigError> {
-        let mode = text_value(view, RESILIENCE_BREAKER_MODE_KEY).unwrap_or_default();
-        let mut builder = CircuitBreaker::builder()
-            .open_for(Duration::from_millis(required_u64(
-                view,
-                RESILIENCE_BREAKER_OPEN_FOR_MS_KEY,
-            )))
-            .probes(required_u64(view, RESILIENCE_BREAKER_PROBES_KEY) as u32)
-            .rate_limited_counts_as_failure(
-                bool_value(view, RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY)
-                    .unwrap_or(false),
-            );
-        match mode {
-            "consecutive" => {
-                builder = builder.consecutive_failures(required_u64(
-                    view,
-                    RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
-                ) as u32);
-            }
-            "rate_based" => {
-                builder = builder
-                    .count_window(required_u64(view, RESILIENCE_BREAKER_COUNT_WINDOW_KEY) as u32)
-                    .minimum_calls(required_u64(view, RESILIENCE_BREAKER_MINIMUM_CALLS_KEY) as u32);
-                if let Some(value) = f64_value(view, RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY)
-                {
-                    builder = builder.failure_rate_threshold(value);
-                }
-                if let Some(value) = u64_value(view, RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY) {
-                    builder = builder.slow_call_duration(Duration::from_millis(value));
-                }
-                if let Some(value) =
-                    f64_value(view, RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY)
-                {
-                    builder = builder.slow_call_rate_threshold(value);
-                }
-            }
-            _ => return Err(CircuitBreakerConfigError::MissingMode),
-        }
-        builder
-            .build()
-            .map(|breaker| breaker.inherit_classifier_from(&self.breaker))
-    }
-
     fn resolved_retry(
         &self,
         view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
-    ) -> Result<Option<Retry>, EffectResilienceConfigError> {
-        if self.retry.is_none() {
+    ) -> Result<Option<Retry>, ControlConfigurationError> {
+        let Some(authored) = &self.retry else {
             return Ok(None);
-        }
-        let mut retry = match text_value(view, RESILIENCE_RETRY_KIND_KEY) {
-            Some("fixed") => Retry::fixed(Duration::from_millis(required_u64(
-                view,
-                RESILIENCE_RETRY_FIXED_DELAY_MS_KEY,
-            ))),
-            Some("exponential") => Retry::exponential(),
-            _ => Retry::fixed(Duration::ZERO),
         };
-        retry = retry
-            .max_attempts(required_u64(view, RESILIENCE_RETRY_MAX_ATTEMPTS_KEY) as u32)
-            .max_backoff(Duration::from_millis(required_u64(
-                view,
-                RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
-            )))
-            .attempt_start_window(Duration::from_millis(required_u64(
-                view,
-                RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
-            )));
-        validate_retry(&retry)?;
-        Ok(Some(retry))
+        validate_retry(authored)?;
+        let mut value = match text_value(view, RETRY_KIND_KEY).unwrap_or("exponential") {
+            "fixed" => super::circuit_breaker::retry().fixed_delay(Duration::from_millis(
+                required_u64(view, RETRY_FIXED_DELAY_MS_KEY),
+            )),
+            "exponential" => super::circuit_breaker::retry(),
+            kind => {
+                return Err(ControlConfigurationError::UnknownRetryKind {
+                    kind: kind.to_string(),
+                })
+            }
+        };
+        value = value.max_attempts(
+            u32::try_from(
+                u64_value(view, RETRY_MAX_ATTEMPTS_KEY)
+                    .unwrap_or(authored.policy.max_attempts as u64),
+            )
+            .map_err(|_| ControlConfigurationError::ZeroRetryAttempts)?,
+        );
+        value = value.max_backoff(
+            u64_value(view, RETRY_MAX_BACKOFF_MS_KEY)
+                .map(Duration::from_millis)
+                .unwrap_or(authored.limits.max_single_delay),
+        );
+        value = value.attempt_start_window(
+            u64_value(view, RETRY_ATTEMPT_START_WINDOW_MS_KEY)
+                .map(Duration::from_millis)
+                .unwrap_or(authored.limits.max_attempt_start_window),
+        );
+        validate_retry(&value)?;
+        Ok(Some(value))
     }
-
     fn resolved_limiter(
         &self,
         view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
     ) -> Result<Option<RateLimiter>, RateLimiterConfigError> {
-        if self.rate_limiter.is_none() {
+        let Some(authored) = &self.rate_limiter else {
             return Ok(None);
-        }
-        let limiter = RateLimiter {
-            events_per_second: f64_value(view, RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY)
-                .unwrap_or(0.0),
-            burst_capacity: f64_value(view, RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY),
-            cost_per_attempt: f64_value(view, RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY)
-                .unwrap_or(0.0),
         };
-        limiter.validate()?;
-        Ok(Some(limiter))
+        authored.validate()?;
+        let mut value = super::rate_limiter::rate_limit(
+            f64_value(view, RATE_LIMITER_EVENTS_PER_SECOND_KEY)
+                .unwrap_or(authored.events_per_second),
+        )
+        .cost(
+            f64_value(view, RATE_LIMITER_COST_PER_ATTEMPT_KEY).unwrap_or(authored.cost_per_attempt),
+        );
+        value.burst_capacity =
+            f64_value(view, RATE_LIMITER_BURST_CAPACITY_KEY).or(authored.burst_capacity);
+        value.validate()?;
+        Ok(Some(value))
     }
-}
-
-impl MiddlewareFactory for EffectResilienceFactory {
-    fn label(&self) -> &'static str {
-        "effect_resilience"
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<EffectResilienceFamily>("effect_resilience")
-    }
-
-    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
-        let mut defaults = self.breaker_defaults();
-        defaults.extend(self.limiter_defaults());
-        defaults.extend(self.retry_defaults());
-        defaults
-    }
-
-    fn consumed_config_keys(&self) -> Vec<&'static str> {
-        let mut keys = vec![
-            RESILIENCE_BREAKER_MODE_KEY,
-            RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
-            RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
-            RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
-            RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-            RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY,
-            RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-            RESILIENCE_BREAKER_OPEN_FOR_MS_KEY,
-            RESILIENCE_BREAKER_PROBES_KEY,
-            RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-        ];
-        if self.retry.is_some() {
-            keys.extend([
-                RESILIENCE_RETRY_KIND_KEY,
-                RESILIENCE_RETRY_FIXED_DELAY_MS_KEY,
-                RESILIENCE_RETRY_MAX_ATTEMPTS_KEY,
-                RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
-                RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
-            ]);
-        }
-        if self.rate_limiter.is_some() {
-            keys.extend([
-                RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-                RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
-                RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
-            ]);
-        }
-        keys
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::effect_resilience(self.label(), self.override_key().family_label())
-    }
-
-    fn materialize(
+    fn validate_plan(
         &self,
         request: MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
-    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        let declaration = self.declaration();
-        validate_attachment_request(&declaration, &request).map_err(|err| {
-            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
-        })?;
-        context
-            .authorize_materialization(
-                MaterializationClaim::EffectResilience,
-                &declaration,
-                &request,
-            )
-            .map_err(|error| {
-                MiddlewareFactoryError::materialization_failed(
-                    self.label(),
-                    &context.config.name,
-                    error,
-                )
-            })?;
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
         let MiddlewareSurface::Effect(effect) = request.surface else {
-            return Err(MiddlewareFactoryError::materialization_failed(
+            return Err(MiddlewareFactoryError::invalid_configuration(
                 self.label(),
                 &context.config.name,
-                std::io::Error::other("EffectResilience attaches only to declared effects"),
+                std::io::Error::other("effect controls require a declared effect"),
             ));
         };
-        let view = context.config_view();
-        let breaker = self.resolved_breaker(&view).map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
-        })?;
-        let retry = self.resolved_retry(&view).map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
-        })?;
-        if retry.is_some()
+        if self.retry.is_some()
             && !matches!(
                 effect.safety,
                 obzenflow_runtime::effects::EffectSafety::Idempotent
@@ -483,55 +397,179 @@ impl MiddlewareFactory for EffectResilienceFactory {
                 self.label(),
                 &context.config.name,
                 std::io::Error::other(format!(
-                    "EffectResilience retry is not eligible for effect '{}' with safety {:?}",
+                    "retry is not eligible for effect '{}' with safety {:?}",
                     effect.effect_type.as_str(),
-                    effect.safety,
+                    effect.safety
                 )),
             ));
         }
-        let limiter = self.resolved_limiter(&view).map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
-        })?;
-
-        let (breaker, _) = CircuitBreakerFactory::from_effect_breaker(&breaker)
-            .build_middleware_keyed(
-                context.config,
-                context,
-                MaterializationClaim::EffectResilience,
-                Some(effect.effect_type.clone()),
-            )?;
-        let breaker = Arc::new(breaker);
-        let limiter = if let Some(config) = limiter {
-            let validated = config.validate().map_err(|error| {
+        let view = context.config_view();
+        if let Some(breaker) = &self.breaker {
+            resolve_breaker(breaker, &view).map_err(|e| {
                 MiddlewareFactoryError::invalid_configuration(
-                    self.label(),
+                    "circuit_breaker",
                     &context.config.name,
-                    error,
+                    e,
                 )
             })?;
-            Some(Arc::new(
+        }
+        self.resolved_retry(&view).map_err(|e| {
+            MiddlewareFactoryError::invalid_configuration("retry", &context.config.name, e)
+        })?;
+        self.resolved_limiter(&view).map_err(|e| {
+            MiddlewareFactoryError::invalid_configuration("rate_limiter", &context.config.name, e)
+        })?;
+        Ok(())
+    }
+}
+
+impl MiddlewareFactory for EffectPlanFactory {
+    fn builtin_control(&self) -> Option<super::composition::BuiltinControlContribution> {
+        Some(super::composition::BuiltinControlContribution::from_plan(
+            self,
+        ))
+    }
+    fn label(&self) -> &'static str {
+        "effect_resilience"
+    }
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<EffectResilienceFamily>("effect_resilience")
+    }
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::effect_resilience(self.label(), self.override_key().family_label())
+    }
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        let mut defaults = self
+            .breaker
+            .as_ref()
+            .map(breaker_defaults)
+            .unwrap_or_default();
+        if let Some(limiter) = &self.rate_limiter {
+            defaults.extend(limiter.dsl_config_defaults());
+        }
+        defaults.extend(self.retry_defaults());
+        defaults
+    }
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        let mut keys = if self.breaker.is_some() {
+            breaker_config_keys()
+        } else {
+            Vec::new()
+        };
+        if let Some(limiter) = &self.rate_limiter {
+            keys.extend(limiter.consumed_config_keys());
+        }
+        if self.retry.is_some() {
+            keys.extend([
+                RETRY_KIND_KEY,
+                RETRY_FIXED_DELAY_MS_KEY,
+                RETRY_MAX_ATTEMPTS_KEY,
+                RETRY_MAX_BACKOFF_MS_KEY,
+                RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+            ]);
+        }
+        keys
+    }
+    fn validate_configuration(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        config: &obzenflow_runtime::pipeline::config::StageConfig,
+        stage_type: obzenflow_core::event::context::StageType,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        let declaration = self.declaration();
+        self.validate_plan(
+            request,
+            &MiddlewareMaterializationContext::new(config, stage_type, &declaration, &request),
+        )
+    }
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        self.validate_plan(request, context)?;
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|e| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, e)
+        })?;
+        context
+            .authorize_materialization(
+                MaterializationClaim::EffectResilience,
+                &declaration,
+                &request,
+            )
+            .map_err(|e| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    e,
+                )
+            })?;
+        let MiddlewareSurface::Effect(effect) = request.surface else {
+            unreachable!("validated effect plan")
+        };
+        let view = context.config_view();
+        let breaker = self
+            .breaker
+            .as_ref()
+            .map(|value| resolve_breaker(value, &view))
+            .transpose()
+            .map_err(|e| {
+                MiddlewareFactoryError::invalid_configuration(
+                    "circuit_breaker",
+                    &context.config.name,
+                    e,
+                )
+            })?;
+        let retry = self.resolved_retry(&view).map_err(|e| {
+            MiddlewareFactoryError::invalid_configuration("retry", &context.config.name, e)
+        })?;
+        let limiter = self.resolved_limiter(&view).map_err(|e| {
+            MiddlewareFactoryError::invalid_configuration("rate_limiter", &context.config.name, e)
+        })?;
+        let breaker = breaker
+            .as_ref()
+            .map(|value| {
+                CircuitBreakerFactory::from_effect_breaker(value)
+                    .build_middleware_keyed(
+                        context.config,
+                        context,
+                        MaterializationClaim::EffectResilience,
+                        Some(effect.effect_type.clone()),
+                    )
+                    .map(|(state, _)| Arc::new(state))
+            })
+            .transpose()?;
+        let limiter = limiter
+            .map(|value| {
+                let config = value.validate().map_err(|e| {
+                    MiddlewareFactoryError::invalid_configuration(
+                        "rate_limiter",
+                        &context.config.name,
+                        e,
+                    )
+                })?;
                 RateLimiterMiddleware::new_keyed(
                     context.config.stage_id,
-                    validated,
+                    config,
                     context,
                     MaterializationClaim::EffectResilience,
                     Some(effect.effect_type.clone()),
                 )
-                .map_err(|message| {
+                .map(Arc::new)
+                .map_err(|e| {
                     MiddlewareFactoryError::invalid_configuration(
-                        self.label(),
+                        "rate_limiter",
                         &context.config.name,
-                        std::io::Error::other(message),
+                        std::io::Error::other(e),
                     )
-                })?,
-            ))
-        } else {
-            None
-        };
-
+                })
+            })
+            .transpose()?;
         MiddlewareSurfaceAttachment::claimed(
             MiddlewareSurfaceAttachmentKind::Effect(EffectPolicyAttachment::effect_resilience(
                 Arc::new(EffectResilienceMiddleware {
+                    writer_id: obzenflow_core::WriterId::from(context.config.stage_id),
                     breaker,
                     retry,
                     limiter,
@@ -544,60 +582,46 @@ impl MiddlewareFactory for EffectResilienceFactory {
             MaterializationClaim::EffectResilience,
             context,
         )
-        .map_err(|error| {
-            MiddlewareFactoryError::materialization_failed(
-                self.label(),
-                &context.config.name,
-                error,
-            )
+        .map_err(|e| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, e)
         })
     }
-
     fn safety_level(&self) -> MiddlewareSafety {
         MiddlewareSafety::Advanced
     }
-
     fn hints(&self) -> MiddlewareHints {
         MiddlewareHints {
             rate_limits: self.rate_limiter.is_some(),
             ..Default::default()
         }
     }
-
     fn config_snapshot(&self) -> Option<serde_json::Value> {
-        let defaults_snapshot = |defaults: Vec<DslConfigDefault>| {
-            defaults
-                .into_iter()
-                .map(|default| (default.key_path.to_string(), default.value.to_json()))
-                .collect::<serde_json::Map<_, _>>()
+        let family = |defaults: Vec<DslConfigDefault>| {
+            serde_json::Value::Object(
+                defaults
+                    .into_iter()
+                    .map(|value| (value.key_path.to_string(), value.value.to_json()))
+                    .collect(),
+            )
         };
         let mut snapshot = serde_json::Map::new();
-        snapshot.insert(
-            "kind".to_string(),
-            serde_json::Value::String("effect_resilience".to_string()),
-        );
-        snapshot.insert(
-            "breaker".to_string(),
-            serde_json::Value::Object(defaults_snapshot(self.breaker_defaults())),
-        );
-        if self.retry.is_some() {
-            snapshot.insert(
-                "retry".to_string(),
-                serde_json::Value::Object(defaults_snapshot(self.retry_defaults())),
-            );
+        snapshot.insert("kind".into(), "effect_resilience".into());
+        if let Some(breaker) = &self.breaker {
+            snapshot.insert("breaker".into(), family(breaker_defaults(breaker)));
         }
-        if self.rate_limiter.is_some() {
-            snapshot.insert(
-                "rate_limiter".to_string(),
-                serde_json::Value::Object(defaults_snapshot(self.limiter_defaults())),
-            );
+        if let Some(limiter) = &self.rate_limiter {
+            snapshot.insert("rate_limiter".into(), family(limiter.dsl_config_defaults()));
+        }
+        if self.retry.is_some() {
+            snapshot.insert("retry".into(), family(self.retry_defaults()));
         }
         Some(serde_json::Value::Object(snapshot))
     }
 }
 
 pub(in crate::middleware::control) struct EffectResilienceMiddleware {
-    breaker: Arc<CircuitBreakerMiddleware>,
+    writer_id: obzenflow_core::WriterId,
+    breaker: Option<Arc<CircuitBreakerMiddleware>>,
     retry: Option<Retry>,
     limiter: Option<Arc<RateLimiterMiddleware>>,
     #[cfg(feature = "test-support")]
@@ -990,7 +1014,10 @@ impl EffectResilienceMiddleware {
 
     #[cfg(test)]
     pub(in crate::middleware::control) fn expire_breaker_cooldown_for_test(&self) {
-        self.breaker.expire_effect_cooldown_for_test();
+        self.breaker
+            .as_ref()
+            .expect("test requires a breaker")
+            .expire_effect_cooldown_for_test();
     }
 
     #[cfg(test)]
@@ -1022,21 +1049,22 @@ impl EffectResilienceMiddleware {
             if recovery.attempts() > 0 && !recovery.later_attempt_may_start() {
                 return repeatable_retry_exhausted(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
-                    CircuitBreakerRetryStopReason::AttemptStartWindow,
+                    RetryStopReason::AttemptStartWindow,
                     event,
                     ctx,
                 );
             }
 
-            let reservation_epoch =
-                match self.breaker.effect_precheck(ctx, recovery.initial_epoch()) {
+            if let Some(breaker) = &self.breaker {
+                let reservation_epoch = match breaker.effect_precheck(ctx, recovery.initial_epoch())
+                {
                     Ok(epoch) => epoch,
                     Err(cause) => {
                         return repeatable_admission_rejected(
                             &mut recovery,
-                            self.breaker.as_ref(),
+                            self.writer_id,
                             identity,
                             cause,
                             event,
@@ -1044,7 +1072,8 @@ impl EffectResilienceMiddleware {
                         )
                     }
                 };
-            recovery.observe_precheck(reservation_epoch);
+                recovery.observe_precheck(reservation_epoch);
+            }
 
             let admission_started = Instant::now();
             recovery.begin_limiter_wait();
@@ -1064,20 +1093,22 @@ impl EffectResilienceMiddleware {
             if recovery.attempts() > 0 && !recovery.later_attempt_may_start() {
                 return repeatable_retry_exhausted(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
-                    CircuitBreakerRetryStopReason::AttemptStartWindow,
+                    RetryStopReason::AttemptStartWindow,
                     event,
                     ctx,
                 );
             }
 
-            if let PolicyAdmission::Reject(cause) =
-                self.breaker.effect_admit(ctx, recovery.admission_fence())
+            if let Some(PolicyAdmission::Reject(cause)) = self
+                .breaker
+                .as_ref()
+                .map(|breaker| breaker.effect_admit(ctx, recovery.admission_fence()))
             {
                 return repeatable_admission_rejected(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
                     cause,
                     event,
@@ -1089,12 +1120,14 @@ impl EffectResilienceMiddleware {
             // the tiny breaker critical section crossed the deadline, release
             // any probe lease and refund the limiter reservation.
             if recovery.attempts() > 0 && !recovery.later_attempt_may_start() {
-                self.breaker.settle_not_executed(ctx);
+                if let Some(breaker) = &self.breaker {
+                    breaker.settle_not_executed(ctx);
+                }
                 return repeatable_retry_exhausted(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
-                    CircuitBreakerRetryStopReason::AttemptStartWindow,
+                    RetryStopReason::AttemptStartWindow,
                     event,
                     ctx,
                 );
@@ -1103,8 +1136,10 @@ impl EffectResilienceMiddleware {
 
             let prepared = operation.prepare();
             let receipt = prepared.receipt();
-            let mut settlement_guard =
-                AttemptSettlementGuard::new(self.breaker.clone(), receipt.clone());
+            let mut settlement_guard = self
+                .breaker
+                .as_ref()
+                .map(|breaker| AttemptSettlementGuard::new(breaker.clone(), receipt.clone()));
             let attempt = recovery.begin_physical_attempt(
                 self.retry
                     .as_ref()
@@ -1112,7 +1147,9 @@ impl EffectResilienceMiddleware {
             );
             let result = prepared.execute().await;
             let observation = receipt.observation();
-            settlement_guard.disarm();
+            if let Some(guard) = &mut settlement_guard {
+                guard.disarm();
+            }
             recovery.finish_physical_attempt(&result);
             let (physical_outcome, dependency_elapsed) = match observation {
                 PhysicalCallObservation::Completed {
@@ -1120,10 +1157,12 @@ impl EffectResilienceMiddleware {
                     dependency_elapsed,
                 } => (outcome, dependency_elapsed),
                 PhysicalCallObservation::Prepared | PhysicalCallObservation::Started { .. } => {
-                    self.breaker.settle_not_executed(ctx);
+                    if let Some(breaker) = &self.breaker {
+                        breaker.settle_not_executed(ctx);
+                    }
                     return repeatable_physical_terminal(
                         &mut recovery,
-                        self.breaker.as_ref(),
+                        self.writer_id,
                         identity,
                         result,
                         event,
@@ -1134,39 +1173,49 @@ impl EffectResilienceMiddleware {
             ctx.insert::<EffectCallDurationNanos>(
                 dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64,
             );
-            prepare_retry_context(&result, ctx);
-            let classification = classify_physical_result(
-                self.breaker.as_ref(),
-                event,
-                &result,
-                physical_outcome,
-                ctx,
-            );
-            if let Some(classification) = classification.as_ref() {
-                self.breaker.settle_classified_call(classification, ctx);
-            } else {
-                self.breaker.settle_unobserved_call(ctx);
+            if self.breaker.is_some() {
+                prepare_retry_context(&result, ctx);
             }
+            let classification = self.breaker.as_ref().and_then(|breaker| {
+                classify_physical_result(breaker, event, &result, physical_outcome, ctx)
+            });
+            if let Some(breaker) = &self.breaker {
+                if let Some(classification) = classification.as_ref() {
+                    breaker.settle_classified_call(classification, ctx);
+                } else {
+                    breaker.settle_unobserved_call(ctx);
+                }
+                ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
+                    self.writer_id,
+                    CircuitBreakerAttemptSettledEventParams {
+                        cursor: identity.cursor.clone(),
+                        attempt,
+                        health_classification: evidence_classification(classification.as_ref()),
+                        slow: breaker.is_slow_dependency_call(dependency_elapsed),
+                        dependency_elapsed_ms: duration_ms(dependency_elapsed),
+                        admission_wait_ms: duration_ms(admission_wait),
+                    },
+                    event.id,
+                ));
+            } else {
+                ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
+                    self.writer_id,
+                    identity.cursor.clone(),
+                    attempt,
+                    duration_ms(dependency_elapsed),
+                    duration_ms(admission_wait),
+                    event.id,
+                ));
+            }
+
             if let Some(limiter) = &self.limiter {
                 limiter.observe_resilience_attempt(ctx);
             }
-            ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
-                self.breaker.evidence_writer_id(),
-                CircuitBreakerAttemptSettledEventParams {
-                    cursor: identity.cursor.clone(),
-                    attempt,
-                    health_classification: evidence_classification(classification.as_ref()),
-                    slow: self.breaker.is_slow_dependency_call(dependency_elapsed),
-                    dependency_elapsed_ms: duration_ms(dependency_elapsed),
-                    admission_wait_ms: duration_ms(admission_wait),
-                },
-                event.id,
-            ));
 
             let Some(retry) = &self.retry else {
                 return repeatable_physical_terminal(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
                     result,
                     event,
@@ -1175,17 +1224,16 @@ impl EffectResilienceMiddleware {
             };
             let Err(error) = &result else {
                 if recovery.attempts() > 1 {
-                    ctx.write_control_event(ChainEventFactory::circuit_breaker_retry_succeeded(
-                        self.breaker.evidence_writer_id(),
+                    ctx.write_control_event(ChainEventFactory::retry_succeeded(
+                        self.writer_id,
                         identity.cursor.clone(),
                         recovery.attempts(),
-                        evidence_classification(classification.as_ref()),
                         event.id,
                     ));
                 }
                 return repeatable_physical_terminal(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
                     result,
                     event,
@@ -1194,18 +1242,16 @@ impl EffectResilienceMiddleware {
             };
             if physical_outcome != PhysicalCallOutcome::Failed || !retryable_error(error) {
                 if recovery.attempts() > 1 {
-                    ctx.write_control_event(
-                        ChainEventFactory::circuit_breaker_retry_stopped_non_retryable(
-                            self.breaker.evidence_writer_id(),
-                            identity.cursor.clone(),
-                            recovery.attempts(),
-                            event.id,
-                        ),
-                    );
+                    ctx.write_control_event(ChainEventFactory::retry_stopped_non_retryable(
+                        self.writer_id,
+                        identity.cursor.clone(),
+                        recovery.attempts(),
+                        event.id,
+                    ));
                 }
                 return repeatable_physical_terminal(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
                     result,
                     event,
@@ -1214,34 +1260,35 @@ impl EffectResilienceMiddleware {
             }
             if recovery.attempts() >= retry.policy.max_attempts {
                 write_exhausted(
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
                     recovery.attempts(),
-                    CircuitBreakerRetryStopReason::AttemptLimit,
+                    RetryStopReason::AttemptLimit,
                     event,
                     ctx,
                 );
                 return repeatable_physical_terminal(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
                     result,
                     event,
                     ctx,
                 );
             }
-            if self.breaker.is_effect_probe(ctx)
-                || !self.breaker.effect_recovery_epoch_is_current(
-                    recovery
-                        .initial_epoch()
-                        .expect("a physical attempt must have an initial epoch"),
-                )
-            {
+            if self.breaker.as_ref().is_some_and(|breaker| {
+                breaker.is_effect_probe(ctx)
+                    || !breaker.effect_recovery_epoch_is_current(
+                        recovery
+                            .initial_epoch()
+                            .expect("a breaker attempt captures its epoch"),
+                    )
+            }) {
                 return repeatable_retry_exhausted(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
-                    CircuitBreakerRetryStopReason::CircuitNoLongerClosed,
+                    RetryStopReason::CircuitNoLongerClosed,
                     event,
                     ctx,
                 );
@@ -1251,15 +1298,15 @@ impl EffectResilienceMiddleware {
             if !recovery.backoff_fits_attempt_window(delay) {
                 return repeatable_retry_exhausted(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
-                    CircuitBreakerRetryStopReason::AttemptStartWindow,
+                    RetryStopReason::AttemptStartWindow,
                     event,
                     ctx,
                 );
             }
-            ctx.write_control_event(ChainEventFactory::circuit_breaker_retry_scheduled(
-                self.breaker.evidence_writer_id(),
+            ctx.write_control_event(ChainEventFactory::retry_scheduled(
+                self.writer_id,
                 identity.cursor.clone(),
                 recovery.next_attempt(),
                 duration_ms(delay),
@@ -1271,23 +1318,25 @@ impl EffectResilienceMiddleware {
             if !recovery.later_attempt_may_start() {
                 return repeatable_retry_exhausted(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
-                    CircuitBreakerRetryStopReason::AttemptStartWindow,
+                    RetryStopReason::AttemptStartWindow,
                     event,
                     ctx,
                 );
             }
-            if !self.breaker.effect_recovery_epoch_is_current(
-                recovery
-                    .initial_epoch()
-                    .expect("a physical attempt must have an initial epoch"),
-            ) {
+            if self.breaker.as_ref().is_some_and(|breaker| {
+                !breaker.effect_recovery_epoch_is_current(
+                    recovery
+                        .initial_epoch()
+                        .expect("a breaker attempt captures its epoch"),
+                )
+            }) {
                 return repeatable_retry_exhausted(
                     &mut recovery,
-                    self.breaker.as_ref(),
+                    self.writer_id,
                     identity,
-                    CircuitBreakerRetryStopReason::CircuitNoLongerClosed,
+                    RetryStopReason::CircuitNoLongerClosed,
                     event,
                     ctx,
                 );
@@ -1309,21 +1358,17 @@ impl EffectResilienceMiddleware {
         debug_assert!(self.retry.is_none());
         let mut recovery = EffectRecoveryController::new();
 
-        let reservation_epoch = match self.breaker.effect_precheck(ctx, None) {
-            Ok(epoch) => epoch,
-            Err(cause) => {
-                let decision = recovery.finish_from_admission(cause);
-                write_recovery_completed(
-                    &mut recovery,
-                    self.breaker.as_ref(),
-                    identity,
-                    event,
-                    ctx,
-                );
-                return single_use_admission_terminal(decision, ctx, operation);
-            }
-        };
-        recovery.observe_precheck(reservation_epoch);
+        if let Some(breaker) = &self.breaker {
+            let reservation_epoch = match breaker.effect_precheck(ctx, None) {
+                Ok(epoch) => epoch,
+                Err(cause) => {
+                    let decision = recovery.finish_from_admission(cause);
+                    write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
+                    return single_use_admission_terminal(decision, ctx, operation);
+                }
+            };
+            recovery.observe_precheck(reservation_epoch);
+        }
 
         let admission_started = Instant::now();
         recovery.begin_limiter_wait();
@@ -1337,75 +1382,94 @@ impl EffectResilienceMiddleware {
         self.pause_before_final_admission(&identity.cursor, recovery.attempts())
             .await;
 
-        if let PolicyAdmission::Reject(cause) =
-            self.breaker.effect_admit(ctx, recovery.admission_fence())
+        if let Some(PolicyAdmission::Reject(cause)) = self
+            .breaker
+            .as_ref()
+            .map(|breaker| breaker.effect_admit(ctx, recovery.admission_fence()))
         {
             let decision = recovery.finish_from_admission(cause);
-            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
             return single_use_admission_terminal(decision, ctx, operation);
         }
         let admission_wait = admission_started.elapsed();
 
         let prepared = operation.prepare();
         let receipt = prepared.receipt();
-        let mut settlement_guard =
-            AttemptSettlementGuard::new(self.breaker.clone(), receipt.clone());
+        let mut settlement_guard = self
+            .breaker
+            .as_ref()
+            .map(|breaker| AttemptSettlementGuard::new(breaker.clone(), receipt.clone()));
         let attempt = recovery.begin_physical_attempt(None);
         let execution = prepared.execute().await;
-        settlement_guard.disarm();
+        if let Some(guard) = &mut settlement_guard {
+            guard.disarm();
+        }
         recovery.finish_physical_attempt(execution.result());
         let PhysicalCallObservation::Completed {
             outcome,
             dependency_elapsed,
         } = receipt.observation()
         else {
-            self.breaker.settle_not_executed(ctx);
+            if let Some(breaker) = &self.breaker {
+                breaker.settle_not_executed(ctx);
+            }
             let terminal = recovery.finish_with_physical_result();
             debug_assert!(matches!(
                 terminal,
                 RecoveryTerminalDecision::ReturnPhysicalResult
             ));
-            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
             return execution.into_report(ctx.take_control_events());
         };
 
         ctx.insert::<EffectCallDurationNanos>(
             dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64
         );
-        prepare_retry_context(execution.result(), ctx);
-        let classification = classify_physical_result(
-            self.breaker.as_ref(),
-            event,
-            execution.result(),
-            outcome,
-            ctx,
-        );
-        if let Some(classification) = classification.as_ref() {
-            self.breaker.settle_classified_call(classification, ctx);
-        } else {
-            self.breaker.settle_unobserved_call(ctx);
+        if self.breaker.is_some() {
+            prepare_retry_context(execution.result(), ctx);
         }
+        let classification = self.breaker.as_ref().and_then(|breaker| {
+            classify_physical_result(breaker, event, execution.result(), outcome, ctx)
+        });
+        if let Some(breaker) = &self.breaker {
+            if let Some(classification) = classification.as_ref() {
+                breaker.settle_classified_call(classification, ctx);
+            } else {
+                breaker.settle_unobserved_call(ctx);
+            }
+            ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
+                self.writer_id,
+                CircuitBreakerAttemptSettledEventParams {
+                    cursor: identity.cursor.clone(),
+                    attempt,
+                    health_classification: evidence_classification(classification.as_ref()),
+                    slow: breaker.is_slow_dependency_call(dependency_elapsed),
+                    dependency_elapsed_ms: duration_ms(dependency_elapsed),
+                    admission_wait_ms: duration_ms(admission_wait),
+                },
+                event.id,
+            ));
+        } else {
+            ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
+                self.writer_id,
+                identity.cursor.clone(),
+                attempt,
+                duration_ms(dependency_elapsed),
+                duration_ms(admission_wait),
+                event.id,
+            ));
+        }
+
         if let Some(limiter) = &self.limiter {
             limiter.observe_resilience_attempt(ctx);
         }
-        ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
-            self.breaker.evidence_writer_id(),
-            CircuitBreakerAttemptSettledEventParams {
-                cursor: identity.cursor.clone(),
-                attempt,
-                health_classification: evidence_classification(classification.as_ref()),
-                slow: self.breaker.is_slow_dependency_call(dependency_elapsed),
-                dependency_elapsed_ms: duration_ms(dependency_elapsed),
-                admission_wait_ms: duration_ms(admission_wait),
-            },
-            event.id,
-        ));
+
         let terminal = recovery.finish_with_physical_result();
         debug_assert!(matches!(
             terminal,
             RecoveryTerminalDecision::ReturnPhysicalResult
         ));
-        write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+        write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
         execution.into_report(ctx.take_control_events())
     }
 
@@ -1435,25 +1499,21 @@ impl EffectResilienceMiddleware {
                     event: None,
                 },
             ));
-            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
             return affine_admission_terminal(decision, ctx, operation);
         }
 
-        let reservation_epoch = match self.breaker.effect_precheck(ctx, None) {
-            Ok(epoch) => epoch,
-            Err(cause) => {
-                let decision = recovery.finish_affine_admission(cause);
-                write_recovery_completed(
-                    &mut recovery,
-                    self.breaker.as_ref(),
-                    identity,
-                    event,
-                    ctx,
-                );
-                return affine_admission_terminal(decision, ctx, operation);
-            }
-        };
-        recovery.observe_precheck(reservation_epoch);
+        if let Some(breaker) = &self.breaker {
+            let reservation_epoch = match breaker.effect_precheck(ctx, None) {
+                Ok(epoch) => epoch,
+                Err(cause) => {
+                    let decision = recovery.finish_affine_admission(cause);
+                    write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
+                    return affine_admission_terminal(decision, ctx, operation);
+                }
+            };
+            recovery.observe_precheck(reservation_epoch);
+        }
 
         let admission_started = Instant::now();
         recovery.begin_limiter_wait();
@@ -1467,93 +1527,112 @@ impl EffectResilienceMiddleware {
         self.pause_before_final_admission(&identity.cursor, recovery.attempts())
             .await;
 
-        if let PolicyAdmission::Reject(cause) =
-            self.breaker.effect_admit(ctx, recovery.admission_fence())
+        if let Some(PolicyAdmission::Reject(cause)) = self
+            .breaker
+            .as_ref()
+            .map(|breaker| breaker.effect_admit(ctx, recovery.admission_fence()))
         {
             let decision = recovery.finish_affine_admission(cause);
-            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
             return affine_admission_terminal(decision, ctx, operation);
         }
         let admission_wait = admission_started.elapsed();
 
         let prepared = operation.prepare();
         let receipt = prepared.receipt();
-        let mut settlement_guard =
-            AttemptSettlementGuard::new(self.breaker.clone(), receipt.clone());
+        let mut settlement_guard = self
+            .breaker
+            .as_ref()
+            .map(|breaker| AttemptSettlementGuard::new(breaker.clone(), receipt.clone()));
         let (attempt, reservation) = recovery.begin_affine_attempt(None);
         let mut limiter_settlement =
             AffineLimiterSettlementGuard::new(receipt.clone(), reservation);
         let execution = prepared.execute().await;
         limiter_settlement.settle();
-        settlement_guard.disarm();
+        if let Some(guard) = &mut settlement_guard {
+            guard.disarm();
+        }
         recovery.finish_physical_attempt(execution.result());
         let PhysicalCallObservation::Completed {
             outcome,
             dependency_elapsed,
         } = receipt.observation()
         else {
-            self.breaker.settle_not_executed(ctx);
+            if let Some(breaker) = &self.breaker {
+                breaker.settle_not_executed(ctx);
+            }
             let terminal = recovery.finish_with_physical_result();
             debug_assert!(matches!(
                 terminal,
                 RecoveryTerminalDecision::ReturnPhysicalResult
             ));
-            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
             return execution.into_report(ctx.take_control_events());
         };
 
         ctx.insert::<EffectCallDurationNanos>(
             dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64
         );
-        prepare_retry_context(execution.result(), ctx);
-        let classification = classify_physical_result(
-            self.breaker.as_ref(),
-            event,
-            execution.result(),
-            outcome,
-            ctx,
-        );
-        if let Some(classification) = classification.as_ref() {
-            self.breaker.settle_classified_call(classification, ctx);
-        } else {
-            self.breaker.settle_unobserved_call(ctx);
+        if self.breaker.is_some() {
+            prepare_retry_context(execution.result(), ctx);
         }
+        let classification = self.breaker.as_ref().and_then(|breaker| {
+            classify_physical_result(breaker, event, execution.result(), outcome, ctx)
+        });
+        if let Some(breaker) = &self.breaker {
+            if let Some(classification) = classification.as_ref() {
+                breaker.settle_classified_call(classification, ctx);
+            } else {
+                breaker.settle_unobserved_call(ctx);
+            }
+            ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
+                self.writer_id,
+                CircuitBreakerAttemptSettledEventParams {
+                    cursor: identity.cursor.clone(),
+                    attempt,
+                    health_classification: evidence_classification(classification.as_ref()),
+                    slow: breaker.is_slow_dependency_call(dependency_elapsed),
+                    dependency_elapsed_ms: duration_ms(dependency_elapsed),
+                    admission_wait_ms: duration_ms(admission_wait),
+                },
+                event.id,
+            ));
+        } else {
+            ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
+                self.writer_id,
+                identity.cursor.clone(),
+                attempt,
+                duration_ms(dependency_elapsed),
+                duration_ms(admission_wait),
+                event.id,
+            ));
+        }
+
         if let Some(limiter) = &self.limiter {
             limiter.observe_resilience_attempt(ctx);
         }
-        ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
-            self.breaker.evidence_writer_id(),
-            CircuitBreakerAttemptSettledEventParams {
-                cursor: identity.cursor.clone(),
-                attempt,
-                health_classification: evidence_classification(classification.as_ref()),
-                slow: self.breaker.is_slow_dependency_call(dependency_elapsed),
-                dependency_elapsed_ms: duration_ms(dependency_elapsed),
-                admission_wait_ms: duration_ms(admission_wait),
-            },
-            event.id,
-        ));
+
         let terminal = recovery.finish_with_physical_result();
         debug_assert!(matches!(
             terminal,
             RecoveryTerminalDecision::ReturnPhysicalResult
         ));
-        write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+        write_recovery_completed(&mut recovery, self.writer_id, identity, event, ctx);
         execution.into_report(ctx.take_control_events())
     }
 }
 
 fn write_recovery_completed(
     recovery: &mut EffectRecoveryController,
-    breaker: &CircuitBreakerMiddleware,
+    writer_id: obzenflow_core::WriterId,
     identity: &EffectIdentity,
     event: &ChainEvent,
     ctx: &mut crate::middleware::MiddlewareContext,
 ) {
     let completion = recovery.take_completion();
-    ctx.write_control_event(ChainEventFactory::circuit_breaker_recovery_completed(
-        breaker.evidence_writer_id(),
-        CircuitBreakerRecoveryCompletedEventParams {
+    ctx.write_control_event(ChainEventFactory::recovery_completed(
+        writer_id,
+        RecoveryCompletedEventParams {
             cursor: identity.cursor.clone(),
             total_attempts: completion.total_attempts,
             backoff_elapsed_ms: duration_ms(completion.backoff_elapsed),
@@ -1565,24 +1644,24 @@ fn write_recovery_completed(
 
 fn repeatable_admission_rejected(
     recovery: &mut EffectRecoveryController,
-    breaker: &CircuitBreakerMiddleware,
+    writer_id: obzenflow_core::WriterId,
     identity: &EffectIdentity,
     cause: Box<crate::middleware::MiddlewareAbortCause>,
     event: &ChainEvent,
     ctx: &mut crate::middleware::MiddlewareContext,
 ) -> EffectBoundaryReport {
     let decision = recovery.finish_from_admission(cause);
-    write_recovery_completed(recovery, breaker, identity, event, ctx);
+    write_recovery_completed(recovery, writer_id, identity, event, ctx);
     match decision {
         RecoveryTerminalDecision::BoundaryRejected(cause) => {
             report_from_admission(PolicyAdmission::Reject(cause), ctx)
         }
         RecoveryTerminalDecision::ReturnLastPhysicalError => {
             write_exhausted(
-                breaker,
+                writer_id,
                 identity,
                 recovery.attempts(),
-                CircuitBreakerRetryStopReason::CircuitNoLongerClosed,
+                RetryStopReason::CircuitNoLongerClosed,
                 event,
                 ctx,
             );
@@ -1596,15 +1675,15 @@ fn repeatable_admission_rejected(
 
 fn repeatable_retry_exhausted(
     recovery: &mut EffectRecoveryController,
-    breaker: &CircuitBreakerMiddleware,
+    writer_id: obzenflow_core::WriterId,
     identity: &EffectIdentity,
-    reason: CircuitBreakerRetryStopReason,
+    reason: RetryStopReason,
     event: &ChainEvent,
     ctx: &mut crate::middleware::MiddlewareContext,
 ) -> EffectBoundaryReport {
-    write_exhausted(breaker, identity, recovery.attempts(), reason, event, ctx);
+    write_exhausted(writer_id, identity, recovery.attempts(), reason, event, ctx);
     let decision = recovery.finish_with_last_physical_error();
-    write_recovery_completed(recovery, breaker, identity, event, ctx);
+    write_recovery_completed(recovery, writer_id, identity, event, ctx);
     match decision {
         RecoveryTerminalDecision::ReturnLastPhysicalError => {
             executed(Err(recovery.take_last_physical_error()), ctx)
@@ -1618,14 +1697,14 @@ fn repeatable_retry_exhausted(
 
 fn repeatable_physical_terminal(
     recovery: &mut EffectRecoveryController,
-    breaker: &CircuitBreakerMiddleware,
+    writer_id: obzenflow_core::WriterId,
     identity: &EffectIdentity,
     result: Result<Vec<ChainEvent>, EffectError>,
     event: &ChainEvent,
     ctx: &mut crate::middleware::MiddlewareContext,
 ) -> EffectBoundaryReport {
     let decision = recovery.finish_with_physical_result();
-    write_recovery_completed(recovery, breaker, identity, event, ctx);
+    write_recovery_completed(recovery, writer_id, identity, event, ctx);
     match decision {
         RecoveryTerminalDecision::ReturnPhysicalResult => executed(result, ctx),
         RecoveryTerminalDecision::BoundaryRejected(_)
@@ -1858,15 +1937,15 @@ fn evidence_classification(
 }
 
 fn write_exhausted(
-    breaker: &CircuitBreakerMiddleware,
+    writer_id: obzenflow_core::WriterId,
     identity: &EffectIdentity,
     attempts: u32,
-    reason: CircuitBreakerRetryStopReason,
+    reason: RetryStopReason,
     event: &ChainEvent,
     ctx: &mut crate::middleware::MiddlewareContext,
 ) {
-    ctx.write_control_event(ChainEventFactory::circuit_breaker_retry_exhausted(
-        breaker.evidence_writer_id(),
+    ctx.write_control_event(ChainEventFactory::retry_exhausted(
+        writer_id,
         identity.cursor.clone(),
         attempts,
         reason,
@@ -1937,42 +2016,40 @@ mod tests {
     use crate::middleware::MiddlewareSurfaceKind;
 
     fn valid_breaker() -> CircuitBreaker {
-        CircuitBreaker::builder()
+        crate::middleware::control::circuit_breaker()
             .count_window(5)
             .minimum_calls(5)
             .failure_rate_threshold(0.6)
             .slow_call_duration(Duration::from_millis(250))
             .slow_call_rate_threshold(0.5)
             .open_for(Duration::from_secs(5))
-            .build()
-            .expect("test breaker should be valid")
     }
 
     #[test]
     fn checked_breaker_builder_rejects_ambiguous_and_incomplete_modes() {
         assert!(matches!(
-            CircuitBreaker::builder()
+            crate::middleware::control::circuit_breaker()
                 .consecutive_failures(3)
                 .count_window(5)
                 .minimum_calls(5)
                 .failure_rate_threshold(0.5)
-                .build(),
+                .validate(),
             Err(CircuitBreakerConfigError::MixedModes)
         ));
         assert!(matches!(
-            CircuitBreaker::builder()
+            crate::middleware::control::circuit_breaker()
                 .count_window(5)
                 .minimum_calls(5)
                 .slow_call_duration(Duration::from_millis(10))
-                .build(),
+                .validate(),
             Err(CircuitBreakerConfigError::IncompleteSlowCallTrigger)
         ));
         assert!(matches!(
-            CircuitBreaker::builder()
+            crate::middleware::control::circuit_breaker()
                 .count_window(3)
                 .minimum_calls(4)
                 .failure_rate_threshold(0.5)
-                .build(),
+                .validate(),
             Err(CircuitBreakerConfigError::MinimumCallsExceedsWindow { .. })
         ));
     }
@@ -1980,37 +2057,50 @@ mod tests {
     #[test]
     fn aggregate_validates_retry_without_panicking() {
         assert!(matches!(
-            EffectResilience::with_breaker(valid_breaker())
-                .retry(Retry::fixed(Duration::ZERO))
+            EffectPlanFactory::with_breaker(valid_breaker())
+                .retry(crate::middleware::control::retry().fixed_delay(Duration::ZERO))
                 .build(),
-            Err(EffectResilienceConfigError::ZeroFixedDelay)
+            Err(ControlConfigurationError::ZeroFixedDelay)
         ));
         assert!(matches!(
-            EffectResilience::with_breaker(valid_breaker())
-                .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(0))
+            EffectPlanFactory::with_breaker(valid_breaker())
+                .retry(
+                    crate::middleware::control::retry()
+                        .fixed_delay(Duration::from_millis(1))
+                        .max_attempts(0)
+                )
                 .build(),
-            Err(EffectResilienceConfigError::ZeroRetryAttempts)
+            Err(ControlConfigurationError::ZeroRetryAttempts)
         ));
         assert!(matches!(
-            EffectResilience::with_breaker(valid_breaker())
-                .retry(Retry::fixed(Duration::from_millis(1)).max_backoff(Duration::ZERO))
+            EffectPlanFactory::with_breaker(valid_breaker())
+                .retry(
+                    crate::middleware::control::retry()
+                        .fixed_delay(Duration::from_millis(1))
+                        .max_backoff(Duration::ZERO)
+                )
                 .build(),
-            Err(EffectResilienceConfigError::ZeroMaxBackoff)
+            Err(ControlConfigurationError::ZeroMaxBackoff)
         ));
         assert!(matches!(
-            EffectResilience::with_breaker(valid_breaker())
-                .retry(Retry::fixed(Duration::from_millis(1)).attempt_start_window(Duration::ZERO))
+            EffectPlanFactory::with_breaker(valid_breaker())
+                .retry(
+                    crate::middleware::control::retry()
+                        .fixed_delay(Duration::from_millis(1))
+                        .attempt_start_window(Duration::ZERO)
+                )
                 .build(),
-            Err(EffectResilienceConfigError::ZeroAttemptStartWindow)
+            Err(ControlConfigurationError::ZeroAttemptStartWindow)
         ));
     }
 
     #[test]
     fn aggregate_builder_defaults_to_absent_retry_and_accepts_concrete_retry() {
-        let builder = EffectResilience::with_breaker(valid_breaker());
+        let builder = EffectPlanFactory::with_breaker(valid_breaker());
         assert!(builder.retry.is_none());
 
-        let builder = builder.retry(Retry::fixed(Duration::from_millis(10)));
+        let builder = builder
+            .retry(crate::middleware::control::retry().fixed_delay(Duration::from_millis(10)));
         assert!(builder.retry.is_some());
         builder
             .build()
@@ -2061,7 +2151,9 @@ mod tests {
 
     #[test]
     fn provider_retry_after_is_the_only_delay_floor_and_is_not_capped() {
-        let retry = Retry::fixed(Duration::from_millis(50)).max_backoff(Duration::from_millis(10));
+        let retry = crate::middleware::control::retry()
+            .fixed_delay(Duration::from_millis(50))
+            .max_backoff(Duration::from_millis(10));
         assert_eq!(
             retry_delay(&retry, 1, &EffectError::Timeout("slow".to_string())),
             Duration::from_millis(10)
@@ -2081,14 +2173,15 @@ mod tests {
 
     #[test]
     fn aggregate_contributes_one_namespaced_configuration_unit() {
-        let factory = EffectResilience::with_breaker(valid_breaker())
+        let factory = EffectPlanFactory::with_breaker(valid_breaker())
             .retry(
-                Retry::fixed(Duration::from_millis(10))
+                crate::middleware::control::retry()
+                    .fixed_delay(Duration::from_millis(10))
                     .max_attempts(3)
                     .max_backoff(Duration::from_secs(1))
                     .attempt_start_window(Duration::from_secs(2)),
             )
-            .rate_limit_each_attempt(RateLimiter::per_second(20.0).unwrap())
+            .rate_limit_each_attempt(crate::middleware::control::rate_limit(20.0))
             .build()
             .unwrap();
 
@@ -2100,28 +2193,29 @@ mod tests {
         let defaults = factory.dsl_config_defaults();
         assert!(defaults
             .iter()
-            .all(|default| default.key_path.starts_with("effects.resilience.")));
+            .all(|default| default.key_path.starts_with("middleware.")));
         let keys = defaults
             .iter()
             .map(|default| default.key_path)
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(keys.contains(RESILIENCE_BREAKER_MODE_KEY));
-        assert!(keys.contains(RESILIENCE_RETRY_MAX_ATTEMPTS_KEY));
-        assert!(keys.contains(RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY));
+        assert!(keys.contains(CIRCUIT_BREAKER_MODE_KEY));
+        assert!(keys.contains(RETRY_MAX_ATTEMPTS_KEY));
+        assert!(keys.contains(RATE_LIMITER_EVENTS_PER_SECOND_KEY));
     }
 
     fn aggregate_snapshot(with_retry: bool, with_limiter: bool) -> serde_json::Value {
-        let mut builder = EffectResilience::with_breaker(valid_breaker());
+        let mut builder = EffectPlanFactory::with_breaker(valid_breaker());
         if with_retry {
             builder = builder.retry(
-                Retry::fixed(Duration::from_millis(10))
+                crate::middleware::control::retry()
+                    .fixed_delay(Duration::from_millis(10))
                     .max_attempts(3)
                     .max_backoff(Duration::from_secs(1))
                     .attempt_start_window(Duration::from_secs(2)),
             );
         }
         if with_limiter {
-            builder = builder.rate_limit_each_attempt(RateLimiter::per_second(20.0).unwrap());
+            builder = builder.rate_limit_each_attempt(crate::middleware::control::rate_limit(20.0));
         }
         builder
             .build()
@@ -2143,11 +2237,11 @@ mod tests {
         assert_eq!(
             retry_only["retry"],
             serde_json::json!({
-                (RESILIENCE_RETRY_KIND_KEY): "fixed",
-                (RESILIENCE_RETRY_FIXED_DELAY_MS_KEY): 10,
-                (RESILIENCE_RETRY_MAX_ATTEMPTS_KEY): 3,
-                (RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY): 1_000,
-                (RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY): 2_000,
+                (RETRY_KIND_KEY): "fixed",
+                (RETRY_FIXED_DELAY_MS_KEY): 10,
+                (RETRY_MAX_ATTEMPTS_KEY): 3,
+                (RETRY_MAX_BACKOFF_MS_KEY): 1_000,
+                (RETRY_ATTEMPT_START_WINDOW_MS_KEY): 2_000,
             })
         );
         assert!(retry_only.get("rate_limiter").is_none());
@@ -2158,8 +2252,8 @@ mod tests {
         assert_eq!(
             limiter_only["rate_limiter"],
             serde_json::json!({
-                (RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY): 20.0,
-                (RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY): 1.0,
+                (RATE_LIMITER_EVENTS_PER_SECOND_KEY): 20.0,
+                (RATE_LIMITER_COST_PER_ATTEMPT_KEY): 1.0,
             })
         );
 

@@ -243,7 +243,6 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
                 numbers = async_source!(ProbeEvent => numbers_handler);
                 slow = effectful_transform!(
                     ProbeEvent -> SlowProbeEvent => slow_handler,
-                    observers: [],
                 );
                 fast = transform!(ProbeEvent -> FastProbeEvent => fast_handler);
                 sink_slow = sink!(SlowProbeEvent => slow_sink_handler);

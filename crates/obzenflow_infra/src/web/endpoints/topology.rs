@@ -298,16 +298,19 @@ mod tests {
             .map(|mut s| {
                 if s.id == stage_topology_id {
                     s.middleware = Some(obzenflow_topology::MiddlewareInfo {
-                        stack: vec!["rate_limiter".to_string()],
-                        circuit_breaker: None,
-                        rate_limiter: Some(obzenflow_topology::RateLimiterInfo {
-                            tokens_per_sec: 2.0,
-                            burst_capacity: 5.0,
-                            configured_burst_capacity: None,
-                            cost_per_event: 5.0,
-                            limit_rate: 0.4,
-                        }),
-                        retry: None,
+                        attachments: vec![obzenflow_topology::MiddlewareAttachmentInfo {
+                            key: "rate_limited:source_poll:rate_limiter".into(),
+                            label: "rate_limiter".into(),
+                            family: obzenflow_topology::MiddlewareFamily::RateLimiter,
+                            authored_site:
+                                obzenflow_topology::MiddlewareAuthoredSite::Implementation,
+                            operation: obzenflow_topology::MiddlewareOperation::SourcePoll,
+                            configuration: serde_json::json!({
+                                "events_per_second": 2.0,
+                                "burst_capacity": 5.0,
+                                "cost_per_attempt": 5.0,
+                            }),
+                        }],
                     });
                 }
                 s
@@ -342,14 +345,19 @@ mod tests {
         let rate_limiter = stage
             .middleware
             .as_ref()
-            .and_then(|middleware| middleware.rate_limiter.as_ref())
-            .expect("rate limiter config should be present");
-
-        assert_eq!(rate_limiter.tokens_per_sec, 2.0);
-        assert_eq!(rate_limiter.burst_capacity, 5.0);
-        assert_eq!(rate_limiter.configured_burst_capacity, None);
-        assert_eq!(rate_limiter.cost_per_event, 5.0);
-        assert!((rate_limiter.limit_rate - 0.4).abs() < f64::EPSILON);
+            .and_then(|middleware| {
+                middleware.attachments.iter().find(|attachment| {
+                    attachment.family == obzenflow_topology::MiddlewareFamily::RateLimiter
+                })
+            })
+            .expect("rate limiter configuration should be present");
+        assert_eq!(
+            rate_limiter.operation,
+            obzenflow_topology::MiddlewareOperation::SourcePoll
+        );
+        assert_eq!(rate_limiter.configuration["events_per_second"], 2.0);
+        assert_eq!(rate_limiter.configuration["burst_capacity"], 5.0);
+        assert_eq!(rate_limiter.configuration["cost_per_attempt"], 5.0);
     }
 
     #[tokio::test]

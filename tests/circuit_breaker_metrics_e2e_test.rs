@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::CircuitBreaker;
+use obzenflow_adapters::middleware::circuit_breaker;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
@@ -167,13 +167,11 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
             stages: {
                 // Typed source-poll binding: three error-marked batches open the breaker.
-                cb_source = source!(CircuitMetricEvent => source with [
-                    CircuitBreaker::builder()
+                cb_source = source!(CircuitMetricEvent => source with {
+                    circuit_breaker()
                         .consecutive_failures(3)
                         .open_for(Duration::from_millis(100))
-                        .build()
-                        .expect("source breaker configuration")
-                ]);
+                });
                 cb_sink = sink!(CircuitMetricEvent => sink);
             },
 
@@ -292,12 +290,10 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
             )),
 
             stages: {
-                rapid_source = source!(CircuitMetricEvent => rapid_source_handler with [
-                    CircuitBreaker::builder()
+                rapid_source = source!(CircuitMetricEvent => rapid_source_handler with {
+                    circuit_breaker()
                         .consecutive_failures(10)
-                        .build()
-                        .expect("source breaker configuration")
-                ]);
+                });
                 null_sink = sink!(CircuitMetricEvent => null_sink_handler);
             },
 

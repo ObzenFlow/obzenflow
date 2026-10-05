@@ -188,9 +188,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 store_orders = source!(OrderPlaced => store_orders_handler);
                 intake = transform!(OrderPlaced -> OrderPlaced => intake_handler);
                 charge = effectful_transform!(
-                    OrderPlaced -> { Charged } uses ChargeEffect => charge_handler,
-                    observers: []
-                );
+                    OrderPlaced -> { Charged } uses ChargeEffect => charge_handler);
                 receipts = sink!(Charged => receipts_handler);
             },
 

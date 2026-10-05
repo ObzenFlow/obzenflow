@@ -421,40 +421,40 @@ fn admit_file_candidates(
         )?;
     }
 
-    // [effects] global/flow/stages.
-    admit_effects_fields(
+    // [middleware] global/flow/stages.
+    admit_middleware_fields(
         set,
         ConfigScope::Global.into(),
-        &file.effects.circuit_breaker,
-        &file.effects.rate_limiter,
-        &file.effects.resilience,
-        "effects",
+        &file.middleware.circuit_breaker,
+        &file.middleware.rate_limiter,
+        &file.middleware.retry,
+        "middleware",
     )?;
-    admit_effects_fields(
+    admit_middleware_fields(
         set,
         ConfigScope::Flow.into(),
-        &file.effects.flow.circuit_breaker,
-        &file.effects.flow.rate_limiter,
-        &file.effects.flow.resilience,
-        "effects.flow",
+        &file.middleware.flow.circuit_breaker,
+        &file.middleware.flow.rate_limiter,
+        &file.middleware.flow.retry,
+        "middleware.flow",
     )?;
-    for (stage, entry) in &file.effects.stages {
-        admit_effects_fields(
+    for (stage, entry) in &file.middleware.stages {
+        admit_middleware_fields(
             set,
             ConfigScope::stage(stage.as_str()).into(),
             &entry.circuit_breaker,
             &entry.rate_limiter,
-            &entry.resilience,
-            &format!("effects.stages.{stage}"),
+            &entry.retry,
+            &format!("middleware.stages.{stage}"),
         )?;
         for (effect_type, exact) in &entry.by_type {
-            admit_effects_fields(
+            admit_middleware_fields(
                 set,
                 ConfigAddress::effect(stage.as_str(), effect_type.as_str()),
                 &exact.circuit_breaker,
                 &exact.rate_limiter,
-                &exact.resilience,
-                &format!("effects.stages.{stage}.by_type.\"{effect_type}\""),
+                &exact.retry,
+                &format!("middleware.stages.{stage}.by_type.\"{effect_type}\""),
             )?;
         }
     }
@@ -524,181 +524,151 @@ fn admit_file_candidates(
     Ok(())
 }
 
-fn admit_effects_fields(
+fn admit_middleware_fields(
     set: &mut CandidateSet,
     address: ConfigAddress,
-    breaker: &super::config::RawBreakerFields,
-    limiter: &super::config::RawLimiterFields,
-    resilience: &super::config::RawResilienceFields,
+    breaker: &super::config::RawCircuitBreakerFields,
+    limiter: &super::config::RawRateLimiterFields,
+    retry: &super::config::RawRetryFields,
     at_prefix: &str,
 ) -> Result<(), ConfigError> {
-    file_u64!(
-        set,
-        "effects.circuit_breaker.threshold",
-        address.clone(),
-        breaker.threshold,
-        &format!("{at_prefix}.circuit_breaker.threshold")
-    );
-    if let Some(rate) = limiter.events_per_second {
-        admit(
-            set,
-            "effects.rate_limiter.events_per_second",
-            address.clone(),
-            ConfigSource::File,
-            ConfigValue::F64(rate),
-            &format!("{at_prefix}.rate_limiter.events_per_second"),
-        )?;
-    }
-    if let Some(burst) = limiter.burst_capacity {
-        admit(
-            set,
-            "effects.rate_limiter.burst_capacity",
-            address.clone(),
-            ConfigSource::File,
-            ConfigValue::F64(burst),
-            &format!("{at_prefix}.rate_limiter.burst_capacity"),
-        )?;
-    }
-
-    let rb = &resilience.breaker;
+    let rb = breaker;
     if let Some(mode) = &rb.mode {
         admit(
             set,
-            "effects.resilience.breaker.mode",
+            "middleware.circuit_breaker.mode",
             address.clone(),
             ConfigSource::File,
             ConfigValue::Text(mode.clone()),
-            &format!("{at_prefix}.resilience.breaker.mode"),
+            &format!("{at_prefix}.circuit_breaker.mode"),
         )?;
     }
     file_u64!(
         set,
-        "effects.resilience.breaker.consecutive_failures",
+        "middleware.circuit_breaker.consecutive_failures",
         address.clone(),
         rb.consecutive_failures,
-        &format!("{at_prefix}.resilience.breaker.consecutive_failures")
+        &format!("{at_prefix}.circuit_breaker.consecutive_failures")
     );
     file_u64!(
         set,
-        "effects.resilience.breaker.count_window",
+        "middleware.circuit_breaker.count_window",
         address.clone(),
         rb.count_window,
-        &format!("{at_prefix}.resilience.breaker.count_window")
+        &format!("{at_prefix}.circuit_breaker.count_window")
     );
     file_u64!(
         set,
-        "effects.resilience.breaker.minimum_calls",
+        "middleware.circuit_breaker.minimum_calls",
         address.clone(),
         rb.minimum_calls,
-        &format!("{at_prefix}.resilience.breaker.minimum_calls")
+        &format!("{at_prefix}.circuit_breaker.minimum_calls")
     );
     if let Some(value) = rb.failure_rate_threshold {
         admit(
             set,
-            "effects.resilience.breaker.failure_rate_threshold",
+            "middleware.circuit_breaker.failure_rate_threshold",
             address.clone(),
             ConfigSource::File,
             ConfigValue::F64(value),
-            &format!("{at_prefix}.resilience.breaker.failure_rate_threshold"),
+            &format!("{at_prefix}.circuit_breaker.failure_rate_threshold"),
         )?;
     }
     file_u64!(
         set,
-        "effects.resilience.breaker.slow_call_duration_ms",
+        "middleware.circuit_breaker.slow_call_duration_ms",
         address.clone(),
         rb.slow_call_duration_ms,
-        &format!("{at_prefix}.resilience.breaker.slow_call_duration_ms")
+        &format!("{at_prefix}.circuit_breaker.slow_call_duration_ms")
     );
     if let Some(value) = rb.slow_call_rate_threshold {
         admit(
             set,
-            "effects.resilience.breaker.slow_call_rate_threshold",
+            "middleware.circuit_breaker.slow_call_rate_threshold",
             address.clone(),
             ConfigSource::File,
             ConfigValue::F64(value),
-            &format!("{at_prefix}.resilience.breaker.slow_call_rate_threshold"),
+            &format!("{at_prefix}.circuit_breaker.slow_call_rate_threshold"),
         )?;
     }
     file_u64!(
         set,
-        "effects.resilience.breaker.open_for_ms",
+        "middleware.circuit_breaker.open_for_ms",
         address.clone(),
         rb.open_for_ms,
-        &format!("{at_prefix}.resilience.breaker.open_for_ms")
+        &format!("{at_prefix}.circuit_breaker.open_for_ms")
     );
     file_u64!(
         set,
-        "effects.resilience.breaker.probes",
+        "middleware.circuit_breaker.probes",
         address.clone(),
         rb.probes,
-        &format!("{at_prefix}.resilience.breaker.probes")
+        &format!("{at_prefix}.circuit_breaker.probes")
     );
     if let Some(value) = rb.rate_limited_counts_as_failure {
         admit(
             set,
-            "effects.resilience.breaker.rate_limited_counts_as_failure",
+            "middleware.circuit_breaker.rate_limited_counts_as_failure",
             address.clone(),
             ConfigSource::File,
             ConfigValue::Bool(value),
-            &format!("{at_prefix}.resilience.breaker.rate_limited_counts_as_failure"),
+            &format!("{at_prefix}.circuit_breaker.rate_limited_counts_as_failure"),
         )?;
     }
 
-    let retry = &resilience.retry;
     if let Some(kind) = &retry.kind {
         admit(
             set,
-            "effects.resilience.retry.kind",
+            "middleware.retry.kind",
             address.clone(),
             ConfigSource::File,
             ConfigValue::Text(kind.clone()),
-            &format!("{at_prefix}.resilience.retry.kind"),
+            &format!("{at_prefix}.retry.kind"),
         )?;
     }
     file_u64!(
         set,
-        "effects.resilience.retry.fixed_delay_ms",
+        "middleware.retry.fixed_delay_ms",
         address.clone(),
         retry.fixed_delay_ms,
-        &format!("{at_prefix}.resilience.retry.fixed_delay_ms")
+        &format!("{at_prefix}.retry.fixed_delay_ms")
     );
     file_u64!(
         set,
-        "effects.resilience.retry.max_attempts",
+        "middleware.retry.max_attempts",
         address.clone(),
         retry.max_attempts,
-        &format!("{at_prefix}.resilience.retry.max_attempts")
+        &format!("{at_prefix}.retry.max_attempts")
     );
     file_u64!(
         set,
-        "effects.resilience.retry.max_backoff_ms",
+        "middleware.retry.max_backoff_ms",
         address.clone(),
         retry.max_backoff_ms,
-        &format!("{at_prefix}.resilience.retry.max_backoff_ms")
+        &format!("{at_prefix}.retry.max_backoff_ms")
     );
     file_u64!(
         set,
-        "effects.resilience.retry.attempt_start_window_ms",
+        "middleware.retry.attempt_start_window_ms",
         address.clone(),
         retry.attempt_start_window_ms,
-        &format!("{at_prefix}.resilience.retry.attempt_start_window_ms")
+        &format!("{at_prefix}.retry.attempt_start_window_ms")
     );
 
-    let resilience_limiter = &resilience.rate_limiter;
     for (key, value, at) in [
         (
-            "effects.resilience.rate_limiter.events_per_second",
-            resilience_limiter.events_per_second,
+            "middleware.rate_limiter.events_per_second",
+            limiter.events_per_second,
             "events_per_second",
         ),
         (
-            "effects.resilience.rate_limiter.burst_capacity",
-            resilience_limiter.burst_capacity,
+            "middleware.rate_limiter.burst_capacity",
+            limiter.burst_capacity,
             "burst_capacity",
         ),
         (
-            "effects.resilience.rate_limiter.cost_per_attempt",
-            resilience_limiter.cost_per_attempt,
+            "middleware.rate_limiter.cost_per_attempt",
+            limiter.cost_per_attempt,
             "cost_per_attempt",
         ),
     ] {
@@ -709,7 +679,7 @@ fn admit_effects_fields(
                 address.clone(),
                 ConfigSource::File,
                 ConfigValue::F64(value),
-                &format!("{at_prefix}.resilience.rate_limiter.{at}"),
+                &format!("{at_prefix}.rate_limiter.{at}"),
             )?;
         }
     }
@@ -1006,7 +976,7 @@ mod tests {
             [contracts]
             source_contract_strict_mode = "warn"
 
-            [effects.stages.fetcher.rate_limiter]
+            [middleware.stages.fetcher.rate_limiter]
             events_per_second = 10.5
 
             [ai.models]
@@ -1036,7 +1006,7 @@ mod tests {
         assert!(snapshot
             .candidates()
             .get(
-                "effects.rate_limiter.events_per_second",
+                "middleware.rate_limiter.events_per_second",
                 &ConfigScope::stage("fetcher")
             )
             .is_some());
@@ -1272,10 +1242,10 @@ mod tests {
         let _guard = EnvGuard::new(&["OBZENFLOW_EFFECTS_RATE_LIMITER_EVENTS_PER_SECOND"]);
         let snapshot = snapshot(
             r#"
-            [effects.stages.authorize_payment.rate_limiter]
+            [middleware.stages.authorize_payment.rate_limiter]
             events_per_second = 8.0
 
-            [effects.stages.authorize_payment.by_type."payments.authorize".rate_limiter]
+            [middleware.stages.authorize_payment.by_type."payments.authorize".rate_limiter]
             events_per_second = 5.0
             "#,
             &[],
@@ -1347,7 +1317,7 @@ mod tests {
             "[runtime.stages.x]\ncycle_max_iterations = 5",
             "[runtime.backpressure]\nwindows = 10",
             "[contracts]\nstrict = true",
-            "[effects.stages.x]\nedges = {}",
+            "[middleware.stages.x]\nedges = {}",
             "[ai.models]\nprovder = \"ollama\"",
             "[sinks.stages.output]\nhandlers = \"console_sink\"",
         ] {
@@ -1359,11 +1329,27 @@ mod tests {
     }
 
     #[test]
+    fn retired_policy_configuration_routes_are_rejected() {
+        for old in [
+            "[effects.rate_limiter]\nevents_per_second = 10.0",
+            "[effects.resilience.retry]\nmax_attempts = 3",
+            "[middleware.resilience.breaker]\nconsecutive_failures = 3",
+            "[middleware.circuit_breaker]\nthreshold = 3",
+            "[middleware.stages.payments.by_type.\"payments.authorize\".circuit_breaker]\nthreshold = 3",
+        ] {
+            assert!(
+                toml::from_str::<RawFileStartupConfig>(old).is_err(),
+                "retired configuration must not be translated: {old}"
+            );
+        }
+    }
+
+    #[test]
     fn effect_subjects_are_rejected_outside_stage_by_type() {
         for bad in [
-            "[effects.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
-            "[effects.flow.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
-            "[effects.stages.payments.edges.sink.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
+            "[middleware.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
+            "[middleware.flow.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
+            "[middleware.stages.payments.edges.sink.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
             "[runtime.stages.payments.by_type.\"payments.authorize\"]\nheartbeat_interval = 1",
         ] {
             assert!(

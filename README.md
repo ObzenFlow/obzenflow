@@ -44,7 +44,7 @@ fn build_flow() -> FlowDefinition {
             journals: disk_journals("target/logs".into()),
 
             stages: {
-                input = source!(InputEvent => my_source with [rate_limit(100.0)]);
+                input = source!(InputEvent => my_source with rate_limit(100.0));
                 enrich = transform!(InputEvent -> OutputEvent => my_transform);
                 output = sink!(OutputEvent => my_sink);
             },

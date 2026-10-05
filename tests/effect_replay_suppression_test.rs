@@ -7,11 +7,11 @@ mod exported_jsonl;
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder, Retry};
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
     event::payloads::delivery_payload::DeliveryMethod,
-    event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload},
+    event::payloads::execution_payload::{ExecutionPayload, RecoveryFact},
     event::payloads::flow_control_payload::FlowControlPayload,
     event::{payloads::execution_payload::StageLifecycleFact, ChainPayload},
     id::StageId,
@@ -1055,9 +1055,7 @@ fn build_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1084,13 +1082,11 @@ fn build_source_limiter_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                inputs = source!(ReplayInput => inputs_handler with [
-                    RateLimiterBuilder::new(1.0).build()
-                ]);
+                inputs = source!(ReplayInput => inputs_handler with {
+                    rate_limit(1.0)
+                });
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1124,9 +1120,7 @@ fn build_fast_limiter_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with RateLimiterBuilder::new(1000.0).build() => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with rate_limit(1000.0) => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1147,15 +1141,12 @@ fn build_blocking_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .consecutive_failures(1)
-                .build()
-                .expect("blocking breaker configuration"),
-        )
-        .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
-        .build()
-        .expect("blocking resilience configuration");
+        let resilience = (
+            circuit_breaker().consecutive_failures(1),
+            retry()
+                .fixed_delay(Duration::from_millis(1))
+                .max_attempts(2),
+        );
         let inputs_handler = SingleReplaySource::new();
         let effectful_handler = BlockingTransform {
             calls,
@@ -1172,9 +1163,7 @@ fn build_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses BlockingEffect with resilience => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses BlockingEffect with { resilience.0, resilience.1 } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1194,14 +1183,7 @@ fn build_post_perform_blocking_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .consecutive_failures(2)
-                .build()
-                .expect("post-perform breaker configuration"),
-        )
-        .build()
-        .expect("post-perform resilience configuration");
+        let resilience = circuit_breaker().consecutive_failures(2);
         let inputs_handler = SingleReplaySource::new();
         let effectful_handler = PostPerformBlockingTransform {
             calls,
@@ -1217,9 +1199,7 @@ fn build_post_perform_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1237,14 +1217,7 @@ fn build_fan_out_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .consecutive_failures(2)
-                .build()
-                .expect("fan-out breaker configuration"),
-        )
-        .build()
-        .expect("fan-out resilience configuration");
+        let resilience = circuit_breaker().consecutive_failures(2);
         let inputs_handler = SingleReplaySource::new();
         let fan_out_handler = FanOutTransform::new();
         let effectful_handler = ReplayTransform { calls };
@@ -1258,9 +1231,7 @@ fn build_fan_out_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 fan_out = transform!(ReplayInput -> ReplayInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1290,9 +1261,7 @@ fn build_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1310,19 +1279,13 @@ fn build_policy_stateful_flow(
     failures: Arc<Mutex<Vec<ReservationFailed>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reserve_resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .count_window(1)
-                .minimum_calls(1)
-                .slow_call_duration(Duration::from_millis(1))
-                .slow_call_rate_threshold(1.0)
-                .open_for(Duration::from_secs(60))
-                .probes(1)
-                .build()
-                .expect("stateful policy breaker configuration"),
-        )
-        .build()
-        .expect("stateful policy resilience configuration");
+        let reserve_resilience = circuit_breaker()
+            .count_window(1)
+            .minimum_calls(1)
+            .slow_call_duration(Duration::from_millis(1))
+            .slow_call_rate_threshold(1.0)
+            .open_for(Duration::from_secs(60))
+            .probes(1);
         let inputs_handler = ReplaySource::new();
         let allocator = PolicyStateful { calls };
         let failure_sink = ReservationFailureSink { failures };
@@ -1337,9 +1300,7 @@ fn build_policy_stateful_flow(
                     ReplayInput -> { PolicyReserved, ReservationFailed }
                     uses SlowReserveEffect
                         with reserve_resilience
-                    => allocator,
-                    observers: []
-                );
+                    => allocator);
                 reservation_failures = sink!(
                     ReservationFailed => failure_sink,
                     delivery: idempotent
@@ -1380,9 +1341,7 @@ fn build_dishonest_one_fact_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1417,9 +1376,7 @@ fn build_error_after_commit_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1456,9 +1413,7 @@ fn build_apply_rejection_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1488,9 +1443,7 @@ fn build_product_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } uses ProductEffect => effectful_handler,
-                    observers: []
-                );
+                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } uses ProductEffect => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1778,11 +1731,11 @@ async fn circuit_breaker_retry_events_in_stage(run_dir: &Path, stage_key: &str) 
         .filter(|event| {
             matches!(
                 event.payload,
-                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                    CircuitBreakerFact::RetryScheduled { .. }
-                        | CircuitBreakerFact::RetrySucceeded { .. }
-                        | CircuitBreakerFact::RetryExhausted { .. }
-                        | CircuitBreakerFact::RetryStoppedNonRetryable { .. }
+                ChainPayload::Execution(ExecutionPayload::Recovery(
+                    RecoveryFact::RetryScheduled { .. }
+                        | RecoveryFact::RetrySucceeded { .. }
+                        | RecoveryFact::RetryExhausted { .. }
+                        | RecoveryFact::RetryStoppedNonRetryable { .. }
                 ))
             )
         })
@@ -1814,8 +1767,8 @@ async fn circuit_breaker_recovery_completions_in_stage(
         .await
         .into_iter()
         .filter_map(|event| match event.payload {
-            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                CircuitBreakerFact::RecoveryCompleted {
+            ChainPayload::Execution(ExecutionPayload::Recovery(
+                RecoveryFact::RecoveryCompleted {
                     cursor,
                     total_attempts,
                     backoff_elapsed_ms,
@@ -3786,8 +3739,7 @@ fn build_ported_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ported = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses PortedEffect via ported_binding => ported_handler,
-                    observers: []
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses PortedEffect via ported_binding => ported_handler
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4109,14 +4061,7 @@ fn build_transactional_flow(
     ledger_binding: EffectBinding<LedgerEffect>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .consecutive_failures(2)
-                .build()
-                .expect("transactional breaker configuration"),
-        )
-        .build()
-        .expect("transactional resilience configuration");
+        let resilience = circuit_breaker().consecutive_failures(2);
         let inputs_handler = SingleReplaySource::new();
         let ledger_handler = LedgerTransform {
             binding: ledger_binding.invocation(),
@@ -4129,8 +4074,7 @@ fn build_transactional_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses transactional(LedgerEffect) via ledger_binding with resilience => ledger_handler,
-                    observers: []
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses transactional(LedgerEffect) via ledger_binding with resilience => ledger_handler
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4209,8 +4153,8 @@ async fn collected_binding_dispatches_transactional_effect_through_port() {
         exported_chain_events(&live_archive, &temp.path().join("transactional-live.jsonl"))
             .into_iter()
             .filter_map(|event| match event.payload {
-                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                    CircuitBreakerFact::RecoveryCompleted {
+                ChainPayload::Execution(ExecutionPayload::Recovery(
+                    RecoveryFact::RecoveryCompleted {
                         cursor,
                         total_attempts,
                         backoff_elapsed_ms,
@@ -4265,14 +4209,12 @@ async fn collected_binding_dispatches_transactional_effect_through_port() {
     )
     .into_iter()
     .filter_map(|event| match event.payload {
-        ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-            CircuitBreakerFact::RecoveryCompleted {
-                cursor,
-                total_attempts,
-                backoff_elapsed_ms,
-                recovery_elapsed_ms,
-            },
-        )) => Some(RecoveryCompletionEvidence {
+        ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RecoveryCompleted {
+            cursor,
+            total_attempts,
+            backoff_elapsed_ms,
+            recovery_elapsed_ms,
+        })) => Some(RecoveryCompletionEvidence {
             cursor,
             total_attempts,
             backoff_elapsed_ms,
@@ -4411,14 +4353,7 @@ fn build_fail_fast_rejection_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .consecutive_failures(1)
-                .build()
-                .expect("fail-fast breaker configuration"),
-        )
-        .build()
-        .expect("fail-fast resilience configuration");
+        let resilience = circuit_breaker().consecutive_failures(1);
         let inputs_handler = ReplaySource::new();
         let effectful_handler = FailFastTransform { calls };
         let collector_handler = CollectSink { outputs };
@@ -4430,8 +4365,7 @@ fn build_fail_fast_rejection_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses AlwaysFailingEffect with resilience => effectful_handler,
-                    observers: []);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses AlwaysFailingEffect with resilience => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -4449,14 +4383,7 @@ fn build_multi_effect_per_effect_breaker_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .consecutive_failures(1)
-                .build()
-                .expect("per-effect breaker configuration"),
-        )
-        .build()
-        .expect("per-effect resilience configuration");
+        let resilience = circuit_breaker().consecutive_failures(1);
         let inputs_handler = ReplaySource::new();
         let effectful_handler = MultiEffectFailFastTransform { calls };
         let collector_handler = CollectSink { outputs };
@@ -4473,8 +4400,7 @@ fn build_multi_effect_per_effect_breaker_flow(
                         AlwaysFailingEffect with resilience,
                         CountingEffect,
                     }
-                    => effectful_handler,
-                    observers: []);
+                    => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 

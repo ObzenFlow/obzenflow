@@ -93,7 +93,7 @@ pub struct CircuitBreakerAttemptSettledEventParams {
 }
 
 #[derive(Debug, Clone)]
-pub struct CircuitBreakerRecoveryCompletedEventParams {
+pub struct RecoveryCompletedEventParams {
     pub cursor: EffectCursor,
     pub total_attempts: u32,
     pub backoff_elapsed_ms: u64,

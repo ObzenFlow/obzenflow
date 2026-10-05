@@ -24,12 +24,12 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, MiddlewareFactory, Retry};
+use obzenflow_adapters::middleware::{circuit_breaker, retry, MiddlewareFactory};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
     event::payloads::delivery_payload::DeliveryMethod,
     event::payloads::execution_payload::{
-        CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
+        CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
     },
     event::ChainPayload,
     StageOutputs, TypedPayload,
@@ -41,6 +41,7 @@ use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectCursor, EffectError, EffectSafety, Effects, IdempotencyKey,
     SinkRedeliverySafety,
 };
+use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -261,23 +262,14 @@ fn build_retry_flow(
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_breaker = CircuitBreaker::builder()
-            .consecutive_failures(5)
-            .build()
-            .expect("source breaker configuration");
-        let effect_resilience = EffectResilience::with_breaker(
-            CircuitBreaker::builder()
-                .consecutive_failures(2)
-                .build()
-                .expect("effect breaker configuration"),
-        )
-        .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
-        .build()
-        .expect("effect resilience configuration");
-        let sink_breaker = CircuitBreaker::builder()
-            .consecutive_failures(5)
-            .build()
-            .expect("sink breaker configuration");
+        let source_breaker = circuit_breaker().consecutive_failures(5);
+        let effect_resilience = (
+            circuit_breaker().consecutive_failures(2),
+            retry()
+                .fixed_delay(Duration::from_millis(1))
+                .max_attempts(2),
+        );
+        let sink_breaker = circuit_breaker().consecutive_failures(5);
         let source_handler = CompSource::new(source_calls);
         let fan_out_handler = FanOutTransform::new();
         let effectful_handler = RetryTransform { calls };
@@ -289,13 +281,11 @@ fn build_retry_flow(
 
             stages: {
                 // Source breaker stays closed; the scripted source never fails.
-                inputs = source!(CompInput => source_handler with [source_breaker]);
+                inputs = source!(CompInput => source_handler with {source_breaker});
                 fan_out = transform!(CompInput -> CompInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    CompInput -> { CompOutput, CompEffectValue } uses RetryOnceEffect with effect_resilience => effectful_handler,
-                    observers: []
-                );
-                collector = sink!(CompOutput => collector_handler with [sink_breaker]);
+                    CompInput -> { CompOutput, CompEffectValue } uses RetryOnceEffect with { effect_resilience.0, effect_resilience.1 } => effectful_handler);
+                collector = sink!(CompOutput => collector_handler with {sink_breaker});
             },
 
             topology: {
@@ -344,7 +334,9 @@ async fn circuit_breaker_events_in_stage(run_dir: &Path, stage_key: &str) -> usi
         .filter(|event| {
             matches!(
                 event.payload,
-                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_))
+                ChainPayload::Execution(
+                    ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::Recovery(_)
+                )
             )
         })
         .count()
@@ -356,7 +348,9 @@ fn circuit_breaker_event_ids(events: &[ChainEvent]) -> Vec<obzenflow_core::Event
         .filter(|event| {
             matches!(
                 event.payload,
-                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_))
+                ChainPayload::Execution(
+                    ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::Recovery(_)
+                )
             )
         })
         .map(|event| event.id)
@@ -389,67 +383,66 @@ fn expected_calls() -> BTreeMap<u64, usize> {
         .collect()
 }
 
-fn assert_retry_is_nested_introspection_without_a_topology_slot() {
-    let factory: Box<dyn MiddlewareFactory> = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
-            .build()
-            .expect("effect breaker configuration"),
-    )
-    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
-    .build()
-    .expect("effect resilience configuration");
-
+fn assert_retry_is_independent_configuration() {
+    let factory = retry()
+        .fixed_delay(Duration::from_millis(1))
+        .max_attempts(2);
     let snapshot = factory
         .config_snapshot()
-        .expect("effect resilience keeps aggregate-local introspection");
-    assert_eq!(snapshot["kind"], "effect_resilience");
-    assert!(
-        snapshot["retry"].is_object(),
-        "retry remains nested inside the protected effect aggregate"
-    );
-    assert!(
-        factory.topology_config_slot().is_none(),
-        "effect resilience must not reclaim the retired standalone retry topology slot"
-    );
+        .expect("retry exposes its own configuration");
+    assert_eq!(snapshot["retry"][RETRY_MAX_ATTEMPTS_KEY], 2);
+    assert!(snapshot.get("breaker").is_none());
 }
 
-fn assert_topology_omits_standalone_retry(topology: &obzenflow_topology::Topology) {
-    for stage in topology.stages() {
-        let Some(middleware) = &stage.middleware else {
-            continue;
-        };
-        assert!(
-            middleware.stack.iter().all(|label| label != "retry"),
-            "stage '{}' advertised standalone retry in its middleware stack",
-            stage.name
-        );
-        assert!(
-            middleware.retry.is_none(),
-            "stage '{}' populated the published 0.5.1 retry tombstone",
-            stage.name
-        );
-        let encoded =
-            serde_json::to_value(middleware).expect("stage middleware topology serialises");
-        assert!(
-            encoded.get("retry").is_none(),
-            "stage '{}' emitted a middleware.retry payload",
-            stage.name
-        );
-    }
+fn assert_topology_records_resolved_retry(topology: &obzenflow_topology::Topology) {
+    let retry_attachments: Vec<_> = topology
+        .stages()
+        .filter_map(|stage| stage.middleware.as_ref())
+        .flat_map(|middleware| &middleware.attachments)
+        .filter(|attachment| attachment.family == obzenflow_topology::MiddlewareFamily::Retry)
+        .collect();
+    assert_eq!(
+        retry_attachments.len(),
+        1,
+        "one retry definition protects the declared effect"
+    );
+    assert!(matches!(
+        retry_attachments[0].operation,
+        obzenflow_topology::MiddlewareOperation::Effect { .. }
+    ));
+    assert_eq!(
+        retry_attachments[0].configuration[RETRY_MAX_ATTEMPTS_KEY]["value"],
+        2
+    );
 }
 
 fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
     let mut cursors: HashMap<EffectCursor, (usize, usize)> = HashMap::new();
+    let mut health: HashMap<EffectCursor, Vec<(u32, CircuitBreakerHealthClassification)>> =
+        HashMap::new();
     let mut retry_rows = 0;
 
     for event in events {
-        let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(retry_event)) = &event.payload
+        if let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+            CircuitBreakerFact::AttemptSettled {
+                cursor,
+                attempt,
+                health_classification,
+                ..
+            },
+        )) = &event.payload
+        {
+            health
+                .entry(cursor.clone())
+                .or_default()
+                .push((*attempt, *health_classification));
+        }
+        let ChainPayload::Execution(ExecutionPayload::Recovery(retry_event)) = &event.payload
         else {
             continue;
         };
         match retry_event {
-            CircuitBreakerFact::RetryScheduled {
+            RecoveryFact::RetryScheduled {
                 cursor,
                 next_attempt,
                 delay_ms,
@@ -459,21 +452,15 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
                 assert_eq!(*delay_ms, 1);
                 cursors.entry(cursor.clone()).or_default().0 += 1;
             }
-            CircuitBreakerFact::RetrySucceeded {
+            RecoveryFact::RetrySucceeded {
                 cursor,
                 total_attempts,
-                terminal_classification,
             } => {
                 retry_rows += 1;
                 assert_eq!(*total_attempts, 2);
-                assert!(matches!(
-                    terminal_classification,
-                    CircuitBreakerHealthClassification::Success
-                ));
                 cursors.entry(cursor.clone()).or_default().1 += 1;
             }
-            CircuitBreakerFact::RetryExhausted { .. }
-            | CircuitBreakerFact::RetryStoppedNonRetryable { .. } => {
+            RecoveryFact::RetryExhausted { .. } | RecoveryFact::RetryStoppedNonRetryable { .. } => {
                 panic!("every derived cursor should recover on attempt two")
             }
             _ => {}
@@ -489,13 +476,26 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
         cursors.values().all(|counts| *counts == (1, 1)),
         "each cursor should have exactly one scheduled and one succeeded row: {cursors:?}"
     );
+    assert_eq!(health.len(), cursors.len());
+    for cursor in cursors.keys() {
+        assert_eq!(
+            health
+                .get(cursor)
+                .expect("each recovery has breaker settlement evidence"),
+            &[
+                (1, CircuitBreakerHealthClassification::TransientFailure),
+                (2, CircuitBreakerHealthClassification::Success),
+            ],
+            "each cursor must settle the timeout and recovered physical call exactly once"
+        );
+    }
 }
 
 #[tokio::test]
 async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
-    assert_retry_is_nested_introspection_without_a_topology_slot();
+    assert_retry_is_independent_configuration();
 
     // --- Live run ---------------------------------------------------------
     let live_source_calls = Arc::new(AtomicUsize::new(0));
@@ -513,7 +513,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     let topology = live_handle
         .topology()
         .expect("built flow carries its emitted topology");
-    assert_topology_omits_standalone_retry(&topology);
+    assert_topology_records_resolved_retry(&topology);
     live_handle
         .run()
         .await

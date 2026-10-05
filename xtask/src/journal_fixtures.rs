@@ -17,7 +17,7 @@ pub(super) fn run(
         [] => {}
         [arg] if super::is_help(arg) => {
             println!("usage: cargo xtask regenerate-journal-fixtures");
-            println!("Replace the two reference .frame files using their JSON records.");
+            println!("Replace the reference .frame files using their JSON records.");
             return Ok(());
         }
         _ => return Err("regenerate-journal-fixtures accepts no options".into()),
@@ -25,8 +25,8 @@ pub(super) fn run(
 
     let fixtures = root.join("crates/obzenflow_infra/src/journal/disk/codec/fixtures");
     let mut replacements = Vec::new();
-    // Parse and encode both records before replacing either reference frame.
-    for name in ["observations", "plain"] {
+    // Parse and encode every record before replacing any reference frame.
+    for name in ["observations", "plain", "recovery"] {
         let json = fs::read(fixtures.join(format!("{name}.json")))?;
         let record: JournalRecord<ChainPayload> = serde_json::from_slice(&json)?;
         let bytes = encode_record_fixture(&record)?;

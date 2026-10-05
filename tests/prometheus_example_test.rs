@@ -62,11 +62,18 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
         .find(|stage| stage.name == "high_volume_source")
         .unwrap();
     let middleware = source.middleware.as_ref().unwrap();
-    assert_eq!(
-        middleware.circuit_breaker.as_ref().unwrap().cooldown_ms,
-        5_000
-    );
-    assert!(middleware.rate_limiter.is_some());
+    let breaker = middleware
+        .attachments
+        .iter()
+        .find(|attachment| {
+            attachment.family == obzenflow_topology::MiddlewareFamily::CircuitBreaker
+        })
+        .unwrap();
+    assert_eq!(breaker.configuration["open_for_ms"], 5_000);
+    assert!(middleware
+        .attachments
+        .iter()
+        .any(|attachment| attachment.family == obzenflow_topology::MiddlewareFamily::RateLimiter));
     let config = flow.flow_effective_config().unwrap();
     for (from, to) in [
         ("high_volume_source", "error_processor"),

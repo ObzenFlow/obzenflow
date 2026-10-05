@@ -92,6 +92,7 @@ async fn every_non_current_manifest_shape_fails_before_materialisation_or_connec
             ("missing", r#"{"flow_id":"old"}"#),
             ("numeric", r#"{"journal_schema_version":3.0}"#),
             ("old", r#"{"journal_schema_version":"4.0"}"#),
+            ("previous", r#"{"journal_schema_version":"15.0"}"#),
             (
                 "legacy-fields",
                 r#"{"manifest_version":"4.0","journal_format_version":4}"#,
@@ -139,5 +140,230 @@ async fn every_non_current_manifest_shape_fails_before_materialisation_or_connec
                 "{name} manifest created output journals"
             );
         }
+    }
+}
+
+struct CountingObserverFactory(Arc<AtomicUsize>);
+struct PollObserver;
+
+impl obzenflow_runtime::stages::observer::SourcePollObserver for PollObserver {}
+
+impl obzenflow_adapters::middleware::MiddlewareFactory for CountingObserverFactory {
+    fn label(&self) -> &'static str {
+        "preflight_poll_observer"
+    }
+
+    fn override_key(&self) -> obzenflow_adapters::middleware::MiddlewareOverrideKey {
+        obzenflow_adapters::middleware::MiddlewareOverrideKey::of::<Self>(self.label())
+    }
+
+    fn declaration(&self) -> obzenflow_adapters::middleware::MiddlewareDeclaration {
+        obzenflow_adapters::middleware::MiddlewareDeclaration::observer(
+            self.label(),
+            vec![obzenflow_adapters::middleware::MiddlewareSurfaceKind::SourcePoll],
+        )
+    }
+
+    fn materialize(
+        &self,
+        _request: obzenflow_adapters::middleware::MiddlewareAttachmentRequest<'_>,
+        _context: &obzenflow_adapters::middleware::MiddlewareMaterializationContext<'_>,
+    ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<
+        obzenflow_adapters::middleware::MiddlewareSurfaceAttachment,
+    > {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(
+            obzenflow_adapters::middleware::MiddlewareSurfaceAttachment::source_poll_observer(
+                Arc::new(PollObserver),
+            ),
+        )
+    }
+}
+
+#[tokio::test]
+async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_materialisation() {
+    use obzenflow_adapters::middleware::circuit_breaker;
+    use obzenflow_runtime::run_context::FlowBuildContext;
+
+    let root = tempfile::tempdir().unwrap();
+    let output_root = root.path().join("must-not-exist");
+    let journal_root = output_root.clone();
+    let materialisations = Arc::new(AtomicUsize::new(0));
+    let opens = Arc::new(AtomicUsize::new(0));
+    let observer = CountingObserverFactory(materialisations.clone());
+    let output = CountingConnector(opens.clone());
+    let definition = FlowDefinition::materialize(move |_| {
+        let inputs = sources::ValuesSource::new([Input(1)]);
+        Ok(flow! {
+            name: "whole_flow_middleware_preflight",
+            journals: disk_journals(journal_root),
+            stages: {
+                inputs = source!(Input => inputs with observer);
+                output = sink!(Input => output);
+                invalid = sink!(Input => placeholder!() with circuit_breaker()
+                    .count_window(2).minimum_calls(3).failure_rate_threshold(0.5));
+            },
+            topology: {
+                inputs |> output;
+                inputs |> invalid;
+            }
+        })
+    });
+    let failure = definition
+        .build(FlowBuildContext::for_tests())
+        .await
+        .map(|_| ())
+        .expect_err("the complete plan must reject an invalid later breaker");
+    assert!(
+        matches!(
+            failure.error,
+            obzenflow_dsl::FlowBuildError::MiddlewarePlan(_)
+        ),
+        "{failure}"
+    );
+    assert!(failure.to_string().contains("invalid"), "{failure}");
+    assert_eq!(materialisations.load(Ordering::SeqCst), 0);
+    assert_eq!(opens.load(Ordering::SeqCst), 0);
+    assert!(failure.run.is_none());
+    assert!(!output_root.exists());
+}
+
+#[tokio::test]
+async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io() {
+    use obzenflow_adapters::middleware::source_poll_observer;
+    use obzenflow_runtime::run_context::FlowBuildContext;
+    for label in ["", "  "] {
+        let root = tempfile::tempdir().unwrap();
+        let output_root = root.path().join("must-not-exist");
+        let journal_root = output_root.clone();
+        let materialisations = Arc::new(AtomicUsize::new(0));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let observer = CountingObserverFactory(materialisations.clone());
+        let output = CountingConnector(opens.clone());
+        let definition = FlowDefinition::materialize(move |_| {
+            let inputs = sources::ValuesSource::new([Input(1)]);
+            Ok(flow! {
+                name: "empty_observer_label_preflight",
+                journals: disk_journals(journal_root),
+                stages: {
+                    inputs = source!(Input => inputs with observer);
+                    invalid = source!(Input => placeholder!() with source_poll_observer(label, PollObserver));
+                    output = sink!(Input => output);
+                },
+                topology: {
+                    inputs |> output;
+                    invalid |> output;
+                }
+            })
+        });
+        let failure = definition
+            .build(FlowBuildContext::for_tests())
+            .await
+            .map(|_| ())
+            .expect_err("empty labels must fail preflight");
+        assert!(matches!(&failure.error,
+            obzenflow_dsl::FlowBuildError::MiddlewarePlan(
+                obzenflow_dsl::dsl::MiddlewarePlanError::InvalidBinding {
+                    source: obzenflow_adapters::middleware::MiddlewareAttachmentValidationError::EmptyLabel,
+                    ..
+                }
+            )
+        ), "{failure}");
+        assert_eq!(materialisations.load(Ordering::SeqCst), 0);
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
+        assert!(failure.run.is_none());
+        assert!(!output_root.exists());
+    }
+}
+
+#[derive(Clone)]
+struct HostedInputDecoder;
+
+impl obzenflow_runtime::stages::common::handlers::IngressDecoder for HostedInputDecoder {
+    type Output = Input;
+}
+
+#[tokio::test]
+async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
+    use obzenflow_adapters::middleware::rate_limit;
+    use obzenflow_core::ingress::{FilledHostedIngress, HostedIngressBindingSlot};
+    use obzenflow_dsl::async_infinite_source;
+    use obzenflow_runtime::run_context::FlowBuildContext;
+    use obzenflow_runtime::stages::common::handlers::HostedIngressSource;
+
+    for prefilled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let output_root = root.path().join("must-not-exist");
+        let journal_root = output_root.clone();
+        let materialisations = Arc::new(AtomicUsize::new(0));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let observer = CountingObserverFactory(materialisations.clone());
+        let output = CountingConnector(opens.clone());
+        let slot = HostedIngressBindingSlot::new("orders");
+        let previous_stage = obzenflow_core::StageId::new();
+        if prefilled {
+            slot.fill(FilledHostedIngress {
+                stage_id: previous_stage,
+                stage_key: "previous".into(),
+                boundary: None,
+            })
+            .unwrap();
+        }
+        let shared_slot = slot.clone();
+        let definition = FlowDefinition::materialize(move |_| {
+            let (_first_tx, first_rx) = tokio::sync::mpsc::channel(1);
+            let (_second_tx, second_rx) = tokio::sync::mpsc::channel(1);
+            let first = HostedIngressSource::new(HostedInputDecoder, first_rx, shared_slot.clone());
+            let second = HostedIngressSource::new(HostedInputDecoder, second_rx, shared_slot);
+            Ok(flow! {
+                name: "hosted_slot_ownership_preflight",
+                journals: disk_journals(journal_root),
+                stages: {
+                    left = async_infinite_source!(Input => first with { rate_limit(10.0), observer });
+                    right = async_infinite_source!(Input => second with rate_limit(10.0));
+                    output = sink!(Input => output);
+                },
+                topology: {
+                    left |> output;
+                    right |> output;
+                }
+            })
+        });
+        let failure = definition
+            .build(FlowBuildContext::for_tests())
+            .await
+            .map(|_| ())
+            .expect_err("hosted ownership must fail before live build work");
+        if prefilled {
+            assert!(
+                matches!(&failure.error,
+                    obzenflow_dsl::FlowBuildError::HostedIngressAlreadyBound {
+                        ingress_key, stage_name, bound_stage
+                    } if ingress_key == "orders" && stage_name == "left" && bound_stage == "previous"
+                ),
+                "{failure}"
+            );
+            let previous = slot.filled().expect("the prior binding is retained");
+            assert_eq!(previous.stage_id, previous_stage);
+            assert_eq!(previous.stage_key.as_str(), "previous");
+            assert!(previous.boundary.is_none());
+        } else {
+            assert!(
+                matches!(&failure.error,
+                    obzenflow_dsl::FlowBuildError::DuplicateHostedIngressBinding {
+                        ingress_key, first_stage, second_stage
+                    } if ingress_key == "orders" && first_stage == "left" && second_stage == "right"
+                ),
+                "{failure}"
+            );
+            assert!(
+                !slot.is_filled(),
+                "rejected ownership must not fill the slot"
+            );
+        }
+        assert_eq!(materialisations.load(Ordering::SeqCst), 0);
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
+        assert!(failure.run.is_none());
+        assert!(!output_root.exists());
     }
 }

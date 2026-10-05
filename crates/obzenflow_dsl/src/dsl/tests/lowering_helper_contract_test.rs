@@ -165,7 +165,7 @@ mod tests {
         );
 
         type WithPolicy = crate::__obzenflow_effect_manifest_types!(
-            PlainEffect with obzenflow_adapters::middleware::RateLimiterBuilder::new(2.0).build()
+            PlainEffect with obzenflow_adapters::middleware::rate_limit(2.0)
         );
         let mut with_policy = Vec::new();
         let mut with_policy_attachments = Vec::new();
@@ -173,7 +173,7 @@ mod tests {
             @entry with_policy,
             with_policy_attachments,
             [],
-            PlainEffect with obzenflow_adapters::middleware::RateLimiterBuilder::new(2.0).build()
+            PlainEffect with obzenflow_adapters::middleware::rate_limit(2.0)
         );
         assert_eq!(
             <WithPolicy as EffectSet>::effect_types(),

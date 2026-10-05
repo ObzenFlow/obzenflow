@@ -16,10 +16,10 @@ mod exported_jsonl;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
-    EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
+    EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareAttachmentSite,
+    MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOverrideKey,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
     MiddlewareSurfaceKind::SinkDelivery, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
     ProtectedUnit, ProtectedUnitId, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
     SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
@@ -510,16 +510,14 @@ fn build_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                input = source!(HookInput => hook_source with [
+                input = source!(HookInput => hook_source with {
                     HookProofFactory::new(counters.clone(), 1)
-                ]);
+                });
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1)) => hook_transform,
-                    observers: []
-                );
-                output = sink!(HookOutput => output_sink with [
+                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1)) => hook_transform);
+                output = sink!(HookOutput => output_sink with {
                     HookProofFactory::new(counters.clone(), 1)
-                ]);
+                });
             },
 
             topology: {
@@ -548,8 +546,7 @@ fn build_failure_cause_flow(
             stages: {
                 input = source!(HookInput => hook_source);
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(BreakerCauseProofFactory) => hook_transform,
-                    observers: []);
+                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(BreakerCauseProofFactory) => hook_transform);
                 output = sink!(HookOutput => output_sink);
             },
 
@@ -854,9 +851,10 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         }),
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: "test_stage",
         surface: &surface,
         protected_unit: &mismatched_unit,
-        declaration_index: MiddlewareDeclarationIndex::effect_with(),
+        authored_site: MiddlewareAttachmentSite::Effect,
     };
 
     assert!(validate_attachment_request(&factory.declaration(), &request).is_err());
@@ -872,9 +870,10 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         }),
     };
     let sink_request = MiddlewareAttachmentRequest {
+        stage_key: "test_stage",
         surface: &sink_surface,
         protected_unit: &sink_unit,
-        declaration_index: MiddlewareDeclarationIndex::sink_with(0),
+        authored_site: MiddlewareAttachmentSite::Implementation,
     };
     assert!(validate_attachment_request(&factory.declaration(), &sink_request).is_ok());
 
@@ -886,9 +885,10 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
     };
     let source_request = MiddlewareAttachmentRequest {
+        stage_key: "test_stage",
         surface: &source_surface,
         protected_unit: &source_unit,
-        declaration_index: MiddlewareDeclarationIndex::source_with(0),
+        authored_site: MiddlewareAttachmentSite::Implementation,
     };
     assert!(validate_attachment_request(&factory.declaration(), &source_request).is_ok());
 }

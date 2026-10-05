@@ -23,25 +23,6 @@ use std::sync::Arc;
 
 type ConfiguredSinkResolution = (HashMap<String, Box<dyn StageDescriptor>>, HashSet<String>);
 
-/// Project current breaker settings into the published topology annotation.
-/// Its threshold is the consecutive failure limit or count-window size.
-fn circuit_breaker_topology_config(
-    breaker_config: &serde_json::Value,
-) -> Result<obzenflow_topology::CircuitBreakerInfo, serde_json::Error> {
-    let breaker_mode = &breaker_config["mode"];
-    let opening_threshold = match breaker_mode.get("kind").and_then(serde_json::Value::as_str) {
-        Some("consecutive") => breaker_mode.get("consecutive_failures"),
-        Some("rate_based") => breaker_mode.get("count_window"),
-        _ => None,
-    };
-    serde_json::from_value(serde_json::json!({
-        "threshold": opening_threshold,
-        "cooldown_ms": breaker_config.get("open_for_ms"),
-        "open_policy": "fail_fast",
-        "has_fallback": false,
-    }))
-}
-
 fn describe_handler_keys(keys: &[&str]) -> String {
     match keys {
         [] => "<none>".to_string(),
@@ -93,6 +74,42 @@ fn resolve_configured_sink_descriptors(
         selected_stages.insert(binding, selected_descriptor);
     }
     Ok((selected_stages, configured_sink_stages))
+}
+
+/// Validate shared hosted ownership before any factory, connector, or journal
+/// can materialise. The final write-once fill remains the race-safety guard.
+#[allow(clippy::result_large_err)]
+fn validate_hosted_ingress_bindings<'a>(
+    bindings: impl IntoIterator<
+        Item = (
+            &'a str,
+            &'a obzenflow_core::ingress::HostedIngressBindingSlot,
+        ),
+    >,
+) -> Result<(), crate::dsl::FlowBuildError> {
+    use crate::dsl::FlowBuildError;
+    let mut bindings = bindings.into_iter().collect::<Vec<_>>();
+    bindings.sort_by_key(|(stage, _)| *stage);
+    for (index, (stage, slot)) in bindings.iter().enumerate() {
+        if let Some(filled) = slot.filled() {
+            return Err(FlowBuildError::HostedIngressAlreadyBound {
+                ingress_key: slot.ingress_key().to_string(),
+                stage_name: (*stage).to_string(),
+                bound_stage: filled.stage_key.to_string(),
+            });
+        }
+        if let Some((first_stage, _)) = bindings[..index]
+            .iter()
+            .find(|(_, previous)| slot.same_binding(previous))
+        {
+            return Err(FlowBuildError::DuplicateHostedIngressBinding {
+                ingress_key: slot.ingress_key().to_string(),
+                first_stage: (*first_stage).to_string(),
+                second_stage: (*stage).to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The production handle plus test-only journal access retained until the
@@ -193,8 +210,16 @@ where
         // FLOWIP-010o: handler sets are build-only. Resolve the framework's
         // non-secret stage selection and replace each carrier with exactly one
         // ordinary typed sink descriptor before topology or lifecycle work.
-        let (stages, __configured_sink_stages) =
+        let (mut stages, __configured_sink_stages) =
             resolve_configured_sink_descriptors(stages, &__runtime_config)?;
+
+        validate_hosted_ingress_bindings(stages.values().filter_map(|descriptor| {
+            descriptor.hosted_ingress_binding_slot().map(|slot| (descriptor.name(), slot))
+        }))?;
+
+        for descriptor in stages.values_mut() {
+            descriptor.prepare_middleware().map_err(FlowBuildError::MiddlewarePlan)?;
+        }
 
         // Build topology - Two-pass approach for join stages:
         // Pass 1: Create all stage IDs and build name_to_id mapping
@@ -216,21 +241,7 @@ where
                 });
             }
 
-            // FLOWIP-115s: retain grammar positions through the pre-substrate
-            // duplicate-family check so a cross-position conflict names both
-            // protected-unit positions instead of flattening them to labels.
-            let mut seen_middleware_families = HashMap::new();
-            for (position, factory) in descriptor.positioned_stage_middleware_factories() {
-                let key = factory.override_key();
-                if let Some(first_position) = seen_middleware_families.insert(key, position) {
-                    return Err(FlowBuildError::DuplicateStageMiddlewareFamily {
-                        stage_name: descriptor.name().to_string(),
-                        family_label: key.family_label(),
-                        first_position: first_position.syntax_label(),
-                        second_position: position.syntax_label(),
-                    });
-                }
-            }
+
         }
 
         // Pass 1: Create stage IDs
@@ -858,6 +869,20 @@ where
             .validate_composite_boundaries()
             .map_err(FlowBuildError::TopologyValidationFailed)?;
 
+        // FLOWIP-115v: validate the complete frozen plan before any factory,
+        // connector, effect port, or journal can materialise.
+        for (name, descriptor) in &descriptors {
+            let config = obzenflow_runtime::pipeline::config::StageConfig {
+                stage_id: name_to_id[name],
+                name: descriptor.name().to_string(),
+                flow_name: flow_name.to_string(),
+                lineage: __flow_effective.lineage_policy_for(&obzenflow_core::StageKey(name.clone())),
+                effective_config: __flow_effective.clone(),
+                cycle_guard: None,
+            };
+            descriptor.validate_middleware_configuration(&config).map_err(FlowBuildError::MiddlewarePlan)?;
+        }
+
         // FLOWIP-133e: validate every authored declaration before atomically
         // transferring its package recipes into the one run-local registry.
         let mut authored_effect_declarations = Vec::new();
@@ -1345,8 +1370,7 @@ where
         let mut stage_resources = stage_resources_set.stage_resources;
 
         // Structural: track final middleware stack config per stage (core StageId) - FLOWIP-059
-        use obzenflow_runtime::pipeline::MiddlewareStackConfig;
-        let mut middleware_stacks: HashMap<StageId, MiddlewareStackConfig> = HashMap::new();
+        let mut middleware_stacks: HashMap<StageId, obzenflow_topology::MiddlewareInfo> = HashMap::new();
 
         // We need to create wrapped descriptors that will merge middleware
         // This is done by wrapping the existing descriptors
@@ -1465,51 +1489,7 @@ where
                     resources.upstream_stages.insert(0, ref_stage_id);
                 }
 
-                // Structural: compute the effective middleware stack config for this stage (FLOWIP-059).
-                // FLOWIP-115r: the declared stage list is the effective list.
-                let stage_middleware = descriptor.stage_middleware_factories();
-
-                let merged_names: Vec<String> = stage_middleware
-                    .iter()
-                    .map(|f| f.label().to_string())
-                    .collect();
-
-                // Extract config snapshots from all factories (FLOWIP-059)
-                let mut circuit_breaker_config: Option<(&'static str, serde_json::Value)> = None;
-                let mut rate_limiter_config: Option<(&'static str, serde_json::Value)> = None;
-
-                for factory in stage_middleware {
-                    if let Some(snapshot) = factory.config_snapshot() {
-                        if let Some(slot) = factory.topology_config_slot() {
-                            match slot {
-                                obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::CircuitBreaker => {
-                                    if let Some((existing, _)) = &circuit_breaker_config {
-                                        return Err(FlowBuildError::StageResourcesFailed(format!(
-                                            "Stage '{name}' has multiple middleware claiming the CircuitBreaker topology config slot: '{existing}' and '{}'",
-                                            factory.label()
-                                        )));
-                                    }
-                                    circuit_breaker_config = Some((factory.label(), snapshot))
-                                }
-                                obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::RateLimiter => {
-                                    if let Some((existing, _)) = &rate_limiter_config {
-                                        return Err(FlowBuildError::StageResourcesFailed(format!(
-                                            "Stage '{name}' has multiple middleware claiming the RateLimiter topology config slot: '{existing}' and '{}'",
-                                            factory.label()
-                                        )));
-                                    }
-                                    rate_limiter_config = Some((factory.label(), snapshot))
-                                }
-                            }
-                        }
-                    }
-                }
-
-                middleware_stacks.insert(*id, MiddlewareStackConfig {
-                    stack: merged_names,
-                    circuit_breaker: circuit_breaker_config.map(|(_, snapshot)| snapshot),
-                    rate_limiter: rate_limiter_config.map(|(_, snapshot)| snapshot),
-                });
+                middleware_stacks.insert(*id, crate::dsl::attachment_plan::topology(descriptor.as_ref(), &config).map_err(FlowBuildError::MiddlewarePlan)?);
 
                 // Cycle protection is configured via StageConfig for transforms.
                 let handle = descriptor
@@ -1537,36 +1517,7 @@ where
         // `/api/topology` endpoint serialises.
         let topology = {
 
-            let mut middleware_decoded: HashMap<StageId, obzenflow_topology::MiddlewareInfo> =
-                HashMap::new();
-            for (id, config) in &middleware_stacks {
-                middleware_decoded.insert(
-                    *id,
-                    obzenflow_topology::MiddlewareInfo {
-                        stack: config.stack.clone(),
-                        circuit_breaker: config
-                            .circuit_breaker
-                            .as_ref()
-                            .map(circuit_breaker_topology_config)
-                            .transpose()
-                            .map_err(|error| FlowBuildError::StageResourcesFailed(format!(
-                                "Stage '{id}' has invalid circuit-breaker topology configuration: {error}"
-                            )))?,
-                        rate_limiter: config
-                            .rate_limiter
-                            .as_ref()
-                            .map(|v| serde_json::from_value(v.clone()))
-                            .transpose()
-                            .map_err(|error| FlowBuildError::StageResourcesFailed(format!(
-                                "Stage '{id}' has invalid rate-limiter topology configuration: {error}"
-                            )))?,
-                        // Published topology 0.5.1 retains this producer-dead
-                        // compatibility tombstone. First-party runtime output
-                        // never populates it.
-                        retry: None,
-                    },
-                );
-            }
+            let middleware_decoded = middleware_stacks.clone();
 
             let annotated_stages: Vec<obzenflow_topology::StageInfo> = topology
                 .stages()
@@ -1668,51 +1619,6 @@ where
         error,
         run: __run_state,
     })
-}
-
-#[cfg(test)]
-mod middleware_topology_tests {
-    use super::*;
-    use obzenflow_adapters::middleware::{CircuitBreaker, MiddlewareFactory};
-    use std::time::Duration;
-
-    #[test]
-    fn current_breaker_modes_preserve_their_cooldown_in_published_topology() {
-        let breakers = [
-            (CircuitBreaker::builder().consecutive_failures(3), 3),
-            (
-                CircuitBreaker::builder()
-                    .count_window(10)
-                    .minimum_calls(2)
-                    .failure_rate_threshold(0.5),
-                10,
-            ),
-        ];
-        for (builder, threshold) in breakers {
-            let breaker = builder.open_for(Duration::from_secs(5)).build().unwrap();
-            let projected =
-                circuit_breaker_topology_config(&breaker.config_snapshot().unwrap()).unwrap();
-            assert_eq!(projected.cooldown_ms, 5_000);
-            assert_eq!(projected.threshold, threshold);
-            assert!(!projected.has_fallback);
-            let wire = serde_json::to_value(projected).unwrap();
-            assert_eq!(wire["cooldown_ms"], 5_000);
-        }
-    }
-
-    #[test]
-    fn malformed_breaker_configuration_is_an_error_instead_of_an_absent_annotation() {
-        for snapshot in [
-            serde_json::json!({"mode": {"kind": "consecutive", "consecutive_failures": 3}}),
-            serde_json::json!({"mode": {"kind": "unknown"}, "open_for_ms": 5_000}),
-            serde_json::json!({
-                "threshold": 3, "cooldown_ms": 5_000,
-                "open_policy": "fail_fast", "has_fallback": false
-            }),
-        ] {
-            assert!(circuit_breaker_topology_config(&snapshot).is_err());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1838,5 +1744,39 @@ mod configured_sink_tests {
                 ..
             } if stage_name == "digest_summary" && selected == "warehouse_sink"
         ));
+    }
+}
+
+#[cfg(test)]
+mod hosted_ownership_tests {
+    use super::validate_hosted_ingress_bindings;
+    use obzenflow_core::ingress::HostedIngressBindingSlot;
+
+    #[test]
+    fn independently_constructed_same_key_slots_do_not_alias() {
+        let first = HostedIngressBindingSlot::new("orders");
+        let second = HostedIngressBindingSlot::new("orders");
+        validate_hosted_ingress_bindings([("first", &first), ("second", &second)])
+            .expect("ownership follows shared cells, not matching key strings");
+        assert!(!first.is_filled());
+        assert!(!second.is_filled());
+    }
+
+    #[test]
+    fn duplicate_slot_diagnostic_is_independent_of_stage_iteration_order() {
+        let slot = HostedIngressBindingSlot::new("orders");
+        let alias = slot.clone();
+        for bindings in [
+            [("second", &alias), ("first", &slot)],
+            [("first", &slot), ("second", &alias)],
+        ] {
+            let error = validate_hosted_ingress_bindings(bindings).unwrap_err();
+            assert!(
+                matches!(error, crate::dsl::FlowBuildError::DuplicateHostedIngressBinding {
+                ingress_key, first_stage, second_stage
+            } if ingress_key == "orders" && first_stage == "first" && second_stage == "second")
+            );
+        }
+        assert!(!slot.is_filled());
     }
 }

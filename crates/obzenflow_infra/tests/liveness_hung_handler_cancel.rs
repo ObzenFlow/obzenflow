@@ -201,9 +201,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
             stages: {
                 numbers = source!(ProbeEvent => one_event_source);
                 hung = effectful_transform!(
-                    ProbeEvent -> ProbeEvent => hung_transform,
-                    observers: [
-                        handler_observer(
+                    ProbeEvent -> ProbeEvent => hung_transform with { handler_observer(
                             "hung-handler-occurrences",
                             CountsHungHandlerOccurrences {
                                 before: before_callbacks_for_flow,
@@ -215,8 +213,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
                             RecordsHungLifecycle {
                                 phases: lifecycle_phases_for_flow,
                             }
-                        )
-                    ],
+                        ) },
                 );
                 snk = sink!(ProbeEvent => noop_sink);
             },

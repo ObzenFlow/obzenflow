@@ -24,7 +24,7 @@ use obzenflow::flow::{
 };
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::ai_resilience;
-use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
+use obzenflow::middleware::{circuit_breaker, rate_limit};
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
 use obzenflow::stages::sinks::SinkRedeliverySafety;
@@ -466,16 +466,10 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 acc.stories.push(story.clone());
             })
             .emit_on_eof();
-        let source_breaker = CircuitBreaker::builder()
+        let source_breaker = circuit_breaker()
             .consecutive_failures(HN_SOURCE_BREAKER_FAILURES)
-            .open_for(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS))
-            .build()
-            .map_err(|error| {
-                FlowBuildError::StageResourcesFailed(format!(
-                    "HN source circuit-breaker configuration failed: {error}"
-                ))
-            })?;
-        let source_limiter = RateLimiterBuilder::new(source_rate_limit).build();
+            .open_for(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS));
+        let source_limiter = rate_limit(source_rate_limit);
         let console_sink = sinks::ConsoleSink::new(format_digest_summary_for_console);
         let postgres_sink = HnDigestPostgresConfig::from_env()
             .and_then(build_digest_postgres_sink)
@@ -493,10 +487,10 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 // Source-boundary policies (FLOWIP-115a): the breaker protects
                 // the external HN HTTP dependency; the limiter paces API reads.
                 // Replay reconstructs archived stories and suppresses both.
-                hn_stories = async_source!(HnStory => hn_source with [
+                hn_stories = async_source!(HnStory => hn_source with {
                     source_breaker,
                     source_limiter
-                ]);
+                });
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
 

@@ -294,13 +294,9 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
             stages: {
                 orders = source!(OrderPlaced => orders_handler);
                 validate = effectful_transform!(
-                    OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler,
-                    observers: []
-                );
+                    OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler);
                 authorize = effectful_transform!(
-                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_handler,
-                    observers: []
-                );
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_handler);
                 paid_orders = sink!(OrderAuthorized => paid_orders_handler);
                 cancelled_orders = sink!(OrderCancelled => cancelled_orders_handler);
                 manual_review = sink!(AuthorizationUnavailable => manual_review_handler);

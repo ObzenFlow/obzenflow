@@ -11,21 +11,19 @@ mod retry_fixture;
 
 use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
+    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
 };
 use obzenflow_core::event::{ChainEvent, ChainPayload, EffectFailureCause, EffectOutcomePayload};
 use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_runtime::effects::EffectCursor;
 use obzenflow_runtime::runtime_config::{
-    RESILIENCE_BREAKER_COUNT_WINDOW_KEY, RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-    RESILIENCE_BREAKER_MINIMUM_CALLS_KEY, RESILIENCE_BREAKER_MODE_KEY,
-    RESILIENCE_BREAKER_OPEN_FOR_MS_KEY, RESILIENCE_BREAKER_PROBES_KEY,
-    RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-    RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY, RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-    RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY, RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-    RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY, RESILIENCE_RETRY_FIXED_DELAY_MS_KEY,
-    RESILIENCE_RETRY_KIND_KEY, RESILIENCE_RETRY_MAX_ATTEMPTS_KEY,
-    RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
+    CIRCUIT_BREAKER_COUNT_WINDOW_KEY, CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY,
+    CIRCUIT_BREAKER_PROBES_KEY, CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+    CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+    RATE_LIMITER_COST_PER_ATTEMPT_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+    RETRY_ATTEMPT_START_WINDOW_MS_KEY, RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY,
+    RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
@@ -82,33 +80,39 @@ fn assert_release_manifest(run: &Path, policy: retry_fixture::ReleasePolicy) {
     }
 
     let mut expected: BTreeMap<String, serde_json::Value> = [
-        (RESILIENCE_BREAKER_MODE_KEY, json!("rate_based")),
-        (RESILIENCE_BREAKER_COUNT_WINDOW_KEY, json!(5)),
-        (RESILIENCE_BREAKER_MINIMUM_CALLS_KEY, json!(5)),
-        (RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY, json!(0.6)),
-        (RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY, json!(250)),
-        (RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, json!(0.5)),
-        (RESILIENCE_BREAKER_OPEN_FOR_MS_KEY, json!(5_000)),
-        (RESILIENCE_BREAKER_PROBES_KEY, json!(1)),
+        (CIRCUIT_BREAKER_MODE_KEY, json!("rate_based")),
+        (CIRCUIT_BREAKER_COUNT_WINDOW_KEY, json!(5)),
+        (CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, json!(5)),
+        (CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY, json!(0.6)),
+        (CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY, json!(250)),
+        (CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, json!(0.5)),
+        (CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, json!(5_000)),
+        (CIRCUIT_BREAKER_PROBES_KEY, json!(1)),
         (
-            RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+            CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
             json!(false),
         ),
-        (RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY, json!(1.0)),
-        (RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY, json!(1.0)),
+        (RATE_LIMITER_EVENTS_PER_SECOND_KEY, json!(1.0)),
+        (RATE_LIMITER_COST_PER_ATTEMPT_KEY, json!(1.0)),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_string(), value))
     .collect();
 
-    if policy == retry_fixture::ReleasePolicy::BreakerRecovery {
+    if !policy.has_breaker() {
+        expected.retain(|key, _| !key.starts_with("middleware.circuit_breaker."));
+    }
+    if !policy.has_limiter() {
+        expected.retain(|key, _| !key.starts_with("middleware.rate_limiter."));
+    }
+    if policy.has_retry() {
         expected.extend(
             [
-                (RESILIENCE_RETRY_KIND_KEY, json!("fixed")),
-                (RESILIENCE_RETRY_FIXED_DELAY_MS_KEY, json!(250)),
-                (RESILIENCE_RETRY_MAX_ATTEMPTS_KEY, json!(3)),
-                (RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY, json!(30_000)),
-                (RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY, json!(30_000)),
+                (RETRY_KIND_KEY, json!("fixed")),
+                (RETRY_FIXED_DELAY_MS_KEY, json!(250)),
+                (RETRY_MAX_ATTEMPTS_KEY, json!(3)),
+                (RETRY_MAX_BACKOFF_MS_KEY, json!(30_000)),
+                (RETRY_ATTEMPT_START_WINDOW_MS_KEY, json!(30_000)),
             ]
             .into_iter()
             .map(|(key, value)| (key.to_string(), value)),
@@ -276,13 +280,11 @@ struct RetrySchedule {
 fn retry_schedules(jsonl: &str) -> Vec<RetrySchedule> {
     exported_chain_events(jsonl)
         .filter_map(|event| match event.payload {
-            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                CircuitBreakerFact::RetryScheduled {
-                    cursor,
-                    next_attempt,
-                    ..
-                },
-            )) => Some(RetrySchedule {
+            ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RetryScheduled {
+                cursor,
+                next_attempt,
+                ..
+            })) => Some(RetrySchedule {
                 cursor,
                 next_attempt,
             }),
@@ -295,22 +297,17 @@ fn retry_schedules(jsonl: &str) -> Vec<RetrySchedule> {
 struct RetrySuccess {
     cursor: EffectCursor,
     total_attempts: u32,
-    terminal_classification: CircuitBreakerHealthClassification,
 }
 
 fn retry_successes(jsonl: &str) -> Vec<RetrySuccess> {
     exported_chain_events(jsonl)
         .filter_map(|event| match event.payload {
-            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                CircuitBreakerFact::RetrySucceeded {
-                    cursor,
-                    total_attempts,
-                    terminal_classification,
-                },
-            )) => Some(RetrySuccess {
+            ChainPayload::Execution(ExecutionPayload::Recovery(RecoveryFact::RetrySucceeded {
                 cursor,
                 total_attempts,
-                terminal_classification,
+            })) => Some(RetrySuccess {
+                cursor,
+                total_attempts,
             }),
             _ => None,
         })
@@ -322,9 +319,9 @@ fn retry_terminal_failure_count(jsonl: &str) -> usize {
         .filter(|event| {
             matches!(
                 event.payload,
-                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                    CircuitBreakerFact::RetryExhausted { .. }
-                        | CircuitBreakerFact::RetryStoppedNonRetryable { .. }
+                ChainPayload::Execution(ExecutionPayload::Recovery(
+                    RecoveryFact::RetryExhausted { .. }
+                        | RecoveryFact::RetryStoppedNonRetryable { .. }
                 ))
             )
         })
@@ -386,8 +383,8 @@ struct RecoveryCompletion {
 fn recovery_completions(jsonl: &str) -> Vec<RecoveryCompletion> {
     exported_chain_events(jsonl)
         .filter_map(|event| match event.payload {
-            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                CircuitBreakerFact::RecoveryCompleted {
+            ChainPayload::Execution(ExecutionPayload::Recovery(
+                RecoveryFact::RecoveryCompleted {
                     cursor,
                     total_attempts,
                     backoff_elapsed_ms,
@@ -729,7 +726,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         vec![RetrySuccess {
             cursor: treatment_cursor.clone(),
             total_attempts: 3,
-            terminal_classification: CircuitBreakerHealthClassification::Success,
         }]
     );
     assert_eq!(retry_terminal_failure_count(&treatment), 0);
@@ -1046,4 +1042,123 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
         failures,
         "strict replay must preserve the half-open witness's cursor-to-cause map"
     );
+}
+
+#[test]
+fn independent_retry_plans_preserve_terminal_groups_and_strict_replay() {
+    use retry_fixture::ReleasePolicy;
+
+    for policy in [
+        ReleasePolicy::RetryOnly,
+        ReleasePolicy::RetryWithLimiter,
+        ReleasePolicy::RetryWithLimiterPermuted,
+        ReleasePolicy::RetryWithLimiterSplit,
+    ] {
+        let live_root = tempfile::tempdir().unwrap();
+        let gateway = Arc::new(retry_fixture::ScriptedGateway::fail_first(2));
+        let live_run = run_release_witness(
+            policy,
+            vec![retry_fixture::retry_order()],
+            gateway.clone(),
+            live_root.path(),
+            None,
+        );
+        assert_eq!(gateway.calls(), 3, "{policy:?}");
+        assert_eq!(
+            gateway.invocations(),
+            1,
+            "retry must not repeat the handler"
+        );
+        let live = exported_run(&live_run, &live_root.path().join("live.jsonl"));
+        assert_eq!(data_event_count(&live, "payment.authorized"), 1);
+        assert_eq!(
+            data_event_count(&live, "payment.authorization_unavailable"),
+            0
+        );
+        assert_eq!(payment_effect_outcome_group_count(&live), 1);
+        assert_eq!(payment_committed_terminal_group_count(&live), 1);
+        assert_eq!(retry_schedules(&live).len(), 2);
+        assert_eq!(retry_successes(&live)[0].total_attempts, 3);
+        let completions = assert_one_recovery_completion_per_payment_cursor(&live);
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].total_attempts, 3);
+        let attempts = neutral_attempts(&live);
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|(_, attempt)| *attempt)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(attempts
+            .iter()
+            .all(|(cursor, _)| cursor == &completions[0].cursor));
+        assert_no_breaker_evidence(&live);
+        if policy.has_limiter() {
+            let limiter = last_payment_limiter_counts(&live);
+            assert_eq!(limiter.events, 3);
+            assert_eq!(limiter.tokens, 3.0);
+            assert!(limiter.delayed >= 2);
+        } else {
+            assert!(
+                exported_chain_events(&live).all(|event| payment_limiter_counts(&event).is_none())
+            );
+        }
+
+        let replay_root = tempfile::tempdir().unwrap();
+        let replay_gateway =
+            Arc::new(retry_fixture::ScriptedGateway::healthy().panic_on_live_call());
+        let replay_run = run_release_witness(
+            policy,
+            vec![retry_fixture::retry_order()],
+            replay_gateway.clone(),
+            replay_root.path(),
+            Some(&live_run),
+        );
+        assert_eq!(replay_gateway.calls(), 0);
+        let replay = exported_run(&replay_run, &replay_root.path().join("replay.jsonl"));
+        assert_eq!(data_event_count(&replay, "payment.authorized"), 1);
+        assert_eq!(payment_committed_terminal_group_count(&replay), 1);
+        assert_eq!(neutral_attempts(&replay), attempts);
+        assert_eq!(recovery_completions(&replay), completions);
+        assert_eq!(retry_schedules(&replay), retry_schedules(&live));
+        assert_no_breaker_evidence(&replay);
+    }
+}
+
+fn neutral_attempts(jsonl: &str) -> Vec<(EffectCursor, u32)> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::Recovery(
+                RecoveryFact::AttemptCompleted {
+                    cursor, attempt, ..
+                },
+            )) => Some((cursor, attempt)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_no_breaker_evidence(jsonl: &str) {
+    for event in exported_chain_events(jsonl) {
+        assert!(
+            !matches!(
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_))
+            ),
+            "an omitted breaker must not author health or state facts"
+        );
+        if let Some(runtime) = event
+            .envelope
+            .observability
+            .as_ref()
+            .and_then(|observation| observation.runtime.as_ref())
+        {
+            assert!(
+                runtime.effect_circuit_breakers.is_empty(),
+                "an omitted breaker must not register metrics"
+            );
+        }
+    }
 }

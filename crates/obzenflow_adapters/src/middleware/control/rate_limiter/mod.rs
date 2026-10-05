@@ -16,8 +16,7 @@
 //!   observability `ChainEvent` lifecycle facts.
 //! - [`hook_adapters`]: the carrier-bound source/effect/sink-delivery/ingress
 //!   adapters.
-//! - [`factory`]: the public `RateLimiterBuilder`/`RateLimiterFactory` and the
-//!   `rate_limit`/`rate_limit_with_burst` constructors; declaration and
+//! - [`factory`]: the inert `RateLimiter` value and `rate_limit` constructor; declaration and
 //!   materialization are the sole production placement authority.
 //!
 //! This root module holds [`RateLimiterMiddleware`], the shared shell state (the
@@ -38,9 +37,9 @@
 //!
 //! ## No global bucket (FLOWIP-114o Q6, FLOWIP-050d)
 //!
-//! Each limiter instance owns its own `RateLimiterCore`. Flow-level
-//! `rate_limit(N)` materialises one instance per stage, and attaching the same
-//! builder to a source and to an effect yields independent buckets. There is
+//! Each limiter attachment owns its own `RateLimiterCore`. Attaching the same
+//! `rate_limit(N)` definition to a source and to an effect yields independent
+//! buckets. There is
 //! deliberately no process-wide shared bucket. Quotas are per protected
 //! dependency, matching the FLOWIP-120c per-effect model.
 //!
@@ -85,9 +84,7 @@ use tokio::time::Instant;
 use tracing::info;
 
 pub use config::RateLimiterConfigError;
-pub use factory::{
-    rate_limit, rate_limit_with_burst, RateLimiter, RateLimiterBuilder, RateLimiterFactory,
-};
+pub use factory::{rate_limit, RateLimiter};
 
 /// Marker type for the rate-limiter override-key family. Kept in the module root
 /// so its type path (and the derived family label) is stable across the

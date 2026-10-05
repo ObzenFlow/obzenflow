@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Literal schema-14 expectations, independent of vocabulary constants. These
-//! cases predate the naming consolidation and exercise authored/decoded events.
+//! Literal schema-16 expectations, independent of vocabulary constants. These
+//! cases exercise authored/decoded events and the breaker-neutral recovery wire.
 
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -175,26 +175,6 @@ fn stage_and_middleware_wire_names_match_the_contract() {
             "runtime.circuit_breaker.call_classified",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"retry_scheduled", "cursor":cursor, "next_attempt":2, "delay_ms":1}),
-            "runtime.retry.scheduled",
-        ),
-        (
-            json!({"execution_type":"resilience_occurrence", "action":"retry_succeeded", "cursor":cursor, "total_attempts":2, "terminal_classification":"success"}),
-            "runtime.retry.succeeded",
-        ),
-        (
-            json!({"execution_type":"resilience_occurrence", "action":"retry_exhausted", "cursor":cursor, "total_attempts":2, "reason":"attempt_limit"}),
-            "runtime.retry.exhausted",
-        ),
-        (
-            json!({"execution_type":"resilience_occurrence", "action":"retry_stopped_non_retryable", "cursor":cursor, "total_attempts":1}),
-            "runtime.retry.stopped_non_retryable",
-        ),
-        (
-            json!({"execution_type":"resilience_occurrence", "action":"recovery_completed", "cursor":cursor, "total_attempts":1, "backoff_elapsed_ms":0, "recovery_elapsed_ms":1}),
-            "runtime.resilience.attempts_reported",
-        ),
-        (
             json!({"execution_type":"resilience_occurrence", "action":"state_changed", "from_state":"closed", "to_state":"open", "timestamp":1}),
             "runtime.circuit_breaker.opened",
         ),
@@ -232,6 +212,56 @@ fn stage_and_middleware_wire_names_match_the_contract() {
             },
         );
         assert_chain(event, name, "execution");
+    }
+}
+
+#[test]
+fn recovery_wire_is_breaker_neutral_and_excluded_from_transport() {
+    use obzenflow_core::event::chain_event::ReplayDisposition;
+
+    let stage = StageId::new();
+    let cursor =
+        json!({"recorded_flow_id":"flow", "stage_key":"orders", "input_seq":1, "effect_ordinal":0});
+    for (wire, name) in [
+        (
+            json!({"execution_type":"recovery", "action":"attempt_completed", "cursor":cursor, "attempt":1, "dependency_elapsed_ms":1, "admission_wait_ms":0}),
+            "runtime.resilience.attempt_completed",
+        ),
+        (
+            json!({"execution_type":"recovery", "action":"retry_scheduled", "cursor":cursor, "next_attempt":2, "delay_ms":1}),
+            "runtime.retry.scheduled",
+        ),
+        (
+            json!({"execution_type":"recovery", "action":"retry_succeeded", "cursor":cursor, "total_attempts":2}),
+            "runtime.retry.succeeded",
+        ),
+        (
+            json!({"execution_type":"recovery", "action":"retry_exhausted", "cursor":cursor, "total_attempts":2, "reason":"attempt_limit"}),
+            "runtime.retry.exhausted",
+        ),
+        (
+            json!({"execution_type":"recovery", "action":"retry_stopped_non_retryable", "cursor":cursor, "total_attempts":1}),
+            "runtime.retry.stopped_non_retryable",
+        ),
+        (
+            json!({"execution_type":"recovery", "action":"recovery_completed", "cursor":cursor, "total_attempts":1, "backoff_elapsed_ms":0, "recovery_elapsed_ms":1}),
+            "runtime.resilience.attempts_reported",
+        ),
+    ] {
+        let payload: ExecutionPayload = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&payload).unwrap(), wire);
+        let event = ChainEventFactory::execution_event(stage.into(), payload);
+        assert!(!event.consumes_data_credit(), "{name}");
+        assert!(event.is_transport_excluded_execution(), "{name}");
+        assert_eq!(event.replay_disposition(), ReplayDisposition::ReAuthor);
+        assert_chain(event, name, "execution");
+
+        let mut legacy = wire;
+        legacy["execution_type"] = json!("resilience_occurrence");
+        assert!(
+            serde_json::from_value::<ExecutionPayload>(legacy).is_err(),
+            "{name} must not decode as a breaker fact"
+        );
     }
 }
 

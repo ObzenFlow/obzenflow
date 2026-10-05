@@ -11,7 +11,7 @@
 mod effects;
 
 use self::effects::{GeneratedAiFinaliseHandler, GeneratedAiMapHandler};
-use crate::dsl::ai_effect::{require_generated_chat_resilience, GeneratedChatEffectRow};
+use crate::dsl::ai_effect::GeneratedChatEffectRow;
 use crate::dsl::composition::{CompositeBuildContext, CompositeBuildError, CompositeDescriptor};
 use crate::dsl::stage_descriptor::{
     EffectfulTransformDescriptor, StatefulDescriptor, TransformDescriptor,
@@ -139,27 +139,6 @@ where
                  prove one estimator/configuration decision",
             ));
         }
-        require_generated_chat_resilience(
-            "ai_map_reduce!",
-            "role",
-            "map",
-            self.map_effect_row
-                .policy_attachments
-                .iter()
-                .map(|attachment| attachment.factory.as_ref()),
-        )
-        .map_err(CompositeBuildError::new)?;
-        require_generated_chat_resilience(
-            "ai_map_reduce!",
-            "role",
-            "reduce",
-            self.finalise_effect_row
-                .policy_attachments
-                .iter()
-                .map(|attachment| attachment.factory.as_ref()),
-        )
-        .map_err(CompositeBuildError::new)?;
-
         let composite_id = CompositeId::new(format!("ai_map_reduce:{}", self.name));
         let direct_bound = NonZeroU64::MIN.saturating_add(2);
 
@@ -187,19 +166,23 @@ where
             binding: _,
             declarations: map_declarations,
             policy_attachments: map_policy_attachments,
+            implementation_middleware: map_middleware,
         } = self.map_effect_row;
         let map_handler = GeneratedAiMapHandler::<Item, Partial, _>::new(self.map_role);
         let map_descriptor = wrap_typed_descriptor(
-            Box::new(EffectfulTransformDescriptor::generated_with_pass_through::<
-                AiMapReduceMapInput<ChunkEnvelope<Item>>,
-                AiMapReducePlanningManifest,
-            >(
-                "map",
-                map_handler,
-                map_declarations,
-                map_policy_attachments,
-                direct_bound,
-            )),
+            Box::new(
+                EffectfulTransformDescriptor::generated_with_pass_through::<
+                    AiMapReduceMapInput<ChunkEnvelope<Item>>,
+                    AiMapReducePlanningManifest,
+                >(
+                    "map",
+                    map_handler,
+                    map_declarations,
+                    map_policy_attachments,
+                    direct_bound,
+                )
+                .with_implementation_middleware(map_middleware),
+            ),
             StageTypingMetadata::transform(
                 TypeHint::exact_payload::<AiMapReduceMapInput<ChunkEnvelope<Item>>>(),
                 TypeHint::exact_payload::<AiMapReduceTaggedPartial<Partial>>(),
@@ -243,19 +226,23 @@ where
             binding: _,
             declarations: finalise_declarations,
             policy_attachments: finalise_policy_attachments,
+            implementation_middleware: finalise_middleware,
         } = self.finalise_effect_row;
         let finalise_handler =
             GeneratedAiFinaliseHandler::<Seed, Many<Partial>, Out, _>::new(self.finalise_role);
         let finalise_descriptor = wrap_typed_descriptor(
-            Box::new(EffectfulTransformDescriptor::generated::<
-                AiMapReduceReduceInput<Seed, Many<Partial>>,
-            >(
-                "finalize",
-                finalise_handler,
-                finalise_declarations,
-                finalise_policy_attachments,
-                direct_bound,
-            )),
+            Box::new(
+                EffectfulTransformDescriptor::generated::<
+                    AiMapReduceReduceInput<Seed, Many<Partial>>,
+                >(
+                    "finalize",
+                    finalise_handler,
+                    finalise_declarations,
+                    finalise_policy_attachments,
+                    direct_bound,
+                )
+                .with_implementation_middleware(finalise_middleware),
+            ),
             StageTypingMetadata::transform(
                 TypeHint::exact_payload::<AiMapReduceReduceInput<Seed, Many<Partial>>>(),
                 TypeHint::exact_payload::<Out>(),

@@ -341,7 +341,7 @@ pub(crate) struct RawFileStartupConfig {
     /// encoded in the struct shapes (§4c layout), so `deny_unknown_fields`
     /// rejects wrong-scope entries at parse.
     pub(crate) contracts: RawFileContractsConfig,
-    pub(crate) effects: RawFileEffectsConfig,
+    pub(crate) middleware: RawFileMiddlewareConfig,
     pub(crate) ai: RawFileAiConfig,
     pub(crate) sinks: RawFileSinksConfig,
     /// FLOWIP-114d: Studio phonebook registration (010h startup layer).
@@ -501,67 +501,38 @@ pub(crate) struct RawFileContractsConfig {
     pub(crate) source_contract_strict_mode: Option<String>,
 }
 
-/// `[effects]` (FLOWIP-120c absorption; Stage-target, so no edge tables).
+/// `[middleware]`: shared family settings at global, flow, stage and effect scope.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawFileEffectsConfig {
-    pub(crate) circuit_breaker: RawBreakerFields,
-    pub(crate) rate_limiter: RawLimiterFields,
-    pub(crate) resilience: RawResilienceFields,
-    pub(crate) flow: RawEffectsBroadcastFields,
-    pub(crate) stages: BTreeMap<String, RawEffectsStageScope>,
+pub(crate) struct RawFileMiddlewareConfig {
+    pub(crate) circuit_breaker: RawCircuitBreakerFields,
+    pub(crate) rate_limiter: RawRateLimiterFields,
+    pub(crate) retry: RawRetryFields,
+    pub(crate) flow: RawMiddlewareFields,
+    pub(crate) stages: BTreeMap<String, RawMiddlewareStageScope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawEffectsBroadcastFields {
-    pub(crate) circuit_breaker: RawBreakerFields,
-    pub(crate) rate_limiter: RawLimiterFields,
-    pub(crate) resilience: RawResilienceFields,
+pub(crate) struct RawMiddlewareFields {
+    pub(crate) circuit_breaker: RawCircuitBreakerFields,
+    pub(crate) rate_limiter: RawRateLimiterFields,
+    pub(crate) retry: RawRetryFields,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawEffectsStageScope {
-    pub(crate) circuit_breaker: RawBreakerFields,
-    pub(crate) rate_limiter: RawLimiterFields,
-    pub(crate) resilience: RawResilienceFields,
+pub(crate) struct RawMiddlewareStageScope {
+    pub(crate) circuit_breaker: RawCircuitBreakerFields,
+    pub(crate) rate_limiter: RawRateLimiterFields,
+    pub(crate) retry: RawRetryFields,
     /// Exact effect subjects. Dotted effect types are quoted TOML map keys.
-    pub(crate) by_type: BTreeMap<String, RawEffectsExactFields>,
+    pub(crate) by_type: BTreeMap<String, RawMiddlewareFields>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawEffectsExactFields {
-    pub(crate) circuit_breaker: RawBreakerFields,
-    pub(crate) rate_limiter: RawLimiterFields,
-    pub(crate) resilience: RawResilienceFields,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RawBreakerFields {
-    pub(crate) threshold: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RawLimiterFields {
-    pub(crate) events_per_second: Option<f64>,
-    pub(crate) burst_capacity: Option<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RawResilienceFields {
-    pub(crate) breaker: RawResilienceBreakerFields,
-    pub(crate) retry: RawResilienceRetryFields,
-    pub(crate) rate_limiter: RawResilienceRateLimiterFields,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct RawResilienceBreakerFields {
+pub(crate) struct RawCircuitBreakerFields {
     pub(crate) mode: Option<String>,
     pub(crate) consecutive_failures: Option<i64>,
     pub(crate) count_window: Option<i64>,
@@ -576,7 +547,7 @@ pub(crate) struct RawResilienceBreakerFields {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawResilienceRetryFields {
+pub(crate) struct RawRetryFields {
     pub(crate) kind: Option<String>,
     pub(crate) fixed_delay_ms: Option<i64>,
     pub(crate) max_attempts: Option<i64>,
@@ -586,7 +557,7 @@ pub(crate) struct RawResilienceRetryFields {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawResilienceRateLimiterFields {
+pub(crate) struct RawRateLimiterFields {
     pub(crate) events_per_second: Option<f64>,
     pub(crate) burst_capacity: Option<f64>,
     pub(crate) cost_per_attempt: Option<f64>,

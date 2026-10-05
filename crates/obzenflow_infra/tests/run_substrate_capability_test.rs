@@ -187,7 +187,7 @@ fn colliding_flow(name: &'static str, base: std::path::PathBuf) -> obzenflow_dsl
             journals: disk_journals(base),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with [
+                src = source!(TestEvent => placeholder!() with {
                     SlotFactory {
                         label: name,
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -198,7 +198,7 @@ fn colliding_flow(name: &'static str, base: std::path::PathBuf) -> obzenflow_dsl
                         key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
                         slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
                     }
-                ]);
+                });
                 snk = sink!(TestEvent => placeholder!());
             },
 

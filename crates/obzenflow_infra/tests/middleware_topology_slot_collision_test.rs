@@ -96,7 +96,7 @@ async fn topology_config_slot_collisions_are_configuration_errors() {
             journals: obzenflow_infra::journal::memory_journals(),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with [
+                src = source!(TestEvent => placeholder!() with {
                     SlotFactory {
                         label: "slot.a",
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -107,7 +107,7 @@ async fn topology_config_slot_collisions_are_configuration_errors() {
                         key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
                         slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
                     }
-                ]);
+                });
                 snk = sink!(TestEvent => placeholder!());
             },
 
@@ -137,7 +137,7 @@ async fn duplicate_stage_middleware_families_are_rejected_before_materialisation
             journals: obzenflow_infra::journal::memory_journals(),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with [
+                src = source!(TestEvent => placeholder!() with {
                     SlotFactory {
                         label: "family.first",
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -148,7 +148,7 @@ async fn duplicate_stage_middleware_families_are_rejected_before_materialisation
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
                         slot: TopologyMiddlewareConfigSlot::RateLimiter,
                     }
-                ]);
+                });
                 snk = sink!(TestEvent => placeholder!());
             },
 

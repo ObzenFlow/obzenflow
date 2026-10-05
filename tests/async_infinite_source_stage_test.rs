@@ -275,12 +275,10 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
             journals: disk_journals(journal_root),
 
             stages: {
-                source = async_infinite_source!(AsyncInfiniteEvent => source, observers: [
-                    source_poll_observer(
+                source = async_infinite_source!(AsyncInfiniteEvent => source with { source_poll_observer(
                         "count_source_poll_data",
                         CountSourcePollObserver { calls: observer_calls_for_flow }
-                    )
-                ]);
+                    ) });
                 sink = sink!(AsyncInfiniteEvent => sink);
             },
 

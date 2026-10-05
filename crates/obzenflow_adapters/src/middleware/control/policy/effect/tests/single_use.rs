@@ -5,7 +5,8 @@
 //! Cardinality, admission, and observation for single-use effect operations.
 
 use super::support::*;
-use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
+use crate::middleware::control::resilience::EffectPlanFactory;
+
 use obzenflow_core::event::{
     CausalCoordinate, CausalFrontier, ChainPayload, JournalClock, JournalRecord,
 };
@@ -520,14 +521,12 @@ async fn single_use_rejection_runs_no_effect_and_finalizes_admitted_policies() {
 
 #[tokio::test]
 async fn effect_resilience_guards_transactional_calls_without_retrying_them() {
-    let factory = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker()
             .consecutive_failures(3)
-            .open_for(Duration::from_secs(1))
-            .build()
-            .expect("transactional test breaker"),
+            .open_for(Duration::from_secs(1)),
     )
-    .rate_limit_each_attempt(RateLimiter::per_second(100.0).unwrap())
+    .rate_limit_each_attempt(crate::middleware::control::rate_limit(100.0))
     .build()
     .expect("transactional resilience configuration");
     let config = test_stage_config(factory.as_ref());
@@ -564,12 +563,10 @@ async fn effect_resilience_guards_transactional_calls_without_retrying_them() {
 
 #[tokio::test]
 async fn transactional_missing_commit_consumes_attempt_without_health_sample() {
-    let factory = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker()
             .consecutive_failures(1)
-            .open_for(Duration::from_secs(1))
-            .build()
-            .expect("transactional test breaker"),
+            .open_for(Duration::from_secs(1)),
     )
     .build()
     .expect("transactional resilience configuration");
@@ -614,12 +611,10 @@ async fn transactional_missing_commit_consumes_attempt_without_health_sample() {
 
 #[tokio::test]
 async fn transactional_terminal_group_failure_preserves_physical_success_sample() {
-    let factory = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker()
             .consecutive_failures(1)
-            .open_for(Duration::from_secs(1))
-            .build()
-            .expect("transactional test breaker"),
+            .open_for(Duration::from_secs(1)),
     )
     .build()
     .expect("transactional resilience configuration");
@@ -664,13 +659,14 @@ async fn transactional_terminal_group_failure_preserves_physical_success_sample(
 
 #[test]
 fn effect_resilience_rejects_retry_for_transactional_effects_at_materialization() {
-    let factory = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(3)
-            .build()
-            .expect("transactional test breaker"),
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker().consecutive_failures(3),
     )
-    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
+    .retry(
+        crate::middleware::control::retry()
+            .fixed_delay(Duration::from_millis(1))
+            .max_attempts(2),
+    )
     .build()
     .expect("retry configuration is intrinsically valid");
     let config = test_stage_config(factory.as_ref());
@@ -691,16 +687,13 @@ fn effect_resilience_rejects_retry_for_transactional_effects_at_materialization(
 
 #[test]
 fn effect_resilience_and_standalone_limiter_cannot_share_one_effect_key() {
-    let resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(3)
-            .build()
-            .expect("duplicate test breaker"),
+    let resilience = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker().consecutive_failures(3),
     )
-    .rate_limit_each_attempt(RateLimiter::per_second(100.0).unwrap())
+    .rate_limit_each_attempt(crate::middleware::control::rate_limit(100.0))
     .build()
     .expect("duplicate test resilience");
-    let standalone = RateLimiterBuilder::new(100.0).build();
+    let standalone = Box::new(crate::middleware::control::rate_limit(100.0));
     let config = test_stage_config_for_factories(&[resilience.as_ref(), standalone.as_ref()]);
     let control = Arc::new(ControlMiddlewareAggregator::new());
 

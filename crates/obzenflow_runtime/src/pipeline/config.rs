@@ -7,7 +7,6 @@
 use crate::stages::common::handlers::source::traits::{FiniteSourceHandler, InfiniteSourceHandler};
 use crate::stages::common::handlers::{SinkHandler, TransformHandler};
 use obzenflow_core::{SccId, StageId};
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -77,31 +76,4 @@ pub struct StageConfig {
 pub struct ObserverConfig {
     pub name: String,
     // TODO: Replace with appropriate observer handler trait when designed
-}
-
-/// Structural middleware configuration for a stage (FLOWIP-059).
-///
-/// Contains both the ordered list of middleware names and their static configuration
-/// snapshots for the topology observability API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MiddlewareStackConfig {
-    /// Ordered list of middleware names in the stack
-    pub stack: Vec<String>,
-    /// Circuit breaker static config (if present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub circuit_breaker: Option<serde_json::Value>,
-    /// Rate limiter static config (if present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_limiter: Option<serde_json::Value>,
-}
-
-impl MiddlewareStackConfig {
-    /// Create a new middleware stack config with just names (no detailed config)
-    pub fn names_only(stack: Vec<String>) -> Self {
-        Self {
-            stack,
-            circuit_breaker: None,
-            rate_limiter: None,
-        }
-    }
 }

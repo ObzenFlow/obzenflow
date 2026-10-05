@@ -44,8 +44,9 @@ pub use classifier::FailureHealth;
 pub use config::CircuitBreakerConfigError;
 use config::HalfOpenPolicy;
 pub(in crate::middleware::control) use factory::CircuitBreakerFactory;
-pub use factory::{CheckedCircuitBreakerBuilder, CircuitBreaker};
-pub use retry::Retry;
+pub(in crate::middleware::control) use factory::ValidatedCircuitBreaker;
+pub use factory::{circuit_breaker, CircuitBreaker};
+pub use retry::{retry, Retry};
 
 use classifier::FailureClassificationClassifier;
 pub(in crate::middleware::control) use config::CircuitBreakerFailureMode;
@@ -216,7 +217,7 @@ pub struct CircuitBreakerFamily;
 /// Circuit breaker middleware that prevents cascading failures.
 ///
 /// Stage-level breaker and limiter instances remain independent controls. At
-/// the effect boundary, [`EffectResilience`](super::super::EffectResilience)
+/// the effect boundary, the internal coordinated execution plan
 /// instead owns an affine limiter reservation and commits it only immediately
 /// before an admitted physical call, so an open-circuit rejection consumes no
 /// permit.
@@ -381,10 +382,6 @@ impl CircuitBreakerMiddleware {
 
     pub(in crate::middleware::control) fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
         ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false)
-    }
-
-    pub(in crate::middleware::control) fn evidence_writer_id(&self) -> WriterId {
-        self.writer_id
     }
 
     fn reset_health_after_successful_probe(&self) {

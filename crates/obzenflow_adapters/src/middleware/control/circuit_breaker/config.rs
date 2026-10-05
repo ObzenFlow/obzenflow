@@ -64,6 +64,10 @@ pub enum CircuitBreakerConfigError {
     IncompleteSlowCallTrigger,
     #[error("{field} must be greater than zero")]
     Zero { field: &'static str },
+    #[error("{field} must be in 1..=4294967295, got {value}")]
+    InvalidCount { field: &'static str, value: u64 },
+    #[error("circuit breaker mode must be 'consecutive' or 'rate_based', got '{value}'")]
+    UnknownMode { value: String },
     #[error("{field} must be finite and in (0, 1], got {value}")]
     InvalidRate { field: &'static str, value: f64 },
     #[error("minimum_calls ({minimum_calls}) must be <= count_window ({count_window})")]

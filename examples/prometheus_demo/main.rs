@@ -28,7 +28,7 @@ use obzenflow::env::env_var_or;
 use obzenflow::flow::backpressure::enforced;
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
+use obzenflow::middleware::{circuit_breaker, rate_limit};
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources::SourceError;
@@ -267,15 +267,13 @@ pub(crate) fn flow_definition_with_outage_interval(
             stages: {
                 // The simulated service outage belongs at the live source boundary.
                 // Pure transform errors still follow their existing error-journal path.
-                high_volume_source = source!(DataRequest => high_volume_source_handler with [
-                    CircuitBreaker::builder()
+                high_volume_source = source!(DataRequest => high_volume_source_handler with {
+                    circuit_breaker()
                         .consecutive_failures(1)
                         .open_for(SOURCE_BREAKER_COOLDOWN)
-                        .probes(1)
-                        .build()
-                        .expect("demo source circuit-breaker configuration must be valid"),
-                    RateLimiterBuilder::new(1000.0).build()
-                ]);
+                        .probes(1),
+                    rate_limit(1000.0)
+                });
                 error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
                 event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
                 summary_sink = sink!(EventCountState => summary_sink_handler);

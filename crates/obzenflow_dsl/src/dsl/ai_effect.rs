@@ -20,6 +20,7 @@ pub struct GeneratedChatEffectRow {
     pub binding: EffectBinding<ChatCompletion>,
     pub declarations: Vec<EffectDeclaration>,
     pub policy_attachments: Vec<EffectPolicyAttachment>,
+    pub implementation_middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 /// Macro type-checking seam for the lexical `via` operand.
@@ -94,9 +95,9 @@ pub(crate) fn require_generated_chat_resilience<'a>(
     }
 
     Err(format!(
-        "{surface}: generated {owner_kind} '{owner}' requires exactly one EffectResilience \
-         policy on 'ChatCompletion'; attach `with ai_resilience()` to its `uses` entry \
-         (found {resilience_count} EffectResilience policies across {} attachments)",
+        "{surface}: generated {owner_kind} '{owner}' requires one coordinated non-retrying middleware plan \
+          on 'ChatCompletion'; attach `with ai_resilience()` to its `uses` entry \
+         (found {resilience_count} coordinated plans across {} control attachments)",
         declarations.len()
     ))
 }

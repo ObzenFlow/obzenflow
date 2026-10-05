@@ -11,9 +11,7 @@ use crate::dsl::stage_descriptor::{
 };
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{
-    control::ControlMiddlewareAggregator, MiddlewareDeclarationPosition, MiddlewareFactory,
-};
+use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::{ChainEvent, StageId};
@@ -1741,18 +1739,30 @@ impl StageDescriptor for TypedStageDescriptor {
             .await
     }
 
+    fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
+        self.inner.prepare_middleware()
+    }
+    fn hosted_ingress_binding_slot(
+        &self,
+    ) -> Option<&obzenflow_core::ingress::HostedIngressBindingSlot> {
+        self.inner.hosted_ingress_binding_slot()
+    }
+    fn hosted_ingress_key(&self) -> Option<obzenflow_core::ingress::IngressKey> {
+        self.inner.hosted_ingress_key()
+    }
+    fn validate_middleware_configuration(
+        &self,
+        config: &StageConfig,
+    ) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
+        self.inner.validate_middleware_configuration(config)
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.inner.stage_middleware_names()
     }
 
     fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
         self.inner.stage_middleware_factories()
-    }
-
-    fn positioned_stage_middleware_factories(
-        &self,
-    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
-        self.inner.positioned_stage_middleware_factories()
     }
 
     fn effect_policy_attachments(&self) -> &[crate::dsl::stage_descriptor::EffectPolicyAttachment] {
@@ -2865,18 +2875,30 @@ impl StageDescriptor for DeterministicOrdererOverride {
             .await
     }
 
+    fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
+        self.inner.prepare_middleware()
+    }
+    fn hosted_ingress_binding_slot(
+        &self,
+    ) -> Option<&obzenflow_core::ingress::HostedIngressBindingSlot> {
+        self.inner.hosted_ingress_binding_slot()
+    }
+    fn hosted_ingress_key(&self) -> Option<obzenflow_core::ingress::IngressKey> {
+        self.inner.hosted_ingress_key()
+    }
+    fn validate_middleware_configuration(
+        &self,
+        config: &StageConfig,
+    ) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
+        self.inner.validate_middleware_configuration(config)
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.inner.stage_middleware_names()
     }
 
     fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
         self.inner.stage_middleware_factories()
-    }
-
-    fn positioned_stage_middleware_factories(
-        &self,
-    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
-        self.inner.positioned_stage_middleware_factories()
     }
 
     fn effect_policy_attachments(&self) -> &[crate::dsl::stage_descriptor::EffectPolicyAttachment] {

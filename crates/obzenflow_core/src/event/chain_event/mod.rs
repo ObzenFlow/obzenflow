@@ -32,8 +32,8 @@ pub use factory::ChainEventFactory;
 pub use model::{ChainEvent, ChainPayload, CorrelationContext, ReplayDisposition};
 pub use params::{
     CircuitBreakerAttemptSettledEventParams, CircuitBreakerOpenedEventParams,
-    CircuitBreakerRecoveryCompletedEventParams, CircuitBreakerSummaryEventParams,
-    ConsumptionFinalEventParams, ConsumptionProgressEventParams, SourceContractEventParams,
+    CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
+    RecoveryCompletedEventParams, SourceContractEventParams,
 };
 
 #[cfg(test)]

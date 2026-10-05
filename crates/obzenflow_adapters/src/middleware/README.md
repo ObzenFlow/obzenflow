@@ -42,7 +42,7 @@ impl SinkDeliveryObserver for DeliveryTrace {
 let observer = sink_delivery_observer("delivery-trace", DeliveryTrace);
 ```
 
-Pass the resulting attachment in the sink's `observers: [...]` clause.
+Pass the resulting attachment in the sink implementation's `with { ... }` group.
 Flow construction checks its input type against the sink connector's input.
 For buffered sinks, the callback follows each original input's eventual receipt,
 including receipts committed during flush or drain. Use the optional
@@ -54,10 +54,15 @@ Application diagnostics use ordinary Rust tools such as `tracing`.
 
 Control policies protect a concrete live-I/O operation: a source poll, effect
 invocation, sink delivery, or hosted ingress request. Use the corresponding
-policy builders from `obzenflow::middleware`.
+inert `rate_limit(...)`, `circuit_breaker()`, and `retry()` values from
+`obzenflow::middleware` in an implementation's `with { ... }` group or a named
+effect's `uses Effect with { ... }` group. Flow construction validates the
+complete group and allocates each policy's runtime state.
 
-Retry is configured through `EffectResilienceBuilder::retry` within effect
-resilience. It is not a standalone middleware attachment.
+Retry protects a declared effect and can be used alone or alongside a limiter
+and breaker. The group resolves into one coordinated effect policy; declaration
+order does not set its execution order. Source polling and sink delivery support
+limiting and breaking, while ingress supports limiting.
 
 ## Framework integration
 

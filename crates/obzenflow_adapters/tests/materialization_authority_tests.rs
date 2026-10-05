@@ -8,13 +8,13 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    materialize_factory_checked, CheckedMiddlewareSurfaceAttachment, CircuitBreaker,
-    EffectAttemptOutcome, EffectPolicy, EffectResilience, EffectSurface, EffectTypeKey,
-    EffectUnitId, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission, ProtectedUnit,
-    ProtectedUnitId, RateLimiter, RateLimiterBuilder, Retry,
+    circuit_breaker, compose_effect_controls, materialize_factory_checked, rate_limit, retry,
+    CheckedMiddlewareSurfaceAttachment, EffectAttemptOutcome, EffectPolicy, EffectSurface,
+    EffectTypeKey, EffectUnitId, MiddlewareAttachmentRequest, MiddlewareAttachmentSite,
+    MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOverrideKey,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
+    ProtectedUnit, ProtectedUnitId,
 };
 use obzenflow_core::event::{context::StageType, EffectType};
 use obzenflow_core::{StageId, StageKey};
@@ -32,6 +32,46 @@ const STAGE: &str = "authority_stage";
 const FLOW: &str = "authority_flow";
 const EFFECT: &str = "authority.effect";
 const RETARGET_EFFECT: &str = "authority.other_effect";
+
+struct ContributionLaunderer;
+
+impl MiddlewareFactory for ContributionLaunderer {
+    fn label(&self) -> &'static str {
+        "ordinary_contribution_wrapper"
+    }
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<Self>(self.label())
+    }
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::control(self.label(), vec![MiddlewareSurfaceKind::Effect])
+    }
+    fn builtin_control(
+        &self,
+    ) -> Option<obzenflow_adapters::middleware::BuiltinControlContribution> {
+        rate_limit(10.0).builtin_control()
+    }
+    fn materialize(
+        &self,
+        _: MiddlewareAttachmentRequest<'_>,
+        _: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        panic!("an invalid contribution must fail before materialisation")
+    }
+}
+
+#[test]
+fn ordinary_declaration_cannot_launder_a_canonical_builtin_contribution() {
+    let result = compose_effect_controls(vec![(
+        MiddlewareAttachmentSite::Effect,
+        Box::new(ContributionLaunderer),
+    )]);
+    assert!(result.is_err());
+    assert!(result
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("sealed declaration"));
+}
 
 struct WrapperFamily;
 
@@ -156,7 +196,8 @@ impl MiddlewareFactory for DelegatingFactory {
                 MiddlewareAttachmentRequest {
                     surface: &surface,
                     protected_unit: &protected_unit,
-                    declaration_index: request.declaration_index,
+                    authored_site: request.authored_site,
+                    stage_key: request.stage_key,
                 },
                 context,
             );
@@ -220,27 +261,30 @@ impl EffectPolicy for OrdinaryPolicy {
 }
 
 fn breaker_only() -> Box<dyn MiddlewareFactory> {
-    EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
-            .build()
-            .expect("valid breaker"),
-    )
-    .build()
-    .expect("valid breaker-only resilience aggregate")
+    compose_effect_controls(vec![(
+        MiddlewareAttachmentSite::Effect,
+        Box::new(circuit_breaker().consecutive_failures(2)),
+    )])
+    .expect("valid breaker-only effect plan")
 }
 
 fn breaker_and_limiter() -> Box<dyn MiddlewareFactory> {
-    EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
-            .build()
-            .expect("valid breaker"),
-    )
-    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
-    .rate_limit_each_attempt(RateLimiter::per_second(10.0).expect("valid limiter"))
-    .build()
-    .expect("valid resilience aggregate")
+    compose_effect_controls(vec![
+        (
+            MiddlewareAttachmentSite::Effect,
+            Box::new(circuit_breaker().consecutive_failures(2)),
+        ),
+        (
+            MiddlewareAttachmentSite::Effect,
+            Box::new(
+                retry()
+                    .fixed_delay(Duration::from_millis(1))
+                    .max_attempts(2),
+            ),
+        ),
+        (MiddlewareAttachmentSite::Effect, Box::new(rate_limit(10.0))),
+    ])
+    .expect("valid effect plan")
 }
 
 fn stage_config(factory: &dyn MiddlewareFactory) -> StageConfig {
@@ -316,7 +360,8 @@ fn materialize_with_safety(
         MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            declaration_index: MiddlewareDeclarationIndex::effect_with(),
+            authored_site: MiddlewareAttachmentSite::Effect,
+            stage_key: &config.name,
         },
         config,
         StageType::Transform,
@@ -492,7 +537,7 @@ fn privileged_attachment_cannot_be_replayed_into_a_later_invocation() {
 
 #[test]
 fn failed_batch_preflight_does_not_partially_commit_other_authority() {
-    let limiter = RateLimiterBuilder::new(10.0).build();
+    let limiter: Box<dyn MiddlewareFactory> = Box::new(rate_limit(10.0));
     let limiter_config = stage_config(limiter.as_ref());
     let control = Arc::new(ControlMiddlewareAggregator::new());
     materialize(limiter.as_ref(), &limiter_config, &control)

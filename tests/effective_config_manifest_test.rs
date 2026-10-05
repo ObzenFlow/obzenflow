@@ -6,7 +6,7 @@
 //! with both provenance axes, so "what configuration was this run executed
 //! under" is answerable from the run directory alone.
 
-use obzenflow_adapters::middleware::{rate_limit, CircuitBreaker, EffectResilience};
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
 use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::archive::manifest::RunManifest;
@@ -18,7 +18,7 @@ use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafet
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
-    RATE_LIMITER_BURST_CAPACITY_KEY, RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
+    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -231,7 +231,7 @@ fn build_rate_limited_flow_future(
 
             stages: {
                 src = source!(Item => one_shot_source);
-                snk = sink!(Item => null_sink with [limiter]);
+                snk = sink!(Item => null_sink with {limiter});
             },
 
             topology: {
@@ -242,17 +242,11 @@ fn build_rate_limited_flow_future(
     .build(ctx)
 }
 
-fn payment_resilience() -> Box<dyn obzenflow_adapters::middleware::MiddlewareFactory> {
-    EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .count_window(10)
-            .minimum_calls(5)
-            .failure_rate_threshold(0.5)
-            .build()
-            .expect("manifest proof breaker"),
-    )
-    .build()
-    .expect("manifest proof resilience aggregate")
+fn payment_resilience() -> obzenflow_adapters::middleware::CircuitBreaker {
+    circuit_breaker()
+        .count_window(10)
+        .minimum_calls(5)
+        .failure_rate_threshold(0.5)
 }
 
 fn build_two_effect_flow_future(
@@ -280,9 +274,7 @@ fn build_two_effect_flow_future(
                         AuthorizePayment with authorize_resilience,
                         RefundPayment with refund_resilience,
                     }
-                    => payment_effects,
-                    observers: []
-                );
+                    => payment_effects);
                 output = sink!(PaymentEffectFact => null_sink);
             },
 
@@ -426,7 +418,7 @@ async fn manifest_retains_two_real_effect_rows_for_one_stage_broadcast() {
     let mut candidates = CandidateSet::default();
     candidates
         .admit(ScopedCandidate::unqualified(
-            RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
+            CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
             obzenflow_core::config::ConfigScope::stage("authorize_payment"),
             obzenflow_core::config::ConfigSource::File,
             ConfigValue::U64(8),
@@ -447,7 +439,7 @@ async fn manifest_retains_two_real_effect_rows_for_one_stage_broadcast() {
     let rows: Vec<_> = evidence
         .values
         .iter()
-        .filter(|row| row.key_path == RESILIENCE_BREAKER_MINIMUM_CALLS_KEY)
+        .filter(|row| row.key_path == CIRCUIT_BREAKER_MINIMUM_CALLS_KEY)
         .collect();
     assert_eq!(rows.len(), 2, "equal inherited values must not collapse");
     assert!(rows.iter().all(|row| {

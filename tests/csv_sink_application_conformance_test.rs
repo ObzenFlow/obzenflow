@@ -201,7 +201,7 @@ fn single_flow(
                 journals: disk_journals(journal_root),
 
                 stages: {
-                    inputs = source!(Row => inputs with [PoisonFactory]);
+                    inputs = source!(Row => inputs with {PoisonFactory});
                     output = sink!(Row => output);
                 },
 

@@ -348,10 +348,15 @@ mod tests {
     fn verification_rejects_non_current_manifest_shapes_before_journal_decode() {
         let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
         let future_version = format!("{}.0", major.parse::<u64>().unwrap() + 1);
+        let previous_version = format!("{}.0", major.parse::<u64>().unwrap() - 1);
         for (version, expected) in [
             (None, "<missing>"),
             (Some(serde_json::json!(3.0)), "3.0"),
             (Some(serde_json::json!("2.0")), "2.0"),
+            (
+                Some(serde_json::json!(previous_version)),
+                previous_version.as_str(),
+            ),
             (
                 Some(serde_json::json!(future_version)),
                 future_version.as_str(),

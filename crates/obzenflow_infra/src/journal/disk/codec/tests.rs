@@ -738,7 +738,7 @@ fn warm_caches_cannot_hide_missing_or_edited_carriers_and_archives_are_relocatab
 #[ignore = "requires fixture files omitted from the published crate; CI runs this explicitly"]
 fn current_schema_fixtures_preserve_bytes_and_logical_records() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/journal/disk/codec/fixtures");
-    for name in ["observations", "plain"] {
+    for name in ["observations", "plain", "recovery"] {
         let json = std::fs::read_to_string(fixtures.join(format!("{name}.json"))).unwrap();
         let record: JournalRecord<ChainPayload> = serde_json::from_str(&json).unwrap();
         let prepared = prepare(

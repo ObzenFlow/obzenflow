@@ -73,6 +73,7 @@ event_names! {
         STOPPED_NON_RETRYABLE => "stopped_non_retryable",
     },
     resilience => "resilience" {
+        ATTEMPT_COMPLETED => "attempt_completed",
         ATTEMPTS_REPORTED => "attempts_reported",
     },
     rate_limiter => "rate_limiter" {

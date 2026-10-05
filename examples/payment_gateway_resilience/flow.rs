@@ -55,10 +55,7 @@ use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::{
-    sink_delivery_observer, CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
-    Retry,
-};
+use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
 use std::time::Duration;
@@ -104,26 +101,19 @@ pub fn assemble_flow(
         // recovery policy, and per-physical-attempt admission. Its fixed ordering
         // keeps limiter wait outside the dependency clock and prevents a stale
         // breaker decision from surviving the queue.
-        let gateway_breaker = CircuitBreaker::builder()
+        let gateway_breaker = circuit_breaker()
             .count_window(5)
             .minimum_calls(5)
             .failure_rate_threshold(0.6)
             .slow_call_duration(Duration::from_millis(250))
             .slow_call_rate_threshold(0.5)
             .open_for(GATEWAY_BREAKER_OPEN_FOR)
-            .probes(1)
-            .build()
-            .expect("gateway circuit-breaker configuration must be valid");
-        let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
-            .expect("gateway rate-limiter configuration must be valid");
-        let gateway_retry = Retry::fixed(Duration::from_millis(250))
+            .probes(1);
+        let gateway_limiter = rate_limit(gateway_calls_per_second);
+        let gateway_retry = retry()
+            .fixed_delay(Duration::from_millis(250))
             .max_attempts(3)
             .attempt_start_window(Duration::from_secs(30));
-        let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
-            .retry(gateway_retry)
-            .rate_limit_each_attempt(gateway_limiter)
-            .build()
-            .expect("gateway resilience configuration must be valid");
 
         let web_orders_feed = sources::ValuesSource::new(scripted_web_orders);
         let store_orders_feed = sources::ValuesSource::new(scripted_store_orders);
@@ -147,16 +137,14 @@ pub fn assemble_flow(
                 // (FLOWIP-115a). These are local scripted fixtures, so a source
                 // circuit breaker would be misleading here; the breaker belongs
                 // on external dependencies such as the gateway effect below.
-                web_orders = source!(CustomerOrderPlaced => web_orders_feed with [
-                    RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
-                        .with_burst(SOURCE_RATE_LIMIT_BURST)
-                        .build()
-                ]);
-                store_orders = source!(CustomerOrderPlaced => store_orders_feed with [
-                    RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
-                        .with_burst(SOURCE_RATE_LIMIT_BURST)
-                        .build()
-                ]);
+                web_orders = source!(CustomerOrderPlaced => web_orders_feed with {
+                    rate_limit(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
+                        .burst_capacity(SOURCE_RATE_LIMIT_BURST)
+                });
+                store_orders = source!(CustomerOrderPlaced => store_orders_feed with {
+                    rate_limit(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
+                        .burst_capacity(SOURCE_RATE_LIMIT_BURST)
+                });
 
                 // Local validation: deterministic checks with no external I/O,
                 // classified exactly once by one multi-type stage. This is typed
@@ -203,7 +191,7 @@ pub fn assemble_flow(
                         PaymentAuthorizationUnavailable,
                     }
                     uses AuthorizePayment
-                        with gateway_resilience
+                        with { gateway_breaker, gateway_retry, gateway_limiter }
                     => gateway_transform,
                 );
 
@@ -213,13 +201,11 @@ pub fn assemble_flow(
                 // One passive observer logs the runtime's immutable delivery
                 // classification. It cannot alter settlement or emit flow facts.
                 paid_orders = sink!(
-                    PaymentAuthorized => shipping_handoff,
-                    delivery: idempotent,
-                    observers: [sink_delivery_observer(
+                    PaymentAuthorized => shipping_handoff with { sink_delivery_observer(
                         "shipping-delivery-log",
                         ShippingDeliveryLog
-                    )]
-                );
+                    ) },
+                    delivery: idempotent);
 
                 // Cancelled-order console destination. The order's
                 // fate converges from both producers (local validation failures
@@ -235,13 +221,11 @@ pub fn assemble_flow(
                 // logs routing after successful output; the Delivery receipt
                 // remains the durable settlement fact.
                 manual_review = sink!(
-                    PaymentAuthorizationUnavailable => record_unavailable,
-                    delivery: idempotent,
-                    observers: [sink_delivery_observer(
+                    PaymentAuthorizationUnavailable => record_unavailable with { sink_delivery_observer(
                         "manual-review-delivery-log",
                         ManualReviewDeliveryLog
-                    )]
-                );
+                    ) },
+                    delivery: idempotent);
             },
 
             topology: {

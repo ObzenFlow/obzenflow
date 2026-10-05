@@ -198,12 +198,10 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
             journals: disk_journals(journal_root),
 
             stages: {
-                source = async_source!(AsyncTestEvent => source, observers: [
-                    source_poll_observer(
+                source = async_source!(AsyncTestEvent => source with { source_poll_observer(
                         "count_source_poll_data",
                         CountSourcePollObserver { calls: observer_calls_for_flow }
-                    )
-                ]);
+                    ) });
                 sink = sink!(AsyncTestEvent => sink);
             },
 
