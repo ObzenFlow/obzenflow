@@ -10,8 +10,8 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_dsl::{flow, infinite_source, sink, source};
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use std::net::TcpListener;
@@ -71,17 +71,10 @@ impl InlineSink for NoopSink {
     type Input = IdlePayload;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("test".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _input: IdlePayload,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("test".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _input: IdlePayload) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }

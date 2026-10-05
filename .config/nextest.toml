@@ -1,4 +1,5 @@
-nextest-version = { required = "0.9.136" }
+# Includes the concurrent capture-pipe inheritance fix on macOS (nextest #3553).
+nextest-version = { required = "0.9.146" }
 
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 1 }

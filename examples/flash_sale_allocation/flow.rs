@@ -15,7 +15,7 @@ use super::warehouse::{
 use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{CircuitBreaker, EffectResilience};
-use obzenflow::stages::sinks::SinkTyped;
+use obzenflow::stages::sinks::TracingSink;
 use obzenflow::stages::sources;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,15 +94,15 @@ pub fn assemble_flow(
             .build()
             .expect("reserve resilience configuration must be valid");
 
-        let allocation_feed = sources::finite(inputs.clone());
+        let allocation_feed = sources::ValuesSource::new(inputs.clone());
         let allocator = Allocator::new(1);
-        let record_reservation = SinkTyped::new(|reserved: StockReserved| async move {
+        let record_reservation = TracingSink::new(|reserved: &StockReserved| {
             tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
         });
-        let record_release = SinkTyped::new(|released: StockReleased| async move {
+        let record_release = TracingSink::new(|released: &StockReleased| {
             tracing::info!(order_id = %released.order_id.0, "stock release delivered");
         });
-        let record_reservation_failure = SinkTyped::new(|failed: ReservationFailed| async move {
+        let record_reservation_failure = TracingSink::new(|failed: &ReservationFailed| {
             tracing::info!(order_id = %failed.order_id.0, "reservation failure delivered");
         });
 

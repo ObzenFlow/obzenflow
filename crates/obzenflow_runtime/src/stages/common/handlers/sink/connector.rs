@@ -34,8 +34,8 @@
 //! redelivery classification describes semantics only; the archive gate remains a
 //! runtime decision.
 
-use super::error::{SinkOperationResult, SinkWriteResult};
-use super::typed::{SinkWriteContext, SinkWriter, SinkWriterLifecycleReport};
+use super::error::{SinkOperationResult, SinkWriteFailure, SinkWriteResult};
+use super::typed::{SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriter};
 use crate::effects::SinkRedeliverySafety;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -64,28 +64,18 @@ pub enum SinkInputOrder {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SinkDescription {
     destination: Option<String>,
-    default_method: Option<DeliveryMethod>,
+    default_method: DeliveryMethod,
     redelivery_safety: Option<SinkRedeliverySafety>,
     input_order: SinkInputOrder,
 }
 
 impl SinkDescription {
-    /// Describe a connector with no archive-safety or receipt defaults.
-    pub fn unspecified() -> Self {
-        Self {
-            destination: None,
-            default_method: None,
-            redelivery_safety: None,
-            input_order: SinkInputOrder::Unspecified,
-        }
-    }
-
     /// Describe a sink whose receipts use `method` and whose destination
     /// identity falls back to the stage name.
     pub fn method(method: DeliveryMethod) -> Self {
         Self {
             destination: None,
-            default_method: Some(method),
+            default_method: method,
             redelivery_safety: None,
             input_order: SinkInputOrder::Unspecified,
         }
@@ -97,7 +87,7 @@ impl SinkDescription {
     pub fn destination(destination: impl Into<String>, method: DeliveryMethod) -> Self {
         Self {
             destination: Some(destination.into()),
-            default_method: Some(method),
+            default_method: method,
             redelivery_safety: None,
             input_order: SinkInputOrder::Unspecified,
         }
@@ -126,8 +116,8 @@ impl SinkDescription {
     }
 
     #[doc(hidden)]
-    pub fn default_method(&self) -> Option<&DeliveryMethod> {
-        self.default_method.as_ref()
+    pub fn default_method(&self) -> &DeliveryMethod {
+        &self.default_method
     }
 
     #[doc(hidden)]
@@ -196,17 +186,19 @@ pub trait SinkConnector: Send + Sync + Sized + 'static {
     async fn open(&self, context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer>;
 }
 
-/// Small, already-configured sink tier for in-process integrations.
+/// Small, already-configured sink tier for immediate delivery.
 ///
-/// `InlineSink` deliberately combines configuration and execution when there
-/// is no meaningful resource-opening lifecycle to separate. The blanket
-/// implementations below still lower it through the canonical connector and
-/// writer roles. Resource-owning integrations should implement
+/// A successful write delivers one input, with no measured byte count, using
+/// the configured description. The runtime supplies its terminal receipt.
+/// The blanket implementations below lower this tier through the canonical
+/// connector and writer roles. Integrations needing delivery provenance,
+/// per-attempt accounting, partial outcomes, buffering, or resource lifecycle
+/// should implement
 /// [`SinkConnector`] on a separate configuration type and return their writer
 /// from `open`.
 ///
 /// `Clone` is the opening boundary for this tier. A clone must not share
-/// transient buffer, transaction, or pending-input state with its source.
+/// transient mutable execution state with its source.
 /// Shared handles may represent the external destination itself, as in a test
 /// probe backed by an `Arc`.
 #[async_trait]
@@ -214,19 +206,13 @@ pub trait InlineSink: Clone + Send + Sync + 'static {
     type Input: TypedPayload + Send + Sync + 'static;
 
     /// Describe any fixed receipt defaults and redelivery classification.
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
-    }
+    fn describe(&self) -> SinkDescription;
 
-    async fn write(&mut self, input: Self::Input, context: SinkWriteContext) -> SinkWriteResult;
-
-    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        Ok(SinkWriterLifecycleReport::default())
-    }
-
-    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        self.flush().await
-    }
+    /// Deliver this input completely before returning success.
+    ///
+    /// Failure classification is preserved for runtime supervision; an uncertain
+    /// destination outcome must still poison the writer.
+    async fn write(&mut self, input: Self::Input) -> Result<(), SinkWriteFailure>;
 }
 
 #[async_trait]
@@ -236,16 +222,11 @@ where
 {
     type Input = I::Input;
 
-    async fn write(&mut self, input: Self::Input, context: SinkWriteContext) -> SinkWriteResult {
-        InlineSink::write(self, input, context).await
-    }
-
-    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        InlineSink::flush(self).await
-    }
-
-    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        InlineSink::drain(self).await
+    async fn write(&mut self, input: Self::Input, _context: SinkWriteContext) -> SinkWriteResult {
+        InlineSink::write(self, input).await?;
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success(None).with_items(1),
+        ))
     }
 }
 
@@ -304,5 +285,37 @@ where
 
     async fn open(&self, context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
         self.connector.open(context).await
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+
+    impl<C: super::SinkConnector> Sealed for C {}
+}
+
+/// Sealed lowering target for the `sink!` macro's site-level `delivery:`
+/// classification.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the `delivery:` clause requires a SinkConnector",
+    note = "configure redelivery safety on the connector or use the sink! clause"
+)]
+pub trait SetSinkRedeliverySafety: sealed::Sealed + Sized {
+    type Output;
+
+    fn safe_to_repeat(self) -> Self::Output;
+    fn duplicate_sensitive(self) -> Self::Output;
+}
+
+impl<C: SinkConnector> SetSinkRedeliverySafety for C {
+    type Output = WithRedeliverySafety<C>;
+
+    fn safe_to_repeat(self) -> Self::Output {
+        WithRedeliverySafety::new(self, SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    fn duplicate_sensitive(self) -> Self::Output {
+        WithRedeliverySafety::new(self, SinkRedeliverySafety::DuplicateSensitive)
     }
 }

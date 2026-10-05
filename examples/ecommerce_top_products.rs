@@ -16,8 +16,8 @@ use obzenflow::flow::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::RateLimiterBuilder;
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::SinkTyped;
-use obzenflow::stages::sources;
+use obzenflow::stages::sinks::ConsoleSink;
+use obzenflow::stages::sources::ValuesSource;
 use obzenflow::stages::stateful;
 use serde::{Deserialize, Serialize};
 
@@ -257,25 +257,7 @@ fn main() -> Result<()> {
     FlowApplication::builder()
         .with_presentation(presentation)
         .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
-            let orders_handler = sources::finite_from_fn(move |index| {
-                let (product_id, product_name, unit_price, quantity, category) =
-                    orders.get(index)?;
-                let order_number = index + 1;
-                let total_value = unit_price * (*quantity as f64);
-
-                println!("📦 Order #{order_number}: {product_name} x{quantity} ({product_id}) = ${total_value:.2}");
-
-                Some(OrderEvent {
-                    order_id: format!("ORD-{order_number:04}"),
-                    product_id: product_id.clone(),
-                    product_name: product_name.clone(),
-                    category: category.clone(),
-                    unit_price: *unit_price,
-                    quantity: *quantity,
-                    total_value,
-                    timestamp: order_number, // Simulated timestamp
-                })
-            });
+            let orders_handler = ValuesSource::new(scripted_orders(orders));
             let top_products_handler = stateful::top_n_by(
                 5,
                 |order: &OrderEvent| order.product_id.clone(),
@@ -318,55 +300,8 @@ fn main() -> Result<()> {
                 },
             )
             .emit_every_n(5);
-            let dashboard_handler = SinkTyped::new(|update: TopProductsUpdate| async move {
-                println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
-                println!("====================================");
-                println!("Total Unique Products Sold: {}\n", update.total_items);
-
-                let mut total_revenue = 0.0;
-                for entry in &update.top_n {
-                    total_revenue += entry.total_score;
-
-                    let medal = match entry.rank {
-                        1 => "🥇",
-                        2 => "🥈",
-                        3 => "🥉",
-                        _ => "  ",
-                    };
-
-                    println!(
-                        "{} #{}: {} ({})",
-                        medal, entry.rank, entry.metadata.product_name, entry.key
-                    );
-                    println!("      Category: {}", entry.metadata.category);
-                    println!(
-                        "      Revenue: ${:.2} from {} orders",
-                        entry.total_score, entry.count
-                    );
-                    println!("      Avg Order Value: ${:.2}", entry.avg_score);
-                    println!();
-                }
-
-                println!("------------------------------------");
-                println!("Top 5 Products Revenue: ${total_revenue:.2}");
-                println!("====================================\n");
-            })
-            .idempotent();
-            let current_orders_handler =
-                SinkTyped::new(|update: TopCurrentOrdersUpdate| async move {
-                    println!("\n📈 HIGHEST CURRENT ORDER VALUE PER PRODUCT 📈");
-                    for entry in &update.top_n {
-                        println!(
-                            "#{} {}: ${:.2} ({})",
-                            entry.rank, entry.metadata.product_name, entry.score, entry.key
-                        );
-                    }
-                    println!(
-                        "Tracking {} current product values (capacity {}).\n",
-                        update.count, update.capacity
-                    );
-                })
-                .idempotent();
+            let dashboard_handler = ConsoleSink::new(format_product_dashboard);
+            let current_orders_handler = ConsoleSink::new(format_current_orders_dashboard);
 
             Ok(flow! {
                 name: "ecommerce_analytics",
@@ -397,4 +332,65 @@ fn main() -> Result<()> {
         }))?;
 
     Ok(())
+}
+
+fn format_product_dashboard(update: &TopProductsUpdate) -> String {
+    let mut output = format!(
+        "\n📊 TOP SELLING PRODUCTS DASHBOARD 📊\n====================================\nTotal Unique Products Sold: {}\n\n",
+        update.total_items
+    );
+    let mut total_revenue = 0.0;
+    for entry in &update.top_n {
+        total_revenue += entry.total_score;
+        let medal = match entry.rank {
+            1 => "🥇",
+            2 => "🥈",
+            3 => "🥉",
+            _ => "  ",
+        };
+        output.push_str(&format!(
+            "{} #{}: {} ({})\n      Category: {}\n      Revenue: ${:.2} from {} orders\n      Avg Order Value: ${:.2}\n\n",
+            medal, entry.rank, entry.metadata.product_name, entry.key,
+            entry.metadata.category, entry.total_score, entry.count, entry.avg_score
+        ));
+    }
+    output.push_str(&format!(
+        "------------------------------------\nTop 5 Products Revenue: ${total_revenue:.2}\n====================================\n"
+    ));
+    output
+}
+
+fn format_current_orders_dashboard(update: &TopCurrentOrdersUpdate) -> String {
+    let mut output = String::from("\n📈 HIGHEST CURRENT ORDER VALUE PER PRODUCT 📈\n");
+    for entry in &update.top_n {
+        output.push_str(&format!(
+            "#{} {}: ${:.2} ({})\n",
+            entry.rank, entry.metadata.product_name, entry.score, entry.key
+        ));
+    }
+    output.push_str(&format!(
+        "Tracking {} current product values (capacity {}).\n",
+        update.count, update.capacity
+    ));
+    output
+}
+
+fn scripted_orders(
+    orders: Vec<(String, String, f64, u32, String)>,
+) -> impl Iterator<Item = OrderEvent> + Send + Sync {
+    orders.into_iter().enumerate().map(|(index, (product_id, product_name, unit_price, quantity, category))| {
+        let order_number = index + 1;
+        let total_value = unit_price * quantity as f64;
+        println!("📦 Order #{order_number}: {product_name} x{quantity} ({product_id}) = ${total_value:.2}");
+        OrderEvent {
+            order_id: format!("ORD-{order_number:04}"),
+            product_id,
+            product_name,
+            category,
+            unit_price,
+            quantity,
+            total_value,
+            timestamp: order_number,
+        }
+    })
 }

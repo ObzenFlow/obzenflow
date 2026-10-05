@@ -31,7 +31,7 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
-use obzenflow_runtime::stages::sink::{DeliveryProvenance, SinkTyped};
+use obzenflow_runtime::stages::sink::DeliveryProvenance;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -293,29 +293,58 @@ impl EffectfulTransformHandler for AuthorizePayment {
 }
 
 // ---------------------------------------------------------------------------
-// Probe sinks: the public FLOWIP-120i surface, `SinkTyped::with_delivery`
+// Named writer probes
 // through the canonical `sink!(In => handler)` arm, recording each
 // delivery's payload and provenance
 // ---------------------------------------------------------------------------
 
 type Probe<T> = Arc<Mutex<Vec<(T, DeliveryProvenance)>>>;
 
-fn probe<T>(
-    deliveries: &Probe<T>,
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
+#[derive(Clone)]
+struct DeliveryProbe<T: TypedPayload + Clone + Send + Sync + 'static> {
+    deliveries: Probe<T>,
+}
+#[async_trait::async_trait]
+impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages::sink::SinkConnector
+    for DeliveryProbe<T>
 {
-    let deliveries = deliveries.clone();
-    move |payload: T, delivery| {
-        deliveries
+    type Input = T;
+    type Writer = Self;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "delivery_probe".into(),
+            ),
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: TypedPayload + Clone + Send + Sync + 'static> obzenflow_runtime::stages::sink::SinkWriter
+    for DeliveryProbe<T>
+{
+    type Input = T;
+
+    async fn write(
+        &mut self,
+        input: T,
+        context: obzenflow_runtime::stages::sink::SinkWriteContext,
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        self.deliveries
             .lock()
             .expect("probe lock poisoned")
-            .push((payload, delivery.provenance()));
-        std::future::ready(())
+            .push((input, context.delivery().provenance()));
+        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+        ))
     }
 }
 
@@ -347,9 +376,11 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>, probes: &Probes) -
         let order_source = OrderSource::new();
         let validate_order = ValidateOrder;
         let authorize_payment = AuthorizePayment { calls };
-        let paid_orders = SinkTyped::with_delivery(probe(&paid)).idempotent();
-        let cancelled_orders = SinkTyped::with_delivery(probe(&cancelled)).idempotent();
-        let manual_review = SinkTyped::with_delivery(probe(&review)).idempotent();
+        let paid_orders = DeliveryProbe { deliveries: paid };
+        let cancelled_orders = DeliveryProbe {
+            deliveries: cancelled,
+        };
+        let manual_review = DeliveryProbe { deliveries: review };
 
         Ok(flow! {
             name: "replay_provenance_labelling",
@@ -592,4 +623,10 @@ async fn every_sink_delivery_carries_replay_provenance_under_strict_replay() {
     // contain the stdout label literal.
     assert_journals_carry_no_label(&archive_dir);
     assert_journals_carry_no_label(&replay_run_dir);
+}
+
+impl<T: TypedPayload + Clone + Send + Sync + 'static> std::fmt::Debug for DeliveryProbe<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeliveryProbe")
+    }
 }

@@ -43,7 +43,7 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
-use obzenflow_runtime::stages::sink::{DeliveryContext, DeliveryProvenance, SinkTyped};
+use obzenflow_runtime::stages::sink::DeliveryProvenance;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -449,16 +449,47 @@ impl EffectfulTransformHandler for HookTransform {
 
 type Delivered = Arc<Mutex<Vec<(HookOutput, DeliveryProvenance)>>>;
 
-fn sink_probe(
-    delivered: &Delivered,
-) -> impl FnMut(HookOutput, DeliveryContext) -> std::future::Ready<()> + Send + Sync + Clone {
-    let delivered = delivered.clone();
-    move |output, delivery| {
-        delivered
+#[derive(Clone)]
+struct DeliveryProbe {
+    delivered: Delivered,
+}
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::SinkConnector for DeliveryProbe {
+    type Input = HookOutput;
+    type Writer = Self;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "delivery_probe".into(),
+            ),
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::SinkWriter for DeliveryProbe {
+    type Input = HookOutput;
+
+    async fn write(
+        &mut self,
+        input: HookOutput,
+        context: obzenflow_runtime::stages::sink::SinkWriteContext,
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        self.delivered
             .lock()
             .expect("delivery probe lock poisoned")
-            .push((output, delivery.provenance()));
-        std::future::ready(())
+            .push((input, context.delivery().provenance()));
+        Ok(obzenflow_runtime::stages::sink::SinkWriteReport::terminal(
+            obzenflow_runtime::stages::sink::SinkTerminalOutcome::success(None).with_items(1),
+        ))
     }
 }
 
@@ -472,7 +503,7 @@ fn build_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let hook_source = HookSource::new();
         let hook_transform = HookTransform { effect_calls };
-        let output_sink = SinkTyped::with_delivery(sink_probe(&delivered)).idempotent();
+        let output_sink = DeliveryProbe { delivered };
 
         Ok(flow! {
             name: "middleware_hook_binding_e2e",
@@ -508,7 +539,7 @@ fn build_failure_cause_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let hook_source = HookSource::new();
         let hook_transform = HookTransform { effect_calls };
-        let output_sink = SinkTyped::with_delivery(sink_probe(&delivered)).idempotent();
+        let output_sink = DeliveryProbe { delivered };
 
         Ok(flow! {
             name: "middleware_failure_cause_api",
@@ -860,4 +891,10 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         declaration_index: MiddlewareDeclarationIndex::source_with(0),
     };
     assert!(validate_attachment_request(&factory.declaration(), &source_request).is_ok());
+}
+
+impl std::fmt::Debug for DeliveryProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeliveryProbe")
+    }
 }

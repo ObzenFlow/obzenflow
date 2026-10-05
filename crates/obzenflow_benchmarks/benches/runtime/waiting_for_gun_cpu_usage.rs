@@ -17,8 +17,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, BootstrapConfig, StartupMode};
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -72,18 +71,11 @@ impl InlineSink for NoopSink {
     type Input = BenchEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
-    async fn write(
-        &mut self,
-        _event: BenchEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+    async fn write(&mut self, _event: BenchEvent) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

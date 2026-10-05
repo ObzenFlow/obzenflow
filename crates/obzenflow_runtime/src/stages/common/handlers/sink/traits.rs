@@ -26,26 +26,17 @@
 //! This trait is the erased runtime substrate. Authored resource-owning sinks
 //! implement [`SinkConnector`](super::connector::SinkConnector) and return a
 //! stage-local [`SinkWriter`](super::typed::SinkWriter). A small integration
-//! can implement [`InlineSink`](super::connector::InlineSink), while a closure
-//! can bind `SinkTyped` before its `sink!` declaration:
+//! implements [`InlineSink`](super::connector::InlineSink), with a required
+//! description and an input-only `write` operation. Inline success delivers
+//! one input with an unmeasured byte count; the runtime authors its receipt.
+//! Writers retain delivery provenance, deferred settlement and richer outcomes,
+//! including per-attempt overrides of the connector's receipt metadata.
 //!
 //! ```ignore
-//! // Bind typed adapters, optionally with declared safety and provenance.
-//! let quick_handler = SinkTyped::new(|authorized: PaymentAuthorized| async move {
-//!     println!("{authorized:?}");
-//! });
-//! let quick = sink!(PaymentAuthorized => quick_handler);
-//!
-//! let declared_handler = SinkTyped::with_delivery(
-//!     |authorized: PaymentAuthorized, delivery| async move {
-//!         audit(authorized, delivery.provenance());
-//!     },
-//! );
-//! let declared = sink!(PaymentAuthorized => declared_handler, delivery: idempotent);
-//!
-//! // A configured queue connector opens its writer at materialisation.
 //! let shipping = ShippingConnector::new(queue_config);
 //! let production = sink!(PaymentAuthorized => shipping);
+//! let audit = RecordAuthorization;
+//! let audit_stage = sink!(PaymentAuthorized => audit, delivery: idempotent);
 //! ```
 //!
 //! Buffered destinations use `SinkWriteContext::defer` and return typed commit

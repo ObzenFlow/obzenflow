@@ -9,8 +9,7 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -74,19 +73,12 @@ impl InlineSink for CountingSink {
     type Input = SmokeEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
-    async fn write(
-        &mut self,
-        _event: SmokeEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: SmokeEvent) -> Result<(), SinkWriteFailure> {
         self.received.fetch_add(1, Ordering::Relaxed);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Noop,
-            None,
-        )))
+        Ok(())
     }
 }
 

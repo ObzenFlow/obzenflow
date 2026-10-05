@@ -17,9 +17,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::{BackpressureAckGate, JournalProbe};
@@ -276,21 +275,14 @@ impl InlineSink for DoneCounterSink {
     type Input = SeedEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        event: SeedEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: SeedEvent) -> Result<(), SinkWriteFailure> {
         if event.kind == KIND_DONE {
             self.done_events.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

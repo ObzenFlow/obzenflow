@@ -244,7 +244,7 @@ fn finite_flow(
             embedding_dimensions,
         )
         .map_err(|error| *error)?;
-        let input = sources::finite(tickets.clone());
+        let input = sources::ValuesSource::new(tickets.clone());
         let collected = CollectEmbedded {
             outputs: outputs.clone(),
         };

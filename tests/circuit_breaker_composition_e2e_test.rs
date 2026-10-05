@@ -43,8 +43,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -241,22 +241,16 @@ impl InlineSink for CollectSink {
     type Input = CompOutput;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(DeliveryMethod::Custom("Memory".to_string()))
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn write(
-        &mut self,
-        output: CompOutput,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, output: CompOutput) -> Result<(), SinkWriteFailure> {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")
             .push(output);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Memory".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

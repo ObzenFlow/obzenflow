@@ -22,8 +22,8 @@ use obzenflow_runtime::runtime_config::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler,
 };
 
 use async_trait::async_trait;
@@ -86,18 +86,11 @@ where
     type Input = T;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Null".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Null".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

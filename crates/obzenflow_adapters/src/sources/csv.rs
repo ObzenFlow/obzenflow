@@ -170,7 +170,7 @@ impl<D> std::fmt::Debug for CsvSourceBuilder<D> {
 }
 
 impl<D> CsvSourceBuilder<D> {
-    pub fn new(decoder: D) -> Self {
+    fn new(decoder: D) -> Self {
         Self {
             decoder,
             path: None,
@@ -395,14 +395,6 @@ where
     pub fn builder(decoder: D) -> CsvSourceBuilder<D> {
         CsvSourceBuilder::new(decoder)
     }
-
-    pub fn from_file(decoder: D, path: impl Into<PathBuf>) -> Result<Self> {
-        Self::builder(decoder).path(path).build()
-    }
-
-    pub fn tsv_from_file(decoder: D, path: impl Into<PathBuf>) -> Result<Self> {
-        Self::builder(decoder).path(path).tab_delimited().build()
-    }
 }
 
 impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvReader<D> {
@@ -610,7 +602,9 @@ mod tests {
         writeln!(tmp, "name,age").unwrap();
         writeln!(tmp, "alice,007").unwrap();
 
-        let mut src = CsvSource::from_file(CsvRowDecoder, tmp.path())
+        let mut src = CsvSource::builder(CsvRowDecoder)
+            .path(tmp.path())
+            .build()
             .expect("source build")
             .open(context())
             .expect("source open");
@@ -647,7 +641,10 @@ mod tests {
         writeln!(tmp, "name\tage").unwrap();
         writeln!(tmp, "alice\t007").unwrap();
 
-        let mut src = CsvSource::tsv_from_file(CsvRowDecoder, tmp.path())
+        let mut src = CsvSource::builder(CsvRowDecoder)
+            .path(tmp.path())
+            .tab_delimited()
+            .build()
             .expect("source build")
             .open(context())
             .expect("source open");
@@ -722,7 +719,9 @@ mod tests {
 
         let mut input = NamedTempFile::new().unwrap();
         writeln!(input, "status\nSECRET_SENTINEL").unwrap();
-        let mut reader = CsvSource::from_file(StatusCsv, input.path())
+        let mut reader = CsvSource::builder(StatusCsv)
+            .path(input.path())
+            .build()
             .unwrap()
             .open(context())
             .unwrap();

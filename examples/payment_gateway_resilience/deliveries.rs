@@ -2,51 +2,41 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Named typed shipping destination.
+//! Passive application diagnostics for terminal deliveries.
 
-use super::console;
-use super::domain::PaymentAuthorized;
-use async_trait::async_trait;
-use obzenflow::middleware::{SinkDeliveryObserver, SinkDeliveryObserverContext};
-use obzenflow::stages::sinks::DeliveryMethod;
-use obzenflow::stages::sinks::{
-    InlineSink, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-};
-
-/// Small in-process shipping handoff used by the demo.
-#[derive(Clone, Debug, Default)]
-pub struct ShippingHandoff;
-
-#[async_trait]
-impl InlineSink for ShippingHandoff {
-    type Input = PaymentAuthorized;
-
-    async fn write(
-        &mut self,
-        authorized: PaymentAuthorized,
-        context: SinkWriteContext,
-    ) -> obzenflow::stages::sinks::SinkWriteResult {
-        console::send_to_shipping(authorized, context.delivery().provenance());
-        Ok(SinkWriteReport::terminal(
-            SinkTerminalOutcome::success_via(
-                DeliveryMethod::Custom("console:stdout".to_string()),
-                None,
-            )
-            .with_items(1),
-        ))
-    }
-}
+use super::domain::{PaymentAuthorizationUnavailable, PaymentAuthorized};
+use obzenflow::middleware::{ObserverResult, SinkDeliveryObserver, SinkDeliveryObserverContext};
 
 /// Emits an application diagnostic after the runtime classifies a shipping
 /// delivery. It receives an immutable view and cannot alter settlement.
 pub struct ShippingDeliveryLog;
 
 impl SinkDeliveryObserver for ShippingDeliveryLog {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+    type Input = PaymentAuthorized;
+
+    fn on_attempt(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
         tracing::info!(
             stage = ctx.stage_name(),
             outcome = ?ctx.outcome(),
             "shipping delivery observed"
         );
+        Ok(())
+    }
+}
+
+/// Log the manual-review notice after console delivery succeeds.
+pub struct ManualReviewDeliveryLog;
+
+impl SinkDeliveryObserver for ManualReviewDeliveryLog {
+    type Input = PaymentAuthorizationUnavailable;
+
+    fn on_delivered(&self, unavailable: &Self::Input) -> ObserverResult {
+        tracing::info!(
+            operation = "payment.authorization",
+            handoff_kind = "manual_review",
+            order_id = %unavailable.order_id,
+            "manual-review record written to console"
+        );
+        Ok(())
     }
 }

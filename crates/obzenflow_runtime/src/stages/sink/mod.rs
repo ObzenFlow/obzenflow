@@ -8,8 +8,9 @@
 
 pub mod journal_sink;
 mod operation_failure;
-pub mod typed;
 
+#[doc(hidden)]
+pub use crate::stages::common::handlers::sink::connector::SetSinkRedeliverySafety;
 pub use crate::stages::common::handlers::sink::{
     DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
     SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
@@ -24,4 +25,3 @@ pub use operation_failure::{
     record_sink_lifecycle_operation_failure, SinkLifecycleFailureCommit,
     SinkLifecycleFailureRecorded,
 };
-pub use typed::{SetSinkRedeliverySafety, SinkTyped};

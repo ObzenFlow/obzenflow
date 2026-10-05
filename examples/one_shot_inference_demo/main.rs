@@ -91,9 +91,9 @@ impl InferenceHandler for GenerateBrief {
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
         let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
-        let evidence = sources::once(input);
+        let evidence = sources::ValuesSource::new([input]);
         let generate_brief = GenerateBrief;
-        let display = sinks::console(|brief: &DecisionBrief| {
+        let display = sinks::ConsoleSink::new(|brief: &DecisionBrief| {
             format!("{}\n\n{}", brief.question, brief.recommendation.trim())
         });
 

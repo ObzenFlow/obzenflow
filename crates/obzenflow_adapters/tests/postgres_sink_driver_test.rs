@@ -251,11 +251,7 @@ where
         ))
         .await?;
     Ok((
-        SinkWriterAdapter::with_default_method(
-            writer,
-            stage_id,
-            description.default_method().cloned(),
-        ),
+        SinkWriterAdapter::new(writer, stage_id, description.default_method().clone()),
         WriterId::from(stage_id),
     ))
 }

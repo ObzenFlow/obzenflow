@@ -12,8 +12,7 @@ use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedAsyncInfiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
 use obzenflow_runtime::stages::SourceError;
@@ -133,23 +132,16 @@ impl InlineSink for CollectSink {
     type Input = AsyncInfiniteEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        event: AsyncInfiniteEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: AsyncInfiniteEvent) -> Result<(), SinkWriteFailure> {
         self.events
             .lock()
             .unwrap()
             .push(event.to_event(WriterId::from(StageId::new())));
         self.event_ready.notify_waiters();
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -275,7 +267,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = obzenflow::stages::sources::from_receiver(rx);
+        let source = obzenflow::stages::sources::ChannelSource::new(rx);
         let sink = CollectSink::new(events_for_flow, event_ready_for_flow);
 
         Ok(flow! {

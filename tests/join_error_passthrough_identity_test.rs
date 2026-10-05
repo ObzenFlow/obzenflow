@@ -29,8 +29,8 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
+    TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -182,18 +182,14 @@ impl InlineSink for DropSink {
     type Input = JoinedItem;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn write(
-        &mut self,
-        _event: JoinedItem,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-            None,
-        )))
+    async fn write(&mut self, _event: JoinedItem) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

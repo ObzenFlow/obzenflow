@@ -1748,7 +1748,7 @@ mod tests {
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
     use obzenflow_dsl::{flow, sink, source};
-    use obzenflow_runtime::stages::sink::SinkTyped;
+    use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2125,8 +2125,29 @@ mod tests {
         let flow = FlowDefinition::materialize({
             let root = root.clone();
             move |_runtime_config| {
-                let inputs = sources::finite(vec![ProjectionInput(1), ProjectionInput(2)]);
-                let output = SinkTyped::new(|_input: ProjectionInput| async move {}).idempotent();
+                let inputs =
+                    sources::ValuesSource::new(vec![ProjectionInput(1), ProjectionInput(2)]);
+                #[derive(Clone, Debug)]
+                struct DiscardOutput {}
+                #[async_trait::async_trait]
+                impl InlineSink for DiscardOutput {
+                    type Input = ProjectionInput;
+                    fn describe(&self) -> SinkDescription {
+                        SinkDescription::method(
+                            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+                        )
+                        .with_redelivery_safety(
+                            obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat,
+                        )
+                    }
+                    async fn write(
+                        &mut self,
+                        _input: ProjectionInput,
+                    ) -> Result<(), SinkWriteFailure> {
+                        Ok(())
+                    }
+                }
+                let output = DiscardOutput {};
                 Ok(flow! {
                     name: "sink_conformance_projection",
                     journals: disk_journals(root),

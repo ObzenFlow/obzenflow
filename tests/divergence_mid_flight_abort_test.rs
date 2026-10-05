@@ -45,8 +45,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -429,18 +429,11 @@ impl InlineSink for CountingSink {
     type Input = SeedEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: SeedEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: SeedEvent) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

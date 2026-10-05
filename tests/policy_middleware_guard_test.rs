@@ -15,8 +15,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -74,18 +73,13 @@ impl InlineSink for NullSink {
     type Input = GuardEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
     }
 
-    async fn write(
-        &mut self,
-        _event: GuardEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-            None,
-        )))
+    async fn write(&mut self, _event: GuardEvent) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

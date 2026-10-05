@@ -66,8 +66,8 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_exporter() {
                     admission: recorded.clone(),
                 })
             };
-            let input = sources::finite(vec![Observation(1), Observation(2)]);
-            let output = sinks::debug::<Observation>();
+            let input = sources::ValuesSource::new(vec![Observation(1), Observation(2)]);
+            let output = sinks::ConsoleSink::<Observation, _>::new(sinks::DebugFormatter);
             let definition = flow! {
                 name: "monitoring_injection",
                 journals: factory,
@@ -234,8 +234,8 @@ async fn concurrent_scrapes_allow_publication_and_flow_settlement() {
     .await
     .expect("all scrape workers must start before execution");
 
-    let input = sources::finite((0..INPUTS).map(Observation).collect::<Vec<_>>());
-    let output = sinks::debug::<Observation>();
+    let input = sources::ValuesSource::new((0..INPUTS).map(Observation).collect::<Vec<_>>());
+    let output = sinks::ConsoleSink::<Observation, _>::new(sinks::DebugFormatter);
     let handle = flow! {
         name: "concurrent_scrapes",
         journals: memory_journals(),

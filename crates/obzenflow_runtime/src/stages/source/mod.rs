@@ -41,16 +41,10 @@ pub mod infinite;
 pub(crate) mod replay_lifecycle;
 pub mod strategies;
 pub(crate) mod supervision;
-pub mod typed;
 
 pub use boundary::{
     SourceBoundary, SourceBoundaryFuture, SourceBoundaryOutcome, SourceBoundaryReport,
     SourcePollCompletion, SourcePollExecution, SourcePollReport, SourcePollResult,
-};
-pub use typed::{
-    AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped,
-    FallibleAsyncInfiniteSourceTyped, FallibleFiniteSourceTyped, FallibleInfiniteSourceTyped,
-    FiniteSourceTyped, InfiniteSourceTyped,
 };
 
 pub use crate::stages::common::handlers::source::{

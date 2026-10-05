@@ -6,7 +6,7 @@ use super::{console, domain::*, handlers, sources::*};
 use obzenflow::flow::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::RateLimiterBuilder;
-use obzenflow::stages::sinks::SinkTyped;
+use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::{joins, stateful};
 use std::path::PathBuf;
 
@@ -48,21 +48,13 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
         let promotions_handler = promotions_source();
         let payment_methods_handler = payment_methods_source();
         let orders_handler = orders_source();
-        let per_order_printer_handler =
-            SinkTyped::new(|order: EnrichedOrderWithPromo| async move {
-                console::print_order(&order);
-            })
-            .idempotent();
+        let per_order_printer_handler = ConsoleSink::new(console::format_order);
         let catalog_stats_handler = stateful::reduce(
             CatalogAnalyticsSummary::default(),
             handlers::summarise_order,
         )
         .emit_on_eof();
-        let summary_printer_handler =
-            SinkTyped::new(|summary: CatalogAnalyticsSummary| async move {
-                console::print_summary(&summary);
-            })
-            .idempotent();
+        let summary_printer_handler = ConsoleSink::new(console::format_summary);
 
         Ok(flow! {
             name: "product_catalog_enrichment",

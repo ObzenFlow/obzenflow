@@ -45,7 +45,7 @@
 //! review. See `README.md`.
 
 use super::console;
-use super::deliveries::{ShippingDeliveryLog, ShippingHandoff};
+use super::deliveries::{ManualReviewDeliveryLog, ShippingDeliveryLog};
 use super::domain::{
     CancelledOrder, CustomerOrderPlaced, InvalidOrder, PaymentAuthorizationUnavailable,
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
@@ -59,7 +59,7 @@ use obzenflow::middleware::{
     sink_delivery_observer, CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
     Retry,
 };
-use obzenflow::stages::sinks::SinkTyped;
+use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
 use std::time::Duration;
 
@@ -125,25 +125,12 @@ pub fn assemble_flow(
             .build()
             .expect("gateway resilience configuration must be valid");
 
-        let web_orders_feed = sources::finite(scripted_web_orders);
-        let store_orders_feed = sources::finite(scripted_store_orders);
+        let web_orders_feed = sources::ValuesSource::new(scripted_web_orders);
+        let store_orders_feed = sources::ValuesSource::new(scripted_store_orders);
         let validate_order = validation::ValidateOrder;
-        let shipping_handoff = ShippingHandoff;
-        let record_cancelled =
-            SinkTyped::with_delivery(|cancelled: CancelledOrder, delivery| async move {
-                console::record_cancelled_order(cancelled, delivery.provenance());
-            });
-        let record_unavailable = SinkTyped::with_delivery(
-            |unavailable: PaymentAuthorizationUnavailable, delivery| async move {
-                tracing::info!(
-                    operation = "payment.authorization",
-                    handoff_kind = "manual_review",
-                    order_id = %unavailable.order_id,
-                    "authorization queued for manual review"
-                );
-                console::record_authorization_unavailable(unavailable, delivery.provenance());
-            },
-        );
+        let shipping_handoff = ConsoleSink::new(console::format_shipping);
+        let record_cancelled = ConsoleSink::new(console::format_cancelled);
+        let record_unavailable = ConsoleSink::new(console::format_unavailable);
 
         Ok(flow! {
             name: "payment_gateway_resilience_demo",
@@ -234,24 +221,26 @@ pub fn assemble_flow(
                     )]
                 );
 
-                // Cancelled-order sink, tier 2: a declared closure. The order's
+                // Cancelled-order console destination. The order's
                 // fate converges from both producers (local validation failures
                 // and gateway declines). `InvalidOrder` and `PaymentDeclined`
                 // stay journal-recorded facts with no dedicated sink; this
                 // delivery carries the lifecycle consequence wherever it
-                // originated. The second closure argument is the per-delivery
-                // provenance context (FLOWIP-120i): labelling only, never a
-                // reason to skip the write.
+                // originated. The console adapter labels reconstructed output.
                 cancelled_orders = sink!(CancelledOrder => record_cancelled, delivery: idempotent);
 
-                // Unavailable-authorization sink, tier 2: failed gateway call or
+                // Unavailable-authorization destination: failed gateway call or
                 // breaker refusal. No payment decision was reached, so the order
-                // is not cancelled; it goes to manual review. Its implementation
-                // uses ordinary structured Rust tracing for local operator output;
-                // the Delivery receipt remains the durable settlement fact.
+                // is not cancelled; it goes to manual review. A passive observer
+                // logs routing after successful output; the Delivery receipt
+                // remains the durable settlement fact.
                 manual_review = sink!(
                     PaymentAuthorizationUnavailable => record_unavailable,
-                    delivery: idempotent
+                    delivery: idempotent,
+                    observers: [sink_delivery_observer(
+                        "manual-review-delivery-log",
+                        ManualReviewDeliveryLog
+                    )]
                 );
             },
 

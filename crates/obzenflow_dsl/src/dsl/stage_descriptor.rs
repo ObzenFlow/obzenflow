@@ -2117,6 +2117,20 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
 
         let sink_policy_factories = self.sink_policies;
         let observer_factories = self.observers;
+        for factory in &observer_factories {
+            if let Some((observer_input, observer_input_name)) = factory.sink_observer_input_type()
+            {
+                if observer_input != std::any::TypeId::of::<C::Input>() {
+                    return Err(format!(
+                        "sink observer '{}' expects input '{observer_input_name}', but sink '{}' consumes '{}'",
+                        factory.label(),
+                        config.name,
+                        std::any::type_name::<C::Input>(),
+                    )
+                    .into());
+                }
+            }
+        }
         let control_strategy = create_default_signal_strategy();
 
         // Create instrumentation configuration
@@ -2178,7 +2192,7 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
         let logical_destination = receipt_destination
             .clone()
             .unwrap_or_else(|| config.name.clone());
-        let default_delivery_method = self.description.default_method().cloned();
+        let default_delivery_method = self.description.default_method().clone();
 
         // Create the stage configuration
         let mut sink_config = JournalSinkConfig::new(
@@ -2186,12 +2200,12 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
             &config.name,
             &config.flow_name,
             resources.upstream_stages.clone(),
+            default_delivery_method.clone(),
         )
         .with_observer_bindings(observers.into_bindings());
         sink_config.control_strategy = Some(control_strategy);
         sink_config.sink_delivery_boundary = sink_delivery_boundary;
         sink_config.receipt_destination = receipt_destination;
-        sink_config.default_delivery_method = default_delivery_method.clone();
 
         // Open the configured connector only at stage materialisation, then
         // erase its unique mutable writer behind the journal sink boundary.
@@ -2224,11 +2238,7 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
                 return Err(format!("Failed to open sink connector: {error}").into());
             }
         };
-        let handler = SinkWriterAdapter::with_default_method(
-            writer,
-            config.stage_id,
-            default_delivery_method,
-        );
+        let handler = SinkWriterAdapter::new(writer, config.stage_id, default_delivery_method);
         let handle = JournalSinkBuilder::new(handler, sink_config, resources)
             .with_instrumentation(instrumentation)
             .build()
@@ -4179,8 +4189,18 @@ mod observer_placement_negative_tests {
     impl JoinObserver for NoopObserver {}
     impl SourcePollObserver for NoopObserver {}
     impl SinkDeliveryObserver for NoopObserver {}
+    impl obzenflow_adapters::middleware::SinkDeliveryObserver for NoopObserver {
+        type Input = ObserverInput;
+    }
     impl StageLifecycleObserver for NoopObserver {}
     impl EffectObserver for NoopObserver {}
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct ObserverInput;
+
+    impl obzenflow_core::TypedPayload for ObserverInput {
+        const EVENT_TYPE: &'static str = "observer_placement.input";
+    }
 
     /// An observer factory used to prove the planner reaches typed materialization.
     struct LoudObserverFactory;

@@ -72,7 +72,7 @@ async fn independent_inventory_consumer_delivers_through_the_public_connector() 
         .expect("build the inventory connector without opening PostgreSQL");
 
     let flow = FlowDefinition::materialize(move |_runtime_config| {
-        let levels = sources::finite([
+        let levels = sources::ValuesSource::new([
             InventoryLevelChanged {
                 warehouse: "toronto".to_string(),
                 sku: "sku-100".to_string(),

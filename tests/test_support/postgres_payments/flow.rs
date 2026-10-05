@@ -34,7 +34,7 @@ pub(crate) fn build(
         .build()?;
 
     Ok(FlowDefinition::materialize(move |_runtime_config| {
-        let payments = sources::finite(sample_payments());
+        let payments = sources::ValuesSource::new(sample_payments());
 
         Ok(flow! {
             name: "postgres_sink_payments",

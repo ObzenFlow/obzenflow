@@ -36,7 +36,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -136,12 +136,26 @@ struct CollectEmbedded {
 }
 
 #[async_trait]
-impl InlineSink for CollectEmbedded {
+impl obzenflow_runtime::stages::sink::SinkConnector for CollectEmbedded {
     type Input = TicketEmbedded;
+    type Writer = Self;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        SinkDescription::method(DeliveryMethod::Custom("CollectEmbedded".to_string()))
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
+
+    async fn open(
+        &self,
+        _context: obzenflow_runtime::stages::sink::SinkWriterInitContext,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
+        Ok(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::SinkWriter for CollectEmbedded {
+    type Input = TicketEmbedded;
 
     async fn write(
         &mut self,
@@ -329,10 +343,10 @@ fn build_flow(
                 },
             )
             .map_err(|error| binding_error("embedding_handler", error))?;
-        let input = sources::once(TicketRaised {
+        let input = sources::ValuesSource::new([TicketRaised {
             id: 7,
             description: "Customer cannot sign in".to_string(),
-        });
+        }]);
         let collected = CollectEmbedded { outputs };
 
         Ok(flow! {

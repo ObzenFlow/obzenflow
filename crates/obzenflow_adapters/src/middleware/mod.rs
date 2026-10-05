@@ -12,8 +12,9 @@
 //! Attachments bind at named stage join points and split by capability:
 //!
 //! - **Observers** are synchronous, live-only interception points over
-//!   immutable runtime views. They return nothing and receive no framework
-//!   authority with which to steer or publish execution.
+//!   immutable runtime views. Typed sink observers return only observer-health
+//!   errors; other hooks return nothing. None receive framework authority with
+//!   which to steer or publish execution.
 //! - **Control** middleware (circuit breaker, rate limiter, and effect
 //!   resilience) admits, paces, or rejects at a live-I/O boundary. Retry exists
 //!   only inside effect resilience; it is not a standalone attachment.
@@ -50,8 +51,9 @@
 //! ## Custom observers
 //!
 //! Author a custom diagnostic aspect by implementing the observer hook for the
-//! surface you care about. Ordinary hooks return no value, receive immutable
-//! views, and are suppressed while recorded history is reconstructed.
+//! surface you care about. Hooks receive immutable views and are suppressed
+//! while recorded history is reconstructed. Typed sink hooks return
+//! `ObserverResult` for health reporting; other observer hooks return unit.
 //!
 //! ```ignore
 //! use obzenflow_adapters::middleware::handler_observer;
@@ -137,9 +139,11 @@ pub use hints::{BatchingHint, MiddlewareHints};
 pub use observer::{
     effect_observer, handler_observer, join_observer, sink_delivery_observer, source_poll_observer,
     stage_lifecycle_observer, stateful_observer, EffectObserverFactory, HandlerObserverFactory,
-    JoinObserverFactory, SinkDeliveryObserverFactory, SourcePollObserverFactory,
-    StageLifecycleObserverFactory, StageObserverSet, StatefulObserverFactory,
+    JoinObserverFactory, SinkDeliveryObserver, SinkDeliveryObserverFactory,
+    SourcePollObserverFactory, StageLifecycleObserverFactory, StageObserverSet,
+    StatefulObserverFactory,
 };
+pub use obzenflow_runtime::stages::observer::{ObserverError, ObserverResult};
 
 // Control middleware
 pub use control::{

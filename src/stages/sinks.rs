@@ -2,16 +2,107 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Sink constructors, formatting, and custom sink authoring contracts.
+//! Traits for application sinks, with built-in destination adapters.
 //!
 //! Sinks are the terminal stages of a pipeline. This module re-exports the
-//! built-in destinations and the contracts for implementing application sinks.
+//! contracts for implementing application sinks and the built-in destinations.
+//!
+//! ## Implement an application sink
+//!
+//! Use [`InlineSink`] when a configured sink completes each input before
+//! returning. Declare its input and destination once; `write` performs the
+//! application operation and returns `Ok(())` or [`SinkWriteFailure`]. The
+//! framework creates the delivery receipt, including one delivered input and
+//! an unknown byte count. It owns input identity, provenance and journalling.
+//!
+//! ```
+//! use obzenflow::stages::sinks::{
+//!     DeliveryMethod, InlineSink, SinkDescription, SinkOperationError,
+//!     SinkWriteFailure, SinkWritePhase,
+//! };
+//! # use obzenflow::schema::TypedPayload;
+//! # use serde::{Deserialize, Serialize};
+//! # #[derive(Clone, Debug, Serialize, Deserialize)]
+//! # struct Order { id: String }
+//! # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "orders.order"; }
+//!
+//! #[derive(Clone, Debug)]
+//! struct DispatchOrders {
+//!     sender: tokio::sync::mpsc::Sender<Order>,
+//! }
+//!
+//! #[async_trait::async_trait]
+//! impl InlineSink for DispatchOrders {
+//!     type Input = Order;
+//!
+//!     fn describe(&self) -> SinkDescription {
+//!         SinkDescription::destination(
+//!             "order_dispatch", DeliveryMethod::Custom("channel".into()),
+//!         )
+//!     }
+//!
+//!     async fn write(&mut self, order: Order) -> Result<(), SinkWriteFailure> {
+//!         self.sender.send(order).await.map_err(|_| {
+//!             SinkWriteFailure::current_only(
+//!                 SinkWritePhase::Execute,
+//!                 SinkOperationError::permanent("order dispatcher closed"),
+//!             )
+//!         })
+//!     }
+//! }
+//! # let (sender, _receiver) = tokio::sync::mpsc::channel(16);
+//! # let dispatch_orders = DispatchOrders { sender };
+//! # let _stage = obzenflow::flow::sink!(Order => dispatch_orders);
+//! ```
+//!
+//! Bind this sink with `sink!(Order => dispatch_orders)`. The operation must be
+//! complete when it returns success. Cloning opens the inline writer, so clones
+//! must isolate transient execution state; a shared destination handle is fine.
+//!
+//! Use [`SinkConnector`] and [`SinkWriter`] when opening destination resources,
+//! buffering, inspecting delivery provenance, measuring bytes, or reporting
+//! partial outcomes. Configuration belongs to the connector; `open` creates an
+//! isolated writer. Only that richer writer receives [`SinkWriteContext`] and
+//! authors [`SinkWriteReport`] values. Both tiers use the same runtime protocol.
+//! A [`SinkDescription`] always declares a [`DeliveryMethod`]; redelivery safety
+//! is a separate property that the integration or flow must classify.
+//!
+//! ## Built-in destinations
+//!
+//! These adapters cover common destinations. The traits above are the extension
+//! points for application integrations.
+//!
+//! | Integration | Entry point |
+//! |---|---|
+//! | Console | [`ConsoleSink::new`] with a pure formatter |
+//! | Batched console table | `ConsoleSink::new(TableFormatter::new(columns, extractor)).batch_size(256)?` |
+//! | Structured diagnostics | [`TracingSink::new`] with a synchronous tracing emitter |
+//! | Intentional discard | [`DiscardSink::new`] |
+//! | CSV or TSV | [`CsvSink::builder`] |
+//! | PostgreSQL | `postgres::PostgresSink::builder` (`postgres` feature) |
+//!
+//! TSV is a CSV builder setting, `.tab_delimited()`. [`ConsoleSink::batch_size`]
+//! requires a positive row limit and moves the formatter and destination into
+//! isolated table writers. Batches also have a default 64 KiB cap on
+//! prepared UTF-8 cell text, configurable through [`TableConsoleSink::batch_byte_limit`].
+//! This excludes rendered table overhead and allocation overhead; an oversized
+//! row is rejected. Thresholds or runtime flush/drain trigger output, with replay
+//! provenance changes forming another boundary. There is no timed flush guarantee.
 //!
 //! ## Console sinks
 //!
 //! [`ConsoleSink`] prints events to stdout using a pluggable [`Formatter`].
 //! Built-in formatters include [`DebugFormatter`], [`JsonFormatter`],
 //! [`JsonPrettyFormatter`], and [`TableFormatter`].
+//! Human-readable [`ConsoleOutput::Text`] is automatically labelled during replay
+//! and resume reconstruction. Formatters receive only application input.
+//! [`JsonFormatter`] and [`JsonPrettyFormatter`] use [`ConsoleOutput::Verbatim`]
+//! to preserve their encoded body without presentation labels. Custom formatters
+//! can use the same representation for output that must retain its exact body.
+//! Both representations retain the console's trailing newline. String-returning
+//! formatter functions produce human-readable text.
+//! The adapter owns stdout/stderr, measures successful bytes, and reports I/O
+//! failures; [`ConsoleOutput::Empty`] is an explicit no-op.
 //!
 //! ## CSV sinks
 //!
@@ -82,11 +173,12 @@
 //! live writer opens.
 
 pub use obzenflow_adapters::sinks::csv::CsvWriter;
-/// Console and CSV sinks, formatters, and output configuration.
+/// Built-in destinations, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{
-    console, debug, json, json_pretty, table, ConsoleSink, CsvProjection, CsvSink, CsvSinkBuilder,
-    DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
-    SnapshotTableFormatter, TableFormatter,
+    ConsoleConfigError, ConsoleFormatError, ConsoleOutput, ConsoleSink, ConsoleWriter,
+    CsvProjection, CsvSink, CsvSinkBuilder, DebugFormatter, DiscardSink, Formatter, JsonFormatter,
+    JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter, TableConsoleSink,
+    TableFormatter, TracingSink,
 };
 
 pub use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
@@ -97,9 +189,9 @@ pub use obzenflow_runtime::stages::sink::{
     SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
     SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
     SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
-    SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteFailure,
-    SinkWriteFailureDisposition, SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter,
-    SinkWriterInitContext, SinkWriterLifecycleReport,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteFailureDisposition,
+    SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
+    SinkWriterLifecycleReport,
 };
 
 /// Feature-gated PostgreSQL sink and its typed parameter-binding surface.

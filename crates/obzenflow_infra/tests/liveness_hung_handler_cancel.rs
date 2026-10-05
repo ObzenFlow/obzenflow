@@ -14,8 +14,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_runtime::stages::observer::{
@@ -123,18 +123,11 @@ impl InlineSink for NoopSink {
     type Input = ProbeEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _input: ProbeEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _input: ProbeEvent) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

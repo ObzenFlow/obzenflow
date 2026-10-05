@@ -16,7 +16,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,7 +45,21 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
     let base = tempfile::tempdir().expect("tempdir");
     let journals = disk_journals(base.path().to_path_buf());
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let guard_sink = SinkTyped::new(|_value: GuardEvent| async move {});
+        #[derive(Clone, Debug)]
+        struct DiscardGuardSink {}
+        #[async_trait::async_trait]
+        impl InlineSink for DiscardGuardSink {
+            type Input = GuardEvent;
+            fn describe(&self) -> SinkDescription {
+                SinkDescription::method(
+                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+                )
+            }
+            async fn write(&mut self, _input: GuardEvent) -> Result<(), SinkWriteFailure> {
+                Ok(())
+            }
+        }
+        let guard_sink = DiscardGuardSink {};
 
         Ok(flow! {
             name: "verb_without_archive",

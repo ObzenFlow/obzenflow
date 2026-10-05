@@ -31,9 +31,7 @@ use crate::stages::observer::{SinkDeliveryAttemptResult, SinkDeliveryObserverOut
 use crate::supervised_base::EventLoopDirective;
 use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::{
-    DeliveryMethod, DeliveryOutcome, DeliveryResult,
-};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryOutcome, DeliveryResult};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::ChainPayload;
@@ -918,6 +916,15 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         stage_input_position,
         subscription.last_delivered_generation(),
     );
+    if ctx.observers.has_sink_delivery() {
+        ctx.pending_delivery_observations.insert(
+            envelope.commitment(),
+            super::super::SinkDeliveryObservation {
+                scope,
+                position: observer_input_position,
+            },
+        );
+    }
     let boundary = ctx.sink_delivery_boundary.clone();
     let input = envelope.clone();
 
@@ -1036,9 +1043,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         (Some(SinkInvocationOutcome::Delivered(Err(HandlerError::SinkWrite(failure)))), None) => {
             let failure = (*failure).clone();
             let report = SinkConsumeReport::new(DeliveryOutcome::failed(
-                ctx.default_delivery_method
-                    .clone()
-                    .unwrap_or(DeliveryMethod::Noop),
+                ctx.default_delivery_method.clone(),
                 write_failure_receipt_type(failure.disposition()),
                 failure.error().detail(),
             ));
@@ -1053,9 +1058,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         }
         (Some(SinkInvocationOutcome::Delivered(Err(error))), None) => {
             let report = SinkConsumeReport::new(DeliveryOutcome::failed(
-                ctx.default_delivery_method
-                    .clone()
-                    .unwrap_or(DeliveryMethod::Noop),
+                ctx.default_delivery_method.clone(),
                 "sink_error",
                 error.to_string(),
             ));
@@ -1067,9 +1070,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         }
         (Some(SinkInvocationOutcome::Panicked), None) => (
             SinkConsumeReport::new(DeliveryOutcome::failed(
-                ctx.default_delivery_method
-                    .clone()
-                    .unwrap_or(DeliveryMethod::Noop),
+                ctx.default_delivery_method.clone(),
                 "handler_panic",
                 "sink connector panicked",
             )),
@@ -1081,9 +1082,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         (None, Some(rejection)) => (
             SinkConsumeReport::new(
                 DeliveryOutcome::rejected(
-                    ctx.default_delivery_method
-                        .clone()
-                        .unwrap_or(DeliveryMethod::Noop),
+                    ctx.default_delivery_method.clone(),
                     rejection.policy(),
                     rejection.reason(),
                 )
@@ -1349,5 +1348,6 @@ async fn journal_delivery_receipt<
     })
     .await?;
     subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
+    super::super::observe_committed_delivery(ctx, parent_envelope, &written);
     Ok(written.into())
 }

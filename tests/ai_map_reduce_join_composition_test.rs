@@ -32,8 +32,9 @@ use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
 };
-use obzenflow_runtime::stages::common::handlers::{SourceError, TypedFiniteSourceHandler};
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow_runtime::stages::common::handlers::{
+    SinkWriteFailure, SourceError, TypedFiniteSourceHandler,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
@@ -386,13 +387,7 @@ fn build_flow(
             .into(),
             counters,
         };
-        let output = SinkTyped::new(move |row: Row| {
-            let delivered = delivered.clone();
-            async move {
-                delivered.lock().unwrap().push(row);
-            }
-        })
-        .idempotent();
+        let output = CollectRows { delivered };
 
         Ok(match placement {
             Placement::Before => {
@@ -845,4 +840,30 @@ async fn ai_map_reduce_as_join_stream_preserves_contributions_and_filters_failur
 #[tokio::test(flavor = "multi_thread")]
 async fn ai_map_reduce_as_join_catalog_selects_latest_contribution_and_replays() {
     exercise(Placement::Catalog).await;
+}
+#[derive(Clone)]
+struct CollectRows {
+    delivered: Arc<Mutex<Vec<Row>>>,
+}
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::sink::InlineSink for CollectRows {
+    type Input = Row;
+    fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+        obzenflow_runtime::stages::sink::SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "collect_rows".into(),
+            ),
+        )
+        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
+    }
+    async fn write(&mut self, input: Row) -> Result<(), SinkWriteFailure> {
+        self.delivered.lock().unwrap().push(input);
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for CollectRows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CollectRows")
+    }
 }

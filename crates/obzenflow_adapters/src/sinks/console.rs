@@ -11,15 +11,25 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt,
-    SinkConnector, SinkDescription, SinkOperationError, SinkOperationResult, SinkTerminalOutcome,
+    PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt, SinkConnector,
+    SinkDescription, SinkOperationError, SinkOperationResult, SinkTerminalOutcome,
     SinkWriteContext, SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult,
     SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::io::{self, Write};
 use std::marker::PhantomData;
+
+const DEFAULT_TABLE_BATCH_BYTE_LIMIT: usize = 64 * 1024;
+
+/// Invalid console table batching configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConsoleConfigError {
+    #[error("console table batch size must be greater than zero")]
+    InvalidBatchSize,
+    #[error("console table batch byte limit must be greater than zero")]
+    InvalidBatchByteLimit,
+}
 
 /// Output destination for `ConsoleSink`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -39,8 +49,8 @@ impl OutputDestination {
 
     fn delivery_method(self) -> DeliveryMethod {
         match self {
-            Self::Stdout => DeliveryMethod::Custom("console:stdout".to_string()),
-            Self::Stderr => DeliveryMethod::Custom("console:stderr".to_string()),
+            Self::Stdout => DeliveryMethod::ConsoleStdout,
+            Self::Stderr => DeliveryMethod::ConsoleStderr,
         }
     }
 
@@ -50,10 +60,20 @@ impl OutputDestination {
     }
 }
 
-/// Immediate formatting result. Empty is an intentional no-op with no I/O.
+/// A formatted frame and its presentation contract.
+///
+/// `Text` and `Verbatim` append one line feed and flush the destination, even
+/// for an empty body. Their receipt byte count includes that line feed and any
+/// framework replay label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsoleOutput {
+    /// Human-readable text. The console prefixes reconstructed frames with
+    /// `[replay] `, once per frame, using runtime delivery provenance.
     Text(String),
+    /// Preserve the body exactly, without replay annotations. Use for structured
+    /// output such as JSON or another format whose bytes belong to the formatter.
+    Verbatim(String),
+    /// Intentional zero-item no-op: no write, line feed, or flush.
     Empty,
 }
 
@@ -106,7 +126,7 @@ where
     T: Serialize,
 {
     fn format(&self, item: &T) -> Result<ConsoleOutput, ConsoleFormatError> {
-        Ok(ConsoleOutput::Text(serde_json::to_string(item)?))
+        Ok(ConsoleOutput::Verbatim(serde_json::to_string(item)?))
     }
 }
 
@@ -119,7 +139,7 @@ where
     T: Serialize,
 {
     fn format(&self, item: &T) -> Result<ConsoleOutput, ConsoleFormatError> {
-        Ok(ConsoleOutput::Text(serde_json::to_string_pretty(item)?))
+        Ok(ConsoleOutput::Verbatim(serde_json::to_string_pretty(item)?))
     }
 }
 
@@ -519,6 +539,9 @@ fn is_wide(code: u32) -> bool {
 }
 
 /// Typed console sink with a pluggable `Formatter`.
+///
+/// Human-readable frames are automatically labelled during reconstruction.
+/// [`ConsoleOutput::Verbatim`] preserves formatter-owned bodies, including JSON.
 pub struct ConsoleSink<T, F = JsonFormatter> {
     formatter: F,
     destination: OutputDestination,
@@ -547,78 +570,47 @@ impl<T, F> std::fmt::Debug for ConsoleSink<T, F> {
     }
 }
 
-impl<T, F0> ConsoleSink<T, F0>
+impl<T, F> ConsoleSink<T, F>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    T: TypedPayload + Send + Sync + 'static,
+    F: Formatter<T>,
 {
-    pub fn json() -> ConsoleSink<T, JsonFormatter>
-    where
-        T: Serialize,
-    {
-        ConsoleSink {
-            formatter: JsonFormatter,
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn json_pretty() -> ConsoleSink<T, JsonPrettyFormatter>
-    where
-        T: Serialize,
-    {
-        ConsoleSink {
-            formatter: JsonPrettyFormatter,
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn debug() -> ConsoleSink<T, DebugFormatter>
-    where
-        T: std::fmt::Debug,
-    {
-        ConsoleSink {
-            formatter: DebugFormatter,
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn table<E>(columns: &[&str], extractor: E) -> TableConsoleSink<T, E>
-    where
-        E: Fn(&T) -> Vec<String> + Send + Sync + Clone,
-    {
-        TableConsoleSink {
-            formatter: TableFormatter::new(columns, extractor),
-            destination: OutputDestination::Stdout,
-            max_rows: 256,
-            max_bytes: 64 * 1024,
-        }
-    }
-
-    pub fn snapshot_table<E>(
-        columns: &[&str],
-        extractor: E,
-    ) -> ConsoleSink<T, SnapshotTableFormatter<T, E>>
-    where
-        E: Fn(&T) -> Vec<Vec<String>> + Send + Sync + Clone,
-    {
-        ConsoleSink {
-            formatter: SnapshotTableFormatter::new(columns, extractor),
-            destination: OutputDestination::Stdout,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn new<F>(formatter: F) -> ConsoleSink<T, F>
-    where
-        F: Formatter<T>,
-    {
-        ConsoleSink {
+    /// Configure immediate console output with a pure formatter.
+    pub fn new(formatter: F) -> Self {
+        Self {
             formatter,
             destination: OutputDestination::Stdout,
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<T, E> ConsoleSink<T, TableFormatter<T, E>>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    E: Fn(&T) -> Vec<String> + Send + Sync + Clone,
+{
+    /// Combine up to `rows` inputs into each console table. `rows` must be positive.
+    ///
+    /// Each stage-local writer also limits batches to 64 KiB of prepared UTF-8
+    /// cell text by default; use [`TableConsoleSink::batch_byte_limit`] to change
+    /// that cap. It excludes headers, padding and allocation overhead. A single
+    /// row larger than the cap is rejected, even if display formatting clips it.
+    ///
+    /// A full batch prints immediately. Runtime flush/drain prints a final
+    /// partial batch. Replayed and live rows always use separate frames, so a
+    /// provenance change flushes the preceding batch before buffering the row.
+    /// There is no timer, so a continuing stream below its limits can retain rows.
+    pub fn batch_size(self, rows: usize) -> Result<TableConsoleSink<T, E>, ConsoleConfigError> {
+        if rows == 0 {
+            return Err(ConsoleConfigError::InvalidBatchSize);
+        }
+        Ok(TableConsoleSink {
+            formatter: self.formatter,
+            destination: self.destination,
+            max_rows: rows,
+            max_bytes: DEFAULT_TABLE_BATCH_BYTE_LIMIT,
+        })
     }
 }
 
@@ -630,30 +622,80 @@ impl<T, F> ConsoleSink<T, F> {
 }
 
 #[async_trait]
-impl<T, F> InlineSink for ConsoleSink<T, F>
+impl<T, F> SinkConnector for ConsoleSink<T, F>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    T: TypedPayload + Send + Sync + 'static,
     F: Formatter<T> + 'static,
 {
     type Input = T;
+    type Writer = ConsoleWriter<T, F>;
 
     fn describe(&self) -> SinkDescription {
         self.destination.description()
     }
 
-    async fn write(&mut self, input: T, _context: SinkWriteContext) -> SinkWriteResult {
+    async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
+        Ok(ConsoleWriter {
+            formatter: self.formatter.clone(),
+            destination: self.destination,
+            poisoned: false,
+            _phantom: PhantomData,
+            #[cfg(test)]
+            output: None,
+        })
+    }
+}
+
+/// One immediate console execution, opened by [`ConsoleSink`].
+pub struct ConsoleWriter<T, F> {
+    formatter: F,
+    destination: OutputDestination,
+    poisoned: bool,
+    _phantom: PhantomData<fn() -> T>,
+    #[cfg(test)]
+    output: Option<std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>>,
+}
+
+#[async_trait]
+impl<T, F> SinkWriter for ConsoleWriter<T, F>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    F: Formatter<T> + 'static,
+{
+    type Input = T;
+
+    async fn write(&mut self, input: T, context: SinkWriteContext) -> SinkWriteResult {
+        if self.poisoned {
+            return Err(SinkWriteFailure::poisoned(
+                SinkWritePhase::Execute,
+                SinkOperationError::other("console writer is poisoned"),
+            ));
+        }
         let output = self.formatter.format(&input).map_err(|error| {
             SinkWriteFailure::current_only(
                 SinkWritePhase::Encode,
                 SinkOperationError::validation(error.to_string()),
             )
         })?;
-        let outcome = match output {
-            ConsoleOutput::Empty => {
-                SinkTerminalOutcome::success_via(DeliveryMethod::Noop, Some(0)).with_items(0)
-            }
+        let frame = match output {
             ConsoleOutput::Text(frame) => {
-                let bytes = self.destination.write_frame(&frame).map_err(|error| {
+                Some(label_frame(frame, context.delivery().is_replayed()))
+            }
+            ConsoleOutput::Verbatim(frame) => Some(frame),
+            ConsoleOutput::Empty => None,
+        };
+        let outcome = match frame {
+            None => SinkTerminalOutcome::success_via(DeliveryMethod::Noop, Some(0)).with_items(0),
+            Some(frame) => {
+                #[cfg(test)]
+                let result = match &self.output {
+                    Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
+                    None => self.destination.write_frame(&frame),
+                };
+                #[cfg(not(test))]
+                let result = self.destination.write_frame(&frame);
+                let bytes = result.map_err(|error| {
+                    self.poisoned = true;
                     SinkWriteFailure::poisoned(
                         SinkWritePhase::Execute,
                         SinkOperationError::other(error.to_string()),
@@ -664,9 +706,25 @@ where
         };
         Ok(SinkWriteReport::terminal(outcome))
     }
+
+    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
+        if self.poisoned {
+            return Err(SinkOperationError::other("console writer is poisoned"));
+        }
+        Ok(SinkWriterLifecycleReport::default())
+    }
 }
 
-/// Reusable table configuration. Opening it never copies another writer's rows.
+fn label_frame(frame: String, replayed: bool) -> String {
+    if replayed {
+        format!("[replay] {frame}")
+    } else {
+        frame
+    }
+}
+
+/// Reusable table configuration selected by [`ConsoleSink::batch_size`].
+/// Opening it never copies another writer's rows.
 pub struct TableConsoleSink<T, E> {
     formatter: TableFormatter<T, E>,
     destination: OutputDestination,
@@ -678,14 +736,16 @@ impl<T, E> TableConsoleSink<T, E> {
         self.destination = OutputDestination::Stderr;
         self
     }
-    pub fn batch_limits(
-        mut self,
-        rows: std::num::NonZeroUsize,
-        bytes: std::num::NonZeroUsize,
-    ) -> Self {
-        self.max_rows = rows.get();
-        self.max_bytes = bytes.get();
-        self
+    /// Limit a batch's prepared UTF-8 cell text to `bytes`, which must be positive.
+    ///
+    /// The default is 64 KiB. This cap excludes table headers, borders, padding
+    /// and allocation overhead. A row exceeding it is rejected before output.
+    pub fn batch_byte_limit(mut self, bytes: usize) -> Result<Self, ConsoleConfigError> {
+        if bytes == 0 {
+            return Err(ConsoleConfigError::InvalidBatchByteLimit);
+        }
+        self.max_bytes = bytes;
+        Ok(self)
     }
 }
 impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
@@ -701,6 +761,7 @@ impl<T, E> std::fmt::Debug for TableConsoleSink<T, E> {
 pub struct TableConsoleWriter<T, E> {
     formatter: TableFormatter<T, E>,
     destination: OutputDestination,
+    replayed: bool,
     rows: Vec<(Vec<String>, PendingSinkInput)>,
     prepared_bytes: usize,
     max_rows: usize,
@@ -725,6 +786,7 @@ where
         Ok(TableConsoleWriter {
             formatter: self.formatter.clone(),
             destination: self.destination,
+            replayed: false,
             rows: Vec::new(),
             prepared_bytes: 0,
             max_rows: self.max_rows,
@@ -754,6 +816,7 @@ impl<T, E> TableConsoleWriter<T, E> {
             &borrowed,
             self.formatter.max_col_width,
         );
+        let frame = label_frame(frame, self.replayed);
         #[cfg(test)]
         let result = match &self.output {
             Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
@@ -816,8 +879,10 @@ where
             ));
         }
         let mut receipts = Vec::new();
+        let replayed = context.delivery().is_replayed();
         if self.rows.len() >= self.max_rows
             || bytes > self.max_bytes.saturating_sub(self.prepared_bytes)
+            || self.replayed != replayed
         {
             receipts = self
                 .flush_pending()
@@ -829,20 +894,22 @@ where
                 })?
                 .0;
         }
+        self.replayed = replayed;
         self.rows.push((row, context.defer()));
         self.prepared_bytes += bytes;
-        if receipts.is_empty()
-            && (self.rows.len() >= self.max_rows || self.prepared_bytes >= self.max_bytes)
-        {
-            receipts = self
-                .flush_pending()
-                .map_err(|error| {
-                    SinkWriteFailure::poisoned(
-                        SinkWritePhase::Execute,
-                        SinkOperationError::other(error.to_string()),
-                    )
-                })?
-                .0;
+        if self.rows.len() >= self.max_rows || self.prepared_bytes >= self.max_bytes {
+            // The incoming row can fill a batch of its own after a preflush.
+            // Preserve the earlier batch's receipts when settling this one.
+            receipts.extend(
+                self.flush_pending()
+                    .map_err(|error| {
+                        SinkWriteFailure::poisoned(
+                            SinkWritePhase::Execute,
+                            SinkOperationError::other(error.to_string()),
+                        )
+                    })?
+                    .0,
+            );
         }
         Ok(
             SinkWriteReport::buffered(SinkBufferedOutcome::accepted(Some(bytes as u64)))
@@ -868,7 +935,7 @@ where
 mod tests {
     use super::*;
     use obzenflow_core::event::{ChainPayload, JournalRecord};
-    use obzenflow_core::{JournalWriterId, StageId};
+    use obzenflow_core::{JournalWriterId, MiddlewareExecutionScope, StageId};
     use obzenflow_runtime::messaging::DeliveredRecord;
     use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
     use serde::{Deserialize, Serialize};
@@ -891,10 +958,31 @@ mod tests {
         )
         .into()
     }
+    fn input_with_provenance(value: &str, replay_context: bool) -> DeliveredRecord<ChainPayload> {
+        let mut event = input(value).authored();
+        if replay_context {
+            event.replay_context = Some(obzenflow_core::event::provenance::ReplayContext {
+                original_event_id: event.id,
+                original_flow_id: "archived-flow".into(),
+                original_stage_id: StageId::new(),
+            });
+        }
+        JournalRecord::new(JournalWriterId::new(), event).into()
+    }
+    fn delivery_cases() -> [(MiddlewareExecutionScope, bool, bool); 4] {
+        [
+            (Default::default(), false, false),
+            (MiddlewareExecutionScope::StrictReplayHandler, false, true),
+            (MiddlewareExecutionScope::ResumeHandler, false, true),
+            (Default::default(), true, true),
+        ]
+    }
     fn text(output: ConsoleOutput) -> String {
         match output {
             ConsoleOutput::Text(value) => value,
-            ConsoleOutput::Empty => panic!("expected text"),
+            ConsoleOutput::Verbatim(_) | ConsoleOutput::Empty => {
+                panic!("expected human-readable text")
+            }
         }
     }
     #[derive(Default)]
@@ -904,6 +992,7 @@ mod tests {
         flushes: usize,
         fail_after: Option<usize>,
         fail_flush: bool,
+        fail_on_flush: Option<usize>,
     }
     struct Output(Arc<Mutex<OutputState>>);
     impl Write for Output {
@@ -923,12 +1012,31 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             let mut state = self.0.lock().unwrap();
             state.flushes += 1;
-            if state.fail_flush {
+            if state.fail_flush || state.fail_on_flush == Some(state.flushes) {
                 Err(io::Error::other("injected flush failure"))
             } else {
                 Ok(())
             }
         }
+    }
+    async fn immediate<F>(
+        connector: &ConsoleSink<TestEvent, F>,
+        output: Arc<Mutex<OutputState>>,
+    ) -> SinkWriterAdapter<ConsoleWriter<TestEvent, F>>
+    where
+        F: Formatter<TestEvent> + 'static,
+    {
+        let stage = StageId::new();
+        let mut writer = connector
+            .open(SinkWriterInitContext::new(
+                stage,
+                "console".into(),
+                "test".into(),
+            ))
+            .await
+            .unwrap();
+        writer.output = Some(Arc::new(Mutex::new(Box::new(Output(output)))));
+        SinkWriterAdapter::new(writer, stage, connector.describe().default_method().clone())
     }
     async fn table<E>(
         connector: &TableConsoleSink<TestEvent, E>,
@@ -947,11 +1055,7 @@ mod tests {
             .await
             .unwrap();
         writer.output = Some(Arc::new(Mutex::new(Box::new(Output(output)))));
-        SinkWriterAdapter::with_default_method(
-            writer,
-            stage,
-            connector.describe().default_method().cloned(),
-        )
+        SinkWriterAdapter::new(writer, stage, connector.describe().default_method().clone())
     }
     #[test]
     fn immediate_formatters_and_snapshot_are_stateless() {
@@ -959,8 +1063,8 @@ mod tests {
             value: "hello".into(),
         };
         assert_eq!(
-            text(JsonFormatter.format(&item).unwrap()),
-            r#"{"value":"hello"}"#
+            JsonFormatter.format(&item).unwrap(),
+            ConsoleOutput::Verbatim(r#"{"value":"hello"}"#.into())
         );
         assert_eq!(
             text(DebugFormatter.format(&item).unwrap()),
@@ -1012,35 +1116,318 @@ mod tests {
                 Ok(ConsoleOutput::Empty)
             }
         }
-        let connector = ConsoleSink::<TestEvent>::new(Empty);
-        let stage = StageId::new();
-        let writer = SinkConnector::open(
-            &connector,
-            SinkWriterInitContext::new(stage, "empty".into(), "test".into()),
-        )
-        .await
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, _) in delivery_cases() {
+                let mut connector = ConsoleSink::<TestEvent, _>::new(Empty);
+                connector.destination = destination;
+                let output = Arc::new(Mutex::new(OutputState::default()));
+                let mut adapter = immediate(&connector, output.clone()).await;
+                let report = adapter
+                    .consume_committed_report(
+                        input_with_provenance("ignored", replay_context),
+                        scope,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(report.primary.delivery_method, DeliveryMethod::Noop);
+                assert_eq!(report.primary.items_delivered, Some(0));
+                assert_eq!(report.primary.bytes_processed, Some(0));
+                assert!(report.commit_receipts.is_empty());
+                let state = output.lock().unwrap();
+                assert!(state.bytes.is_empty());
+                assert_eq!((state.writes, state.flushes), (0, 0));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn human_frames_automatically_label_replay_and_measure_actual_bytes() {
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, replayed) in delivery_cases() {
+                for body in ["first\nsecond\n", "", r#"{"value":"human text"}"#] {
+                    let mut connector = ConsoleSink::new(|event: &TestEvent| event.value.clone());
+                    connector.destination = destination;
+                    let output = Arc::new(Mutex::new(OutputState::default()));
+                    let mut writer = immediate(&connector, output.clone()).await;
+                    let report = writer
+                        .consume_committed_report(
+                            input_with_provenance(body, replay_context),
+                            scope,
+                        )
+                        .await
+                        .unwrap();
+                    let expected = if replayed {
+                        format!("[replay] {body}\n")
+                    } else {
+                        format!("{body}\n")
+                    };
+                    assert_eq!(
+                        report.primary.delivery_method,
+                        destination.delivery_method()
+                    );
+                    assert_eq!(report.primary.bytes_processed, Some(expected.len() as u64));
+                    assert_eq!(report.primary.items_delivered, Some(1));
+                    assert!(report.commit_receipts.is_empty());
+                    {
+                        let state = output.lock().unwrap();
+                        assert_eq!(state.bytes, expected.as_bytes());
+                        assert_eq!(state.flushes, 1, "multiline text is one frame");
+                    }
+                    // A reconstructed frame must not leave a label on the next live input.
+                    let live = writer
+                        .consume_committed_report(input("fresh"), Default::default())
+                        .await
+                        .unwrap();
+                    assert_eq!(live.primary.bytes_processed, Some(6));
+                    assert_eq!(
+                        output.lock().unwrap().bytes,
+                        format!("{expected}fresh\n").as_bytes()
+                    );
+                }
+            }
+        }
+    }
+
+    async fn assert_json_frames<F: Formatter<TestEvent> + 'static>(formatter: F, body: &str) {
+        let expected = format!("{body}\n");
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, _) in delivery_cases() {
+                let mut connector = ConsoleSink::new(formatter.clone());
+                connector.destination = destination;
+                let output = Arc::new(Mutex::new(OutputState::default()));
+                let mut writer = immediate(&connector, output.clone()).await;
+                let report = writer
+                    .consume_committed_report(input_with_provenance("héllo", replay_context), scope)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    report.primary.delivery_method,
+                    destination.delivery_method()
+                );
+                assert_eq!(report.primary.bytes_processed, Some(expected.len() as u64));
+                assert_eq!(report.primary.items_delivered, Some(1));
+                assert!(report.commit_receipts.is_empty());
+                let state = output.lock().unwrap();
+                assert_eq!(state.bytes, expected.as_bytes());
+                assert_eq!(state.flushes, 1);
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&state.bytes).unwrap(),
+                    serde_json::json!({"value": "héllo"})
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn json_frames_preserve_exact_live_and_replay_bytes() {
+        assert_json_frames(JsonFormatter, r#"{"value":"héllo"}"#).await;
+        assert_json_frames(JsonPrettyFormatter, "{\n  \"value\": \"héllo\"\n}").await;
+    }
+
+    #[tokio::test]
+    async fn custom_verbatim_preserves_literal_labels_newlines_and_empty_bodies() {
+        #[derive(Clone)]
+        struct Verbatim;
+        impl Formatter<TestEvent> for Verbatim {
+            fn format(&self, event: &TestEvent) -> Result<ConsoleOutput, ConsoleFormatError> {
+                Ok(ConsoleOutput::Verbatim(event.value.clone()))
+            }
+        }
+        for destination in [OutputDestination::Stdout, OutputDestination::Stderr] {
+            for (scope, replay_context, _) in delivery_cases() {
+                for body in ["[replay] literal\nsecond line\n", "", r#"{"raw":true}"#] {
+                    let mut connector = ConsoleSink::new(Verbatim);
+                    connector.destination = destination;
+                    let output = Arc::new(Mutex::new(OutputState::default()));
+                    let mut writer = immediate(&connector, output.clone()).await;
+                    let report = writer
+                        .consume_committed_report(
+                            input_with_provenance(body, replay_context),
+                            scope,
+                        )
+                        .await
+                        .unwrap();
+                    let expected = format!("{body}\n");
+                    assert_eq!(
+                        report.primary.delivery_method,
+                        destination.delivery_method()
+                    );
+                    assert_eq!(report.primary.bytes_processed, Some(expected.len() as u64));
+                    assert_eq!(report.primary.items_delivered, Some(1));
+                    let state = output.lock().unwrap();
+                    assert_eq!(state.bytes, expected.as_bytes());
+                    assert_eq!(state.flushes, 1);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_uncertain_output_poisoning_prevents_retry() {
+        let connector = ConsoleSink::new(|event: &TestEvent| event.value.clone());
+        let output = Arc::new(Mutex::new(OutputState {
+            fail_flush: true,
+            ..Default::default()
+        }));
+        let mut writer = immediate(&connector, output.clone()).await;
+        assert!(writer
+            .consume_committed_report(input("once"), Default::default())
+            .await
+            .is_err());
+        let writes = output.lock().unwrap().writes;
+        assert!(writer
+            .consume_committed_report(input("again"), Default::default())
+            .await
+            .is_err());
+        assert!(writer.flush_report().await.is_err());
+        assert!(writer.drain_report().await.is_err());
+        drop(writer);
+        assert_eq!(output.lock().unwrap().writes, writes);
+    }
+
+    #[test]
+    fn table_batch_configuration_rejects_zero_limits() {
+        let connector = || {
+            ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
+                vec![event.value.clone()]
+            }))
+        };
+        assert!(matches!(
+            connector().batch_size(0),
+            Err(ConsoleConfigError::InvalidBatchSize)
+        ));
+        assert!(matches!(
+            connector().batch_size(1).unwrap().batch_byte_limit(0),
+            Err(ConsoleConfigError::InvalidBatchByteLimit)
+        ));
+    }
+
+    #[tokio::test]
+    async fn batched_tables_separate_replayed_and_live_frames_in_both_directions() {
+        for replay_first in [false, true] {
+            let connector =
+                ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
+                    vec![event.value.clone()]
+                }))
+                .to_stderr()
+                .batch_size(256)
+                .unwrap();
+            let (first_scope, second_scope) = if replay_first {
+                (MiddlewareExecutionScope::ResumeHandler, Default::default())
+            } else {
+                (Default::default(), MiddlewareExecutionScope::ResumeHandler)
+            };
+            let output = Arc::new(Mutex::new(OutputState::default()));
+            let mut writer = table(&connector, output.clone()).await;
+            let first_input = input("first");
+            let first_ref = first_input.commitment();
+            let second_input = input("second");
+            let second_ref = second_input.commitment();
+            let first = writer
+                .consume_committed_report(first_input, first_scope)
+                .await
+                .unwrap();
+            assert!(first.commit_receipts.is_empty());
+            assert!(output.lock().unwrap().bytes.is_empty());
+            let transition = writer
+                .consume_committed_report(second_input, second_scope)
+                .await
+                .unwrap();
+            assert_eq!(transition.commit_receipts.len(), 1);
+            assert_eq!(transition.commit_receipts[0].subject.input, first_ref);
+            assert_eq!(
+                transition.commit_receipts[0].payload.delivery_method,
+                DeliveryMethod::ConsoleStderr
+            );
+            assert_eq!(
+                transition.commit_receipts[0].payload.items_delivered,
+                Some(1)
+            );
+            assert_eq!(transition.commit_receipts[0].payload.bytes_processed, None);
+            let first_frame_length = {
+                let state = output.lock().unwrap();
+                let frame = std::str::from_utf8(&state.bytes).unwrap();
+                assert_eq!(frame.starts_with("[replay] "), replay_first);
+                assert!(frame.contains("first"));
+                assert!(!frame.contains("second"));
+                state.bytes.len()
+            };
+            let completion = writer.drain_report().await.unwrap();
+            assert_eq!(completion.commit_receipts.len(), 1);
+            assert_eq!(completion.commit_receipts[0].subject.input, second_ref);
+            assert_eq!(
+                completion.commit_receipts[0].payload.delivery_method,
+                DeliveryMethod::ConsoleStderr
+            );
+            assert_eq!(
+                completion.commit_receipts[0].payload.items_delivered,
+                Some(1)
+            );
+            assert_eq!(completion.commit_receipts[0].payload.bytes_processed, None);
+            let state = output.lock().unwrap();
+            let second_frame = std::str::from_utf8(&state.bytes[first_frame_length..]).unwrap();
+            assert_eq!(second_frame.starts_with("[replay] "), !replay_first);
+            assert!(second_frame.contains("second"));
+            assert!(!second_frame.contains("first"));
+            let audit = completion.audit_payload.unwrap();
+            assert_eq!(audit.bytes_processed, Some(second_frame.len() as u64));
+            assert_eq!(audit.items_delivered, Some(1));
+            assert_eq!(state.flushes, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_boundary_keeps_both_receipts_when_the_live_row_fills_its_batch() {
+        let connector = ConsoleSink::new(TableFormatter::new(&["value"], |event: &TestEvent| {
+            vec![event.value.clone()]
+        }))
+        .batch_size(10)
+        .unwrap()
+        .batch_byte_limit(4)
         .unwrap();
-        let mut adapter = SinkWriterAdapter::with_default_method(
-            writer,
-            stage,
-            Some(DeliveryMethod::Custom("console:stdout".into())),
-        );
-        let report = adapter
-            .consume_committed_report(input("ignored"), Default::default())
+        let output = Arc::new(Mutex::new(OutputState::default()));
+        let mut writer = table(&connector, output.clone()).await;
+        let archived = input("a");
+        let archived_ref = archived.commitment();
+        let live = input("bbbb");
+        let live_ref = live.commitment();
+        let report = writer
+            .consume_committed_report(archived, MiddlewareExecutionScope::ResumeHandler)
             .await
             .unwrap();
-        assert_eq!(report.primary.delivery_method, DeliveryMethod::Noop);
-        assert_eq!(report.primary.items_delivered, Some(0));
-        assert_eq!(report.primary.bytes_processed, Some(0));
         assert!(report.commit_receipts.is_empty());
+        let report = writer
+            .consume_committed_report(live, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(report.commit_receipts.len(), 2);
+        assert_eq!(report.commit_receipts[0].subject.input, archived_ref);
+        assert_eq!(report.commit_receipts[1].subject.input, live_ref);
+        {
+            let state = output.lock().unwrap();
+            let frames = std::str::from_utf8(&state.bytes).unwrap();
+            assert_eq!(frames.matches("[replay] ").count(), 1);
+            assert!(frames.starts_with("[replay] "));
+            assert!(frames.contains("bbbb"));
+            assert_eq!(state.flushes, 2);
+        }
+        assert!(writer
+            .drain_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
     }
     #[tokio::test]
     async fn table_receipts_follow_output_and_keep_exact_reconvergent_subjects() {
-        let connector = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()])
-            .batch_limits(
-                std::num::NonZeroUsize::new(2).unwrap(),
-                std::num::NonZeroUsize::new(1024).unwrap(),
-            );
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .batch_size(2)
+            .unwrap()
+            .batch_byte_limit(1024)
+            .unwrap();
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;
         let first = input("first");
@@ -1081,11 +1468,14 @@ mod tests {
     }
     #[tokio::test]
     async fn encoding_failure_preserves_earlier_pending_rows_and_writers_are_isolated() {
-        let connector = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()])
-            .batch_limits(
-                std::num::NonZeroUsize::new(10).unwrap(),
-                std::num::NonZeroUsize::new(3).unwrap(),
-            );
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(3)
+            .unwrap();
         let one = Arc::new(Mutex::new(OutputState::default()));
         let two = Arc::new(Mutex::new(OutputState::default()));
         let mut first = table(&connector, one.clone()).await;
@@ -1121,11 +1511,14 @@ mod tests {
     }
     #[tokio::test]
     async fn byte_limit_flushes_and_uncertain_output_never_releases_partial_receipts() {
-        let connector = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()])
-            .batch_limits(
-                std::num::NonZeroUsize::new(10).unwrap(),
-                std::num::NonZeroUsize::new(4).unwrap(),
-            );
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(4)
+            .unwrap();
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;
         writer
@@ -1161,12 +1554,142 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn byte_limit_flushes_full_row_after_flushing_earlier_batch() {
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(4)
+            .unwrap();
+        let output = Arc::new(Mutex::new(OutputState::default()));
+        let mut writer = table(&connector, output.clone()).await;
+        let first = input("a");
+        let second = input("bbbb");
+        let first_ref = first.commitment();
+        let second_ref = second.commitment();
+
+        let report = writer
+            .consume_committed_report(first, Default::default())
+            .await
+            .unwrap();
+        assert!(report.commit_receipts.is_empty());
+        assert!(output.lock().unwrap().bytes.is_empty());
+
+        let report = writer
+            .consume_committed_report(second, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(report.commit_receipts.len(), 2);
+        assert_eq!(report.commit_receipts[0].subject.input, first_ref);
+        assert_eq!(report.commit_receipts[1].subject.input, second_ref);
+        for receipt in &report.commit_receipts {
+            assert!(matches!(
+                receipt.payload.result,
+                obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Success { .. }
+            ));
+            assert_eq!(
+                receipt.payload.delivery_method,
+                DeliveryMethod::ConsoleStdout
+            );
+        }
+        {
+            let state = output.lock().unwrap();
+            assert_eq!(state.flushes, 2);
+            let printed = std::str::from_utf8(&state.bytes).unwrap();
+            assert!(printed.contains("bbbb"));
+        }
+        let writes = output.lock().unwrap().writes;
+        assert!(writer
+            .flush_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
+        assert!(writer
+            .drain_report()
+            .await
+            .unwrap()
+            .commit_receipts
+            .is_empty());
+        drop(writer);
+        assert_eq!(output.lock().unwrap().writes, writes);
+    }
+
+    #[tokio::test]
+    async fn byte_limit_second_frame_failure_poisoned_without_cleanup_retry() {
+        let connector =
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .batch_size(10)
+            .unwrap()
+            .batch_byte_limit(4)
+            .unwrap();
+        let first_frame = format!(
+            "{}\n",
+            text(
+                connector
+                    .formatter
+                    .format(&TestEvent { value: "a".into() })
+                    .unwrap()
+            )
+        );
+        for fail_flush in [false, true] {
+            let output = Arc::new(Mutex::new(OutputState {
+                fail_after: (!fail_flush).then_some(first_frame.len() + 2),
+                fail_on_flush: fail_flush.then_some(2),
+                ..Default::default()
+            }));
+            let mut writer = table(&connector, output.clone()).await;
+            writer
+                .consume_committed_report(input("a"), Default::default())
+                .await
+                .unwrap();
+            let error = writer
+                .consume_committed_report(input("bbbb"), Default::default())
+                .await
+                .unwrap_err();
+            let obzenflow_runtime::stages::common::HandlerError::SinkWrite(error) = error else {
+                panic!("expected second-frame output failure")
+            };
+            assert_eq!(error.phase(), SinkWritePhase::Execute);
+            assert_eq!(
+                error.disposition(),
+                obzenflow_runtime::stages::common::handlers::SinkWriteFailureDisposition::Poisoned
+            );
+            let (writes, flushes) = {
+                let state = output.lock().unwrap();
+                assert!(state.bytes.starts_with(first_frame.as_bytes()));
+                assert!(state.bytes.len() > first_frame.len());
+                assert_eq!(state.flushes, if fail_flush { 2 } else { 1 });
+                (state.writes, state.flushes)
+            };
+            assert!(writer
+                .consume_committed_report(input("c"), Default::default())
+                .await
+                .is_err());
+            assert!(writer.flush_report().await.is_err());
+            assert!(writer.drain_report().await.is_err());
+            drop(writer);
+            let state = output.lock().unwrap();
+            assert_eq!((state.writes, state.flushes), (writes, flushes));
+        }
+    }
+
+    #[tokio::test]
     async fn descriptor_mismatch_reaches_no_writer_output() {
         let connector =
-            ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()]).to_stderr();
+            ConsoleSink::<TestEvent, _>::new(TableFormatter::new(&["value"], |e: &TestEvent| {
+                vec![e.value.clone()]
+            }))
+            .to_stderr()
+            .batch_size(256)
+            .unwrap();
         assert_eq!(
             connector.describe().default_method(),
-            Some(&DeliveryMethod::Custom("console:stderr".into()))
+            &DeliveryMethod::ConsoleStderr
         );
         let output = Arc::new(Mutex::new(OutputState::default()));
         let mut writer = table(&connector, output.clone()).await;

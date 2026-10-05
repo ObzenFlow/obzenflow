@@ -14,8 +14,7 @@ use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     ConflateTyped, GroupByTyped, ReduceTyped,
@@ -129,22 +128,15 @@ where
     type Input = T;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("collect".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        input: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, input: T) -> Result<(), SinkWriteFailure> {
         self.events
             .lock()
             .unwrap()
             .push(input.to_event(WriterId::from(StageId::new())));
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("collect".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

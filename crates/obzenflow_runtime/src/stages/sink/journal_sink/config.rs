@@ -48,7 +48,7 @@ pub struct JournalSinkConfig {
 
     /// Connector-described normal receipt method, used by writer outcomes
     /// that carry only per-attempt deltas and by runtime-authored failures.
-    pub default_delivery_method: Option<DeliveryMethod>,
+    pub default_delivery_method: DeliveryMethod,
 }
 
 impl JournalSinkConfig {
@@ -57,6 +57,7 @@ impl JournalSinkConfig {
         stage_name: impl Into<String>,
         flow_name: impl Into<String>,
         upstream_stages: Vec<StageId>,
+        default_delivery_method: DeliveryMethod,
     ) -> Self {
         Self {
             stage_id,
@@ -69,7 +70,7 @@ impl JournalSinkConfig {
             sink_delivery_boundary: None,
             observer_bindings: StageObserverBindings::default(),
             receipt_destination: None,
-            default_delivery_method: None,
+            default_delivery_method,
         }
     }
 

@@ -16,9 +16,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedStatefulHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedAsyncFiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
@@ -133,19 +132,12 @@ where
     type Input = T;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
         self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

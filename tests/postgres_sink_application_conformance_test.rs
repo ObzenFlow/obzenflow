@@ -594,7 +594,7 @@ fn custom_postgres_flow(
             probe,
         )
         .map_err(|error| *error)?;
-        let payments = sources::finite(spec.payments);
+        let payments = sources::ValuesSource::new(spec.payments);
         Ok(flow! {
             name: "postgres_full_flow_failure",
             journals: disk_journals(journal_root),
@@ -621,7 +621,7 @@ fn single_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let postgres = build_sink(connection, &schema, probe, class).map_err(|error| *error)?;
-        let payments = sources::finite(payments());
+        let payments = sources::ValuesSource::new(payments());
         if poison_eof {
             Ok(flow! {
                 name: "postgres_sink_application",
@@ -668,8 +668,8 @@ fn fan_in_flow(
             SinkDestinationClass::SafeToRepeat,
         )
         .map_err(|error| *error)?;
-        let left = sources::finite(vec![payments()[0].clone(), payments()[2].clone()]);
-        let right = sources::finite(vec![payments()[1].clone(), payments()[3].clone()]);
+        let left = sources::ValuesSource::new(vec![payments()[0].clone(), payments()[2].clone()]);
+        let right = sources::ValuesSource::new(vec![payments()[1].clone(), payments()[3].clone()]);
         Ok(flow! {
             name: "postgres_sink_application_fan_in",
             journals: disk_journals(journal_root),
@@ -759,7 +759,7 @@ fn ordered_derived_fan_in_flow(
             id: 9_102,
             amount_cents: 1_250,
         };
-        let payments = sources::finite([payment.clone()]);
+        let payments = sources::ValuesSource::new([payment.clone()]);
         let delayed_input = GatedPayments::new(vec![payment], Some(delayed_gate));
         let delayed = IdentityPayment;
         let postgres = build_sink(
@@ -796,7 +796,7 @@ fn ordered_cycle_fan_in_flow(
     probe: PostgresTestProbe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let payments = sources::finite([Payment {
+        let payments = sources::ValuesSource::new([Payment {
             id: 9_103,
             amount_cents: 500,
         }]);
@@ -851,7 +851,7 @@ fn fan_out_flow(
             SinkDestinationClass::SafeToRepeat,
         )
         .map_err(|error| *error)?;
-        let payments = sources::finite(payments());
+        let payments = sources::ValuesSource::new(payments());
         Ok(flow! {
             name: "postgres_sink_application_fan_out",
             journals: disk_journals(journal_root),

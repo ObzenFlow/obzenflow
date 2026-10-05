@@ -29,8 +29,8 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,18 +44,11 @@ impl InlineSink for NoopSink {
     type Input = LifecycleEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: LifecycleEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: LifecycleEvent) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 
@@ -76,20 +69,13 @@ impl InlineSink for SlowSink {
     type Input = LifecycleEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: LifecycleEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: LifecycleEvent) -> Result<(), SinkWriteFailure> {
         self.entered.notify_one();
         tokio::time::sleep(self.sleep).await;
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -330,22 +316,15 @@ async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input()
     impl InlineSink for GatedSink {
         type Input = LifecycleEvent;
         fn describe(&self) -> SinkDescription {
-            SinkDescription::unspecified()
+            SinkDescription::method(DeliveryMethod::Custom("GatedSink".into()))
         }
-        async fn write(
-            &mut self,
-            _: LifecycleEvent,
-            _: SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        async fn write(&mut self, _: LifecycleEvent) -> Result<(), SinkWriteFailure> {
             if self.delivered.load(Ordering::SeqCst) == 0 {
                 self.entered.notify_one();
                 self.release.notified().await;
             }
             self.delivered.fetch_add(1, Ordering::SeqCst);
-            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-                DeliveryMethod::Custom("GatedSink".into()),
-                None,
-            )))
+            Ok(())
         }
     }
     let dir = tempdir()?;

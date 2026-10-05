@@ -394,8 +394,7 @@ mod tests {
     use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
     use obzenflow_runtime::stages::common::handlers::{
-        InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-        TypedAsyncInfiniteSourceHandler,
+        InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncInfiniteSourceHandler,
     };
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -977,20 +976,13 @@ mod tests {
         type Input = T;
 
         fn describe(&self) -> SinkDescription {
-            SinkDescription::unspecified()
+            SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
         }
 
-        async fn write(
-            &mut self,
-            _event: T,
-            _context: SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
             self.delivered.fetch_add(1, Ordering::AcqRel);
             self.notify.notify_waiters();
-            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-                DeliveryMethod::Custom("Collect".to_string()),
-                None,
-            )))
+            Ok(())
         }
     }
 

@@ -156,6 +156,8 @@ pub enum DeliveryMethod {
     DatabaseInsert { table: String },
     QueuePublish { queue_name: String },
     FileWrite { path: PathBuf },
+    ConsoleStdout,
+    ConsoleStderr,
     Noop,           // /dev/null sink
     Custom(String), // user‑defined
 }

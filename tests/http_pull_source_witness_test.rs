@@ -19,7 +19,6 @@ use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::stages::sink::SinkTyped;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -75,7 +74,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 .build()
                 .expect("HTTP pull config"),
         );
-        let sink = SinkTyped::new(|_item: PullItem| async move {}).idempotent();
+        let sink = replay_testkit::Discard::<PullItem>::default();
         Ok(flow! {
             name: "http_pull_source_witness",
             journals: disk_journals(journal_base),

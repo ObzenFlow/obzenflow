@@ -194,7 +194,7 @@ fn single_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let output = build_sink(output, probe, class).map_err(|error| *error)?;
-        let inputs = sources::finite(rows());
+        let inputs = sources::ValuesSource::new(rows());
         if poison_eof {
             Ok(flow! {
                 name: "csv_sink_application",
@@ -231,8 +231,8 @@ fn fan_in_flow(journal_root: PathBuf, output: PathBuf, probe: CsvTestProbe) -> F
     FlowDefinition::materialize(move |_runtime_config| {
         let output = build_sink(output, probe, SinkDestinationClass::SafeToRepeat)
             .map_err(|error| *error)?;
-        let left = sources::finite(vec![rows()[0].clone(), rows()[2].clone()]);
-        let right = sources::finite(vec![rows()[1].clone(), rows()[3].clone()]);
+        let left = sources::ValuesSource::new(vec![rows()[0].clone(), rows()[2].clone()]);
+        let right = sources::ValuesSource::new(vec![rows()[1].clone(), rows()[3].clone()]);
         Ok(flow! {
             name: "csv_sink_application_fan_in",
             journals: disk_journals(journal_root),
@@ -262,7 +262,7 @@ fn fan_out_flow(
             .map_err(|error| *error)?;
         let secondary = build_sink(secondary, probe, SinkDestinationClass::SafeToRepeat)
             .map_err(|error| *error)?;
-        let inputs = sources::finite(rows());
+        let inputs = sources::ValuesSource::new(rows());
         Ok(flow! {
             name: "csv_sink_application_fan_out",
             journals: disk_journals(journal_root),

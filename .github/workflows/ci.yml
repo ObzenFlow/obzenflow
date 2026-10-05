@@ -148,7 +148,7 @@ jobs:
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.136
+          tool: cargo-nextest@0.9.146
       - name: Validate the declared coverage
         run: cargo xtask test ${{ matrix.lanes }}
       - name: Preserve validation reports and phase output
@@ -178,7 +178,7 @@ jobs:
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.136
+          tool: cargo-nextest@0.9.146
       - name: Validate test-support
         # Exercise dependency preparation on PRs and main without an inherited
         # registry cache. Installed tools remain on PATH; target stays in place.
@@ -215,7 +215,7 @@ jobs:
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.136
+          tool: cargo-nextest@0.9.146
       - name: Validate postgres
         run: cargo xtask test --lane postgres
       - name: Preserve validation reports and phase output
@@ -245,7 +245,7 @@ jobs:
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.136
+          tool: cargo-nextest@0.9.146
       - name: Validate doctest
         run: cargo xtask test --lane doctest
       - name: Preserve validation reports and phase output
@@ -280,7 +280,7 @@ jobs:
       - name: Install pinned Nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.136
+          tool: cargo-nextest@0.9.146
       - name: Validate performance
         run: cargo xtask test --lane performance
       - name: Preserve validation reports and phase output

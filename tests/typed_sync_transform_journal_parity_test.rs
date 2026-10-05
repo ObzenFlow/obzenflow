@@ -23,7 +23,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::transform::{ChunkByBudgetBuilder, FilterTyped, TryMapTyped};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -189,12 +188,11 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
         );
         let left_filter = FilterTyped::new(|record: &FilterRecord| record.keep);
         let right_filter = FilterTyped::new(|record: &FilterRecord| record.keep);
-        let ticket_sink = SinkTyped::new(|_ticket: TriagedTicket| async move {}).idempotent();
-        let chunk_sink = SinkTyped::new(|_chunk: ChunkEnvelope<String>| async move {}).idempotent();
-        let try_map_sink = SinkTyped::new(|_record: TryMapRecord| async move {}).idempotent();
-        let merged_filter_sink = SinkTyped::new(|_record: FilterRecord| async move {}).idempotent();
-        let fan_out_filter_sink =
-            SinkTyped::new(|_record: FilterRecord| async move {}).idempotent();
+        let ticket_sink = replay_testkit::Discard::<TriagedTicket>::default();
+        let chunk_sink = replay_testkit::Discard::<ChunkEnvelope<String>>::default();
+        let try_map_sink = replay_testkit::Discard::<TryMapRecord>::default();
+        let merged_filter_sink = replay_testkit::Discard::<FilterRecord>::default();
+        let fan_out_filter_sink = replay_testkit::Discard::<FilterRecord>::default();
 
         Ok(flow! {
             name: "typed_sync_transform_journal_parity",

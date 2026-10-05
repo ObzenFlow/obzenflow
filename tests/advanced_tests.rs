@@ -8,8 +8,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
@@ -116,21 +115,14 @@ async fn test_dsl_pipeline() -> Result<()> {
         type Input = AdvancedTestEvent;
 
         fn describe(&self) -> SinkDescription {
-            SinkDescription::unspecified()
+            SinkDescription::method(DeliveryMethod::Custom("Sum".to_string()))
         }
 
-        async fn write(
-            &mut self,
-            event: AdvancedTestEvent,
-            _context: SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        async fn write(&mut self, event: AdvancedTestEvent) -> Result<(), SinkWriteFailure> {
             if let Some(doubled) = event.doubled {
                 self.total.fetch_add(doubled, Ordering::Relaxed);
             }
-            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-                DeliveryMethod::Custom("Sum".to_string()),
-                None,
-            )))
+            Ok(())
         }
     }
 

@@ -14,15 +14,17 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{sink_delivery_observer, CircuitBreaker};
+use obzenflow_adapters::middleware::{
+    sink_delivery_observer, CircuitBreaker, SinkDeliveryObserver,
+};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteContext, TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{
-    SinkDeliveryObserver, SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
+    ObserverResult, SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -88,35 +90,90 @@ impl InlineSink for AlwaysFailingSink {
     type Input = SinkBreakerEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
-    }
-
-    async fn write(
-        &mut self,
-        _event: SinkBreakerEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(
-            obzenflow_runtime::stages::sink::SinkWriteFailure::current_only(
-                obzenflow_runtime::stages::sink::SinkWritePhase::Execute,
-                obzenflow_runtime::stages::sink::SinkOperationError::remote("sink delivery failed"),
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "test.failure".to_string(),
             ),
         )
+    }
+
+    async fn write(&mut self, _event: SinkBreakerEvent) -> Result<(), SinkWriteFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(SinkWriteFailure::current_only(
+            obzenflow_runtime::stages::sink::SinkWritePhase::Execute,
+            obzenflow_runtime::stages::sink::SinkOperationError::remote("sink delivery failed"),
+        ))
     }
 }
 
 struct RecordsDeliveryClassifications {
     outcomes: Arc<Mutex<Vec<SinkDeliveryObserverOutcome>>>,
+    deliveries: Arc<AtomicUsize>,
 }
 
 impl SinkDeliveryObserver for RecordsDeliveryClassifications {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+    type Input = SinkBreakerEvent;
+
+    fn on_delivered(&self, _input: &Self::Input) -> ObserverResult {
+        self.deliveries.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn on_attempt(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
         self.outcomes
             .lock()
             .expect("sink observer outcome lock")
             .push(ctx.outcome().clone());
+        Ok(())
     }
+}
+
+#[tokio::test]
+async fn sink_observer_input_mismatch_fails_flow_construction() {
+    #[derive(Serialize, Deserialize)]
+    struct OtherSinkEvent {
+        sequence: u64,
+    }
+    impl TypedPayload for OtherSinkEvent {
+        // Sharing the wire name must not erase the distinct Rust input witness.
+        const EVENT_TYPE: &'static str = SinkBreakerEvent::EVENT_TYPE;
+    }
+    struct WrongInputObserver;
+    impl SinkDeliveryObserver for WrongInputObserver {
+        type Input = OtherSinkEvent;
+    }
+
+    let temp = tempfile::tempdir().expect("isolated flow directory");
+    let root = temp.path().to_path_buf();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_sink = calls.clone();
+    let result = FlowDefinition::materialize(move |_runtime_config| {
+        let source = BurstSource::new(1);
+        let sink_handler = AlwaysFailingSink {
+            calls: calls_for_sink,
+        };
+        Ok(flow! {
+            name: "mismatched_sink_observer",
+            journals: disk_journals(root),
+            stages: {
+                source = source!(SinkBreakerEvent => source);
+                destination = sink!(SinkBreakerEvent => sink_handler,
+                    observers: [sink_delivery_observer("wrong-input", WrongInputObserver)]);
+            },
+            topology: { source |> destination; }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+    let error = match result {
+        Ok(_) => panic!("mismatched observer must fail flow construction"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("wrong-input"), "{error}");
+    assert!(error.contains("OtherSinkEvent"), "{error}");
+    assert!(error.contains("SinkBreakerEvent"), "{error}");
+    assert!(error.contains("destination"), "{error}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -137,6 +194,8 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
     let calls_for_flow = Arc::clone(&calls);
     let outcomes = Arc::new(Mutex::new(Vec::new()));
     let outcomes_for_flow = Arc::clone(&outcomes);
+    let deliveries = Arc::new(AtomicUsize::new(0));
+    let deliveries_for_flow = Arc::clone(&deliveries);
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
         let source = BurstSource::new(TOTAL_EVENTS);
@@ -156,6 +215,7 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
                     "delivery-classifications",
                     RecordsDeliveryClassifications {
                         outcomes: outcomes_for_flow,
+                        deliveries: deliveries_for_flow,
                     }
                 )]);
             },
@@ -183,6 +243,11 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
     }
 
     let invoked = calls.load(Ordering::SeqCst);
+    assert_eq!(
+        deliveries.load(Ordering::SeqCst),
+        0,
+        "failed writes and policy rejections must not produce successful delivery notifications"
+    );
 
     // The breaker needs at least `THRESHOLD` real delivery failures to open.
     assert!(

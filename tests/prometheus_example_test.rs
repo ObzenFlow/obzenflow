@@ -10,14 +10,11 @@
 //! `error_processor` reports exactly 50 Unknown errors and no Domain errors.
 
 use anyhow::Result;
-use async_trait::async_trait;
-use obzenflow_core::{event::payloads::delivery_payload::DeliveryMethod, TypedPayload};
+use obzenflow_adapters::sinks::DiscardSink;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +71,6 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
     for (from, to) in [
         ("high_volume_source", "error_processor"),
         ("error_processor", "event_counter"),
-        ("error_processor", "completion_sink"),
         ("event_counter", "summary_sink"),
     ] {
         let from = StageKey::from(from);
@@ -172,7 +168,10 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
                 }
             }
         }
-        receipts += usize::from(matches!(event.payload, ChainPayload::Delivery(_)));
+        if matches!(event.payload, ChainPayload::Delivery(_)) {
+            assert_eq!(event.flow_context.stage_name, "summary_sink");
+            receipts += 1;
+        }
     }
     inputs.sort_unstable();
     assert_eq!(
@@ -181,7 +180,7 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
         "source recovery must not lose or duplicate inputs"
     );
     assert_eq!(summaries, [990]);
-    assert_eq!(receipts, 991);
+    assert_eq!(receipts, 1);
 }
 
 /// Source that generates a high-volume stream with a deterministic error pattern.
@@ -277,36 +276,6 @@ fn error_prone_transform() -> TryMapTyped<
     })
 }
 
-/// Simple sink that acknowledges all events.
-#[derive(Clone, Debug)]
-struct CompletionSink;
-
-impl CompletionSink {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl InlineSink for CompletionSink {
-    type Input = ProcessedEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
-    }
-
-    async fn write(
-        &mut self,
-        _event: ProcessedEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("InMemory".to_string()),
-            Some(1),
-        )))
-    }
-}
-
 #[tokio::test]
 async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     let started = std::time::Instant::now();
@@ -323,11 +292,10 @@ async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     );
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
-        // Build a minimal flow that mirrors the Prometheus example's core path:
-        // high_volume_source -> error_processor -> completion_sink.
+        // Isolate the source and fallible transform for the error-kind assertion.
         let source = HighVolumeSource::new(CI_EVENT_LIMIT);
         let transform = error_prone_transform();
-        let sink = CompletionSink::new();
+        let sink = DiscardSink::<ProcessedEvent>::new();
 
         Ok(flow! {
             name: "prometheus_error_kinds",
@@ -710,6 +678,7 @@ interval_ms = 250
                         .or_default() += 1;
                 }
                 ChainPayload::Delivery(receipt) => {
+                    assert_eq!(event.flow_context.stage_name, "summary_sink");
                     deliveries += 1;
                     content.as_object_mut().unwrap().remove("processed_at");
                     let input = committed_inputs
@@ -745,20 +714,15 @@ interval_ms = 250
         }
         assert_eq!(production_reports.get("high_volume_source"), Some(&1));
         assert!(!final_contracts.contains_key("high_volume_source"));
-        for name in [
-            "error_processor",
-            "event_counter",
-            "completion_sink",
-            "summary_sink",
-        ] {
+        for name in ["error_processor", "event_counter", "summary_sink"] {
             assert!(
                 final_contracts.get(name).copied().unwrap_or_default() > 0,
                 "{name} must author a final contract with its own context"
             );
         }
         assert_eq!(
-            deliveries, 991,
-            "both sinks must retain every delivery receipt"
+            deliveries, 1,
+            "the summary must retain its delivery receipt"
         );
         assert_eq!(inputs, (0..1_000).collect());
         assert_eq!(
@@ -986,9 +950,11 @@ mod managed_lifecycle_regressions {
             })
             .expect("terminal execution is visible before listener close");
         let payload: serde_json::Value = serde_json::from_str(&frames[completed].data).unwrap();
+        // Flow output counts inputs consumed by terminal sinks: this topology
+        // delivers one aggregate summary, not each intermediate success.
         assert_eq!(
             payload["metrics"],
-            serde_json::json!({"events_in_total": count, "events_out_total": count - count / 100 + 1, "errors_total": count / 100})
+            serde_json::json!({"events_in_total": count, "events_out_total": 1, "errors_total": count / 100})
         );
         assert!(completed < frames.len() - 1);
         assert_eq!(
@@ -1083,6 +1049,7 @@ mod managed_lifecycle_regressions {
             count - count / 100
         );
         assert_eq!(snapshot.events_emitted_total[&id("event_counter")], 1);
+        assert_eq!(snapshot.event_counts[&id("summary_sink")], 1);
         let text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
             .render(&view)
             .unwrap();
@@ -1328,7 +1295,11 @@ mod managed_lifecycle_regressions {
         count: u64,
         intervals: Option<(u64, u64)>,
     ) {
+        use obzenflow_core::event::payloads::delivery_payload::{
+            DeliveryMethod, DeliveryPayload, DeliveryResult,
+        };
         use obzenflow_core::event::{chain_event::ChainPayload, SystemEvent, SystemPayload};
+        use obzenflow_core::TypedPayload;
         use obzenflow_infra::journal::disk::log_record::LogRecord;
         use std::collections::BTreeSet;
         use std::ffi::OsString;
@@ -1547,11 +1518,31 @@ enabled = {prometheus}
         let mut journal_by_writer = std::collections::HashMap::new();
         let mut event_ids = BTreeSet::new();
         let mut parents = Vec::new();
-        let mut receipts = 0;
+        let expected_summary = format!(
+            "\n=====================================\n📊 Processing summary:\n   Successfully processed: {} events\n=====================================",
+            count - count / 100
+        );
+        let expected_live_bytes = format!("{expected_summary}\n").len() as u64;
+        let expected_replay_bytes = format!("[replay] {expected_summary}\n").len() as u64;
+        let receipt_output = |receipt: &DeliveryPayload, expected_bytes: u64| {
+            assert!(matches!(receipt.result, DeliveryResult::Success { .. }));
+            assert_eq!(receipt.delivery_method, DeliveryMethod::ConsoleStdout);
+            assert_eq!(receipt.items_delivered, Some(1));
+            assert!(receipt.bytes_processed.is_some_and(|bytes| bytes > 0));
+            assert_eq!(receipt.bytes_processed, Some(expected_bytes));
+            (
+                receipt.destination.clone(),
+                receipt.delivery_method.clone(),
+                receipt.items_delivered,
+                receipt.bytes_processed,
+            )
+        };
+        let mut receipts = Vec::new();
         let mut inputs = BTreeSet::new();
         let mut successes = BTreeSet::new();
         let mut errors = BTreeSet::new();
         let mut summaries = Vec::new();
+        let mut summary_outputs = Vec::new();
         for line in reader.lines() {
             let line = line.unwrap();
             let event = match serde_json::from_str::<LogRecord<obzenflow_core::ChainEvent>>(&line) {
@@ -1582,8 +1573,9 @@ enabled = {prometheus}
             };
             event_ids.insert(event.id);
             parents.extend(event.causality.parent_ids.iter().copied());
-            if matches!(&event.payload, ChainPayload::Delivery(_)) {
-                receipts += 1;
+            if let ChainPayload::Delivery(receipt) = &event.payload {
+                assert_eq!(event.flow_context.stage_name, "summary_sink");
+                receipts.push(receipt_output(receipt, expected_live_bytes));
             }
             if let ChainPayload::Fact(payload) = &event.payload {
                 // Error routing retains the failed parent's source context.
@@ -1599,7 +1591,12 @@ enabled = {prometheus}
                     "error_processor" => {
                         successes.insert(payload["id"].as_u64().unwrap());
                     }
-                    "event_counter" => summaries.push(payload["event_count"].as_u64().unwrap()),
+                    "event_counter" => {
+                        summaries.push(payload["event_count"].as_u64().unwrap());
+                        let summary = prometheus_demo::EventCountState::try_from_event(&event)
+                            .expect("recorded summary has the example's typed schema");
+                        summary_outputs.push(prometheus_demo::format_summary(&summary));
+                    }
                     _ => {}
                 }
             }
@@ -1615,7 +1612,8 @@ enabled = {prometheus}
         );
         assert_eq!(errors, (0..count).step_by(100).collect());
         assert_eq!(summaries, [count - count / 100]);
-        assert_eq!(receipts, count - count / 100 + 1);
+        assert_eq!(summary_outputs, std::slice::from_ref(&expected_summary));
+        assert_eq!(receipts.len(), 1);
         assert!(
             parents.iter().all(|parent| event_ids.contains(parent)),
             "all committed business parents resolve"
@@ -1687,7 +1685,7 @@ enabled = {prometheus}
                 _ => None,
             })
             .collect();
-        assert_eq!(passed_feeds.len(), 4);
+        assert_eq!(passed_feeds.len(), 3);
         assert!(!execution_facts.iter().any(|fact| matches!(fact,
             ExecutionPayload::ContractStatus { pass: false, .. } |
             ExecutionPayload::ContractResult { status: obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel::Failed, .. }
@@ -1833,6 +1831,7 @@ enabled = {prometheus}
         // This example performs no live external I/O; zero configured source
         // inputs force the proof to reconstruct the recorded 100-input archive.
         let replay_model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+        let replay_root = dir.join("replay");
         FlowApplication::builder()
             .with_config_file(replay_config)
             .with_cli_args(vec![
@@ -1843,12 +1842,63 @@ enabled = {prometheus}
             ])
             .with_log_level(LogLevel::Error)
             .run_async(inject_snapshots(
-                prometheus_demo::flow_definition(0, dir.join("replay")),
+                prometheus_demo::flow_definition(0, replay_root.clone()),
                 replay_model.clone(),
             ))
             .await
             .expect("certified replay must report zero differences (verification exit code 0)");
         assert_final_example_metrics(&replay_model, count);
+
+        // Business verification excludes delivery receipts. Inspect the real
+        // console delivery too: changed live configuration must preserve the
+        // recorded summary. Replay adds its label, and both frames include LF.
+        let replay_runs: Vec<_> = std::fs::read_dir(replay_root.join("flows"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect();
+        assert_eq!(replay_runs.len(), 1);
+        let mut replay_snapshot = obzenflow_infra::journal::read::open_disk_run(&replay_runs[0])
+            .await
+            .unwrap();
+        let mut replay_receipts = Vec::new();
+        let mut replay_summaries = Vec::new();
+        let mut replay_summary_outputs = Vec::new();
+        while let Some(record) = replay_snapshot.next().await.unwrap() {
+            if let RunRecordData::Chain(row) = record.record {
+                let event = row.authored();
+                if let ChainPayload::Delivery(receipt) = &event.payload {
+                    assert_eq!(event.flow_context.stage_name, "summary_sink");
+                    replay_receipts.push(receipt_output(receipt, expected_replay_bytes));
+                }
+                if let ChainPayload::Fact(payload) = &event.payload {
+                    if event.flow_context.stage_name == "event_counter" {
+                        assert!(event.processing.status.is_success());
+                        replay_summaries.push(payload["event_count"].as_u64().unwrap());
+                        let summary = prometheus_demo::EventCountState::try_from_event(&event)
+                            .expect("replayed summary has the example's typed schema");
+                        replay_summary_outputs.push(prometheus_demo::format_summary(&summary));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            replay_summaries, summaries,
+            "replay must deliver the recorded summary independently of the live source configuration"
+        );
+        assert_eq!(replay_summary_outputs, summary_outputs);
+        let (destination, method, items, live_bytes) = &receipts[0];
+        assert_eq!(*live_bytes, Some(expected_live_bytes));
+        assert_eq!(
+            replay_receipts,
+            [(
+                destination.clone(),
+                method.clone(),
+                *items,
+                Some(expected_replay_bytes),
+            )],
+            "replay preserves delivery metadata and measures the replay label plus the complete summary and LF"
+        );
     }
 
     // Capture the production diagnostic at the bind boundary. This private

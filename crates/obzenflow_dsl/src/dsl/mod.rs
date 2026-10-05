@@ -19,11 +19,9 @@
 //!
 //! ```ignore
 //! FlowDefinition::materialize(move |_runtime_config| {
-//!     let input = sources::finite(events);
+//!     let input = sources::ValuesSource::new(events);
 //!     let transform = MyTransform::new(options);
-//!     let output = SinkTyped::new(|event: Output| async move {
-//!         println!("{event:?}");
-//!     });
+//!     let output = sinks::ConsoleSink::new(sinks::DebugFormatter);
 //!
 //!     Ok(flow! {
 //!         stages: {
@@ -120,8 +118,11 @@
 //! declared input before descriptor erasure:
 //!
 //! ```ignore
-//! let console_sink = sinks::console(render);
-//! let postgres_sink = sinks::postgres(postgres_config);
+//! let console_sink = sinks::ConsoleSink::new(render);
+//! let postgres_sink = PostgresSink::builder(binder)
+//!     .connection(connection)
+//!     .insert_into(schema, table, insert_body)?
+//!     .build()?;
 //! flow! {
 //!     stages: {
 //!         output = sink!(
@@ -149,16 +150,16 @@
 //! common selection trait, or runtime selector.
 //!
 //! A small named integration can implement `InlineSink` directly. It needs no
-//! separate connector or description method; a site-level clause can classify
+//! separate connector. Its required description declares the delivery method;
+//! a site-level clause can classify
 //! redelivery when archive replay matters.
 //!
 //! ```
 //! use async_trait::async_trait;
 //! use obzenflow_core::event::schema::TypedPayload;
 //! use obzenflow_dsl::sink;
-//! use obzenflow_runtime::stages::common::handler_error::HandlerError;
 //! use obzenflow_runtime::stages::common::handlers::{
-//!     InlineSink, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+//!     InlineSink, SinkDescription, SinkWriteFailure,
 //! };
 //! use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 //! use serde::{Deserialize, Serialize};
@@ -175,14 +176,11 @@
 //! #[async_trait]
 //! impl InlineSink for Typed {
 //!     type Input = Out;
-//!     async fn write(
-//!         &mut self,
-//!         _input: Out,
-//!         _ctx: SinkWriteContext,
-//!     ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-//!         Ok(SinkWriteReport::terminal(
-//!             SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
-//!         ))
+//!     fn describe(&self) -> SinkDescription {
+//!         SinkDescription::method(DeliveryMethod::Noop)
+//!     }
+//!     async fn write(&mut self, _input: Out) -> Result<(), SinkWriteFailure> {
+//!         Ok(())
 //!     }
 //! }
 //!

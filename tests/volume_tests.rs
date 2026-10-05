@@ -18,8 +18,7 @@ use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TransformHandler, TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
@@ -142,20 +141,12 @@ impl InlineSink for CountingSink {
     type Input = BenchEvent;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Noop)
     }
 
-    async fn write(
-        &mut self,
-        _event: BenchEvent,
-        _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, obzenflow_runtime::stages::common::handler_error::HandlerError>
-    {
+    async fn write(&mut self, _event: BenchEvent) -> Result<(), SinkWriteFailure> {
         self.counter.fetch_add(1, Ordering::Relaxed);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-            None,
-        )))
+        Ok(())
     }
 }
 

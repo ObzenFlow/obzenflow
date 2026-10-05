@@ -12,8 +12,8 @@ use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -83,22 +83,17 @@ struct CountingSink {
 impl InlineSink for CountingSink {
     type Input = Payload;
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "test".to_string(),
+            ),
+        )
     }
-    async fn write(
-        &mut self,
-        _: Payload,
-        _: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _: Payload) -> Result<(), SinkWriteFailure> {
         self.entered.notify_one();
         self.released.notified().await;
         self.writes.fetch_add(1, Ordering::SeqCst);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "test".into(),
-            ),
-            None,
-        )))
+        Ok(())
     }
 }
 

@@ -14,8 +14,7 @@ use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -181,19 +180,12 @@ impl InlineSink for AggregateSink {
     type Input = WindowAgg;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        event: WindowAgg,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: WindowAgg) -> Result<(), SinkWriteFailure> {
         self.seen.lock().unwrap().push(event);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -205,18 +197,11 @@ impl InlineSink for AckSink {
     type Input = GroupAggOutput;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Ack".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: GroupAggOutput,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Ack".to_string()),
-            None,
-        )))
+    async fn write(&mut self, _event: GroupAggOutput) -> Result<(), SinkWriteFailure> {
+        Ok(())
     }
 }
 

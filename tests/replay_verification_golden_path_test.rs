@@ -18,6 +18,8 @@
 //! deleted, against generation zero, because lineage is proven from the
 //! effect-lane namespace in the journals rather than from manifest chains.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -31,7 +33,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -277,28 +278,14 @@ impl EffectfulTransformHandler for AuthorizePayment {
     }
 }
 
-fn discard<T>(
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
-{
-    move |_payload: T, _delivery| std::future::ready(())
-}
-
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let orders_handler = OrderSource::new();
         let validate_handler = ValidateOrder;
         let authorize_handler = AuthorizePayment { calls };
-        let paid_orders_handler =
-            SinkTyped::with_delivery(discard::<OrderAuthorized>()).idempotent();
-        let cancelled_orders_handler =
-            SinkTyped::with_delivery(discard::<OrderCancelled>()).idempotent();
-        let manual_review_handler =
-            SinkTyped::with_delivery(discard::<AuthorizationUnavailable>()).idempotent();
+        let paid_orders_handler = replay_testkit::Discard::<OrderAuthorized>::default();
+        let cancelled_orders_handler = replay_testkit::Discard::<OrderCancelled>::default();
+        let manual_review_handler = replay_testkit::Discard::<AuthorizationUnavailable>::default();
 
         Ok(flow! {
             name: "replay_verification_golden_path",

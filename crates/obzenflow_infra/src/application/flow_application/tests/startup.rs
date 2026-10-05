@@ -19,7 +19,7 @@ impl IngressDecoder for IdleIngress {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_ingress_builder_hosts_multiple_sources() {
     use obzenflow_dsl::async_infinite_source;
-    use obzenflow_runtime::stages::sink::SinkTyped;
+    use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
@@ -57,12 +57,28 @@ enabled = false
     let second = app.http_ingress(IdleIngress, config("/second"));
     let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::unbounded_channel();
     let definition = FlowDefinition::materialize(move |_| {
-        let output = SinkTyped::new(move |_: IdlePayload| {
-            let delivered_tx = delivered_tx.clone();
-            async move {
-                delivered_tx.send(()).unwrap();
+        #[derive(Clone, Debug)]
+        struct NotifyDelivery {
+            delivered: tokio::sync::mpsc::UnboundedSender<()>,
+        }
+        #[async_trait::async_trait]
+        impl InlineSink for NotifyDelivery {
+            type Input = IdlePayload;
+            fn describe(&self) -> SinkDescription {
+                SinkDescription::method(
+                    obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                        "test_observer".into(),
+                    ),
+                )
             }
-        });
+            async fn write(&mut self, _input: IdlePayload) -> Result<(), SinkWriteFailure> {
+                self.delivered.send(()).unwrap();
+                Ok(())
+            }
+        }
+        let output = NotifyDelivery {
+            delivered: delivered_tx,
+        };
         Ok(flow! {
             name: "http_ingress_builder",
             journals: crate::journal::memory_journals(),

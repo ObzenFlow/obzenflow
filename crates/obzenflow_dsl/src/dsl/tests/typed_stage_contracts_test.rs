@@ -17,9 +17,9 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkDescription, SinkInputOrder,
-        SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
-        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        SinkWriteFailure, StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
@@ -428,16 +428,14 @@ mod tests {
     #[async_trait]
     impl InlineSink for ExactSink {
         type Input = OutputEvent;
+        fn describe(&self) -> obzenflow_runtime::stages::sink::SinkDescription {
+            obzenflow_runtime::stages::sink::SinkDescription::method(
+                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            )
+        }
 
-        async fn write(
-            &mut self,
-            _input: OutputEvent,
-            _context: SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-                DeliveryMethod::Noop,
-                None,
-            )))
+        async fn write(&mut self, _input: OutputEvent) -> Result<(), SinkWriteFailure> {
+            Ok(())
         }
     }
 
@@ -453,15 +451,8 @@ mod tests {
                 .with_input_order(SinkInputOrder::OrderSensitive)
         }
 
-        async fn write(
-            &mut self,
-            _input: OutputEvent,
-            _context: SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-                DeliveryMethod::Noop,
-                None,
-            )))
+        async fn write(&mut self, _input: OutputEvent) -> Result<(), SinkWriteFailure> {
+            Ok(())
         }
     }
 

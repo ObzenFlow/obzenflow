@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
-    effect_observer, sink_delivery_observer, stage_lifecycle_observer,
+    effect_observer, sink_delivery_observer, stage_lifecycle_observer, SinkDeliveryObserver,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
@@ -17,11 +17,11 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{
-    EffectObserver, EffectObserverContext, SinkDeliveryObserver, SinkDeliveryObserverContext,
+    EffectObserver, EffectObserverContext, ObserverResult, SinkDeliveryObserverContext,
     StageLifecycleObserver, StageLifecycleObserverContext,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -57,6 +57,7 @@ pub(crate) struct Probe {
     sink_writes: Arc<AtomicUsize>,
     effect_callbacks: Arc<AtomicUsize>,
     delivery_callbacks: Arc<AtomicUsize>,
+    delivered_callbacks: Arc<AtomicUsize>,
     lifecycle_callbacks: Arc<AtomicUsize>,
     panicking_callbacks: Arc<AtomicUsize>,
 }
@@ -68,6 +69,7 @@ pub(crate) struct ProbeSnapshot {
     pub(crate) sink_writes: usize,
     pub(crate) effect_callbacks: usize,
     pub(crate) delivery_callbacks: usize,
+    pub(crate) delivered_callbacks: usize,
     pub(crate) lifecycle_callbacks: usize,
     pub(crate) panicking_callbacks: usize,
 }
@@ -80,6 +82,7 @@ impl Probe {
             sink_writes: self.sink_writes.load(Ordering::SeqCst),
             effect_callbacks: self.effect_callbacks.load(Ordering::SeqCst),
             delivery_callbacks: self.delivery_callbacks.load(Ordering::SeqCst),
+            delivered_callbacks: self.delivered_callbacks.load(Ordering::SeqCst),
             lifecycle_callbacks: self.lifecycle_callbacks.load(Ordering::SeqCst),
             panicking_callbacks: self.panicking_callbacks.load(Ordering::SeqCst),
         }
@@ -218,20 +221,13 @@ impl InlineSink for ShippingHandoff {
     type Input = ShippingReady;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("shipping-handoff".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        order: ShippingReady,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, order: ShippingReady) -> Result<(), SinkWriteFailure> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         tracing::info!(order_id = order.order_id, "shipping accepted order");
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("shipping-handoff".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -248,10 +244,19 @@ impl EffectObserver for EffectProbeObserver {
 
 struct DeliveryProbeObserver {
     calls: Arc<AtomicUsize>,
+    delivered: Arc<AtomicUsize>,
 }
 
 impl SinkDeliveryObserver for DeliveryProbeObserver {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+    type Input = ShippingReady;
+
+    fn on_delivered(&self, order: &ShippingReady) -> ObserverResult {
+        self.delivered.fetch_add(1, Ordering::SeqCst);
+        tracing::info!(order_id = order.order_id, "shipping delivery committed");
+        Ok(())
+    }
+
+    fn on_attempt(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         tracing::info!(
             flow_id = %ctx.flow_id(),
@@ -260,6 +265,7 @@ impl SinkDeliveryObserver for DeliveryProbeObserver {
             outcome = ?ctx.outcome(),
             "sink delivery classified"
         );
+        Ok(())
     }
 }
 
@@ -284,7 +290,9 @@ struct PanickingDeliveryObserver {
 }
 
 impl SinkDeliveryObserver for PanickingDeliveryObserver {
-    fn after_sink_delivery(&self, _ctx: &SinkDeliveryObserverContext<'_>) {
+    type Input = ShippingReady;
+
+    fn on_attempt(&self, _ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         panic!("intentional observer panic; the runtime will quarantine this attachment");
     }
@@ -342,6 +350,7 @@ pub(crate) fn build_flow(
                         "delivery-probe",
                         DeliveryProbeObserver {
                             calls: probe.delivery_callbacks.clone(),
+                            delivered: probe.delivered_callbacks.clone(),
                         }
                     )
                 ]
@@ -366,6 +375,7 @@ pub(crate) fn build_flow(
                         "delivery-probe",
                         DeliveryProbeObserver {
                             calls: probe.delivery_callbacks.clone(),
+                            delivered: probe.delivered_callbacks.clone(),
                         }
                     )
                 ]

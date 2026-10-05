@@ -176,6 +176,13 @@ pub trait MiddlewareFactory: Send + Sync {
     /// typed surface and has no legacy default.
     fn declaration(&self) -> MiddlewareDeclaration;
 
+    /// Input witness retained by typed sink observer factories through erasure.
+    /// The sink descriptor checks this before opening its connector.
+    #[doc(hidden)]
+    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        None
+    }
+
     /// Materialize one typed surface attachment for one concrete protected
     /// unit. The adapter-owned checked gateway validates the declaration before
     /// invoking this method and validates the returned claim before committing
@@ -261,6 +268,10 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
 
     fn override_key(&self) -> MiddlewareOverrideKey {
         (**self).override_key()
+    }
+
+    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        (**self).sink_observer_input_type()
     }
 
     fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {

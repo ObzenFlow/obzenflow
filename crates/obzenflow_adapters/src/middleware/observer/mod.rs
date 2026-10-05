@@ -4,11 +4,15 @@
 
 //! Checked authoring and attachment of ordinary observer ports.
 
+use std::any::{type_name, TypeId};
 use std::sync::Arc;
 
+use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_runtime::stages::observer::{
-    EffectObserver, HandlerObserver, JoinObserver, ObserverBinding, SinkDeliveryObserver,
-    SourcePollObserver, StageLifecycleObserver, StageObserverBindings, StatefulObserver,
+    EffectObserver, HandlerObserver, JoinObserver, ObserverBinding, ObserverError, ObserverResult,
+    SinkDeliveryObserver as RuntimeSinkDeliveryObserver, SinkDeliveryObserverContext,
+    SinkDeliverySuccessContext, SourcePollObserver, StageLifecycleObserver, StageObserverBindings,
+    StatefulObserver,
 };
 use thiserror::Error;
 
@@ -134,6 +138,118 @@ struct ObserverFactorySurfaceError {
     actual: MiddlewareSurfaceKind,
 }
 
+/// Typed application diagnostics for a sink's input and delivery attempts.
+///
+/// Returning an error reports observer health: runtime warns and quarantines
+/// this attachment, without changing delivery, settlement or sibling observers.
+/// Callbacks are synchronous and suppressed for replayed occurrences.
+/// Completion follows receipt order: `on_delivered` can precede `on_attempt`
+/// for the same write. Flush and drain produce completion notifications only.
+/// These are best-effort diagnostics, not durable business processing: the
+/// callback has no journal acknowledgement, retry or exactly-once guarantee.
+pub trait SinkDeliveryObserver: Send + Sync {
+    type Input: TypedPayload + 'static;
+
+    /// Called after a full-success, non-Noop receipt is committed for this input.
+    /// Buffered inputs arrive when their later write, flush or drain settles them.
+    fn on_delivered(&self, _input: &Self::Input) -> ObserverResult {
+        Ok(())
+    }
+
+    /// Observe the classification of a current input attempt, including buffered,
+    /// failed or rejected attempts. This does not imply delivery succeeded.
+    fn on_attempt(&self, _ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
+        Ok(())
+    }
+}
+
+struct TypedSinkDeliveryObserver<T> {
+    observer: Arc<T>,
+}
+
+impl<T: SinkDeliveryObserver> TypedSinkDeliveryObserver<T> {
+    fn notify_delivered(&self, input: &ChainEvent) -> ObserverResult {
+        let input =
+            T::Input::try_from_event(input).map_err(|error| Box::new(error) as ObserverError)?;
+        self.observer.on_delivered(&input)
+    }
+}
+
+impl<T: SinkDeliveryObserver> RuntimeSinkDeliveryObserver for TypedSinkDeliveryObserver<T> {
+    fn after_sink_delivery_checked(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverResult {
+        self.observer.on_attempt(ctx)
+    }
+
+    fn on_delivered(&self, ctx: &SinkDeliverySuccessContext<'_>) -> ObserverResult {
+        self.notify_delivered(ctx.input())
+    }
+}
+
+pub struct SinkDeliveryObserverFactory<T: SinkDeliveryObserver> {
+    label: &'static str,
+    observer: Arc<T>,
+}
+
+impl<T: SinkDeliveryObserver> SinkDeliveryObserverFactory<T> {
+    pub fn new(label: &'static str, observer: T) -> Self {
+        Self {
+            label,
+            observer: Arc::new(observer),
+        }
+    }
+}
+
+impl<T: SinkDeliveryObserver + 'static> MiddlewareFactory for SinkDeliveryObserverFactory<T> {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<Self>(self.label)
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::observer(self.label, vec![MiddlewareSurfaceKind::SinkDelivery])
+    }
+
+    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        Some((TypeId::of::<T::Input>(), type_name::<T::Input>()))
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        let actual = request.surface.kind();
+        if actual != MiddlewareSurfaceKind::SinkDelivery {
+            return Err(MiddlewareFactoryError::materialization_failed(
+                self.label,
+                &context.config.name,
+                ObserverFactorySurfaceError {
+                    expected: MiddlewareSurfaceKind::SinkDelivery,
+                    actual,
+                },
+            ));
+        }
+        Ok(MiddlewareSurfaceAttachment::sink_delivery_observer(
+            Arc::new(TypedSinkDeliveryObserver {
+                observer: self.observer.clone(),
+            }),
+        ))
+    }
+}
+
+/// Attach a typed sink observer. Flow construction checks its `Input` against
+/// the connector's input before opening the sink; erased factories cannot
+/// provide a compile-time equality check.
+pub fn sink_delivery_observer<T>(label: &'static str, observer: T) -> SinkDeliveryObserverFactory<T>
+where
+    T: SinkDeliveryObserver + 'static,
+{
+    SinkDeliveryObserverFactory::new(label, observer)
+}
+
 macro_rules! observer_factory {
     (
         $factory:ident,
@@ -244,13 +360,6 @@ observer_factory!(
     effect_observer
 );
 observer_factory!(
-    SinkDeliveryObserverFactory,
-    sink_delivery_observer,
-    SinkDeliveryObserver,
-    SinkDelivery,
-    sink_delivery_observer
-);
-observer_factory!(
     StageLifecycleObserverFactory,
     stage_lifecycle_observer,
     StageLifecycleObserver,
@@ -272,8 +381,54 @@ mod tests {
     impl JoinObserver for Noop {}
     impl SourcePollObserver for Noop {}
     impl EffectObserver for Noop {}
-    impl SinkDeliveryObserver for Noop {}
+    impl SinkDeliveryObserver for Noop {
+        type Input = TestInput;
+    }
     impl StageLifecycleObserver for Noop {}
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct TestInput {
+        sequence: u64,
+    }
+
+    impl TypedPayload for TestInput {
+        const EVENT_TYPE: &'static str = "observer.test_input";
+    }
+
+    #[test]
+    fn typed_delivery_decode_failure_is_reported_without_calling_application() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct RecordsDelivery(Arc<AtomicUsize>);
+        impl SinkDeliveryObserver for RecordsDelivery {
+            type Input = TestInput;
+
+            fn on_delivered(&self, input: &TestInput) -> ObserverResult {
+                assert_eq!(input.sequence, 7);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let adapter = TypedSinkDeliveryObserver {
+            observer: Arc::new(RecordsDelivery(calls.clone())),
+        };
+        let mut input = TestInput { sequence: 7 }.to_event(obzenflow_core::WriterId::from(
+            obzenflow_core::StageId::new(),
+        ));
+        adapter
+            .notify_delivered(&input)
+            .expect("valid input reaches observer");
+        input.payload = obzenflow_core::event::ChainPayload::Fact(serde_json::json!({
+            "sequence": "invalid"
+        }));
+        let error = adapter
+            .notify_delivered(&input)
+            .expect_err("decode error is observable");
+        assert!(error.to_string().contains("Failed to deserialize"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn every_helper_declares_exactly_its_one_observer_surface() {

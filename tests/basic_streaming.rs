@@ -10,8 +10,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
@@ -59,19 +58,12 @@ impl InlineSink for EventCounterSink {
     type Input = StreamItem;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Count".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        _event: StreamItem,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, _event: StreamItem) -> Result<(), SinkWriteFailure> {
         self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 
@@ -289,19 +281,12 @@ impl InlineSink for SumSink {
     type Input = NumberItem;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
+        SinkDescription::method(DeliveryMethod::Custom("Sum".to_string()))
     }
 
-    async fn write(
-        &mut self,
-        event: NumberItem,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    async fn write(&mut self, event: NumberItem) -> Result<(), SinkWriteFailure> {
         self.sum.fetch_add(event.value, Ordering::Relaxed);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("Sum".to_string()),
-            None,
-        )))
+        Ok(())
     }
 }
 

@@ -19,9 +19,8 @@ use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
-    TypedStatefulHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure, StatefulEmission,
+    TypedFiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -213,21 +212,16 @@ where
     type Input = T;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified()
-    }
-
-    async fn write(
-        &mut self,
-        event: T,
-        _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-        self.events.lock().unwrap().push(event);
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+        SinkDescription::method(
             obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
                 "collect".to_string(),
             ),
-            None,
-        )))
+        )
+    }
+
+    async fn write(&mut self, event: T) -> Result<(), SinkWriteFailure> {
+        self.events.lock().unwrap().push(event);
+        Ok(())
     }
 }
 

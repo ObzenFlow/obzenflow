@@ -9,11 +9,28 @@
 //!
 //! ## In-process sources
 //!
-//! [`once`], [`finite`], [`finite_from_fn`], [`async_finite`], [`infinite`], and
-//! [`async_infinite`] construct source adapters from application-owned values or
-//! producer functions. [`generate`] accepts `FnMut() -> Option<T>` and
-//! [`from_receiver`] transfers a Tokio receiver. Producers and receivers move into
-//! one execution without `Clone`; use topology fan-out for multiple consumers.
+//! [`ValuesSource::new`] transfers values into one finite execution. It creates
+//! the iterator only on the first live poll and emits one item per poll, without
+//! cloning or collecting. A single value uses `ValuesSource::new([value])`.
+//! [`ChannelSource::new`] transfers a Tokio receiver into one asynchronous
+//! infinite execution. Channel closure is a source error; orderly drain closes
+//! the receiver. Use topology fan-out for multiple consumers.
+//!
+//! ## Construction catalogue
+//!
+//! | Integration | Entry point |
+//! |---|---|
+//! | Owned values | [`ValuesSource::new`] |
+//! | Tokio receiver | [`ChannelSource::new`] |
+//! | CSV or TSV | [`CsvSource::builder`] |
+//! | HTTP pull | [`HttpPullSource::new`] |
+//! | HTTP polling | [`HttpPollSource::new`] |
+//! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
+//!
+//! New polling behaviour implements the appropriate typed handler:
+//! [`TypedFiniteSourceHandler`], [`TypedAsyncFiniteSourceHandler`],
+//! [`TypedInfiniteSourceHandler`] or [`TypedAsyncInfiniteSourceHandler`].
+//! Resource-owning integrations use the corresponding connector and reader.
 //!
 //! ## CSV sources
 //!
@@ -29,9 +46,11 @@
 //!
 //! [`HostedIngressSource`] receives admitted push submissions. A user-owned
 //! [`IngressDecoder`] value declares the emitted [`IngressDecoder::Output`],
-//! matching the output ownership used by CSV and HTTP pull decoders. Use the
-//! [`crate::application::ingress::ingress_source`] or
-//! [`crate::application::ingress::http_ingress`] to construct it.
+//! matching the output ownership used by CSV and HTTP pull decoders. Register
+//! it through `FlowApplication::builder().http_ingress(decoder, config)` (or
+//! `.ingress` for another transport). Custom hosting can explicitly compose
+//! bundles with [`crate::application::ingress::ingress_source`] or
+//! [`crate::application::ingress::http_ingress`].
 //!
 //! ## HTTP pull sources
 //!
@@ -54,10 +73,8 @@ pub use obzenflow_adapters::sources::{
     CsvSourceBuilder,
 };
 
-/// In-process source adapters constructed from values and producer functions.
-pub use obzenflow_adapters::sources::{
-    async_finite, async_infinite, finite, finite_from_fn, from_receiver, generate, infinite, once,
-};
+/// In-process sources owning values or a channel receiver.
+pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
 pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
 /// Hosted-ingress source and its application-owned decoder contract.
@@ -86,8 +103,6 @@ pub use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 pub use obzenflow_runtime::stages::source::{
-    AsyncFiniteSourceConnector, AsyncFiniteSourceTyped, AsyncInfiniteSourceConnector,
-    AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped, FallibleAsyncInfiniteSourceTyped,
-    FallibleFiniteSourceTyped, FallibleInfiniteSourceTyped, FiniteSourceConnector,
-    FiniteSourceTyped, InfiniteSourceConnector, InfiniteSourceTyped, SourceReaderInitContext,
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
+    InfiniteSourceConnector, SourceReaderInitContext,
 };

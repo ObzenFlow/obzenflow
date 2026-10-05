@@ -2,20 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Prometheus Demo with FlowApplication Framework (FLOWIP-080h, 080j & 082a)
+//! Prometheus metrics demo
 //!
 //! Processes a configurable volume of events (default 100,000) demonstrating:
 //! - Source-intake rate limiting middleware
 //! - Circuit-breaker opening, failed probing, and recovery during source outages
-//! - Enforced backpressure across the fan-out
-//! - Fan-out topology pattern (one stage to multiple downstream stages)
-//! - ReduceTyped for type-safe event counting (FLOWIP-080j)
-//! - TypedPayload for strongly-typed events (FLOWIP-082a)
+//! - Enforced backpressure between stages
+//! - Counting successfully processed events
+//! - Strongly typed events
 //! - Prometheus metrics via /metrics endpoint
-//!
-//! **FLOWIP-080h Update**: Replaced 38-line ErrorProneTransform struct with Map helper
-//! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
-//! **FLOWIP-082a Update**: Added TypedPayload with EVENT_TYPE and SCHEMA_VERSION constants
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host
 //!
@@ -28,7 +23,6 @@
 //! - /health and /ready endpoints for monitoring
 
 use anyhow::Result;
-use async_trait::async_trait;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow::env::env_var_or;
 use obzenflow::flow::backpressure::enforced;
@@ -36,11 +30,7 @@ use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow::schema::TypedPayload;
-use obzenflow::stages::sinks::DeliveryMethod;
-use obzenflow::stages::sinks::SinkRedeliverySafety;
-use obzenflow::stages::sinks::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteReport,
-};
+use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources::SourceError;
 use obzenflow::stages::sources::TypedFiniteSourceHandler;
 use obzenflow::stages::transforms::TryMapTyped;
@@ -178,44 +168,13 @@ fn error_prone_transform() -> TryMapTyped<
 
 /// State for business-level event counting (FLOWIP-080j)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct EventCountState {
+pub(crate) struct EventCountState {
     event_count: usize,
 }
 
 impl TypedPayload for EventCountState {
     const EVENT_TYPE: &'static str = "prometheus.event_count";
     const SCHEMA_VERSION: u32 = 1;
-}
-
-/// Simple sink that consumes all events (simulates Kafka/S3 persistence)
-/// Framework metrics at /metrics show how many events were processed
-#[derive(Clone, Debug)]
-struct CompletionSink;
-
-impl CompletionSink {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl InlineSink for CompletionSink {
-    type Input = ProcessedEvent;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-    }
-
-    async fn write(
-        &mut self,
-        _event: ProcessedEvent,
-        _context: SinkWriteContext,
-    ) -> obzenflow::stages::sinks::SinkWriteResult {
-        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-            DeliveryMethod::Custom("InMemory".to_string()),
-            Some(1),
-        )))
-    }
 }
 
 fn main() -> Result<()> {
@@ -232,8 +191,7 @@ fn main() -> Result<()> {
                     "Source-intake rate limiting middleware",
                     "Source outages with five-second circuit-breaker cooldowns",
                     "Enforced backpressure (64 events per edge)",
-                    "Fan-out topology (processor -> counter + sink)",
-                    "StatefulHandler for business-level counting",
+                    "Counting successfully processed events",
                     "Framework Prometheus metrics",
                 ],
             )
@@ -298,27 +256,7 @@ pub(crate) fn flow_definition_with_outage_interval(
             },
         )
         .emit_on_eof();
-        let summary_sink_handler = SinkTyped::new(move |summary: EventCountState| async move {
-                    let count = summary.event_count;
-                    let errors = total_events.saturating_sub(count);
-
-                    println!();
-                    println!("=====================================");
-                    println!("📊 Business-Level Event Count (FLOWIP-080j):");
-                    println!("   Successfully processed: {count} events");
-                    println!(
-                        "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)"
-                    );
-                    println!("=====================================");
-                    println!();
-                    println!("💡 Key Improvement:");
-                    println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
-                    println!("   Type-safe accumulation with zero ChainEvent manipulation!");
-                    println!();
-                    println!("=====================================");
-                })
-                .idempotent();
-        let completion_sink_handler = CompletionSink::new();
+        let summary_sink_handler = ConsoleSink::new(format_summary);
 
         Ok(flow! {
             name: "prometheus_demo",
@@ -341,15 +279,26 @@ pub(crate) fn flow_definition_with_outage_interval(
                 error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
                 event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
                 summary_sink = sink!(EventCountState => summary_sink_handler);
-                completion_sink = sink!(ProcessedEvent => completion_sink_handler);
             },
 
             topology: {
                 high_volume_source |> error_processor;
                 error_processor |> event_counter;
-                error_processor |> completion_sink;
                 event_counter |> summary_sink;
             }
         })
     })
+}
+
+pub(crate) fn format_summary(summary: &EventCountState) -> String {
+    let count = summary.event_count;
+    format!(
+        concat!(
+            "\n=====================================\n",
+            "📊 Processing summary:\n",
+            "   Successfully processed: {count} events\n",
+            "====================================="
+        ),
+        count = count
+    )
 }

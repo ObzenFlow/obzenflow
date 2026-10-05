@@ -12,6 +12,8 @@
 //! stage is named `not_order_certified`, per-type row counts are an advisory,
 //! and the run exits 2.
 
+mod replay_testkit;
+
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -21,7 +23,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -79,17 +80,6 @@ impl TypedTransformHandler for PassthroughMerge {
     }
 }
 
-fn discard<T>(
-) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
-       + Send
-       + Sync
-       + Clone
-where
-    T: Clone + Send + Sync + 'static,
-{
-    move |_payload: T, _delivery| std::future::ready(())
-}
-
 /// Two channels converge on a plain transform with no effectful descendant:
 /// the merge keeps availability-driven scheduling and stays unordered.
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
@@ -97,7 +87,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
         let channel_a_handler = Channel::new("a");
         let channel_b_handler = Channel::new("b");
         let merge_handler = PassthroughMerge;
-        let out_handler = SinkTyped::with_delivery(discard::<Reading>()).idempotent();
+        let out_handler = replay_testkit::Discard::<Reading>::default();
 
         Ok(flow! {
             name: "replay_verification_honesty",

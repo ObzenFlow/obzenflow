@@ -18,7 +18,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -253,12 +252,10 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
             },
         )
         .emit_on_eof();
-        let fold_sink = SinkTyped::new(|_snapshot: FoldSnapshot| async move {}).idempotent();
-        let group_sink = SinkTyped::new(|_snapshot: GroupSnapshot| async move {}).idempotent();
-        let current_ranking_sink =
-            SinkTyped::new(|_snapshot: CurrentRanking| async move {}).idempotent();
-        let aggregate_ranking_sink =
-            SinkTyped::new(|_snapshot: AggregateRanking| async move {}).idempotent();
+        let fold_sink = replay_testkit::Discard::<FoldSnapshot>::default();
+        let group_sink = replay_testkit::Discard::<GroupSnapshot>::default();
+        let current_ranking_sink = replay_testkit::Discard::<CurrentRanking>::default();
+        let aggregate_ranking_sink = replay_testkit::Discard::<AggregateRanking>::default();
 
         Ok(flow! {
             name: "typed_stateful_journal_parity",
