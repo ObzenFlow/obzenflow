@@ -189,7 +189,7 @@ pub(crate) fn attachment_key(
     effect: Option<&EffectDeclaration>,
     ingress: Option<&IngressKey>,
     authored_site: MiddlewareAttachmentSite,
-) -> Result<String, crate::dsl::error::MiddlewarePlanError> {
+) -> Result<obzenflow_topology::MiddlewareAttachmentKey, crate::dsl::error::MiddlewarePlanError> {
     with_binding_request(
         declaration.label,
         config,
@@ -198,12 +198,14 @@ pub(crate) fn attachment_key(
         ingress,
         authored_site,
         |request| {
-            obzenflow_adapters::middleware::MiddlewareAttachmentId::from_declaration_and_request(
-                declaration,
-                &request,
+            obzenflow_topology::MiddlewareAttachmentKey::from_bytes(
+                obzenflow_adapters::middleware::MiddlewareAttachmentId::from_declaration_and_request(
+                    declaration,
+                    &request,
+                )
+                .as_ulid()
+                .to_bytes(),
             )
-            .as_ulid()
-            .to_string()
         },
     )
 }

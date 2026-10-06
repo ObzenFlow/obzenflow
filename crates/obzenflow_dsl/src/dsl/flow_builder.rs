@@ -1243,6 +1243,7 @@ where
         use obzenflow_runtime::backpressure::BackpressurePlan;
 
         let mut backpressure_plan = BackpressurePlan::disabled();
+        let mut topology_backpressure = HashMap::new();
         {
             for (from_var, to_var, _kind) in &connections {
                 let from_key = obzenflow_core::StageKey::from(
@@ -1280,13 +1281,20 @@ where
                             .expect(
                                 "required-where-enforce validated the window at materialization",
                             );
-                        let stall_timeout = std::time::Duration::from_millis(
-                            __flow_effective
-                                .backpressure_stall_timeout_for(&from_key, &to_key)
-                                .expect(
-                                    "required-where-enforce validated the stall timeout at \
-                                     materialization",
-                                ),
+                        let stall_timeout_ms = __flow_effective
+                            .backpressure_stall_timeout_for(&from_key, &to_key)
+                            .expect(
+                                "required-where-enforce validated the stall timeout at \
+                                 materialization",
+                            );
+                        let stall_timeout = std::time::Duration::from_millis(stall_timeout_ms);
+                        topology_backpressure.insert(
+                            (to_topology_id(up_id), to_topology_id(down_id)),
+                            obzenflow_topology::BackpressureInfo::Enforce {
+                                window,
+                                stall_timeout_ms: std::num::NonZeroU64::new(stall_timeout_ms)
+                                    .expect("validated stall timeout is positive"),
+                            },
                         );
                         backpressure_plan = backpressure_plan.with_edge_enforced(
                             up_id,
@@ -1296,6 +1304,10 @@ where
                         );
                     }
                     EdgeBackpressure::Track => {
+                        topology_backpressure.insert(
+                            (to_topology_id(up_id), to_topology_id(down_id)),
+                            obzenflow_topology::BackpressureInfo::Track,
+                        );
                         backpressure_plan = backpressure_plan.track_only_edge(up_id, down_id);
                     }
                     EdgeBackpressure::Disabled => {}
@@ -1541,13 +1553,21 @@ where
                 .collect();
 
             let annotated_edges: Vec<obzenflow_topology::DirectedEdge> =
-                topology.edges().to_vec();
+                topology
+                    .edges()
+                    .iter()
+                    .cloned()
+                    .map(|mut edge| {
+                        edge.backpressure = topology_backpressure.get(&(edge.from, edge.to)).copied();
+                        edge
+                    })
+                    .collect();
 
             let annotated =
                 obzenflow_topology::Topology::new_unvalidated(annotated_stages, annotated_edges)
                     .map_err(FlowBuildError::TopologyValidationFailed)?
                     .with_flow_name(flow_name)
-                    .with_api_version("0.5.1")
+                    .with_api_version("0.6")
                     .with_subgraphs(subgraphs.clone())
                     .populate_derived_stage_annotations()
                     .derive_edge_typings();

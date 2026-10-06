@@ -5,7 +5,9 @@
 //! Instrumented catalog flow for rejection and replay tests.
 //! Business transformations, domain types and input fixtures come from the demo.
 
-use crate::product_catalog_enrichment::{console, domain::*, handlers, sources::*};
+use crate::product_catalog_enrichment::{
+    console, domain::*, handlers, sources::*, summary_delivery::SingleSummaryDelivery,
+};
 use anyhow::Result;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::{joins, stateful};
@@ -123,7 +125,9 @@ pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> F
 
             catalog_stats = stateful!(EnrichedOrderWithPromo -> CatalogAnalyticsSummary => catalog_stats_handler);
 
-            summary_printer = sink!(CatalogAnalyticsSummary => summary_printer_handler);
+            summary_printer = sink!(
+                CatalogAnalyticsSummary => summary_printer_handler with SingleSummaryDelivery
+            );
         },
 
         topology: {

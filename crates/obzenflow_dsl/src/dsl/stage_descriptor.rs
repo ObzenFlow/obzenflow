@@ -3708,18 +3708,30 @@ mod tests {
             .iter()
             .find(|a| a.label == "rate_limiter")
             .unwrap();
-        assert_eq!(
-            limiter.configuration["middleware.rate_limiter.events_per_second"]["value"],
-            17.0
+        let obzenflow_topology::MiddlewareDetailsInfo::RateLimiter(limiter) = &limiter.details
+        else {
+            panic!("expected typed limiter information");
+        };
+        assert_eq!(limiter.events_per_second().value, 17.0);
+        assert!(
+            limiter.burst_capacity().is_none(),
+            "automatic capacity stays absent"
         );
         let breaker = first
             .attachments
             .iter()
             .find(|a| a.label == "circuit_breaker")
             .unwrap();
+        let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(breaker) = &breaker.details
+        else {
+            panic!("expected typed breaker information");
+        };
+        assert_eq!(breaker.open_for_ms().value, 5000);
+        let restored: obzenflow_topology::MiddlewareInfo =
+            serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
         assert_eq!(
-            breaker.configuration["middleware.circuit_breaker.open_for_ms"]["value"],
-            5000
+            restored, first,
+            "all produced fields and provenance must survive"
         );
     }
 

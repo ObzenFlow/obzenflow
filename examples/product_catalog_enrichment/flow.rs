@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{console, domain::*, handlers, sources::*};
+use super::{console, domain::*, handlers, sources::*, summary_delivery::SingleSummaryDelivery};
 use obzenflow::flow::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
@@ -102,7 +102,9 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
                     EnrichedOrderWithPromo -> CatalogAnalyticsSummary => catalog_stats_handler
                 );
 
-                summary_printer = sink!(CatalogAnalyticsSummary => summary_printer_handler);
+                summary_printer = sink!(
+                    CatalogAnalyticsSummary => summary_printer_handler with SingleSummaryDelivery
+                );
             },
 
             topology: {

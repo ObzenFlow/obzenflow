@@ -21,6 +21,10 @@ fn live_banner() -> Banner {
             "Background",
             "Based on industrial-scale product catalog patterns",
         )
+        .section(
+            "Final summary",
+            "An application-owned control permits one live dashboard delivery attempt per summary sink; repeated attempts fail before printing.",
+        )
         .config_block_if(
             inject_bad_payment,
             "INJECT_BAD_PAYMENT is set!\nStrictJoin will trigger the Jonestown Protocol on the invalid payment.\nIt preserves the valid committed prefix, then emits a sealed Poison EOF.",

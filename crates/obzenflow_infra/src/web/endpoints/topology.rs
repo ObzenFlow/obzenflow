@@ -145,15 +145,14 @@ impl TopologyHttpEndpoint {
             })
             .collect();
 
-        // Reuse the canonical top-level annotations (flow_name,
-        // api_version, subgraphs registry) that were baked in at flow
-        // build time; rebuild via `new_unvalidated` so cycle/SCC caches
-        // stay consistent with any structural changes.
+        // Reuse the canonical flow name and subgraphs, and identify the
+        // current topology wire contract. Rebuild via `new_unvalidated` so
+        // cycle/SCC caches stay consistent with any structural changes.
         let subgraphs = self.topology.subgraphs().to_vec();
         let mut topology = obzenflow_topology::Topology::new_unvalidated(stages, edges)
             .expect("annotated topology rebuilds from a valid input topology")
             .with_subgraphs(subgraphs)
-            .with_api_version("0.5");
+            .with_api_version("0.6");
         if let Some(name) = self.topology.flow_name_annotation() {
             topology = topology.with_flow_name(name);
         }
@@ -299,23 +298,36 @@ mod tests {
                 if s.id == stage_topology_id {
                     s.middleware = Some(obzenflow_topology::MiddlewareInfo {
                         attachments: vec![obzenflow_topology::MiddlewareAttachmentInfo {
-                            key: "rate_limited:source_poll:rate_limiter".into(),
+                            key: obzenflow_topology::MiddlewareAttachmentKey::from_bytes([5; 16]),
                             label: "rate_limiter".into(),
-                            family: obzenflow_topology::MiddlewareFamily::RateLimiter,
                             authored_site:
                                 obzenflow_topology::MiddlewareAuthoredSite::Implementation,
                             operation: obzenflow_topology::MiddlewareOperation::SourcePoll,
-                            configuration: serde_json::json!({
-                                "middleware.rate_limiter.events_per_second": {
-                                    "value": 2.0, "source": "dsl", "scope": "stage:rate_limited"
-                                },
-                                "middleware.rate_limiter.burst_capacity": {
-                                    "value": 5.0, "source": "dsl", "scope": "stage:rate_limited"
-                                },
-                                "middleware.rate_limiter.cost_per_attempt": {
-                                    "value": 5.0, "source": "dsl", "scope": "stage:rate_limited"
-                                },
-                            }),
+                            details: obzenflow_topology::MiddlewareDetailsInfo::try_from_settings(
+                                obzenflow_topology::MiddlewareFamily::RateLimiter,
+                                [
+                                    ("middleware.rate_limiter.events_per_second", 2.0),
+                                    ("middleware.rate_limiter.burst_capacity", 5.0),
+                                    ("middleware.rate_limiter.cost_per_attempt", 5.0),
+                                ]
+                                .into_iter()
+                                .map(|(key, value)| {
+                                    (
+                                        key.to_owned(),
+                                        obzenflow_topology::ResolvedSettingInfo {
+                                            value: obzenflow_topology::SettingValueInfo::F64(value),
+                                            provenance: obzenflow_topology::SettingProvenanceInfo {
+                                                source: "dsl".into(),
+                                                scope: "stage:rate_limited".into(),
+                                                winner_subject:
+                                                    obzenflow_topology::SettingSubject::Unqualified,
+                                            },
+                                        },
+                                    )
+                                })
+                                .collect(),
+                            )
+                            .unwrap(),
                         }],
                     });
                 }
@@ -353,7 +365,7 @@ mod tests {
             .as_ref()
             .and_then(|middleware| {
                 middleware.attachments.iter().find(|attachment| {
-                    attachment.family == obzenflow_topology::MiddlewareFamily::RateLimiter
+                    attachment.family() == obzenflow_topology::MiddlewareFamily::RateLimiter
                 })
             })
             .expect("rate limiter configuration should be present");
@@ -361,18 +373,13 @@ mod tests {
             rate_limiter.operation,
             obzenflow_topology::MiddlewareOperation::SourcePoll
         );
-        assert_eq!(
-            rate_limiter.configuration["middleware.rate_limiter.events_per_second"]["value"],
-            2.0
-        );
-        assert_eq!(
-            rate_limiter.configuration["middleware.rate_limiter.burst_capacity"]["value"],
-            5.0
-        );
-        assert_eq!(
-            rate_limiter.configuration["middleware.rate_limiter.cost_per_attempt"]["value"],
-            5.0
-        );
+        let obzenflow_topology::MiddlewareDetailsInfo::RateLimiter(info) = &rate_limiter.details
+        else {
+            panic!("expected typed limiter information");
+        };
+        assert_eq!(info.events_per_second().value, 2.0);
+        assert_eq!(info.burst_capacity().unwrap().value, 5.0);
+        assert_eq!(info.cost_per_attempt().value, 5.0);
     }
 
     #[tokio::test]
@@ -451,7 +458,7 @@ mod tests {
 
         let parsed: obzenflow_topology::Topology =
             serde_json::from_slice(&response.body).expect("response should be valid JSON");
-        assert_eq!(parsed.api_version(), Some("0.5"));
+        assert_eq!(parsed.api_version(), Some("0.6"));
 
         let typed_stage = parsed
             .stages()
@@ -996,7 +1003,7 @@ mod tests {
 
         let parsed: obzenflow_topology::Topology =
             serde_json::from_slice(&response.body).expect("response should be valid JSON");
-        assert_eq!(parsed.api_version(), Some("0.5"));
+        assert_eq!(parsed.api_version(), Some("0.6"));
         assert_eq!(parsed.subgraphs().len(), 1);
 
         let a_topology = a_core.to_topology_id();

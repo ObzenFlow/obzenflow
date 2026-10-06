@@ -57,6 +57,14 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
     .await
     .unwrap();
     let topology = flow.topology().unwrap();
+    assert!(
+        topology.edges().iter().all(|edge| edge.backpressure
+            == Some(obzenflow_topology::BackpressureInfo::Enforce {
+                window: std::num::NonZeroU64::new(64).unwrap(),
+                stall_timeout_ms: std::num::NonZeroU64::new(30000).unwrap(),
+            })),
+        "the demo exposes configured transport before its first delivery"
+    );
     let source = topology
         .stages()
         .find(|stage| stage.name == "high_volume_source")
@@ -66,17 +74,29 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
         .attachments
         .iter()
         .find(|attachment| {
-            attachment.family == obzenflow_topology::MiddlewareFamily::CircuitBreaker
+            attachment.family() == obzenflow_topology::MiddlewareFamily::CircuitBreaker
         })
         .unwrap();
+    let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(info) = &breaker.details else {
+        panic!("expected typed breaker information");
+    };
+    assert_eq!(info.open_for_ms().value, 5_000);
+    assert_eq!(info.open_for_ms().provenance.source, "dsl");
     assert_eq!(
-        breaker.configuration["middleware.circuit_breaker.open_for_ms"],
-        serde_json::json!({ "value": 5_000, "source": "dsl", "scope": "stage:high_volume_source" })
+        info.open_for_ms().provenance.scope,
+        "stage:high_volume_source"
     );
-    assert!(middleware
-        .attachments
-        .iter()
-        .any(|attachment| attachment.family == obzenflow_topology::MiddlewareFamily::RateLimiter));
+    assert_eq!(
+        info.open_for_ms().provenance.winner_subject,
+        obzenflow_topology::SettingSubject::Unqualified
+    );
+    assert!(
+        middleware
+            .attachments
+            .iter()
+            .any(|attachment| attachment.family()
+                == obzenflow_topology::MiddlewareFamily::RateLimiter)
+    );
     let config = flow.flow_effective_config().unwrap();
     for (from, to) in [
         ("high_volume_source", "error_processor"),

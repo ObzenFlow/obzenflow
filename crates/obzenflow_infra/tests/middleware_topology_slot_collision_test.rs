@@ -153,7 +153,7 @@ async fn legacy_slots_and_override_families_do_not_merge_observer_attachments() 
     );
     let observers: Vec<_> = attachments
         .iter()
-        .filter(|attachment| attachment.family == MiddlewareFamily::Observer)
+        .filter(|attachment| attachment.family() == MiddlewareFamily::Observer)
         .collect();
     assert_eq!(observers.len(), 3);
     assert_eq!(
@@ -169,13 +169,13 @@ async fn legacy_slots_and_override_families_do_not_merge_observer_attachments() 
     }));
     let breaker = attachments
         .iter()
-        .find(|attachment| attachment.family == MiddlewareFamily::CircuitBreaker)
+        .find(|attachment| attachment.family() == MiddlewareFamily::CircuitBreaker)
         .expect("the real built-in breaker retains its own binding");
     assert_eq!(breaker.label, "circuit_breaker");
     assert_eq!(breaker.operation, MiddlewareOperation::SourcePoll);
     assert!(!attachments
         .iter()
-        .any(|attachment| attachment.family == MiddlewareFamily::RateLimiter));
+        .any(|attachment| attachment.family() == MiddlewareFamily::RateLimiter));
 }
 
 #[tokio::test]

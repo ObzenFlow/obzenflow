@@ -399,7 +399,7 @@ fn assert_topology_records_resolved_retry(topology: &obzenflow_topology::Topolog
         .stages()
         .filter_map(|stage| stage.middleware.as_ref())
         .flat_map(|middleware| &middleware.attachments)
-        .filter(|attachment| attachment.family == obzenflow_topology::MiddlewareFamily::Retry)
+        .filter(|attachment| attachment.family() == obzenflow_topology::MiddlewareFamily::Retry)
         .collect();
     assert_eq!(
         retry_attachments.len(),
@@ -410,10 +410,11 @@ fn assert_topology_records_resolved_retry(topology: &obzenflow_topology::Topolog
         retry_attachments[0].operation,
         obzenflow_topology::MiddlewareOperation::Effect { .. }
     ));
-    assert_eq!(
-        retry_attachments[0].configuration[RETRY_MAX_ATTEMPTS_KEY]["value"],
-        2
-    );
+    let obzenflow_topology::MiddlewareDetailsInfo::Retry(info) = &retry_attachments[0].details
+    else {
+        panic!("expected typed retry information");
+    };
+    assert_eq!(info.max_attempts().value, 2);
 }
 
 fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {

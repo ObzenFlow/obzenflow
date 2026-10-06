@@ -1085,16 +1085,23 @@ mod tests {
         let bindings = &source.middleware.as_ref().unwrap().attachments;
         assert_eq!(bindings.len(), 1);
         assert_eq!(
-            bindings[0].family,
+            bindings[0].family(),
             obzenflow_topology::MiddlewareFamily::RateLimiter
         );
         assert_eq!(
             bindings[0].operation,
             obzenflow_topology::MiddlewareOperation::Ingress
         );
+        let obzenflow_topology::MiddlewareDetailsInfo::RateLimiter(info) = &bindings[0].details
+        else {
+            panic!("expected typed ingress limiter information");
+        };
+        assert_eq!(info.events_per_second().value, 10.0);
+        assert_eq!(info.events_per_second().provenance.source, "dsl");
+        assert_eq!(info.events_per_second().provenance.scope, "stage:source");
         assert_eq!(
-            bindings[0].configuration["middleware.rate_limiter.events_per_second"],
-            serde_json::json!({ "value": 10.0, "source": "dsl", "scope": "stage:source" })
+            info.events_per_second().provenance.winner_subject,
+            obzenflow_topology::SettingSubject::Unqualified
         );
     }
 

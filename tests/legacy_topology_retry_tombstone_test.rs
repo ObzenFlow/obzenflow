@@ -16,23 +16,54 @@ fn retired_topology_retry_member_is_rejected() {
 #[test]
 fn resolved_retry_attachment_round_trips_with_its_operation() {
     use obzenflow_topology::{
-        MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareFamily, MiddlewareInfo,
-        MiddlewareOperation,
+        MiddlewareAttachmentInfo, MiddlewareAttachmentKey, MiddlewareAuthoredSite,
+        MiddlewareDetailsInfo, MiddlewareFamily, MiddlewareInfo, MiddlewareOperation,
+        ResolvedSettingInfo, SettingProvenanceInfo, SettingSubject, SettingValueInfo,
     };
+    let settings = [
+        ("middleware.retry.max_attempts", SettingValueInfo::U64(3)),
+        (
+            "middleware.retry.kind",
+            SettingValueInfo::Text("fixed".into()),
+        ),
+        (
+            "middleware.retry.fixed_delay_ms",
+            SettingValueInfo::U64(100),
+        ),
+        (
+            "middleware.retry.max_backoff_ms",
+            SettingValueInfo::U64(30_000),
+        ),
+        (
+            "middleware.retry.attempt_start_window_ms",
+            SettingValueInfo::U64(120_000),
+        ),
+    ]
+    .into_iter()
+    .map(|(key, value)| {
+        (
+            key.to_owned(),
+            ResolvedSettingInfo {
+                value,
+                provenance: SettingProvenanceInfo {
+                    source: "dsl".into(),
+                    scope: "stage:payments".into(),
+                    winner_subject: SettingSubject::Unqualified,
+                },
+            },
+        )
+    })
+    .collect();
     let expected = MiddlewareInfo {
         attachments: vec![MiddlewareAttachmentInfo {
-            key: "payments:authorize:retry".into(),
+            key: MiddlewareAttachmentKey::from_bytes([7; 16]),
             label: "retry".into(),
-            family: MiddlewareFamily::Retry,
             authored_site: MiddlewareAuthoredSite::Implementation,
             operation: MiddlewareOperation::Effect {
                 effect_type: "payments.authorize".into(),
             },
-            configuration: serde_json::json!({
-                "middleware.retry.max_attempts": { "value": 3, "source": "dsl", "scope": "stage:payments" },
-                "middleware.retry.kind": { "value": "fixed", "source": "dsl", "scope": "stage:payments" },
-                "middleware.retry.fixed_delay_ms": { "value": 100, "source": "dsl", "scope": "stage:payments" },
-            }),
+            details: MiddlewareDetailsInfo::try_from_settings(MiddlewareFamily::Retry, settings)
+                .unwrap(),
         }],
     };
     let encoded = serde_json::to_value(&expected).unwrap();

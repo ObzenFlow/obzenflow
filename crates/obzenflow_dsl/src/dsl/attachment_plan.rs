@@ -372,9 +372,11 @@ pub(super) fn topology(
     config: &StageConfig,
 ) -> Result<obzenflow_topology::MiddlewareInfo, MiddlewarePlanError> {
     use obzenflow_adapters::middleware::{BuiltinControlFamily, MiddlewareDeclaration};
+    use obzenflow_runtime::runtime_config::{knob, ConfigValue, Redaction};
     use obzenflow_topology::{
-        MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareFamily, MiddlewareInfo,
-        MiddlewareOperation,
+        MiddlewareAttachmentInfo, MiddlewareAuthoredSite, MiddlewareDetailsInfo, MiddlewareFamily,
+        MiddlewareInfo, MiddlewareOperation, ResolvedSettingInfo, SettingProvenanceInfo,
+        SettingSubject, SettingValueInfo,
     };
     let mut result = MiddlewareInfo::default();
     let effects = descriptor.effect_declarations();
@@ -462,7 +464,7 @@ pub(super) fn topology(
                         .to_string(),
                 },
             };
-            let mut configuration = serde_json::Map::new();
+            let mut settings = BTreeMap::new();
             let prefix = component.map(|member| format!("middleware.{}.", member.label()));
             for key in factory.consumed_config_keys() {
                 if prefix
@@ -483,9 +485,51 @@ pub(super) fn topology(
                     ),
                 };
                 if let Some(resolved) = resolved {
-                    configuration.insert(key.to_string(), serde_json::json!({ "value": resolved.value.to_json(), "source": resolved.meta.source.to_string(), "scope": resolved.meta.scope.to_string() }));
+                    let spec = knob(key).ok_or_else(|| {
+                        MiddlewarePlanError::invalid(
+                            &config.name,
+                            effect.map(EffectDeclaration::effect_type),
+                            format!("middleware '{label}' consumes unregistered setting '{key}'"),
+                        )
+                    })?;
+                    let value = match (&spec.redaction, &resolved.value) {
+                        (Redaction::SecretValue, _) => SettingValueInfo::Redacted,
+                        (_, ConfigValue::Bool(value)) => SettingValueInfo::Bool(*value),
+                        (_, ConfigValue::U64(value)) => SettingValueInfo::U64(*value),
+                        (_, ConfigValue::F64(value)) => SettingValueInfo::F64(*value),
+                        (_, ConfigValue::Text(value)) => SettingValueInfo::Text(value.clone()),
+                    };
+                    let winner_subject = match &resolved.meta.subject {
+                        obzenflow_core::config::ConfigSubject::Unqualified => {
+                            SettingSubject::Unqualified
+                        }
+                        obzenflow_core::config::ConfigSubject::Effect { effect_type } => {
+                            SettingSubject::Effect {
+                                effect_type: effect_type.as_str().to_owned(),
+                            }
+                        }
+                    };
+                    settings.insert(
+                        key.to_string(),
+                        ResolvedSettingInfo {
+                            value,
+                            provenance: SettingProvenanceInfo {
+                                source: resolved.meta.source.to_string(),
+                                scope: resolved.meta.scope.to_string(),
+                                winner_subject,
+                            },
+                        },
+                    );
                 }
             }
+            let details =
+                MiddlewareDetailsInfo::try_from_settings(family, settings).map_err(|error| {
+                    MiddlewarePlanError::invalid(
+                        &config.name,
+                        effect.map(EffectDeclaration::effect_type),
+                        format!("invalid topology information for middleware '{label}': {error}"),
+                    )
+                })?;
             result.attachments.push(MiddlewareAttachmentInfo {
                 key: super::binder::attachment_key(
                     &member_declaration,
@@ -496,10 +540,9 @@ pub(super) fn topology(
                     component_site,
                 )?,
                 label: label.to_string(),
-                family,
                 authored_site,
                 operation,
-                configuration: serde_json::Value::Object(configuration),
+                details,
             });
         }
         Ok(())
@@ -561,5 +604,11 @@ pub(super) fn topology(
     result
         .attachments
         .sort_by(|left, right| left.key.cmp(&right.key));
-    Ok(result)
+    MiddlewareInfo::try_new(result.attachments).map_err(|error| {
+        MiddlewarePlanError::invalid(
+            &config.name,
+            None,
+            format!("invalid middleware topology information: {error}"),
+        )
+    })
 }

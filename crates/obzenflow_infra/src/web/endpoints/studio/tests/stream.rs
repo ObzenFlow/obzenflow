@@ -1481,13 +1481,18 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .attachments
         .iter()
         .find(|attachment| {
-            attachment.family == obzenflow_topology::MiddlewareFamily::CircuitBreaker
+            attachment.family() == obzenflow_topology::MiddlewareFamily::CircuitBreaker
         })
         .unwrap();
+    let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(info) = &config.details else {
+        panic!("expected typed breaker information");
+    };
+    assert_eq!(info.open_for_ms().value, 1);
+    assert_eq!(info.open_for_ms().provenance.source, "dsl");
+    assert_eq!(info.open_for_ms().provenance.scope, "stage:input");
     assert_eq!(
-        config.configuration["middleware.circuit_breaker.open_for_ms"],
-        serde_json::json!({ "value": 1, "source": "dsl", "scope": "stage:input" }),
-        "the resolved factory configuration and provenance reach topology"
+        info.open_for_ms().provenance.winner_subject,
+        obzenflow_topology::SettingSubject::Unqualified
     );
     let journal = handle.system_journal().unwrap();
     let stage_journals = handle.stage_journals();

@@ -7,7 +7,7 @@
 //! under" is answerable from the run directory alone.
 
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
-use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
+use obzenflow_core::config::{ConfigAddress, ConfigSource, ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::journal::factory::RunSubstrateState;
@@ -18,12 +18,18 @@ use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafet
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
-    CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
+    CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
+    CIRCUIT_BREAKER_MODE_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
     TypedFiniteSourceHandler,
+};
+use obzenflow_topology::{
+    CircuitBreakerInfo, CircuitBreakerMode, MiddlewareAttachmentInfo, MiddlewareAuthoredSite,
+    MiddlewareDetailsInfo, MiddlewareFamily, MiddlewareInfo, MiddlewareOperation,
+    ResolvedSettingInfo, SettingProvenanceInfo, SettingSubject,
 };
 
 use async_trait::async_trait;
@@ -187,6 +193,99 @@ fn manifest_for(handle: &obzenflow_runtime::prelude::FlowHandle) -> RunManifest 
     serde_json::from_str(&raw).expect("run_manifest.json should parse")
 }
 
+fn round_trip_middleware(
+    handle: &obzenflow_runtime::prelude::FlowHandle,
+    stage_name: &str,
+) -> MiddlewareInfo {
+    let topology = handle.topology().expect("built flow must expose topology");
+    let original = topology
+        .stages()
+        .find(|stage| stage.name == stage_name)
+        .and_then(|stage| stage.middleware.as_ref())
+        .expect("the authored stage must retain its middleware");
+    let wire = serde_json::to_vec(original).expect("producer information must serialise");
+    let decoded: MiddlewareInfo =
+        serde_json::from_slice(&wire).expect("producer information must pass checked decoding");
+    assert_eq!(
+        &decoded, original,
+        "every binding key, label, site, operation, setting and provenance field must survive"
+    );
+    decoded
+}
+
+fn assert_setting<T: std::fmt::Debug + PartialEq>(
+    actual: &ResolvedSettingInfo<T>,
+    value: T,
+    source: &str,
+    scope: &str,
+    winner_subject: SettingSubject,
+) {
+    assert_eq!(
+        actual,
+        &ResolvedSettingInfo {
+            value,
+            provenance: SettingProvenanceInfo {
+                source: source.to_string(),
+                scope: scope.to_string(),
+                winner_subject,
+            },
+        }
+    );
+}
+
+fn assert_effect_breaker<'a>(
+    attachment: &'a MiddlewareAttachmentInfo,
+    effect_type: &str,
+) -> &'a CircuitBreakerInfo {
+    assert_eq!(attachment.label, "circuit_breaker");
+    assert_eq!(attachment.family(), MiddlewareFamily::CircuitBreaker);
+    assert_eq!(
+        attachment.authored_site,
+        MiddlewareAuthoredSite::Effect {
+            effect_type: effect_type.to_string(),
+        }
+    );
+    assert_eq!(
+        attachment.operation,
+        MiddlewareOperation::Effect {
+            effect_type: effect_type.to_string(),
+        }
+    );
+    let MiddlewareDetailsInfo::CircuitBreaker(info) = &attachment.details else {
+        panic!("the effect must carry typed breaker information");
+    };
+    let subject = SettingSubject::Effect {
+        effect_type: effect_type.to_string(),
+    };
+    let scope = "stage:authorize_payment";
+    assert_setting(info.open_for_ms(), 60_000, "dsl", scope, subject.clone());
+    assert_setting(info.probes(), 1, "dsl", scope, subject.clone());
+    assert_setting(
+        info.rate_limited_counts_as_failure(),
+        false,
+        "dsl",
+        scope,
+        subject.clone(),
+    );
+    assert_setting(
+        info.count_window().unwrap(),
+        10,
+        "dsl",
+        scope,
+        subject.clone(),
+    );
+    assert_setting(
+        info.failure_rate_threshold().unwrap(),
+        0.5,
+        "dsl",
+        scope,
+        subject,
+    );
+    assert!(info.slow_call_duration_ms().is_none());
+    assert!(info.slow_call_rate_threshold().is_none());
+    info
+}
+
 fn build_flow_future(
     base: std::path::PathBuf,
     ctx: FlowBuildContext,
@@ -285,6 +384,74 @@ fn build_two_effect_flow_future(
         })
     })
     .build(ctx)
+}
+
+#[tokio::test]
+async fn topology_backpressure_comes_from_resolved_edge_configuration_before_execution() {
+    use obzenflow_core::config::ConfigScope;
+    use obzenflow_topology::BackpressureInfo;
+
+    for (mode, disable_edge, expected) in [
+        ("off", false, None),
+        ("track", false, Some(BackpressureInfo::Track)),
+        (
+            "enforce",
+            false,
+            Some(BackpressureInfo::Enforce {
+                window: std::num::NonZeroU64::new(64).unwrap(),
+                stall_timeout_ms: std::num::NonZeroU64::new(30000).unwrap(),
+            }),
+        ),
+        ("enforce", true, None),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut candidates = CandidateSet::default();
+        for (key, value) in [
+            ("runtime.backpressure.mode", ConfigValue::Text(mode.into())),
+            ("runtime.backpressure.window", ConfigValue::U64(64)),
+            (
+                "runtime.backpressure.stall_timeout_ms",
+                ConfigValue::U64(30000),
+            ),
+        ] {
+            candidates
+                .admit(ScopedCandidate::unqualified(
+                    key,
+                    ConfigScope::Global,
+                    ConfigSource::File,
+                    value,
+                ))
+                .unwrap();
+        }
+        if disable_edge {
+            candidates
+                .admit(ScopedCandidate::unqualified(
+                    "runtime.backpressure.mode",
+                    ConfigScope::edge("src", "snk"),
+                    ConfigSource::File,
+                    ConfigValue::Text("off".into()),
+                ))
+                .unwrap();
+        }
+        let handle = build_flow_future(
+            directory.path().to_path_buf(),
+            FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates))),
+        )
+        .await
+        .unwrap();
+        // No run/start call and no metrics fetch: the built topology already
+        // describes the concrete edge policy, including a narrower off override.
+        let topology = handle.topology().unwrap();
+        assert_eq!(topology.edges().len(), 1);
+        assert_eq!(
+            topology.edges()[0].backpressure,
+            expected,
+            "{mode}, override={disable_edge}"
+        );
+        let decoded: obzenflow_topology::Topology =
+            serde_json::from_value(serde_json::to_value(topology.as_ref()).unwrap()).unwrap();
+        assert_eq!(decoded.edges()[0].backpressure, expected);
+    }
 }
 
 #[tokio::test]
@@ -410,6 +577,67 @@ async fn manifest_records_a_file_supplied_optional_key_for_a_surviving_factory()
         burst.resolved_for.is_none(),
         "a stage middleware value resolves for the stage itself"
     );
+
+    let middleware = round_trip_middleware(&handle, "snk");
+    assert_eq!(middleware.attachments.len(), 1);
+    let attachment = &middleware.attachments[0];
+    assert_eq!(attachment.label, "rate_limiter");
+    assert_eq!(attachment.family(), MiddlewareFamily::RateLimiter);
+    assert_eq!(
+        attachment.authored_site,
+        MiddlewareAuthoredSite::Implementation
+    );
+    assert_eq!(attachment.operation, MiddlewareOperation::SinkDelivery);
+    let MiddlewareDetailsInfo::RateLimiter(info) = &attachment.details else {
+        panic!("the sink must carry typed limiter information");
+    };
+    assert_setting(
+        info.events_per_second(),
+        10.0,
+        "dsl",
+        "stage:snk",
+        SettingSubject::Unqualified,
+    );
+    assert_setting(
+        info.cost_per_attempt(),
+        1.0,
+        "dsl",
+        "stage:snk",
+        SettingSubject::Unqualified,
+    );
+    assert_setting(
+        info.burst_capacity()
+            .expect("explicit burst remains present"),
+        3.0,
+        "file",
+        "stage:snk",
+        SettingSubject::Unqualified,
+    );
+}
+
+#[tokio::test]
+async fn topology_keeps_automatic_burst_absent_without_fabricated_provenance() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let handle =
+        build_rate_limited_flow_future(dir.path().to_path_buf(), FlowBuildContext::for_tests())
+            .await
+            .expect("the limiter can calculate its own automatic capacity");
+    let middleware = round_trip_middleware(&handle, "snk");
+    assert_eq!(middleware.attachments.len(), 1);
+    let MiddlewareDetailsInfo::RateLimiter(info) = &middleware.attachments[0].details else {
+        panic!("the sink must carry typed limiter information");
+    };
+    assert!(
+        info.burst_capacity().is_none(),
+        "an automatically calculated capacity is not a resolved configuration winner"
+    );
+    let manifest = manifest_for(&handle);
+    assert!(manifest
+        .effective_config
+        .expect("effective configuration must be recorded")
+        .values
+        .iter()
+        .all(|row| row.key_path != RATE_LIMITER_BURST_CAPACITY_KEY));
 }
 
 #[tokio::test]
@@ -463,6 +691,160 @@ async fn manifest_retains_two_real_effect_rows_for_one_stage_broadcast() {
             }),
         ]
     );
+
+    let middleware = round_trip_middleware(&handle, "authorize_payment");
+    assert_eq!(middleware.attachments.len(), 2);
+    assert_ne!(middleware.attachments[0].key, middleware.attachments[1].key);
+    let mut effects = Vec::new();
+    for attachment in &middleware.attachments {
+        let MiddlewareOperation::Effect { effect_type } = &attachment.operation else {
+            panic!("each breaker must protect a declared effect");
+        };
+        effects.push(effect_type.as_str());
+        let info = assert_effect_breaker(attachment, effect_type);
+        assert_setting(
+            info.mode(),
+            CircuitBreakerMode::RateBased,
+            "dsl",
+            "stage:authorize_payment",
+            SettingSubject::Effect {
+                effect_type: effect_type.clone(),
+            },
+        );
+        assert_setting(
+            info.minimum_calls()
+                .expect("rate mode requires minimum calls"),
+            8,
+            "file",
+            "stage:authorize_payment",
+            SettingSubject::Unqualified,
+        );
+        assert!(info.consecutive_failures().is_none());
+    }
+    effects.sort();
+    assert_eq!(
+        effects,
+        [AuthorizePayment::EFFECT_TYPE, RefundPayment::EFFECT_TYPE],
+        "equal inherited values retain both concrete effect operations"
+    );
+}
+
+#[tokio::test]
+async fn topology_retains_effect_winners_and_inactive_settings_after_a_mode_override() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut candidates = CandidateSet::default();
+    candidates
+        .admit(ScopedCandidate::unqualified(
+            CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
+            obzenflow_core::config::ConfigScope::stage("authorize_payment"),
+            ConfigSource::File,
+            ConfigValue::U64(8),
+        ))
+        .expect("stage broadcast admits");
+    for (key, value) in [
+        (CIRCUIT_BREAKER_MINIMUM_CALLS_KEY, ConfigValue::U64(6)),
+        (
+            CIRCUIT_BREAKER_MODE_KEY,
+            ConfigValue::Text("consecutive".to_string()),
+        ),
+        (
+            CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY,
+            ConfigValue::U64(3),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate {
+                key_path: key.to_string(),
+                address: ConfigAddress::effect("authorize_payment", AuthorizePayment::EFFECT_TYPE),
+                source: ConfigSource::File,
+                value,
+            })
+            .expect("exact effect override admits");
+    }
+    let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
+    let handle =
+        build_two_effect_flow_future(dir.path().to_path_buf(), FlowBuildContext::new(snapshot))
+            .await
+            .expect("one effect can select consecutive mode while its sibling remains rate-based");
+    let middleware = round_trip_middleware(&handle, "authorize_payment");
+    assert_eq!(middleware.attachments.len(), 2);
+    assert_ne!(middleware.attachments[0].key, middleware.attachments[1].key);
+    let manifest = manifest_for(&handle);
+    let evidence = manifest.effective_config.expect("effective configuration");
+    for attachment in &middleware.attachments {
+        let MiddlewareOperation::Effect { effect_type } = &attachment.operation else {
+            panic!("each breaker must protect a declared effect");
+        };
+        // Count-window and failure-rate rows remain visible even when inactive.
+        let info = assert_effect_breaker(attachment, effect_type);
+        let exact = effect_type == AuthorizePayment::EFFECT_TYPE;
+        assert!(exact || effect_type == RefundPayment::EFFECT_TYPE);
+        let effect_subject = SettingSubject::Effect {
+            effect_type: effect_type.clone(),
+        };
+        let minimum = info
+            .minimum_calls()
+            .expect("inactive settings remain evidence");
+        assert_setting(
+            minimum,
+            if exact { 6 } else { 8 },
+            "file",
+            "stage:authorize_payment",
+            if exact {
+                effect_subject.clone()
+            } else {
+                SettingSubject::Unqualified
+            },
+        );
+        assert_setting(
+            info.mode(),
+            if exact {
+                CircuitBreakerMode::Consecutive
+            } else {
+                CircuitBreakerMode::RateBased
+            },
+            if exact { "file" } else { "dsl" },
+            "stage:authorize_payment",
+            effect_subject.clone(),
+        );
+        if exact {
+            assert_setting(
+                info.consecutive_failures()
+                    .expect("active consecutive setting"),
+                3,
+                "file",
+                "stage:authorize_payment",
+                effect_subject,
+            );
+        } else {
+            assert!(info.consecutive_failures().is_none());
+        }
+        let minimum_row = evidence
+            .values
+            .iter()
+            .find(|row| {
+                row.key_path == CIRCUIT_BREAKER_MINIMUM_CALLS_KEY
+                    && row.resolved_for
+                        == Some(ResolvedForDoc::Effect {
+                            stage: "authorize_payment".to_string(),
+                            effect_type: effect_type.clone(),
+                        })
+            })
+            .expect("the topology setting must have corresponding manifest evidence");
+        assert_eq!(minimum_row.value, json!(minimum.value));
+        assert_eq!(minimum_row.source, minimum.provenance.source);
+        assert_eq!(minimum_row.scope, minimum.provenance.scope);
+        assert_eq!(
+            minimum_row.winner_subject,
+            Some(if exact {
+                ConfigSubject::Effect {
+                    effect_type: effect_type.as_str().into(),
+                }
+            } else {
+                ConfigSubject::Unqualified
+            })
+        );
+    }
 }
 
 #[test]

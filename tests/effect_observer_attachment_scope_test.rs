@@ -406,7 +406,7 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                 }));
             let mut keys = attachments
                 .iter()
-                .map(|attachment| attachment.key.clone())
+                .map(|attachment| attachment.key)
                 .collect::<Vec<_>>();
             keys.sort();
             if let Some(expected) = &stable_keys {
