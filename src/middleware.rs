@@ -52,6 +52,13 @@ pub use obzenflow_adapters::middleware::{
     MiddlewareFactoryResult, RateLimiter, Retry, SinkDeliveryObserver, SinkDeliveryObserverFactory,
     SourcePollObserverFactory, StageLifecycleObserverFactory, StatefulObserverFactory,
 };
+// Application-owned control factories use the same checked attachment contract
+// as built-in policies, without importing implementation crates.
+pub use obzenflow_adapters::middleware::{
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceKind, SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
+};
 pub use obzenflow_runtime::stages::observer::{
     EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
     HandlerObserverContext, JoinDeliverySnapshot, JoinObserver, JoinObserverContext,
