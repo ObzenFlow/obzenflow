@@ -14,7 +14,7 @@ use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, Presentation};
 use obzenflow::flow::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::RateLimiterBuilder;
+use obzenflow::middleware::rate_limit;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources::ValuesSource;
@@ -309,9 +309,9 @@ fn main() -> Result<()> {
 
                 stages: {
                     // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-                    orders = source!(OrderEvent => orders_handler with [
-                        RateLimiterBuilder::new(3.0).build()
-                    ]); // Pace source intake for demo visibility.
+                    orders = source!(OrderEvent => orders_handler with {
+                        rate_limit(3.0)
+                    }); // Pace source intake for demo visibility.
 
                     // Cumulative score and count per product.
                     top_products = stateful!(OrderEvent -> TopProductsUpdate => top_products_handler);

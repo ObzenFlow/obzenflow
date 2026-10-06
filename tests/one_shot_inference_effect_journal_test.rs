@@ -9,7 +9,7 @@ mod replay_testkit;
 use async_trait::async_trait;
 use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, ChatEffects, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
-use obzenflow_adapters::middleware::{MiddlewareFactory, RateLimiterFactory};
+use obzenflow_adapters::middleware::{rate_limit, MiddlewareFactory};
 use obzenflow_core::ai::{
     AiClientError, ChatClient, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
     ChatRequestSpec, ChatResponse, ChatTarget, HeuristicTokenEstimator, ResolvedTokenEstimator,
@@ -568,7 +568,6 @@ fn build_shared_domain_operation_flow(
                         via chat
                         with ai_resilience()
                     => reviewed,
-                    observers: [],
                 );
                 collected = sink!(DecisionBrief => collected);
             },
@@ -588,7 +587,7 @@ fn build_flow_for_handler<H>(
     backpressure: BackpressureClause,
     evidence_inputs: Vec<ReducedEvidence>,
     brief_handler: H,
-    brief_policy: Box<dyn MiddlewareFactory>,
+    brief_policy: impl MiddlewareFactory + 'static,
 ) -> FlowDefinition
 where
     H: InferenceHandler<Input = ReducedEvidence, Output = DecisionBrief>
@@ -1330,7 +1329,7 @@ async fn inference_fan_out_acquires_once_against_the_slowest_edge() {
 }
 
 #[tokio::test]
-async fn invalid_inference_policy_leaves_its_binding_package_retryable() {
+async fn retrying_inference_policy_leaves_its_binding_package_retryable() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let prepare_calls = Arc::new(AtomicUsize::new(0));
     let interpret_calls = Arc::new(AtomicUsize::new(0));
@@ -1351,19 +1350,14 @@ async fn invalid_inference_policy_leaves_its_binding_package_retryable() {
                 interpret_calls: interpret_calls.clone(),
                 prompt_suffix: "",
             },
-            Box::new(RateLimiterFactory::new(1.0)),
+            obzenflow_adapters::middleware::retry(),
         ))
         .await;
 
     let detail = result
-        .expect_err("inference! requires its one EffectResilience policy")
+        .expect_err("inference! requires its one policy")
         .to_string();
-    assert!(detail.contains("inference!"), "{detail}");
-    assert!(detail.contains("generated stage 'brief'"), "{detail}");
-    assert!(
-        detail.contains("requires exactly one EffectResilience"),
-        "{detail}"
-    );
+    assert!(detail.contains("retry"), "{detail}");
     assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
     assert_eq!(interpret_calls.load(Ordering::SeqCst), 0);
     assert_eq!(resolutions.load(Ordering::SeqCst), 0);
@@ -1775,4 +1769,37 @@ async fn changed_inference_logic_version_is_replay_divergence_with_identical_req
     );
     assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn inference_accepts_limiter_only_effect_control() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let prepare_calls = Arc::new(AtomicUsize::new(0));
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+    let chat = live_chat_registry(resolutions.clone(), calls.clone());
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_flow_for_handler(
+            temp.path().join("journals"),
+            outputs.clone(),
+            chat,
+            enforced_backpressure(3).stall_timeout_ms(5_000),
+            vec![ReducedEvidence { value: 7 }],
+            BriefHandler {
+                prepare_calls: prepare_calls.clone(),
+                interpret_calls: interpret_calls.clone(),
+                prompt_suffix: "",
+            },
+            rate_limit(100.0),
+        ))
+        .await
+        .expect("a limiter-only plan is valid for non-retrying inference");
+    assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(outputs.lock().expect("output lock").len(), 1);
 }

@@ -23,7 +23,6 @@
 //!         via chat
 //!         with ai_resilience()
 //!     => chat_handler,
-//!     observers: [],
 //! );
 //! ```
 //!

@@ -5,32 +5,38 @@
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use std::time::Duration;
 
-/// Retry configuration for `EffectResilience`.
+/// Inert retry configuration for one eligible declared effect.
 #[derive(Debug, Clone)]
 pub struct Retry {
-    pub(in crate::middleware::control) policy: CircuitBreakerRetryPolicy,
+    pub(in crate::middleware::control) policy: RetryPolicy,
     pub(in crate::middleware::control) limits: RetryLimits,
 }
 
 impl Retry {
-    pub fn fixed(delay: Duration) -> Self {
-        Self::with_backoff(BackoffStrategy::Fixed { delay })
+    pub fn fixed_delay(mut self, delay: Duration) -> Self {
+        self.policy.backoff = BackoffStrategy::Fixed { delay };
+        self
     }
 
     /// Default exponential backoff: 250 ms initial, factor 2, four-second
     /// strategy cap, and jitter.
-    pub fn exponential() -> Self {
-        Self::with_backoff(BackoffStrategy::Exponential {
+    pub fn exponential_backoff(mut self) -> Self {
+        self.policy.backoff = Self::default_backoff();
+        self
+    }
+
+    fn default_backoff() -> BackoffStrategy {
+        BackoffStrategy::Exponential {
             initial: Duration::from_millis(250),
             max: Duration::from_secs(4),
             factor: 2.0,
             jitter: true,
-        })
+        }
     }
 
     fn with_backoff(backoff: BackoffStrategy) -> Self {
         Self {
-            policy: CircuitBreakerRetryPolicy {
+            policy: RetryPolicy {
                 max_attempts: 3,
                 backoff,
             },
@@ -39,13 +45,13 @@ impl Retry {
     }
 
     /// Total physical calls including the first. Validation occurs when the
-    /// enclosing `EffectResilience` is built.
+    /// flow is built.
     pub fn max_attempts(mut self, attempts: u32) -> Self {
         self.policy.max_attempts = attempts;
         self
     }
 
-    /// Cap breaker-generated backoff. A typed provider delay floor is never
+    /// Cap generated backoff. A typed provider delay floor is never
     /// shortened by this value.
     pub fn max_backoff(mut self, delay: Duration) -> Self {
         self.limits.max_single_delay = delay;
@@ -76,13 +82,18 @@ impl Default for RetryLimits {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::middleware::control) struct CircuitBreakerRetryPolicy {
+pub(in crate::middleware::control) struct RetryPolicy {
     pub(in crate::middleware::control) max_attempts: u32,
     pub(in crate::middleware::control) backoff: BackoffStrategy,
 }
 
-impl CircuitBreakerRetryPolicy {
+impl RetryPolicy {
     pub(in crate::middleware::control) fn calculate_delay(&self, attempt: usize) -> Duration {
         self.backoff.calculate_delay(attempt)
     }
+}
+
+/// Declare an inert retry policy using the default exponential schedule.
+pub fn retry() -> Retry {
+    Retry::with_backoff(Retry::default_backoff())
 }

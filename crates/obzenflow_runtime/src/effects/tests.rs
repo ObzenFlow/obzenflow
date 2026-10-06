@@ -6359,6 +6359,7 @@ impl EffectBoundary for PanicBoundary {
 
 struct InvariantEvidenceBoundary {
     include_preterminal: bool,
+    breaker_free: bool,
     consults: Arc<AtomicUsize>,
 }
 
@@ -6389,7 +6390,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         operation: AffineEffectOperation,
     ) -> AffineEffectBoundaryReport {
         use obzenflow_core::event::chain_event::{
-            CircuitBreakerAttemptSettledEventParams, CircuitBreakerRecoveryCompletedEventParams,
+            CircuitBreakerAttemptSettledEventParams, RecoveryCompletedEventParams,
         };
         use obzenflow_core::event::payloads::execution_payload::CircuitBreakerHealthClassification;
 
@@ -6404,7 +6405,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         let evidence_writer = WriterId::from(StageId::new());
         let mut controls = Vec::new();
         if self.include_preterminal {
-            controls.push(ChainEventFactory::circuit_breaker_retry_scheduled(
+            controls.push(ChainEventFactory::retry_scheduled(
                 evidence_writer,
                 identity.cursor.clone(),
                 attempt.saturating_add(1),
@@ -6412,21 +6413,32 @@ impl EffectBoundary for InvariantEvidenceBoundary {
                 event.id,
             ));
         }
-        controls.push(ChainEventFactory::circuit_breaker_attempt_settled(
-            evidence_writer,
-            CircuitBreakerAttemptSettledEventParams {
-                cursor: identity.cursor.clone(),
+        controls.push(if self.breaker_free {
+            ChainEventFactory::recovery_attempt_completed(
+                evidence_writer,
+                identity.cursor.clone(),
                 attempt,
-                health_classification: CircuitBreakerHealthClassification::Ignored,
-                slow: false,
-                dependency_elapsed_ms: 0,
-                admission_wait_ms: 0,
-            },
-            event.id,
-        ));
-        controls.push(ChainEventFactory::circuit_breaker_recovery_completed(
+                0,
+                0,
+                event.id,
+            )
+        } else {
+            ChainEventFactory::circuit_breaker_attempt_settled(
+                evidence_writer,
+                CircuitBreakerAttemptSettledEventParams {
+                    cursor: identity.cursor.clone(),
+                    attempt,
+                    health_classification: CircuitBreakerHealthClassification::Ignored,
+                    slow: false,
+                    dependency_elapsed_ms: 0,
+                    admission_wait_ms: 0,
+                },
+                event.id,
+            )
+        });
+        controls.push(ChainEventFactory::recovery_completed(
             evidence_writer,
-            CircuitBreakerRecoveryCompletedEventParams {
+            RecoveryCompletedEventParams {
                 cursor: identity.cursor.clone(),
                 total_attempts: attempt,
                 backoff_elapsed_ms: 0,
@@ -6508,6 +6520,7 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
     let preterminal_calls = Arc::new(AtomicUsize::new(0));
     let mut preterminal_ctx = invocation_context(preterminal_cut.clone(), parent.clone(), None);
     preterminal_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        breaker_free: false,
         include_preterminal: true,
         consults: Arc::new(AtomicUsize::new(0)),
     }));
@@ -6539,6 +6552,7 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
     let terminal_calls = Arc::new(AtomicUsize::new(0));
     let mut terminal_ctx = invocation_context(terminal_cut.clone(), parent, None);
     terminal_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        breaker_free: false,
         include_preterminal: true,
         consults: Arc::new(AtomicUsize::new(0)),
     }));
@@ -6574,6 +6588,15 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
 
 #[tokio::test]
 async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
+    invariant_escape_resume_sequence(false).await;
+}
+
+#[tokio::test]
+async fn breaker_free_invariant_escape_resume_preserves_attempt_scoped_identity() {
+    invariant_escape_resume_sequence(true).await;
+}
+
+async fn invariant_escape_resume_sequence(breaker_free: bool) {
     let stage_id = StageId::new();
     let parent = parent_envelope(WriterId::from(stage_id));
 
@@ -6584,6 +6607,7 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
     let first_calls = Arc::new(AtomicUsize::new(0));
     let mut first_ctx = invocation_context(first.clone(), parent.clone(), None);
     first_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        breaker_free,
         include_preterminal: true,
         consults: Arc::new(AtomicUsize::new(0)),
     }));
@@ -6612,6 +6636,7 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
         EffectPortRegistry::new(),
     );
     second_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        breaker_free,
         include_preterminal: true,
         consults: Arc::new(AtomicUsize::new(0)),
     }));
@@ -6637,6 +6662,7 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
         EffectPortRegistry::new(),
     );
     terminal_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        breaker_free,
         include_preterminal: false,
         consults: terminal_consults.clone(),
     }));
@@ -6733,6 +6759,15 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
         .expect("sequenced cursor history remains valid replay evidence"),
     );
 
+    if breaker_free {
+        assert!(
+            terminal.events().iter().all(|event| !matches!(
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_))
+            )),
+            "breaker-free invariant settlement must not fabricate health evidence"
+        );
+    }
     let replay = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_consults = Arc::new(AtomicUsize::new(0));
@@ -6744,6 +6779,7 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
         EffectPortRegistry::new(),
     );
     replay_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        breaker_free,
         include_preterminal: true,
         consults: replay_consults.clone(),
     }));

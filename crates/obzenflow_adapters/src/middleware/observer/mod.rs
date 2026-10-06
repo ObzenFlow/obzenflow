@@ -86,7 +86,7 @@ impl StageObserverSet {
         Ok(())
     }
 
-    /// Regroup every checked subject product from one `observers:` declaration
+    /// Regroup every checked subject product from one authored observer attachment
     /// into one runtime attachment. This preserves subject-aware factory
     /// materialisation without multiplying dispatch or quarantine identities.
     pub fn push_effect_attachments(
@@ -119,6 +119,33 @@ impl StageObserverSet {
         let binding =
             ObserverBinding::effects(label, subjects).map_err(|error| error.to_string())?;
         self.bindings.push(binding);
+        Ok(())
+    }
+
+    /// Preserve one authored declaration's quarantine across shell and effect
+    /// products. Calls for different authored sites remain independent.
+    pub fn push_logical_attachments(
+        &mut self,
+        shell: Vec<CheckedMiddlewareSurfaceAttachment>,
+        effects: Vec<(&'static str, CheckedMiddlewareSurfaceAttachment)>,
+    ) -> Result<(), String> {
+        let mut products = Self::default();
+        for attachment in shell {
+            products.push_attachment(attachment)?;
+        }
+        if !effects.is_empty() {
+            products.push_effect_attachments(effects)?;
+        }
+        if let Some(first) = products.bindings.iter().next() {
+            if products
+                .bindings
+                .iter()
+                .any(|binding| binding.label() != first.label())
+            {
+                return Err("observer declaration changed its label across surfaces".into());
+            }
+        }
+        self.bindings.extend_logical_attachment(products.bindings);
         Ok(())
     }
 

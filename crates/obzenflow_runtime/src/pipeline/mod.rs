@@ -20,9 +20,7 @@ mod termination;
 pub(crate) mod tests;
 
 pub use builder::PipelineBuilder;
-pub use config::{
-    MiddlewareStackConfig, ObserverConfig, StageConfig as PipelineStageConfig, StageHandlerType,
-};
+pub use config::{ObserverConfig, StageConfig as PipelineStageConfig, StageHandlerType};
 pub use handle::FlowHandle;
 pub use lifecycle::{FlowStartControlOutcome, FlowStopMode, PipelineControl, PipelineState};
 pub use max_iterations::MaxIterations;

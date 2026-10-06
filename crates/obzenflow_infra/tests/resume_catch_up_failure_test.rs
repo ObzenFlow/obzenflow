@@ -267,9 +267,7 @@ fn build_flow(
                 src_b = infinite_source!(ChannelTick => channel_b);
                 merge = transform!(ChannelTick -> Merged => merge_transform);
                 effectful = effectful_transform!(
-                    Merged -> { AbortOutput, EffectValue } uses CountingEffect => effectful_tail,
-                    observers: []
-                );
+                    Merged -> { AbortOutput, EffectValue } uses CountingEffect => effectful_tail);
                 collect = sink!(AbortOutput => counting_sink);
             },
 

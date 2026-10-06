@@ -42,6 +42,12 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
     }
 
+    struct OutObserver;
+
+    impl obzenflow_adapters::middleware::SinkDeliveryObserver for OutObserver {
+        type Input = Out;
+    }
+
     #[derive(Clone, Debug)]
     struct Src;
     impl SourceTyping for Src {
@@ -406,61 +412,53 @@ mod tests {
 
         let _ = crate::source!(
             name: "finite",
-            Out => finite with [],
+            Out => finite ,
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::async_source!(
             name: "async_finite",
-            Out => async_finite with [],
+            Out => async_finite ,
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::infinite_source!(
             name: "infinite",
-            Out => infinite with [],
+            Out => infinite ,
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::async_infinite_source!(
             name: "async_infinite",
-            Out => async_infinite with [],
+            Out => async_infinite ,
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::transform!(
             name: "transform",
             In -> Out => transform,
-            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::effectful_transform!(
             name: "effectful_transform",
             In -> Out => effectful_transform,
-            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::stateful!(
             name: "stateful",
             In -> Out => stateful,
             emit_interval = std::time::Duration::from_millis(1),
-            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::effectful_stateful!(
             name: "effectful_stateful",
             In -> Out => effectful_stateful,
-            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::join!(
             name: "join",
             catalog reference_stage: In,
-            In -> Out => join,
-            observers: []
-        );
+            In -> Out => join);
         let _ = crate::sink!(
             name: "sink",
             Out => sink,
-            delivery: idempotent,
-            observers: []
-        );
+            delivery: idempotent);
     }
 
     // ── source! ─────────────────────────────────────────────────────────────
@@ -470,7 +468,7 @@ mod tests {
     }
     #[test]
     fn source_typed_mw() {
-        let _ = crate::source!(Out => Src with []);
+        let _ = crate::source!(Out => Src );
     }
     #[test]
     fn source_typed_name() {
@@ -478,7 +476,7 @@ mod tests {
     }
     #[test]
     fn source_typed_name_mw() {
-        let _ = crate::source!(name: "s", Out => Src with []);
+        let _ = crate::source!(name: "s", Out => Src );
     }
     #[test]
     fn source_accepts_a_qualified_unit_path() {
@@ -500,7 +498,7 @@ mod tests {
     }
     #[test]
     fn async_source_typed_mw() {
-        let _ = crate::async_source!(Out => AsyncSrc with []);
+        let _ = crate::async_source!(Out => AsyncSrc );
     }
     #[test]
     fn async_source_typed_name() {
@@ -508,7 +506,7 @@ mod tests {
     }
     #[test]
     fn async_source_typed_name_mw() {
-        let _ = crate::async_source!(name: "s", Out => AsyncSrc with []);
+        let _ = crate::async_source!(name: "s", Out => AsyncSrc );
     }
 
     // ── infinite_source! ────────────────────────────────────────────────────
@@ -518,7 +516,7 @@ mod tests {
     }
     #[test]
     fn infinite_source_typed_mw() {
-        let _ = crate::infinite_source!(Out => InfSrc with []);
+        let _ = crate::infinite_source!(Out => InfSrc );
     }
     #[test]
     fn infinite_source_typed_name() {
@@ -526,7 +524,7 @@ mod tests {
     }
     #[test]
     fn infinite_source_typed_name_mw() {
-        let _ = crate::infinite_source!(name: "s", Out => InfSrc with []);
+        let _ = crate::infinite_source!(name: "s", Out => InfSrc );
     }
 
     // ── async_infinite_source! ──────────────────────────────────────────────
@@ -536,7 +534,7 @@ mod tests {
     }
     #[test]
     fn async_infinite_source_typed_mw() {
-        let _ = crate::async_infinite_source!(Out => AsyncInfSrc with []);
+        let _ = crate::async_infinite_source!(Out => AsyncInfSrc );
     }
     #[test]
     fn async_infinite_source_typed_name() {
@@ -544,7 +542,7 @@ mod tests {
     }
     #[test]
     fn async_infinite_source_typed_name_mw() {
-        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc with []);
+        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc );
     }
 
     // ── transform! ──────────────────────────────────────────────────────────
@@ -554,7 +552,7 @@ mod tests {
     }
     #[test]
     fn transform_typed_mw() {
-        let _ = crate::transform!(In -> Out => Tr, observers: []);
+        let _ = crate::transform!(In -> Out => Tr);
     }
     #[test]
     fn transform_typed_name() {
@@ -562,33 +560,31 @@ mod tests {
     }
     #[test]
     fn transform_typed_name_mw() {
-        let _ = crate::transform!(name: "t", In -> Out => Tr, observers: []);
+        let _ = crate::transform!(name: "t", In -> Out => Tr);
     }
 
     // ── effectful_transform! ──────────────────────────────────────────
     #[test]
     fn effectful_transform_typed_bare() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr, observers: []);
+        let _ = crate::effectful_transform!(In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_typed_mw() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr, observers: []);
+        let _ = crate::effectful_transform!(In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_typed_name() {
-        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr, observers: []);
+        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_typed_name_mw() {
-        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr, observers: []);
+        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_transactional_effect_clause_declares_executor() {
         let tx = tx_binding();
         let descriptor = crate::effectful_transform!(
-            In -> Out uses transactional(TxEffect) via tx => TxFxTr,
-            observers: []
-        );
+            In -> Out uses transactional(TxEffect) via tx => TxFxTr);
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
@@ -608,7 +604,7 @@ mod tests {
     }
     #[test]
     fn stateful_typed_mw() {
-        let _ = crate::stateful!(In -> Out => St, observers: []);
+        let _ = crate::stateful!(In -> Out => St);
     }
     #[test]
     fn stateful_typed_name() {
@@ -616,25 +612,25 @@ mod tests {
     }
     #[test]
     fn stateful_typed_name_mw() {
-        let _ = crate::stateful!(name: "s", In -> Out => St, observers: []);
+        let _ = crate::stateful!(name: "s", In -> Out => St);
     }
 
     // ── effectful_stateful! ─────────────────────────────────────────────────
     #[test]
     fn effectful_stateful_typed_bare() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt, observers: []);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt);
     }
     #[test]
     fn effectful_stateful_typed_mw() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt, observers: []);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt);
     }
     #[test]
     fn effectful_stateful_typed_name() {
-        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt, observers: []);
+        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt);
     }
     #[test]
     fn effectful_stateful_typed_name_mw() {
-        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt, observers: []);
+        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt);
     }
 
     #[test]
@@ -642,10 +638,8 @@ mod tests {
         let descriptor = crate::effectful_stateful!(
             In -> Out
             uses PolicyEffect
-                with obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
-            => FxPolicySt,
-            observers: []
-        );
+                with obzenflow_adapters::middleware::rate_limit(1_000.0)
+            => FxPolicySt);
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
@@ -655,6 +649,48 @@ mod tests {
         assert_eq!(policies[0].effect_type, PolicyEffect::EFFECT_TYPE);
     }
 
+    struct EffectAudit;
+    impl obzenflow_runtime::stages::observer::EffectObserver for EffectAudit {}
+
+    #[test]
+    fn uniform_groups_compose_controls_across_effect_and_implementation_sites() {
+        use obzenflow_adapters::middleware::{circuit_breaker, effect_observer, rate_limit, retry};
+        let limiter = rate_limit(10.0);
+        let mut descriptor = crate::effectful_stateful!(
+            In -> Out uses PolicyEffect with { limiter, effect_observer("audit", EffectAudit) }
+            => FxPolicySt with { retry(), circuit_breaker().consecutive_failures(3), effect_observer("audit", EffectAudit) }
+        );
+        descriptor
+            .prepare_middleware()
+            .expect("a single plan spans both authored sites");
+        assert_eq!(descriptor.stage_middleware_factories().len(), 1);
+        assert_eq!(descriptor.effect_policy_attachments().len(), 2);
+        let controls = descriptor
+            .effect_policy_attachments()
+            .iter()
+            .find(|a| a.factory.declaration().is_control())
+            .unwrap();
+        assert_eq!(
+            controls.factory.builtin_control().unwrap().families().len(),
+            3
+        );
+    }
+
+    #[test]
+    fn source_and_sink_groups_mix_observers_with_controls() {
+        use obzenflow_adapters::middleware::{
+            circuit_breaker, rate_limit, sink_delivery_observer, source_poll_observer,
+        };
+        struct PollAudit;
+        impl obzenflow_runtime::stages::observer::SourcePollObserver for PollAudit {}
+        let mut source = crate::source!(Out => Src with { circuit_breaker().consecutive_failures(3), source_poll_observer("audit", PollAudit), rate_limit(10.0) });
+        source.prepare_middleware().unwrap();
+        assert_eq!(source.stage_middleware_factories().len(), 3);
+        let mut sink = crate::sink!(Out => Sn with { sink_delivery_observer("audit", OutObserver), rate_limit(10.0), circuit_breaker().consecutive_failures(3) });
+        sink.prepare_middleware().unwrap();
+        assert_eq!(sink.stage_middleware_factories().len(), 3);
+    }
+
     // ── sink! ───────────────────────────────────────────────────────────────
     #[test]
     fn sink_typed_bare() {
@@ -662,7 +698,7 @@ mod tests {
     }
     #[test]
     fn sink_typed_mw() {
-        let _ = crate::sink!(Out => Sn, observers: []);
+        let _ = crate::sink!(Out => Sn);
     }
     #[test]
     fn sink_typed_name() {
@@ -670,7 +706,7 @@ mod tests {
     }
     #[test]
     fn sink_typed_name_mw() {
-        let _ = crate::sink!(name: "s", Out => Sn, observers: []);
+        let _ = crate::sink!(name: "s", Out => Sn);
     }
     #[test]
     fn sink_handler_set_lowers_one_heterogeneous_binding_by_its_exact_name() {
@@ -712,15 +748,13 @@ mod tests {
         );
 
         let pending = crate::sink!(
-            Out => handler_set!(first_sink, second_sink) with [{
+            Out => handler_set!(first_sink, second_sink) with { ({
                 policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
-            }],
-            observers: [{
+                obzenflow_adapters::middleware::rate_limit(1_000.0)
+            }), ({
                 observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::RateLimiterBuilder::new(2_000.0).build()
-            }]
-        )
+                obzenflow_adapters::middleware::sink_delivery_observer("capture-proof", OutObserver)
+            }) })
         .expect("the closed handler set is valid");
         let result = pending.select_configured_sink_handler("unknown_sink");
 
@@ -768,16 +802,14 @@ mod tests {
 
         let pending = crate::sink!(
             name: "selected_output",
-            Out => handler_set!(inline_sink, classified_sink) with [{
+            Out => handler_set!(inline_sink, classified_sink) with { ({
                 policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
-            }],
-            delivery: idempotent,
-            observers: [{
+                obzenflow_adapters::middleware::rate_limit(1_000.0)
+            }), ({
                 observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                obzenflow_adapters::middleware::RateLimiterBuilder::new(2_000.0).build()
-            }]
-        )
+                obzenflow_adapters::middleware::sink_delivery_observer("capture-proof", OutObserver)
+            }) },
+            delivery: idempotent)
         .expect("the closed handler set is valid");
         let selected = pending
             .select_configured_sink_handler("inline_sink")
@@ -807,7 +839,7 @@ mod tests {
         let idempotent_sink = Sn;
         let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
         let non_idempotent_sink = Sn;
-        let _ = crate::sink!(Out => non_idempotent_sink, delivery: non_idempotent, observers: []);
+        let _ = crate::sink!(Out => non_idempotent_sink, delivery: non_idempotent);
     }
     #[test]
     fn sink_exact_contract_inline_sink() {
@@ -816,7 +848,7 @@ mod tests {
         let idempotent_sink = Sn;
         let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
         let named_sink = Sn;
-        let _ = crate::sink!(name: "s", Out => named_sink, observers: []);
+        let _ = crate::sink!(name: "s", Out => named_sink);
     }
     #[test]
     fn sink_exact_contract_named_delivery() {
@@ -826,8 +858,6 @@ mod tests {
         let _ = crate::sink!(
             name: "s",
             Out => named_sink,
-            delivery: idempotent,
-            observers: []
-        );
+            delivery: idempotent);
     }
 }

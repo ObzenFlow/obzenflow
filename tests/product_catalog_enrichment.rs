@@ -7,6 +7,9 @@ mod replay_testkit;
 #[path = "../examples/product_catalog_enrichment/support.rs"]
 mod product_catalog_enrichment;
 
+#[path = "test_support/product_catalog_summary_delivery.rs"]
+mod summary_delivery;
+
 #[path = "test_support/product_catalog_enrichment_fixture.rs"]
 mod catalog_fixture;
 #[path = "../examples/product_catalog_enrichment/presentation.rs"]

@@ -618,9 +618,7 @@ mod tests {
 
         let effectful_transform = crate::effectful_transform!(
             name: "effectful_transform",
-            OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform,
-            observers: []
-        );
+            OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform);
         let effectful_transform_meta = effectful_transform.typing_metadata().unwrap();
         assert_eq!(effectful_transform_meta.output_type, exact::<OutputEvent>());
         assert_output_contract(
@@ -633,9 +631,7 @@ mod tests {
     fn effectful_transform_output_set_lowers_all_members_to_output_contract() {
         let effectful_transform = crate::effectful_transform!(
             name: "effectful_multi_output_transform",
-            OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform,
-            observers: []
-        );
+            OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform);
         let metadata = effectful_transform.typing_metadata().unwrap();
 
         assert_eq!(metadata.output_type, exact::<OutputEvent>());
@@ -722,9 +718,7 @@ mod tests {
 
         let effectful_stateful = crate::effectful_stateful!(
             name: "multi_output_effectful_stateful",
-            InputEvent -> { OutputEvent, AlternateEvent } => EffectfulProductStateful,
-            observers: []
-        );
+            InputEvent -> { OutputEvent, AlternateEvent } => EffectfulProductStateful);
         let effectful_stateful_meta = effectful_stateful.typing_metadata().unwrap();
         assert_eq!(effectful_stateful_meta.output_type, exact::<OutputEvent>());
         assert_output_contract(
@@ -749,9 +743,7 @@ mod tests {
     fn effectful_stateful_scalar_output_contract_has_one_member() {
         let effectful_stateful = crate::effectful_stateful!(
             name: "effectful_stateful",
-            InputEvent -> OutputEvent => EffectfulExactStateful,
-            observers: []
-        );
+            InputEvent -> OutputEvent => EffectfulExactStateful);
         let metadata = effectful_stateful.typing_metadata().unwrap();
 
         assert_eq!(metadata.output_type, exact::<OutputEvent>());
@@ -1127,9 +1119,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -1214,9 +1204,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -1708,9 +1696,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -1829,9 +1815,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -1947,9 +1931,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -2046,9 +2028,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -2128,9 +2108,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -2245,9 +2223,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
         // A fan-in with only a sink below it: never marked.
         descriptors.insert(
@@ -2380,9 +2356,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();
@@ -2458,9 +2432,7 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform,
-                observers: []
-            ),
+                OutputEvent -> OutputEvent => EffectfulExactTransform),
         );
 
         let mut name_to_id = HashMap::new();

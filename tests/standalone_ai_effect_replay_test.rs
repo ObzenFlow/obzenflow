@@ -360,7 +360,6 @@ fn build_flow(
                         via chat
                         with ai_resilience()
                     => chat_handler,
-                    observers: [],
                 );
                 embedding = effectful_transform!(
                     TicketSummarised -> TicketEmbedded
@@ -368,7 +367,6 @@ fn build_flow(
                         via embedding
                         with ai_resilience()
                     => embedding_handler,
-                    observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);
             },

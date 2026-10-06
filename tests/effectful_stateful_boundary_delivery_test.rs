@@ -318,7 +318,6 @@ fn build_probe_flow(
                     BoundaryProbeInput -> BoundaryProbeFact
                     uses BoundaryProbeEffect with policy
                     => handler,
-                    observers: [],
                 );
                 output = sink!(BoundaryProbeFact => NoopSink);
             },

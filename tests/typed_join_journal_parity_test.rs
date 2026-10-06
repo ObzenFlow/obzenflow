@@ -681,7 +681,7 @@ async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpr
             journals: disk_journals(journal_base),
             backpressure: enforced(2).stall_timeout_ms(3_000),
             stages: {
-                references = source!(ReferenceItem => references with [], backpressure: enforced(1));
+                references = source!(ReferenceItem => references , backpressure: enforced(1));
                 stream_a = source!(StreamItem => stream_a);
                 stream_b = source!(StreamItem => stream_b);
                 joined = join!(catalog references: ReferenceItem, StreamItem -> JoinedFact => joined);

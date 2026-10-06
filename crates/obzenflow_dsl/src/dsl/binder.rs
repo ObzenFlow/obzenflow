@@ -14,7 +14,7 @@ use obzenflow_adapters::middleware::{
     materialize_factory_checked, materialize_factory_checked_with_declaration,
     CheckedMiddlewareSurfaceAttachment, EffectPolicyAttachment, EffectSurface, EffectTypeKey,
     EffectUnitId, HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareDeclarationIndex,
+    MiddlewareAttachmentRequest, MiddlewareAttachmentSite, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareSurface, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
     SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
     SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
@@ -27,6 +27,188 @@ use obzenflow_runtime::effects::EffectDeclaration;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
+
+/// Preflight uses the same typed surface and protected unit as materialisation.
+/// It runs over every stage before any factory or connector can open.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_factory_configuration(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    stage_type: StageType,
+    kind: MiddlewareSurfaceKind,
+    effect: Option<&EffectDeclaration>,
+    ingress: Option<&IngressKey>,
+    authored_site: MiddlewareAttachmentSite,
+) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
+    use crate::dsl::error::MiddlewarePlanError;
+    let effect_name = effect.map(EffectDeclaration::effect_type);
+    with_binding_request(
+        factory.label(),
+        config,
+        kind,
+        effect,
+        ingress,
+        authored_site,
+        |request| {
+            obzenflow_adapters::middleware::validate_attachment_request(
+                &factory.declaration(),
+                &request,
+            )
+            .map_err(|source| MiddlewarePlanError::InvalidBinding {
+                stage: config.name.clone(),
+                effect: MiddlewarePlanError::effect_context(effect_name),
+                source,
+            })?;
+            factory
+                .validate_configuration(request, config, stage_type)
+                .map_err(|source| MiddlewarePlanError::InvalidConfiguration {
+                    stage: config.name.clone(),
+                    effect: MiddlewarePlanError::effect_context(effect_name),
+                    source,
+                })
+        },
+    )?
+}
+
+fn with_binding_request<T>(
+    label: &str,
+    config: &StageConfig,
+    kind: MiddlewareSurfaceKind,
+    effect: Option<&EffectDeclaration>,
+    ingress: Option<&IngressKey>,
+    authored_site: MiddlewareAttachmentSite,
+    visit: impl FnOnce(MiddlewareAttachmentRequest<'_>) -> T,
+) -> Result<T, crate::dsl::error::MiddlewarePlanError> {
+    use crate::dsl::error::MiddlewarePlanError;
+    let effect_name = effect.map(EffectDeclaration::effect_type);
+    let (surface, unit) = match kind {
+        MiddlewareSurfaceKind::SourcePoll => (
+            MiddlewareSurface::SourcePoll(SourcePollSurface {
+                stage_id: config.stage_id,
+            }),
+            ProtectedUnit::SourcePoll(SourcePollUnitId),
+        ),
+        MiddlewareSurfaceKind::SinkDelivery => (
+            MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
+                stage_id: config.stage_id,
+                configured_target: None,
+            }),
+            ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
+                target: SinkDeliveryTarget::Stage,
+            }),
+        ),
+        MiddlewareSurfaceKind::Effect => {
+            let effect = effect.ok_or_else(|| {
+                MiddlewarePlanError::invalid(
+                    &config.name,
+                    effect_name,
+                    format!("no effect subject for '{}'", label),
+                )
+            })?;
+            (
+                MiddlewareSurface::Effect(EffectSurface {
+                    stage_id: config.stage_id,
+                    effect_type: EffectTypeKey::from(effect.effect_type()),
+                    safety: effect.safety(),
+                }),
+                ProtectedUnit::Effect(EffectUnitId {
+                    effect_type: EffectTypeKey::from(effect.effect_type()),
+                }),
+            )
+        }
+        MiddlewareSurfaceKind::Ingress => {
+            let ingress = ingress.ok_or_else(|| {
+                MiddlewarePlanError::invalid(
+                    &config.name,
+                    effect_name,
+                    format!("'{}' requires a hosted source", label),
+                )
+            })?;
+            let stage_key = StageKey(config.name.clone());
+            let target = HostedIngressTargetKey {
+                surface: ingress.clone(),
+                scope: IngressRouteScope::Admission,
+            };
+            (
+                MiddlewareSurface::Ingress(IngressSurface {
+                    owner: SourceStageIngressOwner {
+                        stage_id: config.stage_id,
+                        stage_key: stage_key.clone(),
+                    },
+                    target: target.clone(),
+                }),
+                ProtectedUnit::Ingress(IngressUnitId {
+                    source_stage_key: stage_key,
+                    target,
+                }),
+            )
+        }
+        MiddlewareSurfaceKind::Handler => (
+            MiddlewareSurface::Handler {
+                stage_id: config.stage_id,
+            },
+            ProtectedUnit::Handler,
+        ),
+        MiddlewareSurfaceKind::Stateful => (
+            MiddlewareSurface::Stateful {
+                stage_id: config.stage_id,
+            },
+            ProtectedUnit::Stateful,
+        ),
+        MiddlewareSurfaceKind::Join => (
+            MiddlewareSurface::Join {
+                stage_id: config.stage_id,
+            },
+            ProtectedUnit::Join,
+        ),
+        MiddlewareSurfaceKind::StageLifecycle => (
+            MiddlewareSurface::StageLifecycle {
+                stage_id: config.stage_id,
+            },
+            ProtectedUnit::StageLifecycle,
+        ),
+    };
+    let protected_unit = ProtectedUnitId {
+        stage_id: config.stage_id,
+        unit,
+    };
+    let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
+        surface: &surface,
+        protected_unit: &protected_unit,
+        authored_site,
+    };
+    Ok(visit(request))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attachment_key(
+    declaration: &MiddlewareDeclaration,
+    config: &StageConfig,
+    kind: MiddlewareSurfaceKind,
+    effect: Option<&EffectDeclaration>,
+    ingress: Option<&IngressKey>,
+    authored_site: MiddlewareAttachmentSite,
+) -> Result<obzenflow_topology::MiddlewareAttachmentKey, crate::dsl::error::MiddlewarePlanError> {
+    with_binding_request(
+        declaration.label,
+        config,
+        kind,
+        effect,
+        ingress,
+        authored_site,
+        |request| {
+            obzenflow_topology::MiddlewareAttachmentKey::from_bytes(
+                obzenflow_adapters::middleware::MiddlewareAttachmentId::from_declaration_and_request(
+                    declaration,
+                    &request,
+                )
+                .as_ulid()
+                .to_bytes(),
+            )
+        },
+    )
+}
 
 /// The pieces destructured from one control middleware's `SourcePoll`
 /// attachment: the composable source policy and the optional completion-gate
@@ -63,7 +245,7 @@ pub(crate) fn materialize_source_poll(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    declaration_index: MiddlewareDeclarationIndex,
+    authored_site: MiddlewareAttachmentSite,
 ) -> Result<SourcePollBinding, String> {
     let surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
         stage_id: config.stage_id,
@@ -73,9 +255,10 @@ pub(crate) fn materialize_source_poll(
         unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index,
+        authored_site,
     };
     match materialize_factory_checked(factory, request, config, stage_type, control_middleware)
         .map_err(|error| error.to_string())?
@@ -102,7 +285,7 @@ pub(crate) fn bind_effect_policy(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect: &EffectDeclaration,
-    declaration_index: MiddlewareDeclarationIndex,
+    authored_site: MiddlewareAttachmentSite,
 ) -> Result<EffectPolicyAttachment, String> {
     let factory = declared_factory.factory;
     let declaration = declared_factory.declaration;
@@ -119,9 +302,10 @@ pub(crate) fn bind_effect_policy(
         }),
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index,
+        authored_site,
     };
     match materialize_factory_checked_with_declaration(
         factory,
@@ -148,7 +332,7 @@ pub(crate) fn materialize_effect_observer(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect: &EffectDeclaration,
-    declaration_index: MiddlewareDeclarationIndex,
+    authored_site: MiddlewareAttachmentSite,
 ) -> Result<CheckedMiddlewareSurfaceAttachment, String> {
     let effect_type = effect.effect_type();
     let surface = MiddlewareSurface::Effect(EffectSurface {
@@ -163,9 +347,10 @@ pub(crate) fn materialize_effect_observer(
         }),
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index,
+        authored_site,
     };
     materialize_factory_checked(factory, request, config, stage_type, control_middleware)
         .map_err(|error| error.to_string())
@@ -177,7 +362,7 @@ pub(crate) fn materialize_observer(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     surface_kind: MiddlewareSurfaceKind,
-    declaration_index: MiddlewareDeclarationIndex,
+    authored_site: MiddlewareAttachmentSite,
 ) -> Result<CheckedMiddlewareSurfaceAttachment, String> {
     let surface = match surface_kind {
         MiddlewareSurfaceKind::SourcePoll => MiddlewareSurface::SourcePoll(SourcePollSurface {
@@ -226,9 +411,10 @@ pub(crate) fn materialize_observer(
         },
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index,
+        authored_site,
     };
     materialize_factory_checked(factory, request, config, stage_type, control_middleware)
         .map_err(|error| error.to_string())
@@ -241,7 +427,7 @@ pub(crate) fn materialize_sink_delivery(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    declaration_index: MiddlewareDeclarationIndex,
+    authored_site: MiddlewareAttachmentSite,
 ) -> Result<Arc<dyn SinkPolicy>, String> {
     let surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
         stage_id: config.stage_id,
@@ -254,9 +440,10 @@ pub(crate) fn materialize_sink_delivery(
         }),
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index,
+        authored_site,
     };
     match materialize_factory_checked(factory, request, config, stage_type, control_middleware)
         .map_err(|error| error.to_string())?
@@ -282,7 +469,7 @@ pub(crate) fn materialize_ingress(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     ingress_key: &IngressKey,
-    declaration_index: MiddlewareDeclarationIndex,
+    authored_site: MiddlewareAttachmentSite,
 ) -> Result<Arc<dyn IngressBoundaryMiddleware>, String> {
     let stage_key = StageKey(config.name.clone());
     let target = HostedIngressTargetKey {
@@ -304,9 +491,10 @@ pub(crate) fn materialize_ingress(
         }),
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index,
+        authored_site,
     };
     match materialize_factory_checked(factory, request, config, stage_type, control_middleware)
         .map_err(|error| error.to_string())?

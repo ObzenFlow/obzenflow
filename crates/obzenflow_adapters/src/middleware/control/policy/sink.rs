@@ -329,9 +329,10 @@ mod tests {
             }),
         };
         let request = MiddlewareAttachmentRequest {
+            stage_key: &config.name,
             surface: &surface,
             protected_unit: &unit,
-            declaration_index: crate::middleware::MiddlewareDeclarationIndex::sink_with(0),
+            authored_site: crate::middleware::MiddlewareAttachmentSite::Implementation,
         };
         let policy = crate::middleware::materialize_factory_checked(
             &factory,

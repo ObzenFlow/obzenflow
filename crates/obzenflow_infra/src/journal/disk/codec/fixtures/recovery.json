@@ -1,0 +1,66 @@
+{
+  "envelope": {
+    "provenance": {
+      "event": {
+        "id": "01M2R1P9BVTYM3VW6A1C977A2X",
+        "writer_id": {
+          "type": "Stage",
+          "id": "01M2R1P9BTCYETFDCV5JYHW1VZ"
+        },
+        "event_kind": "execution",
+        "event_type": "runtime.resilience.attempt_completed",
+        "payload_schema_version": 1,
+        "causality": {
+          "parent_ids": [
+            "01M2R1P9BW8HY0RX3NQGTKYGMG"
+          ]
+        },
+        "flow_context": {
+          "flow_name": "unknown",
+          "flow_id": "unknown",
+          "stage_name": "unknown",
+          "stage_id": "01M2R1P9BVN71QD6W0D7EABTFC",
+          "stage_type": "Transform"
+        },
+        "processing": {
+          "event_time": 1789660964219,
+          "status": "Success"
+        },
+        "composite_activations": []
+      },
+      "journal": {
+        "run_id": "00000000000000000000000003",
+        "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
+        "vector_clock": {
+          "entries": [
+            {
+              "journal_writer_id": "00000000000000000000000001",
+              "sequence": 18446744073709551615
+            },
+            {
+              "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
+              "sequence": 1
+            }
+          ]
+        },
+        "previous": null,
+        "timestamp": "2037-01-02T03:04:05.123456789Z",
+        "journal_group_id": null,
+        "journal_group_member": null
+      }
+    }
+  },
+  "payload": {
+    "execution_type": "recovery",
+    "action": "attempt_completed",
+    "cursor": {
+      "recorded_flow_id": "schema-16-fixture",
+      "stage_key": "orders",
+      "input_seq": 1,
+      "effect_ordinal": 0
+    },
+    "attempt": 2,
+    "dependency_elapsed_ms": 19,
+    "admission_wait_ms": 7
+  }
+}

@@ -9,7 +9,7 @@
 //! live-I/O unit to protect.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::CircuitBreaker;
+use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreaker};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -21,10 +21,7 @@ use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
 fn breaker(failures: u32) -> CircuitBreaker {
-    CircuitBreaker::builder()
-        .consecutive_failures(failures)
-        .build()
-        .expect("test breaker configuration")
+    circuit_breaker().consecutive_failures(failures)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,9 +95,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
 
             stages: {
                 guard_source = source!(GuardEvent => source_handler);
-                guarded = transform!(GuardEvent -> GuardEvent => transform_handler, observers: [
-                    breaker(3)
-                ]);
+                guarded = transform!(GuardEvent -> GuardEvent => transform_handler with { breaker(3) });
                 guard_sink = sink!(GuardEvent => sink_handler);
             },
 
@@ -118,7 +113,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
         Err(err) => format!("{err:?}"),
     };
     assert!(
-        err.contains("'observers:' accepts observer middleware only"),
-        "expected the FLOWIP-115s observer-authority rejection, got: {err}"
+        err.contains("guarded") && (err.contains("operation") || err.contains("control")),
+        "expected contextual rejection of control without a protected operation, got: {err}"
     );
 }

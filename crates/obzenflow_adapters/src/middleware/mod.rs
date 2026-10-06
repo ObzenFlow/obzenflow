@@ -16,12 +16,13 @@
 //!   errors; other hooks return nothing. None receive framework authority with
 //!   which to steer or publish execution.
 //! - **Control** middleware (circuit breaker, rate limiter, and effect
-//!   resilience) admits, paces, or rejects at a live-I/O boundary. Retry exists
-//!   only inside effect resilience; it is not a standalone attachment.
+//!   recovery) admits, paces, or rejects at a live-I/O boundary. Retry is an
+//!   independently configured effect attachment; one coordinated owner executes
+//!   every eligible attempt through its resolved admissions.
 //!
 //! Custom observers use a surface-specific `*_observer("label", value)`
 //! helper. Built-in control middleware uses the checked
-//! `CircuitBreaker::builder()` and `rate_limit()`.
+//! inert `circuit_breaker()`, `rate_limit()` and `retry()` values.
 //!
 //! ## Monitoring
 //!
@@ -107,9 +108,9 @@ mod validation;
 // directly, and dashboards/query assets live outside the middleware API.
 
 pub use middleware_factory::{
-    materialize_factory_checked, materialize_factory_checked_with_declaration,
-    MiddlewareBindingError, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
+    capture_middleware, materialize_factory_checked, materialize_factory_checked_with_declaration,
+    CapturedMiddlewareFactory, MiddlewareBindingError, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareFactoryResult, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
 
@@ -119,12 +120,12 @@ pub use carrier::{
     CheckedMiddlewareSurfaceAttachment, EffectControlCompositionError, EffectSurface,
     EffectTypeKey, EffectUnitId, HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope,
     IngressSurface, IngressUnitId, MiddlewareAttachmentId, MiddlewareAttachmentRequest,
-    MiddlewareAttachmentValidationError, MiddlewareAuthorityError, MiddlewareCapability,
-    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationPosition,
-    MiddlewareMaterializationContext, MiddlewareSurface, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId, SinkConfiguredTargetKey,
-    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SourcePollAttachment,
-    SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    MiddlewareAttachmentSite, MiddlewareAttachmentValidationError, MiddlewareAuthorityError,
+    MiddlewareCapability, MiddlewareDeclaration, MiddlewareMaterializationContext,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
+    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
+    SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
+    SourceStageIngressOwner,
 };
 pub(crate) use carrier::{MaterializationClaim, MiddlewareSurfaceAttachmentKind};
 pub use context::MiddlewareContext;
@@ -147,9 +148,14 @@ pub use obzenflow_runtime::stages::observer::{ObserverError, ObserverResult};
 
 // Control middleware
 pub use control::{
-    rate_limit, rate_limit_with_burst, CircuitBreaker, CircuitBreakerConfigError, EffectResilience,
-    EffectResilienceConfigError, FailureHealth, RateLimiter, RateLimiterBuilder,
-    RateLimiterFactory, RateLimiterMiddleware, Retry,
+    circuit_breaker, rate_limit, retry, CircuitBreaker, CircuitBreakerConfigError, FailureHealth,
+    RateLimiter, RateLimiterMiddleware, Retry,
+};
+
+#[doc(hidden)]
+pub use control::composition::{
+    compose_effect_controls, BuiltinControlContribution, BuiltinControlFamily,
+    ControlCompositionError,
 };
 
 // Middleware validation helpers

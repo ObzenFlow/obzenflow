@@ -147,12 +147,10 @@ pub fn build_flow(
             stages: {
                 // Ingestion
                 accounts = async_infinite_source!(
-                    AccountOpened => accounts_source,
-                    ingress with rate_limit(10.0)
+                    AccountOpened => accounts_source with { rate_limit(10.0) }
                 );
                 tx = async_infinite_source!(
-                    LedgerEntry => tx_source,
-                    ingress with rate_limit(50.0)
+                    LedgerEntry => tx_source with { rate_limit(50.0) }
                 );
 
                 // Processing

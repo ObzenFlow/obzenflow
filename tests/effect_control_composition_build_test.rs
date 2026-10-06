@@ -2,16 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115n A4: exclusive built-in effect-control authority is validated
-//! over the complete stage-plus-inline declaration set before materialisation.
+//! FLOWIP-115v: contextual effect-control composition and authority are
+//! validated over every authored site before materialisation.
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
-    validate_attachment_request, CircuitBreaker, EffectAttemptOutcome, EffectPolicy,
-    EffectResilience, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
-    MiddlewareFactory, MiddlewareFactoryResult, MiddlewareHints, MiddlewareMaterializationContext,
-    MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    PolicyAdmission, RateLimiterBuilder, TopologyMiddlewareConfigSlot,
+    circuit_breaker, rate_limit, validate_attachment_request, EffectAttemptOutcome, EffectPolicy,
+    MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory,
+    MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOverrideKey,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::stage_descriptor::{
@@ -163,30 +162,18 @@ impl EffectfulStatefulHandler for StatefulOneEffectHandler {
     }
 }
 
-fn aggregate() -> Box<dyn MiddlewareFactory> {
-    EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
-            .build()
-            .expect("breaker-only aggregate configuration"),
-    )
-    .build()
-    .expect("breaker-only aggregate factory")
+fn breaker() -> Box<dyn MiddlewareFactory> {
+    Box::new(circuit_breaker().consecutive_failures(2))
 }
 
 fn limiter() -> Box<dyn MiddlewareFactory> {
-    RateLimiterBuilder::new(10.0).build()
-}
-
-struct CountingFactory {
-    inner: Box<dyn MiddlewareFactory>,
-    materializations: Arc<AtomicUsize>,
+    Box::new(rate_limit(10.0))
 }
 
 struct LaunderedResilienceFamily;
 
 /// Models a third-party factory that claims ordinary effect-control semantics
-/// while delegating construction to the privileged aggregate.
+/// while delegating construction to the privileged breaker.
 struct LaunderedResilienceFactory {
     inner: Box<dyn MiddlewareFactory>,
 }
@@ -221,8 +208,8 @@ impl MiddlewareFactory for LaunderedResilienceFactory {
     }
 }
 
-fn laundered_aggregate() -> Box<dyn MiddlewareFactory> {
-    Box::new(LaunderedResilienceFactory { inner: aggregate() })
+fn laundered_breaker() -> Box<dyn MiddlewareFactory> {
+    Box::new(LaunderedResilienceFactory { inner: breaker() })
 }
 
 struct MutableDeclarationFamily;
@@ -267,74 +254,11 @@ impl MiddlewareFactory for MutableDeclarationFactory {
     }
 }
 
-fn mutable_declaration_aggregate() -> Box<dyn MiddlewareFactory> {
+fn mutable_declaration_breaker() -> Box<dyn MiddlewareFactory> {
     Box::new(MutableDeclarationFactory {
-        inner: aggregate(),
+        inner: breaker(),
         materializing: AtomicBool::new(false),
     })
-}
-
-impl CountingFactory {
-    fn boxed(
-        inner: Box<dyn MiddlewareFactory>,
-        materializations: Arc<AtomicUsize>,
-    ) -> Box<dyn MiddlewareFactory> {
-        Box::new(Self {
-            inner,
-            materializations,
-        })
-    }
-}
-
-impl MiddlewareFactory for CountingFactory {
-    fn label(&self) -> &'static str {
-        self.inner.label()
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        self.inner.override_key()
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        self.inner.declaration()
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        self.materializations.fetch_add(1, Ordering::SeqCst);
-        self.inner.materialize(request, context)
-    }
-
-    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
-        self.inner.dsl_config_defaults()
-    }
-
-    fn consumed_config_keys(&self) -> Vec<&'static str> {
-        self.inner.consumed_config_keys()
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        self.inner.topology_config_slot()
-    }
-
-    fn supported_stage_types(&self) -> &[obzenflow_core::event::context::StageType] {
-        self.inner.supported_stage_types()
-    }
-
-    fn safety_level(&self) -> MiddlewareSafety {
-        self.inner.safety_level()
-    }
-
-    fn hints(&self) -> MiddlewareHints {
-        self.inner.hints()
-    }
-
-    fn config_snapshot(&self) -> Option<serde_json::Value> {
-        self.inner.config_snapshot()
-    }
 }
 
 struct ProofObserverFamily;
@@ -433,6 +357,21 @@ impl EffectPolicy for OrdinaryControl {
 }
 
 macro_rules! single_effect_flow {
+    (observers: [], policy: $policy:expr) => {
+        FlowDefinition::materialize(move |_runtime_config| {
+            let guarded_handler = OneEffectHandler;
+            Ok(flow! {
+                name: "effect_control_composition_single",
+                journals: memory_journals(),
+                stages: {
+                    input = source!(CompositionInput => placeholder!());
+                    guarded = effectful_transform!(CompositionInput -> CompositionFact uses EffectA with $policy => guarded_handler);
+                    output = sink!(CompositionFact => placeholder!());
+                },
+                topology: { input |> guarded; guarded |> output; }
+            })
+        })
+    };
     (observers: [$($observer:expr),* $(,)?], policy: $policy:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
             let guarded_handler = OneEffectHandler;
@@ -444,9 +383,7 @@ macro_rules! single_effect_flow {
                 stages: {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_transform!(
-                        CompositionInput -> CompositionFact uses EffectA with $policy => guarded_handler,
-                        observers: [$($observer),*]
-                    );
+                        CompositionInput -> CompositionFact uses EffectA with $policy => guarded_handler with { $($observer),* });
                     output = sink!(CompositionFact => placeholder!());
                 },
 
@@ -476,9 +413,7 @@ macro_rules! two_effect_flow {
                             EffectA with $effect_a,
                             EffectB with $effect_b,
                         }
-                        => guarded_handler,
-                        observers: []
-                    );
+                        => guarded_handler);
                     output = sink!(CompositionFact => placeholder!());
                 },
 
@@ -505,9 +440,7 @@ macro_rules! stateful_single_effect_flow {
                     guarded = effectful_stateful!(
                         CompositionInput -> CompositionFact
                         uses EffectA with $policy
-                        => guarded_handler,
-                        observers: [$($observer),*]
-                    );
+                        => guarded_handler with { $($observer),* });
                     output = sink!(CompositionFact => placeholder!());
                 },
 
@@ -531,8 +464,9 @@ fn malformed_effect_policy_attachment_flow(
             Vec::new(),
             vec![EffectPolicyAttachment {
                 effect_type: EffectB::EFFECT_TYPE,
-                // No config defaults: this must reach descriptor materialisation
-                // instead of failing during configuration extraction.
+                authored_site: obzenflow_adapters::middleware::MiddlewareAttachmentSite::Effect,
+                // No config defaults: the structural attachment plan must
+                // reject this before configuration or materialisation.
                 factory: Box::new(OrdinaryControlFactory {
                     materializations: policy_materializations.clone(),
                 }),
@@ -580,12 +514,14 @@ fn duplicate_effect_policy_attachment_flow(
             vec![
                 EffectPolicyAttachment {
                     effect_type: EffectA::EFFECT_TYPE,
+                    authored_site: obzenflow_adapters::middleware::MiddlewareAttachmentSite::Effect,
                     factory: Box::new(OrdinaryControlFactory {
                         materializations: first_materializations.clone(),
                     }),
                 },
                 EffectPolicyAttachment {
                     effect_type: EffectA::EFFECT_TYPE,
+                    authored_site: obzenflow_adapters::middleware::MiddlewareAttachmentSite::Effect,
                     factory: Box::new(OrdinaryControlFactory {
                         materializations: second_materializations.clone(),
                     }),
@@ -636,8 +572,8 @@ async fn undeclared_policy_effect_fails_build_before_materialization() {
     .expect_err("a policy attachment for an undeclared effect must fail the flow build");
     let rendered = error.to_string();
     assert!(
-        rendered.contains("Effectful stage 'guarded'")
-            && rendered.contains("attaches policy middleware to undeclared effect")
+        rendered.contains("stage 'guarded'")
+            && rendered.contains("undeclared effect")
             && rendered.contains(EffectB::EFFECT_TYPE),
         "unexpected malformed attachment diagnostic: {rendered}"
     );
@@ -651,7 +587,9 @@ async fn bare_singleton_effect_policy_and_passive_observer_materialize_once() {
     let observer: Box<dyn MiddlewareFactory> = Box::new(ProofObserverFactory {
         materializations: observer_materializations.clone(),
     });
-    let policy = CountingFactory::boxed(aggregate(), policy_materializations.clone());
+    let policy = Box::new(OrdinaryControlFactory {
+        materializations: policy_materializations.clone(),
+    });
 
     build(single_effect_flow!(
         observers: [observer],
@@ -671,7 +609,9 @@ async fn stateful_policy_and_passive_observer_materialize_without_a_wrapper() {
     let observer: Box<dyn MiddlewareFactory> = Box::new(ProofObserverFactory {
         materializations: observer_materializations.clone(),
     });
-    let policy = CountingFactory::boxed(aggregate(), policy_materializations.clone());
+    let policy = Box::new(OrdinaryControlFactory {
+        materializations: policy_materializations.clone(),
+    });
 
     build(stateful_single_effect_flow!(
         observers: [observer],
@@ -685,43 +625,23 @@ async fn stateful_policy_and_passive_observer_materialize_without_a_wrapper() {
 }
 
 #[tokio::test]
-async fn control_middleware_in_observers_fails_with_authority_diagnostic() {
-    let error = build(single_effect_flow!(
-        observers: [limiter()],
-        policy: aggregate()
-    ))
-    .await
-    .expect_err("the passive observer lane must not grant control authority");
-
-    assert!(
-        error.to_string().contains(
-            "'observers:' accepts observer middleware only; attach control middleware 'rate_limiter' in the 'with [...]' clause of the live I/O unit it protects (FLOWIP-115s)"
-        ),
-        "unexpected authority diagnostic: {error}"
-    );
+async fn controls_on_implementation_compose_with_the_sole_named_effect() {
+    build(single_effect_flow!(observers: [limiter()], policy: breaker()))
+        .await
+        .expect("implementation limiter and effect breaker share one operation");
 }
 
 #[tokio::test]
-async fn stateful_observer_lane_still_rejects_control_middleware() {
-    let error = build(stateful_single_effect_flow!(
-        observers: [limiter()],
-        policy: aggregate()
-    ))
-    .await
-    .expect_err("the stateful observer lane must not grant control authority");
-
-    assert!(
-        error.to_string().contains(
-            "'observers:' accepts observer middleware only; attach control middleware 'rate_limiter' in the 'with [...]' clause of the live I/O unit it protects (FLOWIP-115s)"
-        ),
-        "unexpected stateful authority diagnostic: {error}"
-    );
+async fn stateful_controls_target_the_sole_effect_without_wrapping_accumulation() {
+    build(stateful_single_effect_flow!(observers: [limiter()], policy: breaker()))
+        .await
+        .expect("stateful controls resolve to the sole declared effect");
 }
 
 #[tokio::test]
-async fn aggregate_and_limiter_on_distinct_effects_remain_valid() {
+async fn breaker_and_limiter_on_distinct_effects_remain_valid() {
     build(two_effect_flow!(
-        effect_a: aggregate(),
+        effect_a: breaker(),
         effect_b: limiter()
     ))
     .await
@@ -729,7 +649,7 @@ async fn aggregate_and_limiter_on_distinct_effects_remain_valid() {
 }
 
 #[tokio::test]
-async fn descriptor_cannot_construct_two_policies_for_one_bare_effect_position() {
+async fn independent_custom_controls_without_composition_contract_fail_before_materialization() {
     let first_materializations = Arc::new(AtomicUsize::new(0));
     let second_materializations = Arc::new(AtomicUsize::new(0));
     let error = build(duplicate_effect_policy_attachment_flow(
@@ -737,10 +657,10 @@ async fn descriptor_cannot_construct_two_policies_for_one_bare_effect_position()
         second_materializations.clone(),
     ))
     .await
-    .expect_err("a descriptor cannot bypass the singleton effect position");
+    .expect_err("independent custom controls need a defined composition contract");
     let rendered = error.to_string();
     assert!(
-        rendered.contains("attaches more than one policy"),
+        rendered.contains("control") || rendered.contains("composition"),
         "{rendered}"
     );
     assert!(rendered.contains(EffectA::EFFECT_TYPE), "{rendered}");
@@ -749,26 +669,26 @@ async fn descriptor_cannot_construct_two_policies_for_one_bare_effect_position()
 }
 
 #[tokio::test]
-async fn ordinary_wrapper_cannot_launder_privileged_aggregate_authority() {
+async fn ordinary_wrapper_cannot_launder_privileged_control_authority() {
     let error = build(single_effect_flow!(
         observers: [],
-        policy: laundered_aggregate()
+        policy: laundered_breaker()
     ))
     .await
-    .expect_err("an ordinary wrapper must not launder aggregate authority");
+    .expect_err("an ordinary wrapper must not launder breaker authority");
     let rendered = error.to_string();
     assert!(
         rendered.contains("declared authority 'ordinary'"),
         "{rendered}"
     );
-    assert!(rendered.contains("effect_resilience"), "{rendered}");
+    assert!(rendered.contains("circuit_breaker"), "{rendered}");
 }
 
 #[tokio::test]
 async fn materialization_cannot_swap_the_declaration_that_passed_structural_validation() {
     let error = build(single_effect_flow!(
         observers: [],
-        policy: mutable_declaration_aggregate()
+        policy: mutable_declaration_breaker()
     ))
     .await
     .expect_err("the checked gateway must retain the declaration validated as ordinary");
@@ -777,5 +697,5 @@ async fn materialization_cannot_swap_the_declaration_that_passed_structural_vali
         rendered.contains("declared authority 'ordinary'"),
         "{rendered}"
     );
-    assert!(rendered.contains("effect_resilience"), "{rendered}");
+    assert!(rendered.contains("circuit_breaker"), "{rendered}");
 }

@@ -468,10 +468,9 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         journals: memory_journals(),
 
         stages: {
-            src = source!(SeedEvent => source with [inject_signals]);
+            src = source!(SeedEvent => source with {inject_signals});
             delay = effectful_transform!(
                 SeedEvent -> SeedEvent => delay,
-                observers: [],
             );
             entry = transform!(SeedEvent -> SeedEvent => entry);
             iter = transform!(SeedEvent -> SeedEvent => iter);
@@ -557,7 +556,6 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
             src = source!(SeedEvent => source);
             delay = effectful_transform!(
                 SeedEvent -> SeedEvent => delay,
-                observers: [],
             );
             snk = sink!(SeedEvent => sink);
         },
@@ -713,7 +711,6 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
             src = source!(SeedEvent => source);
             delay = effectful_transform!(
                 SeedEvent -> SeedEvent => delay,
-                observers: [],
             );
             entry = transform!(SeedEvent -> SeedEvent => entry);
             iter = transform!(SeedEvent -> SeedEvent => iter);

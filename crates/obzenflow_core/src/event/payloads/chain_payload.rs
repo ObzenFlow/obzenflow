@@ -232,6 +232,7 @@ impl ChainPayload {
                 | ExecutionPayload::ContractResult { .. }
                 | ExecutionPayload::StageLifecycle(_)
                 | ExecutionPayload::CircuitBreaker(_)
+                | ExecutionPayload::Recovery(_)
                 | ExecutionPayload::RateLimiter(_)
                 | ExecutionPayload::Backpressure(_)
                 | ExecutionPayload::SourcePollError(_)

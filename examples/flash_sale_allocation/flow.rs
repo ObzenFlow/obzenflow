@@ -14,7 +14,7 @@ use super::warehouse::{
 };
 use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::{CircuitBreaker, EffectResilience};
+use obzenflow::middleware::circuit_breaker;
 use obzenflow::stages::sinks::TracingSink;
 use obzenflow::stages::sources;
 use std::path::PathBuf;
@@ -80,19 +80,15 @@ pub fn assemble_flow(
         // One deliberately slow successful reservation opens this breaker.
         // Subsequent ReserveStock calls fail fast, while ReleaseStock remains
         // isolated because it has no policy attachment.
-        let reserve_breaker = CircuitBreaker::builder()
+        let reserve_breaker = circuit_breaker()
             .count_window(1)
             .minimum_calls(1)
             .failure_rate_threshold(1.0)
             .slow_call_duration(Duration::from_millis(1))
             .slow_call_rate_threshold(1.0)
             .open_for(Duration::from_secs(60))
-            .probes(1)
-            .build()
-            .expect("reserve breaker configuration must be valid");
-        let reserve_resilience = EffectResilience::with_breaker(reserve_breaker)
-            .build()
-            .expect("reserve resilience configuration must be valid");
+            .probes(1);
+        let reserve_resilience = reserve_breaker;
 
         let allocation_feed = sources::ValuesSource::new(inputs.clone());
         let allocator = Allocator::new(1);
@@ -129,7 +125,6 @@ pub fn assemble_flow(
                             via release_warehouse,
                     }
                     => allocator,
-                    observers: [],
                 );
 
                 reservations = sink!(

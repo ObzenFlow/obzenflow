@@ -5,12 +5,12 @@
 use super::ChainEventFactory;
 use crate::event::chain_event::{
     ChainEvent, CircuitBreakerAttemptSettledEventParams, CircuitBreakerOpenedEventParams,
-    CircuitBreakerRecoveryCompletedEventParams,
+    RecoveryCompletedEventParams,
 };
 use crate::event::payloads::effect_payload::EffectCursor;
-use crate::event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload};
+use crate::event::payloads::execution_payload::RetryStopReason;
 use crate::event::payloads::execution_payload::{
-    CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
+    CircuitBreakerFact, ExecutionPayload, RecoveryFact,
 };
 use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::types::{EventId, WriterId};
@@ -26,16 +26,42 @@ impl ChainEventFactory {
         event
     }
 
-    pub fn circuit_breaker_retry_scheduled(
+    fn recovery_event(writer_id: WriterId, fact: RecoveryFact, cause: EventId) -> ChainEvent {
+        let mut event = Self::execution_event(writer_id, ExecutionPayload::Recovery(fact));
+        event.causality = CausalityContext::with_parent(cause);
+        event
+    }
+
+    pub fn recovery_attempt_completed(
+        writer_id: WriterId,
+        cursor: EffectCursor,
+        attempt: u32,
+        dependency_elapsed_ms: u64,
+        admission_wait_ms: u64,
+        cause: EventId,
+    ) -> ChainEvent {
+        Self::recovery_event(
+            writer_id,
+            RecoveryFact::AttemptCompleted {
+                cursor,
+                attempt,
+                dependency_elapsed_ms,
+                admission_wait_ms,
+            },
+            cause,
+        )
+    }
+
+    pub fn retry_scheduled(
         writer_id: WriterId,
         cursor: EffectCursor,
         next_attempt: u32,
         delay_ms: u64,
         cause: EventId,
     ) -> ChainEvent {
-        Self::circuit_breaker_retry_event(
+        Self::recovery_event(
             writer_id,
-            CircuitBreakerFact::RetryScheduled {
+            RecoveryFact::RetryScheduled {
                 cursor,
                 next_attempt,
                 delay_ms,
@@ -71,34 +97,32 @@ impl ChainEventFactory {
         )
     }
 
-    pub fn circuit_breaker_retry_succeeded(
+    pub fn retry_succeeded(
         writer_id: WriterId,
         cursor: EffectCursor,
         total_attempts: u32,
-        terminal_classification: CircuitBreakerHealthClassification,
         cause: EventId,
     ) -> ChainEvent {
-        Self::circuit_breaker_retry_event(
+        Self::recovery_event(
             writer_id,
-            CircuitBreakerFact::RetrySucceeded {
+            RecoveryFact::RetrySucceeded {
                 cursor,
                 total_attempts,
-                terminal_classification,
             },
             cause,
         )
     }
 
-    pub fn circuit_breaker_retry_exhausted(
+    pub fn retry_exhausted(
         writer_id: WriterId,
         cursor: EffectCursor,
         total_attempts: u32,
-        reason: CircuitBreakerRetryStopReason,
+        reason: RetryStopReason,
         cause: EventId,
     ) -> ChainEvent {
-        Self::circuit_breaker_retry_event(
+        Self::recovery_event(
             writer_id,
-            CircuitBreakerFact::RetryExhausted {
+            RecoveryFact::RetryExhausted {
                 cursor,
                 total_attempts,
                 reason,
@@ -107,15 +131,15 @@ impl ChainEventFactory {
         )
     }
 
-    pub fn circuit_breaker_retry_stopped_non_retryable(
+    pub fn retry_stopped_non_retryable(
         writer_id: WriterId,
         cursor: EffectCursor,
         total_attempts: u32,
         cause: EventId,
     ) -> ChainEvent {
-        Self::circuit_breaker_retry_event(
+        Self::recovery_event(
             writer_id,
-            CircuitBreakerFact::RetryStoppedNonRetryable {
+            RecoveryFact::RetryStoppedNonRetryable {
                 cursor,
                 total_attempts,
             },
@@ -123,20 +147,20 @@ impl ChainEventFactory {
         )
     }
 
-    pub fn circuit_breaker_recovery_completed(
+    pub fn recovery_completed(
         writer_id: WriterId,
-        params: CircuitBreakerRecoveryCompletedEventParams,
+        params: RecoveryCompletedEventParams,
         cause: EventId,
     ) -> ChainEvent {
-        let CircuitBreakerRecoveryCompletedEventParams {
+        let RecoveryCompletedEventParams {
             cursor,
             total_attempts,
             backoff_elapsed_ms,
             recovery_elapsed_ms,
         } = params;
-        Self::circuit_breaker_retry_event(
+        Self::recovery_event(
             writer_id,
-            CircuitBreakerFact::RecoveryCompleted {
+            RecoveryFact::RecoveryCompleted {
                 cursor,
                 total_attempts,
                 backoff_elapsed_ms,

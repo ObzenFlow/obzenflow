@@ -28,6 +28,7 @@ where
         binding: _,
         declarations,
         policy_attachments,
+        implementation_middleware,
     } = effect_row;
     let direct_bound = NonZeroU64::MIN.saturating_add(2);
     let descriptor = EffectfulTransformDescriptor::generated_for_surface::<Input>(
@@ -38,7 +39,8 @@ where
         declarations,
         policy_attachments,
         direct_bound,
-    );
+    )
+    .with_implementation_middleware(implementation_middleware);
     wrap_typed_descriptor(
         Box::new(descriptor),
         StageTypingMetadata::transform(

@@ -270,8 +270,7 @@ fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
             stages: {
                 inputs = source!(ContainmentInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ContainmentInput -> { ContainmentOutput } => effectful_handler,
-                    observers: []);
+                    ContainmentInput -> { ContainmentOutput } => effectful_handler);
                 drops = sink!(ContainmentOutput => drops_handler);
             },
 

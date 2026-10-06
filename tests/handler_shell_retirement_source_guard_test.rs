@@ -20,7 +20,7 @@ fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn generic_handler_shell_and_standalone_retry_vocabulary_stay_absent() {
+fn generic_handler_shell_and_runtime_retry_routing_stay_absent() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut sources = vec![root.join("src/lib.rs")];
     for crate_entry in fs::read_dir(root.join("crates")).expect("read crates directory") {
@@ -108,7 +108,7 @@ fn generic_handler_shell_and_standalone_retry_vocabulary_stay_absent() {
 }
 
 #[test]
-fn standalone_retry_discovery_and_topology_production_stay_absent() {
+fn generic_retry_discovery_and_handler_repetition_stay_absent() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cases = [
         (
@@ -152,7 +152,6 @@ fn standalone_retry_discovery_and_topology_production_stay_absent() {
         (
             "crates/obzenflow_core/src/event/chain_event/factory/middleware.rs",
             vec![
-                "pub fn retry_exhausted(",
                 "pub fn retry_attempt_failed(",
                 "pub fn retry_succeeded_after_retry(",
             ],
@@ -184,11 +183,7 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
     let cases = [
         (
             "crates/obzenflow_adapters/src/middleware/control/resilience.rs",
-            vec![
-                "pub struct EffectResilienceBuilder",
-                "pub fn retry(mut self, retry: Retry) -> Self",
-                "BackoffStrategy",
-            ],
+            vec!["EffectRecoveryController", "BackoffStrategy"],
         ),
         (
             "crates/obzenflow_adapters/src/middleware/control/circuit_breaker/retry.rs",
@@ -280,30 +275,26 @@ fn payment_tutorial_is_proof_free_and_uses_configured_retry() {
             "payment tutorial flow must use direct configured retry with no proof injection seam; found {forbidden:?}"
         );
     }
-    assert_eq!(
-        flow.matches("EffectResilience::with_breaker(gateway_breaker)")
-            .count(),
-        1,
-        "the tutorial must have one concrete resilience construction path"
-    );
     for required in [
-        "let gateway_retry = Retry::fixed(Duration::from_millis(250))",
+        "let gateway_retry = retry()",
+        ".fixed_delay(Duration::from_millis(250))",
         ".max_attempts(3)",
         ".attempt_start_window(Duration::from_secs(30))",
-        "let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)",
-        ".retry(gateway_retry)",
-        ".rate_limit_each_attempt(gateway_limiter)",
+        "gateway_breaker",
+        "gateway_limiter",
+        "gateway_retry",
     ] {
         assert!(
             flow.contains(required),
-            "payment tutorial must show the configured retry golden path; missing {required:?}"
+            "payment tutorial lost configured middleware {required:?}"
         );
     }
-    assert_eq!(
-        flow.matches(".retry(").count(),
-        1,
-        "the tutorial must configure retry exactly once on its direct resilience path"
-    );
+    for retired in ["EffectResilience", ".build()", ".rate_limit_each_attempt("] {
+        assert!(
+            !flow.contains(retired),
+            "payment tutorial restored {retired}"
+        );
+    }
 
     let main = fs::read_to_string(example_root.join("main.rs"))
         .expect("read payment tutorial entry point");
@@ -312,10 +303,7 @@ fn payment_tutorial_is_proof_free_and_uses_configured_retry() {
     let witness =
         fs::read_to_string(root.join("tests/test_support/payment_gateway_retry_fixture.rs"))
             .expect("read test-only payment resilience witness");
-    for required in [
-        "Retry::fixed(",
-        "ReleasePolicy::BreakerRecovery => resilience.retry(canonical_recovery())",
-    ] {
+    for required in ["retry()", ".fixed_delay(", "ReleasePolicy::BreakerRecovery"] {
         assert!(
             witness.contains(required),
             "configured test witness must retain positive retry authoring {required:?}"

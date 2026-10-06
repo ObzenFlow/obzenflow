@@ -14,7 +14,7 @@ use crate::payment_domain::{
 };
 use async_trait::async_trait;
 use obzenflow::stages::sources;
-use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiter, Retry};
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, Retry};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
@@ -28,11 +28,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The two configuration-faithful policies admitted as release evidence.
+/// Configuration-faithful policies for coordinated and independent controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleasePolicy {
     BreakerOnly,
     BreakerRecovery,
+    RetryOnly,
+    RetryWithLimiter,
+    RetryWithLimiterPermuted,
+    RetryWithLimiterSplit,
+}
+
+impl ReleasePolicy {
+    pub fn has_breaker(self) -> bool {
+        matches!(self, Self::BreakerOnly | Self::BreakerRecovery)
+    }
+
+    pub fn has_limiter(self) -> bool {
+        self != Self::RetryOnly
+    }
+
+    pub fn has_retry(self) -> bool {
+        self != Self::BreakerOnly
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +129,10 @@ impl ScriptedGateway {
 
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    pub fn invocations(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
     }
 
     fn record_call(&self) -> usize {
@@ -238,7 +260,8 @@ impl EffectfulTransformHandler for ScriptedGatewayTransform {
 }
 
 fn canonical_recovery() -> Retry {
-    Retry::fixed(Duration::from_millis(250))
+    retry()
+        .fixed_delay(Duration::from_millis(250))
         .max_attempts(3)
         .attempt_start_window(Duration::from_secs(30))
 }
@@ -272,31 +295,52 @@ pub fn build_flow(
     journal_root: std::path::PathBuf,
 ) -> obzenflow_dsl::FlowDefinition {
     obzenflow_dsl::FlowDefinition::materialize(move |_runtime_config| {
-        let gateway_breaker = CircuitBreaker::builder()
+        let gateway_breaker = circuit_breaker()
             .count_window(5)
             .minimum_calls(5)
             .failure_rate_threshold(0.6)
             .slow_call_duration(Duration::from_millis(250))
             .slow_call_rate_threshold(0.5)
             .open_for(Duration::from_secs(5))
-            .probes(1)
-            .build()
-            .expect("gateway circuit-breaker configuration must be valid");
-        let gateway_limiter =
-            RateLimiter::per_second(1.0).expect("gateway rate-limiter configuration must be valid");
-
-        let resilience = EffectResilience::with_breaker(gateway_breaker)
-            .rate_limit_each_attempt(gateway_limiter);
-        let resilience = match policy {
-            ReleasePolicy::BreakerOnly => resilience,
-            ReleasePolicy::BreakerRecovery => resilience.retry(canonical_recovery()),
-        };
-        let gateway_resilience = resilience
-            .build()
-            .expect("gateway resilience witness configuration must be valid");
+            .probes(1);
+        let gateway_limiter = rate_limit(1.0);
 
         let order_feed = sources::ValuesSource::new(orders);
-        let authorize_payment = ScriptedGatewayTransform { gateway };
+        let authorize_payment_handler = ScriptedGatewayTransform { gateway };
+        let authorize_payment_stage = match policy {
+            ReleasePolicy::BreakerOnly => effectful_transform!(
+                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                uses ScriptedAuthorizePayment with { gateway_breaker, gateway_limiter }
+                => authorize_payment_handler
+            ),
+            ReleasePolicy::BreakerRecovery => effectful_transform!(
+                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                uses ScriptedAuthorizePayment with {
+                    gateway_breaker, gateway_limiter, canonical_recovery()
+                }
+                => authorize_payment_handler
+            ),
+            ReleasePolicy::RetryOnly => effectful_transform!(
+                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                uses ScriptedAuthorizePayment with canonical_recovery()
+                => authorize_payment_handler
+            ),
+            ReleasePolicy::RetryWithLimiter => effectful_transform!(
+                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                uses ScriptedAuthorizePayment with { gateway_limiter, canonical_recovery() }
+                => authorize_payment_handler
+            ),
+            ReleasePolicy::RetryWithLimiterPermuted => effectful_transform!(
+                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                uses ScriptedAuthorizePayment with { canonical_recovery(), gateway_limiter }
+                => authorize_payment_handler
+            ),
+            ReleasePolicy::RetryWithLimiterSplit => effectful_transform!(
+                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                uses ScriptedAuthorizePayment with canonical_recovery()
+                => authorize_payment_handler with gateway_limiter
+            ),
+        };
         let record_authorized = Discard::<PaymentAuthorized> {
             input: std::marker::PhantomData,
         };
@@ -310,13 +354,7 @@ pub fn build_flow(
 
             stages: {
                 orders = source!(ValidatedOrder => order_feed);
-                authorize_payment = effectful_transform!(
-                    ValidatedOrder -> {
-                        PaymentAuthorized,
-                        PaymentAuthorizationUnavailable
-                    } uses ScriptedAuthorizePayment with gateway_resilience => authorize_payment,
-                    observers: []
-                );
+                authorize_payment = authorize_payment_stage;
                 paid_orders = sink!(PaymentAuthorized => record_authorized);
                 manual_review = sink!(PaymentAuthorizationUnavailable => record_unavailable);
             },

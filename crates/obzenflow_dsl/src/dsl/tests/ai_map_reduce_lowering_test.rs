@@ -262,7 +262,7 @@ mod tests {
         let policies = inference.effect_policy_attachments();
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].effect_type, "obzenflow.ai.chat_completion");
-        assert_eq!(policies[0].factory.label(), "effect_resilience");
+        assert_eq!(policies[0].factory.label(), "ai_resilience");
 
         let direct_plan = inference
             .direct_fact_plan()
@@ -387,13 +387,13 @@ mod tests {
                 map: [TestItem] -> TestPartial
                     uses at_least_once(ChatCompletion)
                         via chat
-                        with obzenflow_adapters::middleware::control::ai_resilience()
-                    => TestMapRole,
+                        with { obzenflow_adapters::middleware::circuit_breaker().consecutive_failures(3) }
+                    => TestMapRole with obzenflow_adapters::middleware::rate_limit(10.0),
                 reduce: (TestSeed, [TestPartial]) -> TestOut
                     uses at_least_once(ChatCompletion)
                         via chat
-                        with obzenflow_adapters::middleware::control::ai_resilience()
-                    => TestFinaliseRole,
+                        with { obzenflow_adapters::middleware::rate_limit(10.0) }
+                    => TestFinaliseRole with { obzenflow_adapters::middleware::circuit_breaker().consecutive_failures(3) },
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -410,13 +410,17 @@ mod tests {
         let mut members: HashMap<String, FlowMember> = HashMap::new();
         members.insert("digest".to_string(), digest.into_flow_member());
         let mut connections = Vec::new();
-        let (stages, _) = lower_composites(members, &mut connections)
+        let (mut stages, _) = lower_composites(members, &mut connections)
             .expect("generated effect protocol should lower");
 
         for role in ["map", "finalize"] {
             let descriptor = stages
-                .get(&format!("digest__{role}"))
+                .get_mut(&format!("digest__{role}"))
                 .expect("generated effectful role");
+            descriptor
+                .prepare_middleware()
+                .expect("role controls compose across sites");
+            assert_eq!(descriptor.effect_policy_attachments().len(), 1);
             let declarations = descriptor.effect_declarations();
             assert_eq!(declarations.len(), 1);
             assert_eq!(
@@ -427,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_map_reduce_rejects_generated_roles_without_effect_resilience() {
+    fn ai_map_reduce_accepts_limiter_only_generated_roles() {
         let chat = test_chat_binding("test-model", "test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
@@ -435,14 +439,14 @@ mod tests {
                     uses at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
-                            obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
+                            obzenflow_adapters::middleware::rate_limit(1.0)
                         )
                     => TestMapRole,
                 reduce: (TestSeed, [TestPartial]) -> TestOut
                     uses at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
-                            obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
+                            obzenflow_adapters::middleware::rate_limit(1.0)
                         )
                     => TestFinaliseRole,
             },
@@ -458,16 +462,19 @@ mod tests {
         let mut members: HashMap<String, FlowMember> = HashMap::new();
         members.insert("digest".to_string(), digest.into_flow_member());
         let mut connections = Vec::new();
-        let error = match lower_composites(members, &mut connections) {
-            Ok(_) => panic!("generated chat roles require their resilience aggregate"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            crate::dsl::FlowBuildError::StageResourcesFailed(message)
-                if message.contains("role 'map'")
-                    && message.contains("exactly one EffectResilience")
-        ));
+        let (mut stages, _) = lower_composites(members, &mut connections)
+            .expect("limiter-only roles lower to effectful descriptors");
+        for role in ["map", "finalize"] {
+            let descriptor = stages
+                .get_mut(&format!("digest__{role}"))
+                .expect("generated role");
+            descriptor
+                .prepare_middleware()
+                .expect("limiter-only plan composes");
+            let controls = descriptor.effect_policy_attachments();
+            assert_eq!(controls.len(), 1);
+            assert!(controls[0].factory.declaration().is_effect_resilience());
+        }
     }
 
     #[test]

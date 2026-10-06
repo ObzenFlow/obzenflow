@@ -158,9 +158,7 @@ fn build_flow(journal_base: PathBuf, nondeterministic: bool) -> FlowDefinition {
             stages: {
                 numbers = source!(Input => numbers_handler);
                 stamp = effectful_transform!(
-                    Input -> { Stamped } => stamp_handler,
-                    observers: []
-                );
+                    Input -> { Stamped } => stamp_handler);
                 out = sink!(Stamped => out_handler);
             },
 
@@ -185,9 +183,7 @@ fn build_flow_v2(journal_base: PathBuf) -> FlowDefinition {
             stages: {
                 numbers = source!(Input => numbers_handler);
                 stamp = effectful_transform!(
-                    Input -> { Stamped } => stamp_handler,
-                    observers: []
-                );
+                    Input -> { Stamped } => stamp_handler);
                 out = sink!(Stamped => out_handler);
             },
 

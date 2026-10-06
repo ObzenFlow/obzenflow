@@ -92,19 +92,20 @@
 //! }
 //!
 //! // Pure signature: no `uses` clause.
-//! let _ = effectful_transform!(In -> Out => Handler, observers: []);
+//! let _ = effectful_transform!(In -> Out => Handler);
 //! ```
 //!
 //! ## FLOWIP-120c H7: per-effect policies attach inside `uses`
 //!
 //! A policy attaches to the exact effect it guards (`Effect with policy`).
 //!
-//! ## FLOWIP-115s: the canonical `sink!` grammar
+//! ## Uniform middleware attachments
 //!
-//! Control policies use handler-adjacent `with [...]`; passive middleware uses
-//! the named `observers: [...]` clause.
+//! Controls and passive observers attach with `with middleware` or a flat,
+//! non-empty `with { first, second }` group. Typed context determines which
+//! operation a control protects and which declared points an observer sees.
 //!
-//! The clause order is `with [...]`, then `delivery:`, then `observers:`.
+//! A sink's `delivery:` clause follows its optional middleware attachment.
 //!
 //! The `delivery:` clause accepts only `idempotent` or `non_idempotent`.
 //!
@@ -190,6 +191,7 @@
 
 #[doc(hidden)]
 pub mod ai_effect;
+mod attachment_plan;
 pub mod backpressure_clause;
 mod binder;
 pub mod composites;
@@ -217,5 +219,5 @@ pub mod typing;
 mod tests;
 
 // Re-export all public items
-pub use error::{FlowBuildError, StageCreationError, StageCreationResult};
+pub use error::{FlowBuildError, MiddlewarePlanError, StageCreationError, StageCreationResult};
 pub use flow_definition::{FlowBuildFailure, FlowDefinition};

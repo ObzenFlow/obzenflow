@@ -867,23 +867,21 @@ pub(crate) fn validate_invariant_settlement_evidence(
     use obzenflow_core::event::payloads::execution_payload::CircuitBreakerHealthClassification;
 
     use obzenflow_core::event::payloads::execution_payload::{
-        CircuitBreakerFact, ExecutionPayload,
+        CircuitBreakerFact, ExecutionPayload, RecoveryFact,
     };
     let mut settlement_index = None;
     let mut recovery_index = None;
     for (index, event) in control_events.iter().enumerate() {
-        let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(circuit_breaker)) =
-            &event.payload
-        else {
+        let ChainPayload::Execution(fact) = &event.payload else {
             continue;
         };
-        match circuit_breaker {
-            CircuitBreakerFact::AttemptSettled {
+        match fact {
+            ExecutionPayload::CircuitBreaker(CircuitBreakerFact::AttemptSettled {
                 cursor: observed_cursor,
                 attempt: observed_attempt,
                 health_classification,
                 ..
-            } => {
+            }) => {
                 if observed_cursor != cursor || *observed_attempt != attempt.get() {
                     return Err(EffectError::EffectProvenanceMismatch(format!(
                         "binding-invariant settlement evidence disagrees with cursor {cursor:?} attempt {attempt}"
@@ -903,11 +901,27 @@ pub(crate) fn validate_invariant_settlement_evidence(
                     )));
                 }
             }
-            CircuitBreakerFact::RecoveryCompleted {
+            ExecutionPayload::Recovery(RecoveryFact::AttemptCompleted {
+                cursor: observed_cursor,
+                attempt: observed_attempt,
+                ..
+            }) => {
+                if observed_cursor != cursor || *observed_attempt != attempt.get() {
+                    return Err(EffectError::EffectProvenanceMismatch(format!(
+                        "binding-invariant physical-call evidence disagrees with cursor {cursor:?} attempt {attempt}"
+                    )));
+                }
+                if settlement_index.replace(index).is_some() {
+                    return Err(EffectError::EffectProvenanceMismatch(format!(
+                        "binding-invariant terminal for cursor {cursor:?} attempt {attempt} has duplicate physical-call settlement evidence"
+                    )));
+                }
+            }
+            ExecutionPayload::Recovery(RecoveryFact::RecoveryCompleted {
                 cursor: observed_cursor,
                 total_attempts,
                 ..
-            } => {
+            }) => {
                 if observed_cursor != cursor || *total_attempts != attempt.get() {
                     return Err(EffectError::EffectProvenanceMismatch(format!(
                         "binding-invariant recovery evidence disagrees with cursor {cursor:?} attempt {attempt}"
@@ -925,7 +939,7 @@ pub(crate) fn validate_invariant_settlement_evidence(
 
     let settlement_index = settlement_index.ok_or_else(|| {
         EffectError::EffectProvenanceMismatch(format!(
-            "binding-invariant terminal for cursor {cursor:?} attempt {attempt} lacks AttemptSettled"
+            "binding-invariant terminal for cursor {cursor:?} attempt {attempt} lacks physical-call settlement evidence"
         ))
     })?;
     let recovery_index = recovery_index.ok_or_else(|| {
@@ -935,7 +949,7 @@ pub(crate) fn validate_invariant_settlement_evidence(
     })?;
     if recovery_index <= settlement_index {
         return Err(EffectError::EffectProvenanceMismatch(format!(
-            "binding-invariant terminal for cursor {cursor:?} attempt {attempt} orders RecoveryCompleted before AttemptSettled"
+            "binding-invariant terminal for cursor {cursor:?} attempt {attempt} orders RecoveryCompleted before physical-call settlement"
         )));
     }
     Ok((settlement_index, recovery_index))
@@ -1647,7 +1661,7 @@ mod tests {
             matches!(
                 error,
                 EffectError::EffectProvenanceMismatch(ref message)
-                    if message.contains("AttemptSettled")
+                    if message.contains("lacks physical-call settlement evidence")
             ),
             "unexpected validation error: {error:?}"
         );

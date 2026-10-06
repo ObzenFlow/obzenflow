@@ -112,6 +112,8 @@ struct EffectObserverSubject {
 /// target before materialising any observer ports.
 #[derive(Clone)]
 pub struct ObserverBinding {
+    // Membership only. A fresh quarantine is allocated by each runtime composition.
+    logical_attachment: Arc<()>,
     label: &'static str,
     kind: ObserverBindingKind,
 }
@@ -121,7 +123,11 @@ impl ObserverBinding {
         if label.trim().is_empty() {
             return Err(ObserverBindingError::EmptyLabel);
         }
-        Ok(Self { label, kind })
+        Ok(Self {
+            logical_attachment: Arc::new(()),
+            label,
+            kind,
+        })
     }
 
     pub fn handler(
@@ -260,6 +266,18 @@ impl StageObserverBindings {
         self.bindings.extend(other.bindings);
     }
 
+    /// Add all surface products of one authored observer declaration.
+    /// Membership is explicit: labels never merge independent attachments.
+    /// Cloning these bindings preserves membership but each runtime composition
+    /// allocates a fresh quarantine, so separate runs remain independent.
+    pub fn extend_logical_attachment(&mut self, mut products: Self) {
+        let logical_attachment = Arc::new(());
+        for binding in &mut products.bindings {
+            binding.logical_attachment = logical_attachment.clone();
+        }
+        self.bindings.extend(products.bindings);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
@@ -356,18 +374,25 @@ impl<'a> ObserverTarget<'a> {
     }
 }
 
+struct ObserverQuarantine {
+    // Retain the token throughout composition so its address cannot be reused.
+    _membership: Arc<()>,
+    state: Arc<AtomicBool>,
+}
+
 struct ObserverChild<T: ?Sized> {
     label: &'static str,
     observer: Arc<T>,
-    quarantined: AtomicBool,
+    quarantined: Arc<AtomicBool>,
 }
 
 impl<T: ?Sized> ObserverChild<T> {
+    #[cfg(test)]
     fn new(label: &'static str, observer: Arc<T>) -> Self {
         Self {
             label,
             observer,
-            quarantined: AtomicBool::new(false),
+            quarantined: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -646,7 +671,7 @@ impl SourcePollObserver for SourcePollObserverChain {
 struct EffectObserverChild {
     label: &'static str,
     subjects: Vec<EffectObserverSubject>,
-    quarantined: AtomicBool,
+    quarantined: Arc<AtomicBool>,
 }
 
 impl EffectObserverChild {
@@ -750,38 +775,12 @@ pub(crate) struct StageObserverBundleBuilder {
 }
 
 impl StageObserverBundleBuilder {
+    #[cfg(test)]
     pub(crate) fn push_handler(&mut self, label: &'static str, observer: Arc<dyn HandlerObserver>) {
         self.handler.push(ObserverChild::new(label, observer));
     }
 
-    pub(crate) fn push_stateful(
-        &mut self,
-        label: &'static str,
-        observer: Arc<dyn StatefulObserver>,
-    ) {
-        self.stateful.push(ObserverChild::new(label, observer));
-    }
-
-    pub(crate) fn push_join(&mut self, label: &'static str, observer: Arc<dyn JoinObserver>) {
-        self.join.push(ObserverChild::new(label, observer));
-    }
-
-    pub(crate) fn push_source_poll(
-        &mut self,
-        label: &'static str,
-        observer: Arc<dyn SourcePollObserver>,
-    ) {
-        self.source_poll.push(ObserverChild::new(label, observer));
-    }
-
-    fn push_effect(&mut self, label: &'static str, subjects: Vec<EffectObserverSubject>) {
-        self.effect.push(EffectObserverChild {
-            label,
-            subjects,
-            quarantined: AtomicBool::new(false),
-        });
-    }
-
+    #[cfg(test)]
     pub(crate) fn push_sink_delivery(
         &mut self,
         label: &'static str,
@@ -790,6 +789,7 @@ impl StageObserverBundleBuilder {
         self.sink_delivery.push(ObserverChild::new(label, observer));
     }
 
+    #[cfg(test)]
     pub(crate) fn push_stage_lifecycle(
         &mut self,
         label: &'static str,
@@ -885,6 +885,7 @@ impl StageObserverBundle {
     ) -> Result<Self, ObserverBindingError> {
         let mut builder = StageObserverBundleBuilder::default();
         let permitted = target.permitted_surfaces();
+        let mut quarantines = std::collections::HashMap::new();
 
         for binding in bindings.bindings {
             let requested = binding.surface();
@@ -898,16 +899,36 @@ impl StageObserverBundle {
                 });
             }
 
+            let quarantined = quarantines
+                .entry(Arc::as_ptr(&binding.logical_attachment))
+                .or_insert_with(|| ObserverQuarantine {
+                    _membership: binding.logical_attachment.clone(),
+                    state: Arc::new(AtomicBool::new(false)),
+                })
+                .state
+                .clone();
             match binding.kind {
-                ObserverBindingKind::Handler(observer) => {
-                    builder.push_handler(binding.label, observer)
-                }
-                ObserverBindingKind::Stateful(observer) => {
-                    builder.push_stateful(binding.label, observer)
-                }
-                ObserverBindingKind::Join(observer) => builder.push_join(binding.label, observer),
+                ObserverBindingKind::Handler(observer) => builder.handler.push(ObserverChild {
+                    label: binding.label,
+                    observer,
+                    quarantined,
+                }),
+                ObserverBindingKind::Stateful(observer) => builder.stateful.push(ObserverChild {
+                    label: binding.label,
+                    observer,
+                    quarantined,
+                }),
+                ObserverBindingKind::Join(observer) => builder.join.push(ObserverChild {
+                    label: binding.label,
+                    observer,
+                    quarantined,
+                }),
                 ObserverBindingKind::SourcePoll(observer) => {
-                    builder.push_source_poll(binding.label, observer)
+                    builder.source_poll.push(ObserverChild {
+                        label: binding.label,
+                        observer,
+                        quarantined,
+                    })
                 }
                 ObserverBindingKind::Effect(subjects) => {
                     for subject in &subjects {
@@ -929,13 +950,25 @@ impl StageObserverBundle {
                             });
                         }
                     }
-                    builder.push_effect(binding.label, subjects);
+                    builder.effect.push(EffectObserverChild {
+                        label: binding.label,
+                        subjects,
+                        quarantined,
+                    });
                 }
                 ObserverBindingKind::SinkDelivery(observer) => {
-                    builder.push_sink_delivery(binding.label, observer)
+                    builder.sink_delivery.push(ObserverChild {
+                        label: binding.label,
+                        observer,
+                        quarantined,
+                    })
                 }
                 ObserverBindingKind::StageLifecycle(observer) => {
-                    builder.push_stage_lifecycle(binding.label, observer)
+                    builder.stage_lifecycle.push(ObserverChild {
+                        label: binding.label,
+                        observer,
+                        quarantined,
+                    })
                 }
             }
         }
@@ -1281,6 +1314,69 @@ mod tests {
             serde_json::json!({}),
         );
         (flow_id, flow_context, event)
+    }
+
+    #[test]
+    fn logical_attachment_quarantine_spans_surfaces_but_is_fresh_per_composition() {
+        #[derive(Default)]
+        struct Probe {
+            handlers: AtomicUsize,
+            effects: AtomicUsize,
+        }
+        impl HandlerObserver for Probe {
+            fn before_handle(&self, _: &HandlerObserverContext<'_>) {
+                self.handlers.fetch_add(1, Ordering::SeqCst);
+                panic!("quarantine the entire authored declaration");
+            }
+        }
+        impl EffectObserver for Probe {
+            fn after_effect(&self, _: &EffectObserverContext<'_>) {
+                self.effects.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let probe = Arc::new(Probe::default());
+        let mut products = StageObserverBindings::default();
+        products.push(ObserverBinding::handler("shared", probe.clone()).unwrap());
+        products.push(ObserverBinding::effect("shared", "effect.a", probe.clone()).unwrap());
+        let mut bindings = StageObserverBindings::default();
+        bindings.extend_logical_attachment(products);
+        let effects = [declared_effect("effect.a")];
+        let target = ObserverTarget::Transform { effects: &effects };
+        let first =
+            StageObserverBundle::compose_checked("stage", target, bindings.clone()).unwrap();
+        let second = StageObserverBundle::compose_checked("stage", target, bindings).unwrap();
+        let (flow_id, flow_context, event) = context();
+        let ctx =
+            HandlerObserverContext::new(flow_id, &flow_context, &event, StageInputPosition(1));
+        first
+            .handler()
+            .unwrap()
+            .invoke("stage", "handler", "before_handle", |observer| {
+                observer.before_handle(&ctx)
+            });
+        for _ in 0..2 {
+            first
+                .effect()
+                .unwrap()
+                .invoke("stage", "effect", "after_effect", |observer| {
+                    observer.after_effect(&effect_context("effect.a"))
+                });
+        }
+        assert_eq!(probe.effects.load(Ordering::SeqCst), 0);
+        second
+            .effect()
+            .unwrap()
+            .invoke("stage", "effect", "after_effect", |observer| {
+                observer.after_effect(&effect_context("effect.a"))
+            });
+        assert_eq!(probe.effects.load(Ordering::SeqCst), 1);
+        second
+            .handler()
+            .unwrap()
+            .invoke("stage", "handler", "before_handle", |observer| {
+                observer.before_handle(&ctx)
+            });
+        assert_eq!(probe.handlers.load(Ordering::SeqCst), 2);
     }
 
     #[test]

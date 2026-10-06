@@ -49,6 +49,53 @@ fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> Str
     }
 }
 
+/// A failed frozen middleware plan, preserving its authored context and cause.
+#[derive(Debug, Error)]
+pub enum MiddlewarePlanError {
+    #[error("stage '{stage}'{effect}: {message}")]
+    InvalidAttachment {
+        stage: String,
+        effect: String,
+        message: String,
+    },
+    #[error("stage '{stage}'{effect}: {source}")]
+    InvalidConfiguration {
+        stage: String,
+        effect: String,
+        #[source]
+        source: MiddlewareFactoryError,
+    },
+    #[error("stage '{stage}'{effect}: {source}")]
+    InvalidBinding {
+        stage: String,
+        effect: String,
+        #[source]
+        source: obzenflow_adapters::middleware::MiddlewareAttachmentValidationError,
+    },
+    #[error("stage '{stage}', effect '{effect}': {source}")]
+    InvalidComposition {
+        stage: String,
+        effect: String,
+        #[source]
+        source: obzenflow_adapters::middleware::ControlCompositionError,
+    },
+}
+
+impl MiddlewarePlanError {
+    pub(crate) fn invalid(stage: &str, effect: Option<&str>, message: impl Into<String>) -> Self {
+        Self::InvalidAttachment {
+            stage: stage.to_owned(),
+            effect: Self::effect_context(effect),
+            message: message.into(),
+        }
+    }
+    pub(crate) fn effect_context(effect: Option<&str>) -> String {
+        effect
+            .map(|value| format!(", effect '{value}'"))
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StageCreationError {
     #[error(transparent)]
@@ -91,6 +138,23 @@ pub enum EdgeTypingMismatchKind {
 /// Structured error type for failures during flow construction
 #[derive(Debug, Error)]
 pub enum FlowBuildError {
+    #[error(transparent)]
+    MiddlewarePlan(#[from] MiddlewarePlanError),
+
+    #[error("hosted ingress '{ingress_key}' is assigned to both stages '{first_stage}' and '{second_stage}'; assign each hosted source binding to one stage")]
+    DuplicateHostedIngressBinding {
+        ingress_key: String,
+        first_stage: String,
+        second_stage: String,
+    },
+
+    #[error("stage '{stage_name}' uses hosted ingress '{ingress_key}', already bound to stage '{bound_stage}'; construct a fresh hosted source for this flow")]
+    HostedIngressAlreadyBound {
+        ingress_key: String,
+        stage_name: String,
+        bound_stage: String,
+    },
+
     #[error("Topology validation failed: {0}")]
     TopologyValidationFailed(#[source] TopologyError),
 

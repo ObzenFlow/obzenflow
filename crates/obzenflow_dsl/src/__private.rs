@@ -6,7 +6,7 @@
 
 pub use obzenflow_adapters::ai::ChatBindingMetadata;
 pub use obzenflow_adapters::ai::ChatCompletion;
-pub use obzenflow_adapters::middleware::MiddlewareFactory;
+pub use obzenflow_adapters::middleware::{capture_middleware, MiddlewareFactory};
 pub use obzenflow_core::ai::OversizeExhaustion;
 pub use obzenflow_core::ai::OversizePolicy;
 pub use obzenflow_core::ai::TokenCount;
@@ -30,3 +30,6 @@ pub use obzenflow_runtime::stages::transform::ChunkByBudgetBuilder;
 pub use obzenflow_runtime::stages::EffectfulStatefulHandler;
 pub use obzenflow_runtime::stages::EffectfulTransformHandler;
 pub use obzenflow_topology::EdgeKind;
+
+// Semantic authored site retained by cross-crate middleware lowering.
+pub use obzenflow_adapters::middleware::MiddlewareAttachmentSite;

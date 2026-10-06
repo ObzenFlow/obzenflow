@@ -57,16 +57,46 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
     .await
     .unwrap();
     let topology = flow.topology().unwrap();
+    assert!(
+        topology.edges().iter().all(|edge| edge.backpressure
+            == Some(obzenflow_topology::BackpressureInfo::Enforce {
+                window: std::num::NonZeroU64::new(64).unwrap(),
+                stall_timeout_ms: std::num::NonZeroU64::new(30000).unwrap(),
+            })),
+        "the demo exposes configured transport before its first delivery"
+    );
     let source = topology
         .stages()
         .find(|stage| stage.name == "high_volume_source")
         .unwrap();
     let middleware = source.middleware.as_ref().unwrap();
+    let breaker = middleware
+        .attachments
+        .iter()
+        .find(|attachment| {
+            attachment.family() == obzenflow_topology::MiddlewareFamily::CircuitBreaker
+        })
+        .unwrap();
+    let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(info) = &breaker.details else {
+        panic!("expected typed breaker information");
+    };
+    assert_eq!(info.open_for_ms().value, 5_000);
+    assert_eq!(info.open_for_ms().provenance.source, "dsl");
     assert_eq!(
-        middleware.circuit_breaker.as_ref().unwrap().cooldown_ms,
-        5_000
+        info.open_for_ms().provenance.scope,
+        "stage:high_volume_source"
     );
-    assert!(middleware.rate_limiter.is_some());
+    assert_eq!(
+        info.open_for_ms().provenance.winner_subject,
+        obzenflow_topology::SettingSubject::Unqualified
+    );
+    assert!(
+        middleware
+            .attachments
+            .iter()
+            .any(|attachment| attachment.family()
+                == obzenflow_topology::MiddlewareFamily::RateLimiter)
+    );
     let config = flow.flow_effective_config().unwrap();
     for (from, to) in [
         ("high_volume_source", "error_processor"),

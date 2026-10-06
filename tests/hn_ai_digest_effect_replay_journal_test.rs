@@ -51,7 +51,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
+    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload, RecoveryFact,
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
@@ -683,7 +683,7 @@ fn build_recovery_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     chat_port: ChatPortRecipe,
-    map_policy: Box<dyn MiddlewareFactory>,
+    map_policy: impl MiddlewareFactory + 'static,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = materialise_chat_authority(target(), estimator(), chat_port.clone())?;
@@ -2976,9 +2976,17 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     let recoveries = generated
         .iter()
         .map(|stage| {
-            circuit_breaker_event_count(stage, |event| {
-                matches!(event, CircuitBreakerFact::RecoveryCompleted { .. })
-            })
+            stage
+                .iter()
+                .filter(|envelope| {
+                    matches!(
+                        &envelope.payload,
+                        ChainPayload::Execution(ExecutionPayload::Recovery(
+                            RecoveryFact::RecoveryCompleted { .. }
+                        ))
+                    )
+                })
+                .count()
         })
         .sum::<usize>();
     let direct_data_rows = generated
@@ -3254,16 +3262,14 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
     let mut saw_ignored_settlement = false;
     let mut saw_completed_recovery = false;
     for envelope in &map {
-        let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(event)) = &envelope.payload
-        else {
-            continue;
-        };
-        match event {
-            CircuitBreakerFact::AttemptSettled {
-                attempt,
-                health_classification,
-                ..
-            } => {
+        match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::AttemptSettled {
+                    attempt,
+                    health_classification,
+                    ..
+                },
+            )) => {
                 assert_eq!(*attempt, 1);
                 assert!(matches!(
                     health_classification,
@@ -3276,7 +3282,9 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
                 );
                 saw_ignored_settlement = true;
             }
-            CircuitBreakerFact::RecoveryCompleted { total_attempts, .. } => {
+            ChainPayload::Execution(ExecutionPayload::Recovery(
+                RecoveryFact::RecoveryCompleted { total_attempts, .. },
+            )) => {
                 assert_eq!(*total_attempts, 1);
                 assert_eq!(
                     envelope.envelope.provenance.journal.journal_group_id,

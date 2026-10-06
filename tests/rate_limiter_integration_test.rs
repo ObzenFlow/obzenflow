@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{rate_limit_with_burst, RateLimiterBuilder};
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, TypedPayload};
@@ -231,9 +231,9 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
         journals: disk_journals(unique_journal_dir("rate_limiter_low_rate_half_eps")),
 
         stages: {
-            src = source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(50.0, 1.0)
-            ]);
+            src = source!(RateLimiterTestEvent => source with {
+                rate_limit(50.0).burst_capacity(1.0)
+            });
             throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
         },
@@ -275,11 +275,10 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
         journals: disk_journals(unique_journal_dir("rate_limiter_weighted_default_burst")),
 
         stages: {
-            src = source!(RateLimiterTestEvent => source with [
-                RateLimiterBuilder::new(2.0)
-                    .with_cost_per_event(5.0)
-                    .build()
-            ]);
+            src = source!(RateLimiterTestEvent => source with {
+                rate_limit(2.0)
+                    .cost(5.0)
+            });
             throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
         },
@@ -311,12 +310,11 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
         journals: disk_journals(unique_journal_dir("rate_limiter_invalid")),
 
         stages: {
-            src = source!(RateLimiterTestEvent => source with [
-                RateLimiterBuilder::new(10.0)
-                    .with_burst(2.0)
-                    .with_cost_per_event(5.0)
-                    .build()
-            ]);
+            src = source!(RateLimiterTestEvent => source with {
+                rate_limit(10.0)
+                    .burst_capacity(2.0)
+                    .cost(5.0)
+            });
             throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
         },
@@ -337,7 +335,7 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
         "error: {err}"
     );
     assert!(err.contains("burst_capacity"), "error: {err}");
-    assert!(err.contains("cost_per_event"), "error: {err}");
+    assert!(err.contains("cost_per_attempt"), "error: {err}");
 }
 
 /// Source step in the FLOWIP-114m no-charge tests. `Done` ends the source.
@@ -448,9 +446,9 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
         journals: disk_journals(unique_journal_dir("rate_limiter_source_poll_gating")),
 
         stages: {
-            src = source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(50.0, 1.0)
-            ]);
+            src = source!(RateLimiterTestEvent => source with {
+                rate_limit(50.0).burst_capacity(1.0)
+            });
             passthrough = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
         },
@@ -489,7 +487,7 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
 // (`Ok(Some(vec![]))`) and source errors (`Err(...)`) consume no token,
 // increment no admission counter, and emit no `Delayed` event.
 //
-// Each test uses `rate_limit_with_burst(refill_rate, capacity)` where
+// Each test uses `rate_limit(refill_rate).burst_capacity(capacity)` where
 // `capacity == expected_admission_count`. If the rule were violated (i.e. the
 // rate limiter charged a no-charge poll) the bucket would empty an admission
 // early, the next genuine admission would block for at least `1 / refill_rate`
@@ -507,9 +505,9 @@ async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
         journals: disk_journals(unique_journal_dir("rate_limiter_async_finite_eof_no_charge")),
 
         stages: {
-            src = async_source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(1.0, 2.0)
-            ]);
+            src = async_source!(RateLimiterTestEvent => source with {
+                rate_limit(1.0).burst_capacity(2.0)
+            });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -549,9 +547,9 @@ async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_finite_eof_no_charge")),
 
         stages: {
-            src = source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(1.0, 2.0)
-            ]);
+            src = source!(RateLimiterTestEvent => source with {
+                rate_limit(1.0).burst_capacity(2.0)
+            });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -595,9 +593,9 @@ async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
         journals: disk_journals(unique_journal_dir("rate_limiter_async_empty_no_charge")),
 
         stages: {
-            src = async_source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(1.0, 2.0)
-            ]);
+            src = async_source!(RateLimiterTestEvent => source with {
+                rate_limit(1.0).burst_capacity(2.0)
+            });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -641,9 +639,9 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_empty_no_charge")),
 
         stages: {
-            src = source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(1.0, 2.0)
-            ]);
+            src = source!(RateLimiterTestEvent => source with {
+                rate_limit(1.0).burst_capacity(2.0)
+            });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -687,9 +685,9 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
         journals: disk_journals(unique_journal_dir("rate_limiter_async_error_no_charge")),
 
         stages: {
-            src = async_source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(1.0, 2.0)
-            ]);
+            src = async_source!(RateLimiterTestEvent => source with {
+                rate_limit(1.0).burst_capacity(2.0)
+            });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -733,9 +731,9 @@ async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_error_no_charge")),
 
         stages: {
-            src = source!(RateLimiterTestEvent => source with [
-                rate_limit_with_burst(1.0, 2.0)
-            ]);
+            src = source!(RateLimiterTestEvent => source with {
+                rate_limit(1.0).burst_capacity(2.0)
+            });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -886,10 +884,8 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
         stages: {
             ref_src = source!(RefPayload => reference_source);
             stream_src = async_source!(StreamPayload => stream_source);
-            joiner = join!(catalog ref_src: RefPayload, StreamPayload -> EnrichedPayload => joiner, observers: [
-                // Joins are deterministic coordination surfaces under FLOWIP-120c H1.
-                rate_limit_with_burst(1.0, 3.0)
-            ]);
+            joiner = join!(catalog ref_src: RefPayload, StreamPayload -> EnrichedPayload => joiner
+                with rate_limit(1.0).burst_capacity(3.0));
             snk = sink!(EnrichedPayload => sink);
         },
 
@@ -905,8 +901,8 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
         Err(err) => format!("{err:?}"),
     };
     assert!(
-        err.contains("'observers:' accepts observer middleware only"),
-        "expected FLOWIP-115s join observer-authority rejection, got: {err}"
+        err.contains("no declared live operation"),
+        "expected contextual join control rejection, got: {err}"
     );
 
     Ok(())
@@ -926,9 +922,7 @@ async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<
 
         stages: {
             src = source!(RateLimiterTestEvent => source);
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough, observers: [
-                rate_limit_with_burst(1.0, 3.0)
-            ]);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough with { rate_limit(1.0).burst_capacity(3.0) });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -944,7 +938,7 @@ async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<
         Err(err) => format!("{err:?}"),
     };
     assert!(
-        err.contains("'observers:' accepts observer middleware only"),
+        err.contains("no declared live operation"),
         "expected FLOWIP-115s transform observer-authority rejection, got: {err}"
     );
 
@@ -964,9 +958,7 @@ async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<(
 
         stages: {
             src = source!(RateLimiterTestEvent => source);
-            agg = stateful!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough, observers: [
-                rate_limit_with_burst(1.0, 3.0)
-            ]);
+            agg = stateful!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough with { rate_limit(1.0).burst_capacity(3.0) });
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -986,7 +978,7 @@ async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<(
         Err(err) => format!("{err:?}"),
     };
     assert!(
-        err.contains("'observers:' accepts observer middleware only"),
+        err.contains("no declared live operation"),
         "expected FLOWIP-115s stateful observer-authority rejection, got: {err}"
     );
 

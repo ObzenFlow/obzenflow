@@ -5,7 +5,6 @@
 //! Shared fixtures for the effect-boundary tests. Everything here is private
 //! to `effect::tests`; production code never sees these helpers.
 
-pub(super) use crate::middleware::control::circuit_breaker::{CircuitBreaker, Retry};
 pub(super) use crate::middleware::control::policy::effect::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, PerEffectPolicyBoundary,
     PolicyAdmission,
@@ -30,7 +29,7 @@ pub(super) use std::time::Duration;
 
 use crate::middleware::{
     materialize_factory_checked, EffectSurface, EffectTypeKey, EffectUnitId,
-    MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurface,
+    MiddlewareAttachmentRequest, MiddlewareAttachmentSite, MiddlewareFactory, MiddlewareSurface,
     ProtectedUnit, ProtectedUnitId,
 };
 use obzenflow_core::event::context::StageType;
@@ -130,7 +129,7 @@ pub(super) fn materialize_effect_attachment(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
     control: &Arc<ControlMiddlewareAggregator>,
-    _declaration_index: usize,
+    _authored_site: usize,
     safety: EffectSafety,
 ) -> Result<EffectPolicyAttachment, String> {
     let surface = MiddlewareSurface::Effect(EffectSurface {
@@ -145,9 +144,10 @@ pub(super) fn materialize_effect_attachment(
         }),
     };
     let request = MiddlewareAttachmentRequest {
+        stage_key: &config.name,
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index: MiddlewareDeclarationIndex::effect_with(),
+        authored_site: MiddlewareAttachmentSite::Effect,
     };
     materialize_factory_checked(factory, request, config, StageType::Transform, control)
         .map_err(|error| error.to_string())?

@@ -81,6 +81,7 @@ pub enum ExecutionPayload {
     StageLifecycle(StageLifecycleFact),
     #[serde(rename = "resilience_occurrence")]
     CircuitBreaker(CircuitBreakerFact),
+    Recovery(RecoveryFact),
     RateLimiter(RateLimiterFact),
     Backpressure(BackpressureFact),
     SourcePollError(SourcePollErrorFact),
@@ -255,31 +256,6 @@ pub enum CircuitBreakerFact {
         dependency_elapsed_ms: u64,
         admission_wait_ms: u64,
     },
-    RetryScheduled {
-        cursor: EffectCursor,
-        next_attempt: u32,
-        delay_ms: u64,
-    },
-    RetrySucceeded {
-        cursor: EffectCursor,
-        total_attempts: u32,
-        terminal_classification: CircuitBreakerHealthClassification,
-    },
-    RetryExhausted {
-        cursor: EffectCursor,
-        total_attempts: u32,
-        reason: CircuitBreakerRetryStopReason,
-    },
-    RetryStoppedNonRetryable {
-        cursor: EffectCursor,
-        total_attempts: u32,
-    },
-    RecoveryCompleted {
-        cursor: EffectCursor,
-        total_attempts: u32,
-        backoff_elapsed_ms: u64,
-        recovery_elapsed_ms: u64,
-    },
     StateChanged {
         from_state: CircuitState,
         to_state: CircuitState,
@@ -307,6 +283,50 @@ impl CircuitBreakerFact {
             } => vocabulary::circuit_breaker::HALF_OPEN_ENTERED,
             Self::Rejected { .. } => vocabulary::circuit_breaker::ADMISSION_REJECTED,
             Self::AttemptSettled { .. } => vocabulary::circuit_breaker::CALL_CLASSIFIED,
+        }
+    }
+}
+
+/// Invocation recovery evidence independent of optional breaker health policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum RecoveryFact {
+    AttemptCompleted {
+        cursor: EffectCursor,
+        attempt: u32,
+        dependency_elapsed_ms: u64,
+        admission_wait_ms: u64,
+    },
+    RetryScheduled {
+        cursor: EffectCursor,
+        next_attempt: u32,
+        delay_ms: u64,
+    },
+    RetrySucceeded {
+        cursor: EffectCursor,
+        total_attempts: u32,
+    },
+    RetryExhausted {
+        cursor: EffectCursor,
+        total_attempts: u32,
+        reason: RetryStopReason,
+    },
+    RetryStoppedNonRetryable {
+        cursor: EffectCursor,
+        total_attempts: u32,
+    },
+    RecoveryCompleted {
+        cursor: EffectCursor,
+        total_attempts: u32,
+        backoff_elapsed_ms: u64,
+        recovery_elapsed_ms: u64,
+    },
+}
+
+impl RecoveryFact {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::AttemptCompleted { .. } => vocabulary::resilience::ATTEMPT_COMPLETED,
             Self::RetryScheduled { .. } => vocabulary::retry::SCHEDULED,
             Self::RetrySucceeded { .. } => vocabulary::retry::SUCCEEDED,
             Self::RetryExhausted { .. } => vocabulary::retry::EXHAUSTED,
@@ -449,6 +469,7 @@ impl ExecutionPayload {
             Self::ContractResult { status, .. } => status.event_type(),
             Self::StageLifecycle(fact) => return fact.event_type(stage_name).into(),
             Self::CircuitBreaker(fact) => fact.event_type(),
+            Self::Recovery(fact) => fact.event_type(),
             Self::RateLimiter(fact) => fact.event_type(),
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourcePollError(_) => "source.poll_error",
@@ -488,6 +509,7 @@ impl ExecutionPayload {
             | Self::ContractResult { .. }
             | Self::StageLifecycle(_)
             | Self::CircuitBreaker(_)
+            | Self::Recovery(_)
             | Self::RateLimiter(_)
             | Self::Backpressure(_)
             | Self::SourcePollError(_)
@@ -522,7 +544,7 @@ pub enum CircuitBreakerHealthClassification {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CircuitBreakerRetryStopReason {
+pub enum RetryStopReason {
     AttemptLimit,
     AttemptStartWindow,
     CircuitNoLongerClosed,

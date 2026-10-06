@@ -295,7 +295,7 @@ fn build_flow(
 
             stages: {
                 input = source!(RetainedInput => input);
-                output = sink!(RetainedInput => output with [policy]);
+                output = sink!(RetainedInput => output with {policy});
             },
 
             topology: {

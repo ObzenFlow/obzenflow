@@ -83,6 +83,15 @@ impl HostedIngressBindingSlot {
         &self.ingress_key
     }
 
+    /// Whether two handles share the same write-once binding cell.
+    ///
+    /// This is an in-memory ownership comparison for flow construction, not a
+    /// durable identifier. Independently created slots remain distinct even
+    /// when their ingress keys match.
+    pub fn same_binding(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
+    }
+
     /// Fill the slot once. Returns `Err` if it was already filled, which the
     /// DSL surfaces as a build error for a double-bound listener surface.
     pub fn fill(&self, filled: FilledHostedIngress) -> Result<(), HostedIngressAlreadyBound> {
@@ -122,6 +131,13 @@ impl HostedIngressBindingSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_identity_follows_shared_cell_instead_of_ingress_key() {
+        let slot = HostedIngressBindingSlot::new("orders");
+        assert!(slot.same_binding(&slot.clone()));
+        assert!(!slot.same_binding(&HostedIngressBindingSlot::new("orders")));
+    }
 
     #[test]
     fn resume_live_defaults_true_and_flag_is_shared_across_clones() {

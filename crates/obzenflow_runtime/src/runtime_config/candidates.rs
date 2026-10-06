@@ -485,7 +485,7 @@ mod tests {
         // An edge entry for a Stage-target knob is invalid (§4c).
         let err = set
             .admit(candidate(
-                "effects.circuit_breaker.threshold",
+                "middleware.circuit_breaker.consecutive_failures",
                 ConfigScope::edge("a", "b"),
                 ConfigSource::File,
                 ConfigValue::U64(3),

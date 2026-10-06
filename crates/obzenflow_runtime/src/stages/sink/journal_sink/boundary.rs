@@ -127,12 +127,7 @@ impl SinkPolicyEvidence {
             | CircuitBreakerFact::Rejected { .. }
             | CircuitBreakerFact::HalfOpen { .. } => {}
             CircuitBreakerFact::StateChanged { .. } => {}
-            CircuitBreakerFact::AttemptSettled { .. }
-            | CircuitBreakerFact::RetryScheduled { .. }
-            | CircuitBreakerFact::RetrySucceeded { .. }
-            | CircuitBreakerFact::RetryExhausted { .. }
-            | CircuitBreakerFact::RetryStoppedNonRetryable { .. }
-            | CircuitBreakerFact::RecoveryCompleted { .. } => {
+            CircuitBreakerFact::AttemptSettled { .. } => {
                 return Err(SinkPolicyEvidenceError::DisallowedCircuitBreakerFact);
             }
         }
@@ -244,8 +239,7 @@ mod tests {
     use obzenflow_core::event::payloads::effect_payload::EffectCursor;
     use obzenflow_core::event::payloads::execution_payload::{
         CircuitBreakerHealthClassification, CircuitBreakerOpenTrigger,
-        CircuitBreakerRejectionReason, CircuitBreakerRetryStopReason, CircuitState,
-        RateLimiterMode,
+        CircuitBreakerRejectionReason, CircuitState, RateLimiterMode,
     };
 
     fn cursor() -> EffectCursor {
@@ -324,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn every_retry_or_settlement_shaped_breaker_variant_is_rejected() {
+    fn effect_settlement_cannot_be_published_as_sink_policy_evidence() {
         assert_rejected_breaker(CircuitBreakerFact::AttemptSettled {
             cursor: cursor(),
             attempt: 1,
@@ -333,31 +327,8 @@ mod tests {
             dependency_elapsed_ms: 10,
             admission_wait_ms: 0,
         });
-        assert_rejected_breaker(CircuitBreakerFact::RetryScheduled {
-            cursor: cursor(),
-            next_attempt: 2,
-            delay_ms: 10,
-        });
-        assert_rejected_breaker(CircuitBreakerFact::RetrySucceeded {
-            cursor: cursor(),
-            total_attempts: 2,
-            terminal_classification: CircuitBreakerHealthClassification::Success,
-        });
-        assert_rejected_breaker(CircuitBreakerFact::RetryExhausted {
-            cursor: cursor(),
-            total_attempts: 3,
-            reason: CircuitBreakerRetryStopReason::AttemptLimit,
-        });
-        assert_rejected_breaker(CircuitBreakerFact::RetryStoppedNonRetryable {
-            cursor: cursor(),
-            total_attempts: 1,
-        });
-        assert_rejected_breaker(CircuitBreakerFact::RecoveryCompleted {
-            cursor: cursor(),
-            total_attempts: 3,
-            backoff_elapsed_ms: 20,
-            recovery_elapsed_ms: 30,
-        });
+        // Recovery facts are a separate type and have no constructor on the
+        // closed sink-policy evidence carrier. They cannot enter this boundary.
     }
 
     #[test]

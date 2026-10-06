@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115d: rate-limiter builder, factory, and public constructors.
+//! Inert rate-limiter values and checked boundary materialisation.
 //!
-//! [`RateLimiterFactory::declaration`] plus [`RateLimiterFactory::materialize`]
+//! [`RateLimiter::declaration`] plus [`RateLimiter::materialize`]
 //! are the sole production placement authority for the hook-bound rate limiter:
 //! the binder picks the concrete live-I/O surface per call site and routes it
 //! through `materialize`, which builds the matching [`super::hook_adapters`]
@@ -30,7 +30,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use std::sync::Arc;
 
-/// Inert per-attempt limiter configuration owned by `EffectResilience`.
+/// Inert token-bucket configuration. Every attachment materialises its own bucket.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
     pub(in crate::middleware::control) events_per_second: f64,
@@ -39,26 +39,14 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    pub fn per_second(events_per_second: f64) -> Result<Self, RateLimiterConfigError> {
-        let value = Self {
-            events_per_second,
-            burst_capacity: None,
-            cost_per_attempt: DEFAULT_COST_PER_EVENT,
-        };
-        value.validate()?;
-        Ok(value)
-    }
-
-    pub fn with_burst(mut self, capacity: f64) -> Result<Self, RateLimiterConfigError> {
+    pub fn burst_capacity(mut self, capacity: f64) -> Self {
         self.burst_capacity = Some(capacity);
-        self.validate()?;
-        Ok(self)
+        self
     }
 
-    pub fn with_cost_per_attempt(mut self, cost: f64) -> Result<Self, RateLimiterConfigError> {
+    pub fn cost(mut self, cost: f64) -> Self {
         self.cost_per_attempt = cost;
-        self.validate()?;
-        Ok(self)
+        self
     }
 
     pub(in crate::middleware::control) fn validate(
@@ -70,112 +58,62 @@ impl RateLimiter {
             self.cost_per_attempt,
         )
     }
-}
 
-/// Builder for constructing rate limiter middleware factories.
-///
-/// Every factory built here produces independent per-attachment buckets; see the
-/// module docs for the no-global-bucket decision (FLOWIP-114o Q6), the
-/// async-await vs blocking wait by placement, and the admission accounting
-/// contract.
-#[derive(Clone)]
-pub struct RateLimiterBuilder {
-    events_per_second: f64,
-    burst_capacity: Option<f64>,
-    cost_per_event: f64,
-}
-
-impl RateLimiterBuilder {
-    /// Create a basic rate limiter builder.
-    pub fn new(events_per_second: f64) -> Self {
-        Self {
-            events_per_second,
-            burst_capacity: None,
-            cost_per_event: DEFAULT_COST_PER_EVENT,
-        }
-    }
-
-    /// Set burst capacity (defaults to `events_per_second`).
-    pub fn with_burst(mut self, capacity: f64) -> Self {
-        self.burst_capacity = Some(capacity);
-        self
-    }
-
-    /// Set cost per event (for weighted rate limiting).
-    pub fn with_cost_per_event(mut self, cost: f64) -> Self {
-        self.cost_per_event = cost;
-        self
-    }
-
-    /// Backward-compatible alias for `with_cost_per_event`.
-    pub fn with_cost(self, cost: f64) -> Self {
-        self.with_cost_per_event(cost)
-    }
-
-    /// Build the boxed middleware factory.
-    pub fn build(self) -> Box<dyn MiddlewareFactory> {
-        Box::new(RateLimiterFactory::from(self))
+    fn resolved_config(
+        &self,
+        view: &obzenflow_runtime::runtime_config::ExactConfigView<'_>,
+    ) -> Result<ValidatedRateLimiterConfig, RateLimiterConfigError> {
+        use obzenflow_runtime::runtime_config::{
+            RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+            RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+        };
+        self.validate()?;
+        let rate = view
+            .get(RATE_LIMITER_EVENTS_PER_SECOND_KEY)
+            .and_then(|v| v.value.as_f64())
+            .unwrap_or(self.events_per_second);
+        let burst = view
+            .get(RATE_LIMITER_BURST_CAPACITY_KEY)
+            .and_then(|v| v.value.as_f64())
+            .or(self.burst_capacity);
+        let cost = view
+            .get(RATE_LIMITER_COST_PER_ATTEMPT_KEY)
+            .and_then(|v| v.value.as_f64())
+            .unwrap_or(self.cost_per_attempt);
+        validated_rate_limiter_config(rate, burst, cost)
     }
 }
 
-/// Factory for creating rate limiter middleware.
-///
-/// `RateLimiterFactory` remains available for direct construction and testing,
-/// but caller-facing configuration should prefer `RateLimiterBuilder`.
-#[derive(Clone)]
-pub struct RateLimiterFactory {
-    events_per_second: f64,
-    burst_capacity: Option<f64>,
-    cost_per_event: f64,
-}
-
-impl RateLimiterFactory {
-    /// Create a basic rate limiter
-    pub fn new(events_per_second: f64) -> Self {
-        Self {
-            events_per_second,
-            burst_capacity: None,
-            cost_per_event: DEFAULT_COST_PER_EVENT,
-        }
-    }
-
-    /// Set burst capacity (defaults to events_per_second)
-    pub fn with_burst(mut self, capacity: f64) -> Self {
-        self.burst_capacity = Some(capacity);
-        self
-    }
-
-    /// Set cost per event (for weighted rate limiting).
-    pub fn with_cost_per_event(mut self, cost: f64) -> Self {
-        self.cost_per_event = cost;
-        self
-    }
-
-    /// Backward-compatible alias for `with_cost_per_event`.
-    pub fn with_cost(self, cost: f64) -> Self {
-        self.with_cost_per_event(cost)
-    }
-
-    fn validated_config(&self) -> Result<ValidatedRateLimiterConfig, RateLimiterConfigError> {
-        validated_rate_limiter_config(
-            self.events_per_second,
-            self.burst_capacity,
-            self.cost_per_event,
-        )
+/// Declare an inert limiter; invalid settings are reported while building the flow.
+pub fn rate_limit(events_per_second: f64) -> RateLimiter {
+    RateLimiter {
+        events_per_second,
+        burst_capacity: None,
+        cost_per_attempt: DEFAULT_COST_PER_EVENT,
     }
 }
 
-impl From<RateLimiterBuilder> for RateLimiterFactory {
-    fn from(builder: RateLimiterBuilder) -> Self {
-        Self {
-            events_per_second: builder.events_per_second,
-            burst_capacity: builder.burst_capacity,
-            cost_per_event: builder.cost_per_event,
-        }
+impl MiddlewareFactory for RateLimiter {
+    fn builtin_control(&self) -> Option<super::super::composition::BuiltinControlContribution> {
+        Some(super::super::composition::BuiltinControlContribution::limiter(self.clone()))
     }
-}
 
-impl MiddlewareFactory for RateLimiterFactory {
+    fn validate_configuration(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        config: &obzenflow_runtime::pipeline::config::StageConfig,
+        stage_type: StageType,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        let declaration = self.declaration();
+        let context =
+            MiddlewareMaterializationContext::new(config, stage_type, &declaration, &request);
+        self.resolved_config(&context.config_view())
+            .map(|_| ())
+            .map_err(|error| {
+                MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, error)
+            })
+    }
+
     fn label(&self) -> &'static str {
         "rate_limiter"
     }
@@ -187,12 +125,18 @@ impl MiddlewareFactory for RateLimiterFactory {
     fn dsl_config_defaults(&self) -> Vec<obzenflow_runtime::runtime_config::DslConfigDefault> {
         use obzenflow_runtime::runtime_config::{
             ConfigValue, DslConfigDefault, RATE_LIMITER_BURST_CAPACITY_KEY,
-            RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+            RATE_LIMITER_COST_PER_ATTEMPT_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
         };
-        let mut defaults = vec![DslConfigDefault {
-            key_path: RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-            value: ConfigValue::F64(self.events_per_second),
-        }];
+        let mut defaults = vec![
+            DslConfigDefault {
+                key_path: RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+                value: ConfigValue::F64(self.events_per_second),
+            },
+            DslConfigDefault {
+                key_path: RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+                value: ConfigValue::F64(self.cost_per_attempt),
+            },
+        ];
         if let Some(burst_capacity) = self.burst_capacity {
             defaults.push(DslConfigDefault {
                 key_path: RATE_LIMITER_BURST_CAPACITY_KEY,
@@ -206,6 +150,7 @@ impl MiddlewareFactory for RateLimiterFactory {
         vec![
             obzenflow_runtime::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY,
             obzenflow_runtime::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY,
+            obzenflow_runtime::runtime_config::RATE_LIMITER_COST_PER_ATTEMPT_KEY,
         ]
     }
 
@@ -253,25 +198,9 @@ impl MiddlewareFactory for RateLimiterFactory {
                 )
             })?;
 
-        let config_view = context.config_view();
-        let events_per_second = config_view
-            .get(obzenflow_runtime::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY)
-            .and_then(|resolved| resolved.value.as_f64())
-            .ok_or_else(|| {
-                MiddlewareFactoryError::invalid_configuration(
-                    self.label(),
-                    &context.config.name,
-                    std::io::Error::other(
-                        "resolved rate-limiter events_per_second is missing at the protected unit",
-                    ),
-                )
-            })?;
-        let burst_capacity = config_view
-            .get(obzenflow_runtime::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY)
-            .and_then(|resolved| resolved.value.as_f64());
-        let validated =
-            validated_rate_limiter_config(events_per_second, burst_capacity, self.cost_per_event)
-                .map_err(|err| {
+        let validated = self
+            .resolved_config(&context.config_view())
+            .map_err(|err| {
                 MiddlewareFactoryError::invalid_configuration(
                     self.label(),
                     &context.config.name,
@@ -452,7 +381,7 @@ impl MiddlewareFactory for RateLimiterFactory {
     }
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
-        let validated = self.validated_config().ok()?;
+        let validated = self.validate().ok()?;
         let mut snapshot = serde_json::json!({
             "tokens_per_sec": validated.events_per_second,
             "burst_capacity": validated.burst_capacity,
@@ -464,27 +393,6 @@ impl MiddlewareFactory for RateLimiterFactory {
         }
         Some(snapshot)
     }
-}
-
-/// Attach a token-bucket rate limiter admitting `events_per_second`.
-///
-/// Each attachment owns its own bucket: flow-level `rate_limit(N)` materialises
-/// one instance per stage (FLOWIP-050d), and there is no process-wide shared
-/// bucket (FLOWIP-114o Q6). On async sources and the effect boundary the limiter
-/// awaits its permit as a cancellable future; on sync sources and handler chains
-/// it blocks. Counters increment at admission with no refund on a downstream
-/// `Skip`/`Abort` (FLOWIP-114m, FLOWIP-114o). See the module docs for the full
-/// wait, bucket, and accounting contract.
-pub fn rate_limit(events_per_second: f64) -> Box<dyn MiddlewareFactory> {
-    RateLimiterBuilder::new(events_per_second).build()
-}
-
-/// Attach a rate limiter with an explicit burst capacity. Same per-instance
-/// bucket, wait, and accounting contract as [`rate_limit`].
-pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn MiddlewareFactory> {
-    RateLimiterBuilder::new(events_per_second)
-        .with_burst(burst)
-        .build()
 }
 
 #[cfg(test)]
@@ -537,7 +445,7 @@ mod tests {
 
     #[test]
     fn rate_limiter_is_exclusively_hook_bound() {
-        let factory = RateLimiterFactory::new(10.0);
+        let factory = crate::middleware::control::rate_limit(10.0);
         let declaration = factory.declaration();
         assert!(declaration.is_control());
         assert!(!declaration.surfaces.is_empty());
@@ -545,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_supported_stage_types_includes_join() {
-        let factory = RateLimiterFactory::new(10.0);
+        let factory = crate::middleware::control::rate_limit(10.0);
         let supported = factory.supported_stage_types();
         assert!(
             supported.contains(&StageType::Join),
@@ -568,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_declares_only_live_io_surfaces() {
-        let factory = RateLimiterFactory::new(100.0).with_burst(500.0);
+        let factory = crate::middleware::control::rate_limit(100.0).burst_capacity(500.0);
         let declaration = factory.declaration();
         assert!(declaration.is_control());
         assert!(!declaration
@@ -578,30 +486,27 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_builder_preserves_config() {
-        let factory = RateLimiterFactory::from(
-            RateLimiterBuilder::new(100.0)
-                .with_burst(500.0)
-                .with_cost_per_event(2.0),
-        );
+        let factory = rate_limit(100.0).burst_capacity(500.0).cost(2.0);
 
         assert_eq!(factory.events_per_second, 100.0);
         assert_eq!(factory.burst_capacity, Some(500.0));
-        assert_eq!(factory.cost_per_event, 2.0);
+        assert_eq!(factory.cost_per_attempt, 2.0);
     }
 
     #[test]
     fn dsl_defaults_and_consumption_preserve_optional_burst_semantics() {
         use obzenflow_runtime::runtime_config::{
-            RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+            RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+            RATE_LIMITER_EVENTS_PER_SECOND_KEY,
         };
 
-        let implicit_factory = RateLimiterFactory::new(10.0);
+        let implicit_factory = crate::middleware::control::rate_limit(10.0);
         let implicit_defaults = implicit_factory.dsl_config_defaults();
         let implicit_consumed: BTreeSet<_> = implicit_factory
             .consumed_config_keys()
             .into_iter()
             .collect();
-        assert_eq!(implicit_defaults.len(), 1);
+        assert_eq!(implicit_defaults.len(), 2);
         assert_eq!(
             implicit_defaults[0].key_path,
             RATE_LIMITER_EVENTS_PER_SECOND_KEY
@@ -611,19 +516,20 @@ mod tests {
             BTreeSet::from([
                 RATE_LIMITER_EVENTS_PER_SECOND_KEY,
                 RATE_LIMITER_BURST_CAPACITY_KEY,
+                RATE_LIMITER_COST_PER_ATTEMPT_KEY,
             ])
         );
         assert!(implicit_defaults
             .iter()
             .all(|default| implicit_consumed.contains(default.key_path)));
 
-        let explicit_factory = RateLimiterFactory::new(10.0).with_burst(25.0);
+        let explicit_factory = crate::middleware::control::rate_limit(10.0).burst_capacity(25.0);
         let explicit_defaults = explicit_factory.dsl_config_defaults();
         let explicit_consumed: BTreeSet<_> = explicit_factory
             .consumed_config_keys()
             .into_iter()
             .collect();
-        assert_eq!(explicit_defaults.len(), 2);
+        assert_eq!(explicit_defaults.len(), 3);
         assert!(explicit_defaults.iter().any(|default| {
             default.key_path == RATE_LIMITER_BURST_CAPACITY_KEY
                 && default.value.as_f64() == Some(25.0)
@@ -655,7 +561,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            rate_limit_with_burst(25.0, 50.0).config_snapshot(),
+            rate_limit(25.0).burst_capacity(50.0).config_snapshot(),
             Some(json!({
                 "tokens_per_sec": 25.0,
                 "burst_capacity": 50.0,
@@ -668,57 +574,59 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_rejects_zero_rate() {
-        let err = RateLimiterFactory::new(0.0).validated_config().unwrap_err();
+        let err = crate::middleware::control::rate_limit(0.0)
+            .validate()
+            .unwrap_err();
         assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_negative_rate() {
-        let err = RateLimiterFactory::new(-1.0)
-            .validated_config()
+        let err = crate::middleware::control::rate_limit(-1.0)
+            .validate()
             .unwrap_err();
         assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_zero_cost() {
-        let err = RateLimiterFactory::new(10.0)
-            .with_cost_per_event(0.0)
-            .validated_config()
+        let err = crate::middleware::control::rate_limit(10.0)
+            .cost(0.0)
+            .validate()
             .unwrap_err();
-        assert!(err.to_string().contains("cost_per_event"));
+        assert!(err.to_string().contains("cost_per_attempt"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_non_finite_values() {
-        let inf_err = RateLimiterFactory::new(f64::INFINITY)
-            .validated_config()
+        let inf_err = crate::middleware::control::rate_limit(f64::INFINITY)
+            .validate()
             .unwrap_err();
         assert!(inf_err.to_string().contains("events_per_second"));
 
-        let nan_err = RateLimiterFactory::new(10.0)
-            .with_cost_per_event(f64::NAN)
-            .validated_config()
+        let nan_err = crate::middleware::control::rate_limit(10.0)
+            .cost(f64::NAN)
+            .validate()
             .unwrap_err();
-        assert!(nan_err.to_string().contains("cost_per_event"));
+        assert!(nan_err.to_string().contains("cost_per_attempt"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_explicit_burst_smaller_than_cost() {
-        let err = RateLimiterFactory::new(10.0)
-            .with_burst(2.0)
-            .with_cost_per_event(5.0)
-            .validated_config()
+        let err = crate::middleware::control::rate_limit(10.0)
+            .burst_capacity(2.0)
+            .cost(5.0)
+            .validate()
             .unwrap_err();
         assert!(err.to_string().contains("burst_capacity"));
-        assert!(err.to_string().contains("cost_per_event"));
+        assert!(err.to_string().contains("cost_per_attempt"));
     }
 
     #[test]
     fn test_rate_limiter_config_snapshot_uses_effective_capacity_for_low_rates() {
-        let snapshot = RateLimiterFactory::new(0.5)
+        let snapshot = crate::middleware::control::rate_limit(0.5)
             .config_snapshot()
-            .expect("valid low-rate config should expose a snapshot");
+            .expect("valid limiter snapshot");
         assert_eq!(snapshot["burst_capacity"], json!(1.0));
         assert_eq!(snapshot["cost_per_event"], json!(1.0));
         assert_eq!(snapshot["limit_rate"], json!(0.5));
@@ -727,10 +635,10 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_config_snapshot_exposes_weighted_effective_fields() {
-        let snapshot = RateLimiterFactory::new(2.0)
-            .with_cost_per_event(5.0)
+        let snapshot = crate::middleware::control::rate_limit(2.0)
+            .cost(5.0)
             .config_snapshot()
-            .expect("valid weighted config should expose a snapshot");
+            .expect("valid limiter snapshot");
         assert_eq!(snapshot["tokens_per_sec"], json!(2.0));
         assert_eq!(snapshot["burst_capacity"], json!(5.0));
         assert_eq!(snapshot["cost_per_event"], json!(5.0));
@@ -744,15 +652,15 @@ mod tests {
     fn rate_limiter_ingress_admits_then_rejects_fail_fast() {
         use crate::middleware::{
             HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
-            MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, ProtectedUnit,
-            ProtectedUnitId, SourceStageIngressOwner,
+            MiddlewareAttachmentRequest, MiddlewareAttachmentSite, ProtectedUnit, ProtectedUnitId,
+            SourceStageIngressOwner,
         };
         use obzenflow_core::ingress::{
             IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq, IngressKey,
         };
         use obzenflow_core::StageKey;
 
-        let factory = RateLimiterFactory::new(1.0);
+        let factory = crate::middleware::control::rate_limit(1.0);
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let config = test_stage_config("accounts", &factory);
         let stage_key = StageKey("accounts".to_string());
@@ -775,9 +683,10 @@ mod tests {
             }),
         };
         let request = MiddlewareAttachmentRequest {
+            stage_key: &config.name,
             surface: &surface,
             protected_unit: &unit,
-            declaration_index: MiddlewareDeclarationIndex::ingress_with(),
+            authored_site: MiddlewareAttachmentSite::Implementation,
         };
         // Burst capacity 1 (events_per_second defaults the burst), 1 event/sec.
         let boundary = materialize_factory_checked(

@@ -294,13 +294,9 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
             stages: {
                 orders = source!(OrderPlaced => orders_handler);
                 validate = effectful_transform!(
-                    OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler,
-                    observers: []
-                );
+                    OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler);
                 authorize = effectful_transform!(
-                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_handler,
-                    observers: []
-                );
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_handler);
                 paid_orders = sink!(OrderAuthorized => paid_orders_handler);
                 cancelled_orders = sink!(OrderCancelled => cancelled_orders_handler);
                 manual_review = sink!(AuthorizationUnavailable => manual_review_handler);
@@ -364,7 +360,13 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
         let journal_base = dir.path().join(mode);
         std::fs::create_dir_all(&journal_base).unwrap();
         let config = journal_base.join("obzenflow.toml");
-        let port = 9090;
+        // Keep the configured port occupied so every hosted run must select an
+        // ephemeral port through the CLI, including the shared-baseline replay.
+        let configured_port_owner =
+            (mode == "prometheus").then(|| std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap());
+        let port = configured_port_owner
+            .as_ref()
+            .map_or(9090, |listener| listener.local_addr().unwrap().port());
         std::fs::write(
             &config,
             format!(
@@ -420,6 +422,8 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
             .with_config_file(&config)
             .with_cli_args([
                 OsString::from("reporting-shared-baseline"),
+                OsString::from("--server-port"),
+                OsString::from("0"),
                 OsString::from("--replay-from"),
                 baseline.as_os_str().to_owned(),
                 OsString::from("--verify"),

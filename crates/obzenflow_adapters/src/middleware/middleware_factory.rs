@@ -23,7 +23,7 @@ use super::carrier::{
     MiddlewareAttachmentValidationError, MiddlewareAuthorityError, MiddlewareDeclaration,
     MiddlewareMaterializationContext, MiddlewareSurfaceAttachment,
 };
-use super::control::ControlMiddlewareAggregator;
+use super::control::{composition::BuiltinControlContribution, ControlMiddlewareAggregator};
 pub type MiddlewareFactorySource = Box<dyn StdError + Send + Sync + 'static>;
 
 #[derive(Debug, Error)]
@@ -176,6 +176,25 @@ pub trait MiddlewareFactory: Send + Sync {
     /// typed surface and has no legacy default.
     fn declaration(&self) -> MiddlewareDeclaration;
 
+    /// Framework-owned concrete contributions, captured before erasure. Custom
+    /// labels and capability declarations cannot manufacture these values.
+    #[doc(hidden)]
+    fn builtin_control(&self) -> Option<BuiltinControlContribution> {
+        None
+    }
+
+    /// Validate authored and effective settings without allocating runtime
+    /// state or opening a connector. Custom factories with configuration must
+    /// reject invalid settings here; materialisation remains a separate phase.
+    fn validate_configuration(
+        &self,
+        _request: MiddlewareAttachmentRequest<'_>,
+        _config: &StageConfig,
+        _stage_type: StageType,
+    ) -> MiddlewareFactoryResult<()> {
+        Ok(())
+    }
+
     /// Input witness retained by typed sink observer factories through erasure.
     /// The sink descriptor checks this before opening its connector.
     #[doc(hidden)]
@@ -201,15 +220,12 @@ pub trait MiddlewareFactory: Send + Sync {
 
     /// Configuration keys this factory can consume at a surviving attachment.
     ///
-    /// The common case is exactly the emitted DSL defaults. Factories with
-    /// optional values or mode-dependent branches override this independently,
+    /// The capture step includes every emitted DSL default automatically.
+    /// Factories with optional values or mode-dependent branches add keys here,
     /// so file configuration can refine an existing attachment without a fake
     /// default and can never create an attachment that the DSL omitted.
     fn consumed_config_keys(&self) -> Vec<&'static str> {
-        self.dsl_config_defaults()
-            .into_iter()
-            .map(|default| default.key_path)
-            .collect()
+        Vec::new()
     }
 
     /// Typed topology slot for config snapshot placement.
@@ -270,6 +286,19 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         (**self).override_key()
     }
 
+    fn builtin_control(&self) -> Option<BuiltinControlContribution> {
+        (**self).builtin_control()
+    }
+
+    fn validate_configuration(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        config: &StageConfig,
+        stage_type: StageType,
+    ) -> MiddlewareFactoryResult<()> {
+        (**self).validate_configuration(request, config, stage_type)
+    }
+
     fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
         (**self).sink_observer_input_type()
     }
@@ -312,6 +341,112 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         context: &MiddlewareMaterializationContext<'_>,
     ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
         (**self).materialize(request, context)
+    }
+}
+
+/// One evaluation of a middleware declaration and its immutable build inputs.
+/// All later planning, configuration, topology and binding reads use this
+/// snapshot, including for custom factories with interior mutable state.
+#[doc(hidden)]
+pub struct CapturedMiddlewareFactory {
+    factory: Box<dyn MiddlewareFactory>,
+    declaration: MiddlewareDeclaration,
+    override_key: MiddlewareOverrideKey,
+    defaults: Vec<DslConfigDefault>,
+    consumed_keys: Vec<&'static str>,
+    sink_input: Option<(TypeId, &'static str)>,
+    builtin: Option<BuiltinControlContribution>,
+    topology_slot: Option<TopologyMiddlewareConfigSlot>,
+    snapshot: Option<serde_json::Value>,
+    stage_types: Vec<StageType>,
+    safety: MiddlewareSafety,
+    hints: MiddlewareHints,
+}
+
+impl CapturedMiddlewareFactory {
+    pub fn new<F: MiddlewareFactory + 'static>(factory: F) -> Self {
+        let declaration = factory.declaration();
+        let defaults = factory.dsl_config_defaults();
+        let mut consumed_keys = factory.consumed_config_keys();
+        consumed_keys.extend(defaults.iter().map(|default| default.key_path));
+        consumed_keys.sort_unstable();
+        consumed_keys.dedup();
+        Self {
+            declaration,
+            override_key: factory.override_key(),
+            defaults,
+            consumed_keys,
+            sink_input: factory.sink_observer_input_type(),
+            builtin: factory.builtin_control(),
+            topology_slot: factory.topology_config_slot(),
+            snapshot: factory.config_snapshot(),
+            stage_types: factory.supported_stage_types().to_vec(),
+            safety: factory.safety_level(),
+            hints: factory.hints(),
+            factory: Box::new(factory),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub fn capture_middleware<F: MiddlewareFactory + 'static>(
+    factory: F,
+) -> Box<dyn MiddlewareFactory> {
+    Box::new(CapturedMiddlewareFactory::new(factory))
+}
+
+impl MiddlewareFactory for CapturedMiddlewareFactory {
+    fn label(&self) -> &'static str {
+        self.declaration.label
+    }
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        self.override_key
+    }
+    fn declaration(&self) -> MiddlewareDeclaration {
+        self.declaration.clone()
+    }
+    fn builtin_control(&self) -> Option<BuiltinControlContribution> {
+        self.builtin.clone()
+    }
+    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        self.sink_input
+    }
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        self.defaults.clone()
+    }
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        self.consumed_keys.clone()
+    }
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        self.topology_slot
+    }
+    fn config_snapshot(&self) -> Option<serde_json::Value> {
+        self.snapshot.clone()
+    }
+    fn supported_stage_types(&self) -> &[StageType] {
+        &self.stage_types
+    }
+    fn safety_level(&self) -> MiddlewareSafety {
+        self.safety
+    }
+    fn hints(&self) -> MiddlewareHints {
+        self.hints.clone()
+    }
+    fn validate_configuration(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        config: &StageConfig,
+        stage_type: StageType,
+    ) -> MiddlewareFactoryResult<()> {
+        self.factory
+            .validate_configuration(request, config, stage_type)
+    }
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        self.factory.materialize(request, context)
     }
 }
 
@@ -360,6 +495,75 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
 
     struct TestFamily;
+
+    struct ChangingMetadata {
+        reads: Arc<[std::sync::atomic::AtomicUsize; 4]>,
+    }
+
+    impl MiddlewareFactory for ChangingMetadata {
+        fn label(&self) -> &'static str {
+            "mutable"
+        }
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            MiddlewareOverrideKey::of::<TestFamily>("mutable")
+        }
+        fn declaration(&self) -> MiddlewareDeclaration {
+            let prior = self.reads[0].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            MiddlewareDeclaration::observer(
+                if prior == 0 { "first" } else { "changed" },
+                vec![super::super::MiddlewareSurfaceKind::Handler],
+            )
+        }
+        fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+            self.reads[1].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![DslConfigDefault {
+                key_path: "test.authored",
+                value: obzenflow_runtime::runtime_config::ConfigValue::U64(7),
+            }]
+        }
+        fn consumed_config_keys(&self) -> Vec<&'static str> {
+            self.reads[2].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec!["test.optional"]
+        }
+        fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+            self.reads[3].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some((TypeId::of::<u64>(), "u64"))
+        }
+        fn materialize(
+            &self,
+            _: MiddlewareAttachmentRequest<'_>,
+            _: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            panic!("capture must not materialise a factory")
+        }
+    }
+
+    #[test]
+    fn capture_freezes_custom_metadata_and_includes_default_consumption() {
+        let reads = Arc::new(std::array::from_fn(|_| {
+            std::sync::atomic::AtomicUsize::new(0)
+        }));
+        let captured = capture_middleware(ChangingMetadata {
+            reads: reads.clone(),
+        });
+        // Independent planning/configuration/materialisation reads cannot re-enter
+        // the declaration callback or change its input witness.
+        for _ in 0..3 {
+            assert_eq!(captured.declaration().label, "first");
+            assert_eq!(captured.dsl_config_defaults()[0].key_path, "test.authored");
+            assert_eq!(
+                captured.consumed_config_keys(),
+                vec!["test.authored", "test.optional"]
+            );
+            assert_eq!(
+                captured.sink_observer_input_type(),
+                Some((TypeId::of::<u64>(), "u64"))
+            );
+        }
+        for reads in reads.iter() {
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
 
     fn hash_key(key: MiddlewareOverrideKey) -> u64 {
         let mut hasher = DefaultHasher::new();

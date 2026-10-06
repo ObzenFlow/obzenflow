@@ -5,11 +5,13 @@
 //! Instrumented catalog flow for rejection and replay tests.
 //! Business transformations, domain types and input fixtures come from the demo.
 
-use crate::product_catalog_enrichment::{console, domain::*, handlers, sources::*};
+use crate::product_catalog_enrichment::{
+    console, domain::*, handlers, sources::*, summary_delivery::SingleSummaryDelivery,
+};
 use anyhow::Result;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::{joins, stateful};
-use obzenflow_adapters::middleware::RateLimiterBuilder;
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_dsl::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 
@@ -116,14 +118,16 @@ pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> F
             );
 
             per_order_printer = sink!(
-                EnrichedOrderWithPromo => per_order_printer_handler with [
-                    RateLimiterBuilder::new(0.5).build()
-                ]
+                EnrichedOrderWithPromo => per_order_printer_handler with {
+                    rate_limit(0.5)
+                }
             );
 
             catalog_stats = stateful!(EnrichedOrderWithPromo -> CatalogAnalyticsSummary => catalog_stats_handler);
 
-            summary_printer = sink!(CatalogAnalyticsSummary => summary_printer_handler);
+            summary_printer = sink!(
+                CatalogAnalyticsSummary => summary_printer_handler with SingleSummaryDelivery
+            );
         },
 
         topology: {

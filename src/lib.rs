@@ -82,7 +82,7 @@
 //! - `infinite_source!(Out => handler)` for an infinite source.
 //! - `async_infinite_source!(Out => handler)` for an async infinite source.
 //! - `transform!(In -> Out => handler)` for a synchronous transform.
-//! - `effectful_transform!(In -> Out uses ... => handler, observers: [])`
+//! - `effectful_transform!(In -> Out uses ... => handler)`
 //!   for a transform that performs declared external work.
 //! - `sink!(In => handler)` for a sink.
 //! - `stateful!(In -> Out => handler)` for stateful aggregation.
@@ -90,8 +90,11 @@
 //!   reference data.
 //!
 //! Control middleware attaches with the live I/O unit it protects, for example
-//! `source!(Out => handler with [rate_limit(10.0)])`. Passive middleware uses
-//! the named `observers: [...]` lane on every stage macro.
+//! `source!(Out => handler with rate_limit(10.0))`. Controls and passive
+//! observers share `with middleware` or `with { first, second }`. A named
+//! effect can carry its own group, such as `uses Fetch with { rate_limit(10.0),
+//! retry().max_attempts(3) }`; the complete plan is validated before any
+//! middleware is materialised or effect connector is opened.
 //!
 //! ### `topology:`
 //! Edges connecting stages:

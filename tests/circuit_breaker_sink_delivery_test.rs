@@ -15,7 +15,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
-    sink_delivery_observer, CircuitBreaker, SinkDeliveryObserver,
+    circuit_breaker, sink_delivery_observer, CircuitBreaker, SinkDeliveryObserver,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
@@ -34,10 +34,7 @@ use std::sync::{
 };
 
 fn breaker(failures: usize) -> CircuitBreaker {
-    CircuitBreaker::builder()
-        .consecutive_failures(failures.try_into().expect("test threshold fits u32"))
-        .build()
-        .expect("test breaker configuration")
+    circuit_breaker().consecutive_failures(failures.try_into().expect("test threshold fits u32"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -157,8 +154,7 @@ async fn sink_observer_input_mismatch_fails_flow_construction() {
             journals: disk_journals(root),
             stages: {
                 source = source!(SinkBreakerEvent => source);
-                destination = sink!(SinkBreakerEvent => sink_handler,
-                    observers: [sink_delivery_observer("wrong-input", WrongInputObserver)]);
+                destination = sink!(SinkBreakerEvent => sink_handler with { sink_delivery_observer("wrong-input", WrongInputObserver) });
             },
             topology: { source |> destination; }
         })
@@ -209,15 +205,13 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
 
             stages: {
                 cb_source = source!(SinkBreakerEvent => source);
-                cb_sink = sink!(SinkBreakerEvent => sink_handler with [
-                    breaker(THRESHOLD)
-                ], observers: [sink_delivery_observer(
+                cb_sink = sink!(SinkBreakerEvent => sink_handler with { breaker(THRESHOLD), sink_delivery_observer(
                     "delivery-classifications",
                     RecordsDeliveryClassifications {
                         outcomes: outcomes_for_flow,
                         deliveries: deliveries_for_flow,
                     }
-                )]);
+                ) });
             },
 
             topology: {

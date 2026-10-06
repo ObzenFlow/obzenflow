@@ -44,14 +44,14 @@ pub enum RateLimiterConfigError {
     #[error("rate_limiter events_per_second must be finite and > 0, got {events_per_second}")]
     InvalidEventsPerSecond { events_per_second: f64 },
 
-    #[error("rate_limiter cost_per_event must be finite and > 0, got {cost_per_event}")]
+    #[error("rate_limiter cost_per_attempt must be finite and > 0, got {cost_per_event}")]
     InvalidCostPerEvent { cost_per_event: f64 },
 
     #[error("rate_limiter burst_capacity must be finite and > 0, got {burst_capacity}")]
     InvalidBurstCapacity { burst_capacity: f64 },
 
     #[error(
-        "rate_limiter burst_capacity ({burst_capacity}) must be >= cost_per_event ({cost_per_event})"
+        "rate_limiter burst_capacity ({burst_capacity}) must be >= cost_per_attempt ({cost_per_event})"
     )]
     BurstCapacityBelowCost {
         burst_capacity: f64,

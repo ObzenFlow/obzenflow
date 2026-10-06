@@ -190,7 +190,7 @@ fn poison_flow(journal_base: PathBuf, csv_path: PathBuf) -> FlowDefinition {
             journals: disk_journals(journal_base),
 
             stages: {
-                records = source!(CsvRecord => records with [PoisonCompletionFactory]);
+                records = source!(CsvRecord => records with {PoisonCompletionFactory});
                 csv_out = sink!(CsvRecord => output);
             },
 

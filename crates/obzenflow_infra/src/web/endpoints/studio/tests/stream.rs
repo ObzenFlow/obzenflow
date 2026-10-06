@@ -1392,7 +1392,7 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
 
 #[tokio::test]
 async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
-    use obzenflow_adapters::middleware::{rate_limit_with_burst, CircuitBreaker};
+    use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
     use obzenflow_core::TypedPayload;
     use obzenflow_dsl::{flow, sink, source, FlowDefinition};
     use obzenflow_runtime::run_context::FlowBuildContext;
@@ -1449,18 +1449,16 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
             name: "source_middleware_studio",
             journals: crate::journal::disk_journals(path.clone()),
             stages: {
-                input = source!(Item => input_handler with [
-                    CircuitBreaker::builder()
+                input = source!(Item => input_handler with {
+                    circuit_breaker()
                         .count_window(2)
                         .minimum_calls(2)
                         .failure_rate_threshold(0.5)
-                        .open_for(Duration::from_millis(1))
-                        .build()
-                        .unwrap(),
+                        .open_for(Duration::from_millis(1)),
                     // The initial burst funds all 1,000 admissions. Their
                     // utilisation produces a mode change without a long wait.
-                    rate_limit_with_burst(1.0, 2000.0)
-                ]);
+                    rate_limit(1.0).burst_capacity(2000.0)
+                });
                 output = sink!(Item => output_handler);
             },
             topology: { input |> output; }
@@ -1480,12 +1478,21 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .middleware
         .as_ref()
         .unwrap()
-        .circuit_breaker
-        .as_ref()
+        .attachments
+        .iter()
+        .find(|attachment| {
+            attachment.family() == obzenflow_topology::MiddlewareFamily::CircuitBreaker
+        })
         .unwrap();
+    let obzenflow_topology::MiddlewareDetailsInfo::CircuitBreaker(info) = &config.details else {
+        panic!("expected typed breaker information");
+    };
+    assert_eq!(info.open_for_ms().value, 1);
+    assert_eq!(info.open_for_ms().provenance.source, "dsl");
+    assert_eq!(info.open_for_ms().provenance.scope, "stage:input");
     assert_eq!(
-        config.cooldown_ms, 1,
-        "the real factory snapshot reaches topology"
+        info.open_for_ms().provenance.winner_subject,
+        obzenflow_topology::SettingSubject::Unqualified
     );
     let journal = handle.system_journal().unwrap();
     let stage_journals = handle.stage_journals();

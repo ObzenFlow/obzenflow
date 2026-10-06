@@ -17,5 +17,8 @@ pub mod console;
 #[path = "handlers.rs"]
 pub mod handlers;
 
+#[path = "summary_delivery.rs"]
+pub mod summary_delivery;
+
 #[path = "flow.rs"]
 pub mod flow;

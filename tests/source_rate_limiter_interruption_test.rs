@@ -15,7 +15,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::rate_limit_with_burst;
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
@@ -176,9 +176,9 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
             journals: disk_journals(journal_base_for_flow),
 
             stages: {
-                src = async_source!(DripEvent => source with [
-                    rate_limit_with_burst(0.2, 1.0)
-                ]);
+                src = async_source!(DripEvent => source with {
+                    rate_limit(0.2).burst_capacity(1.0)
+                });
                 snk = sink!(DripEvent => sink);
             },
 
