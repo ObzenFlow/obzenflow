@@ -13,6 +13,7 @@ use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent};
 use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::JournalRecord;
 use std::any::Any;
+use tracing::Instrument;
 
 /// Wrapper for system/error journal readers
 ///
@@ -41,6 +42,12 @@ where
     }
 
     /// Check if an event represents EOF (only ChainEvent EOF is treated as terminal)
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "system_subscription_classify_control"
+    )]
     fn is_eof_event(&self, envelope: &JournalRecord<T::Payload>) -> bool {
         // For ChainEvent, check for explicit EOF flow control
         if let Some(chain_event) = (&envelope.authored() as &dyn Any).downcast_ref::<ChainEvent>() {
@@ -72,12 +79,23 @@ where
 {
     type Event = T;
 
+    #[tracing::instrument(
+        skip_all, target = "obzenflow::performance", level = "debug",
+        name = "system_subscription_poll", fields(owner = %self.stage_name)
+    )]
     async fn poll_next(&mut self) -> PollResult<Self::Event> {
         if self.eof_received {
             return PollResult::NoEvents;
         }
 
-        match self.reader.next().await {
+        match self
+            .reader
+            .next()
+            .instrument(tracing::debug_span!(
+                target: "obzenflow::performance", "subscription_journal_next"
+            ))
+            .await
+        {
             Ok(Some(envelope)) => {
                 // Check for EOF in the event
                 if self.is_eof_event(&envelope) {

@@ -31,11 +31,13 @@ witness lists, and readers do not reconstruct an exact merge proof. Clock
 propagation is checked by tests using known incorporated inputs and committed
 predecessors.
 
-Records are limited to 8 MiB of canonical JSON, atomic groups to 4,096 records
-and 64 MiB of canonical JSON, and encoded frame bodies to 64 MiB. Providers
-reject oversized appends before commitment; decoders enforce the same limits
-before exposing group members. Sequential readers decode frames on the blocking
-pool, outside Tokio worker threads.
+Atomic groups are limited to 4,096 records and encoded frame bodies to 64 MiB.
+The disk writer checks its encoded buffer before commitment; readers check the
+frame header before allocating the body. There is no separate 8 MiB payload cap
+or canonical-JSON record/group accounting pass. Memory journals enforce the member
+count but have no encoded frame. These limits do not describe heap/RSS usage after
+JSON and immutable definitions are materialised. Sequential readers decode frames
+on the blocking pool, outside Tokio worker threads.
 
 ## Framing
 

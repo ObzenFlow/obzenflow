@@ -183,6 +183,12 @@ fn main() -> Result<()> {
     // Operator-tunable event volume through the framework env helpers, so the
     // load varies without a code change (default 100k).
     let total_events = env_var_or::<usize>("PROMETHEUS_EVENT_COUNT", DEFAULT_EVENT_COUNT)?;
+    let source_rate_limit = match std::env::var_os("PROMETHEUS_RATE_LIMIT").as_deref() {
+        None => SourceRateLimit::Enabled,
+        Some(value) if value == "1" => SourceRateLimit::Enabled,
+        Some(value) if value == "0" => SourceRateLimit::Disabled,
+        Some(_) => anyhow::bail!("PROMETHEUS_RATE_LIMIT must be unset, 0, or 1"),
+    };
     let console_enabled = match std::env::var_os("PROMETHEUS_TOKIO_CONSOLE").as_deref() {
         None => false,
         Some(value) if value == "0" => false,
@@ -200,7 +206,10 @@ fn main() -> Result<()> {
             .bullets(
                 "Demonstrating",
                 [
-                    "Source-intake rate limiting middleware",
+                    match source_rate_limit {
+                        SourceRateLimit::Enabled => "Source-intake rate limiting at 1,000/s",
+                        SourceRateLimit::Disabled => "Source-intake rate limiter omitted for measurement",
+                    },
                     "Source outages with five-second circuit-breaker cooldowns",
                     "Enforced backpressure (64 events per edge)",
                     "Counting successfully processed events",
@@ -228,10 +237,17 @@ fn main() -> Result<()> {
     } else {
         application
     };
-    application.run_blocking(flow_definition(
-        total_events,
-        std::path::PathBuf::from("target/prometheus_demo_journal"),
-    ))?;
+    let journal_root = std::path::PathBuf::from("target/prometheus_demo_journal");
+    let definition = match source_rate_limit {
+        SourceRateLimit::Enabled => flow_definition(total_events, journal_root),
+        SourceRateLimit::Disabled => flow_definition_with_options(
+            total_events,
+            journal_root,
+            SOURCE_OUTAGE_INTERVAL,
+            SourceRateLimit::Disabled,
+        ),
+    };
+    application.run_blocking(definition)?;
 
     Ok(())
 }
@@ -250,6 +266,26 @@ pub(crate) fn flow_definition_with_outage_interval(
     total_events: usize,
     journal_root: std::path::PathBuf,
     outage_interval: usize,
+) -> FlowDefinition {
+    flow_definition_with_options(
+        total_events,
+        journal_root,
+        outage_interval,
+        SourceRateLimit::Enabled,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SourceRateLimit {
+    Enabled,
+    Disabled,
+}
+
+fn flow_definition_with_options(
+    total_events: usize,
+    journal_root: std::path::PathBuf,
+    outage_interval: usize,
+    source_rate_limit: SourceRateLimit,
 ) -> FlowDefinition {
     assert!(
         outage_interval > 0,
@@ -284,13 +320,21 @@ pub(crate) fn flow_definition_with_outage_interval(
             stages: {
                 // The simulated service outage belongs at the live source boundary.
                 // Pure transform errors still follow their existing error-journal path.
-                high_volume_source = source!(DataRequest => high_volume_source_handler with {
-                    circuit_breaker()
-                        .consecutive_failures(1)
-                        .open_for(SOURCE_BREAKER_COOLDOWN)
-                        .probes(1),
-                    rate_limit(1000.0)
-                });
+                high_volume_source = match source_rate_limit {
+                    SourceRateLimit::Enabled => source!(DataRequest => high_volume_source_handler with {
+                        circuit_breaker()
+                            .consecutive_failures(1)
+                            .open_for(SOURCE_BREAKER_COOLDOWN)
+                            .probes(1),
+                        rate_limit(1000.0)
+                    }),
+                    SourceRateLimit::Disabled => source!(DataRequest => high_volume_source_handler with {
+                        circuit_breaker()
+                            .consecutive_failures(1)
+                            .open_for(SOURCE_BREAKER_COOLDOWN)
+                            .probes(1)
+                    }),
+                };
                 error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
                 event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
                 summary_sink = sink!(EventCountState => summary_sink_handler);

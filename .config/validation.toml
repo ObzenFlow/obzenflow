@@ -74,6 +74,27 @@ owner = "real_nextest_leaks_fail_acceptance_with_identity independent completion
 
 [[prerequisites]]
 binary = "obzenflow_infra"
+test = "journal::disk::performance::tests::disk_read_write_and_codec_keep_ancestry_across_tasks"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Real disk append/read in an owned temporary directory proves nested span ancestry through retained commits and blocking work."
+
+[[prerequisites]]
+binary = "obzenflow_infra::supervision_journals"
+test = "physical_group_limits_reject_before_commit_and_members_stream_in_order"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Owned disk journals prove physical frame/member rejection before commitment and ordered group reads."
+
+[[prerequisites]]
+binary = "obzenflow_infra::supervision_journals"
+test = "large_in_process_documents_roundtrip_through_memory_and_reopened_disk"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "A public in-process source emits a document above the retired logical cap; owned journals prove memory, live disk and reopened disk agreement."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
 test = "application::observability::tests::console_recording_is_rejected_before_binding_or_creating_a_file"
 lanes = ["production-features"]
 capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]

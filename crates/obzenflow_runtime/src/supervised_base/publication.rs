@@ -506,7 +506,18 @@ impl PublicationScope {
                     .shared(),
             );
             let scope = self.clone();
-            let task = tokio::spawn(async move {
+            // Accepted work remains a child of the originating diagnostic phase
+            // across its existing task boundary. This is inclusive ancestry;
+            // exclusive supervisor time is accounted only by the runner.
+            let diagnostics =
+                tracing::span_enabled!(target: "obzenflow::performance", tracing::Level::DEBUG)
+                    .then(|| {
+                        (
+                            tracing::debug_span!(target: "obzenflow::performance", "publication"),
+                            tracing::dispatcher::get_default(Clone::clone),
+                        )
+                    });
+            let work = async move {
                 let _slot = slot;
                 let mut frontier = snapshot;
                 if let Some(previous) = previous {
@@ -568,6 +579,14 @@ impl PublicationScope {
                 let _ = receipt_tx.send(result);
                 let _ = done_tx.send(frontier.lock().unwrap_or_else(|e| e.into_inner()).clone());
                 settlement
+            };
+            let task = tokio::spawn(async move {
+                use tracing::instrument::WithSubscriber;
+                use tracing::Instrument;
+                match diagnostics {
+                    Some((span, dispatch)) => work.instrument(span).with_subscriber(dispatch).await,
+                    None => work.await,
+                }
             });
             let abort = task.abort_handle();
             let completion = async move {

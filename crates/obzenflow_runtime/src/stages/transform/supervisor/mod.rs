@@ -30,6 +30,7 @@ use crate::supervised_base::base::{self, Registration, Supervisor};
 use crate::supervised_base::handler_supervised::{
     ActionCompletion, ActionExecution, DispatchCompletion, OwnedDispatch, SupervisorAction,
 };
+use crate::supervised_base::loop_timing::{phase, Phase};
 use crate::supervised_base::{
     publication, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
@@ -459,6 +460,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         upstream: Option<StageId>,
         write_error_context: &'static str,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        let _control = phase(Phase::Control);
         let Some(guard) = &mut self.cycle_guard else {
             return Ok(false);
         };
@@ -482,24 +484,31 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
                 let journal = ctx.error_journal.clone();
                 let parent = envelope.clone();
                 let instrumentation = ctx.instrumentation.clone();
-                publication::commit(async move {
-                    crate::supervised_base::publication::append_inline(
-                        &journal,
-                        error_event,
-                        AppendOptions::from_record(Some(&parent))
-                            .unwrap()
-                            .with_capture(instrumentation.journal_capture(None, vec![(0, false)])),
-                    )
-                    .await?;
-                    instrumentation.record_error(ErrorKind::Unknown);
-                    Ok(())
-                })
-                .await
-                .map_err(|e| format!("{write_error_context}: {e}"))?;
+                {
+                    let _publishing = phase(Phase::Publish);
+                    publication::commit(async move {
+                        crate::supervised_base::publication::append_inline(
+                            &journal,
+                            error_event,
+                            AppendOptions::from_record(Some(&parent))
+                                .unwrap()
+                                .with_capture(
+                                    instrumentation.journal_capture(None, vec![(0, false)]),
+                                ),
+                        )
+                        .await?;
+                        instrumentation.record_error(ErrorKind::Unknown);
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|e| format!("{write_error_context}: {e}"))?;
+                }
 
                 if let Some(upstream) = upstream {
                     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                        let _acknowledging = phase(Phase::Acknowledge);
                         reader.ack_consumed(1);
+                        crate::supervised_base::loop_timing::acknowledgement();
                     }
                 }
 
@@ -515,6 +524,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         envelope: &DeliveredRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let _control = phase(Phase::Control);
         let should_forward = self
             .cycle_guard
             .as_mut()
@@ -532,6 +542,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         &mut self,
         ctx: &mut TransformResources<H>,
     ) -> Result<Option<EventLoopDirective<TransformEvent<H>>>, Box<dyn Error + Send + Sync>> {
+        let _control = phase(Phase::Control);
         let Some(cfg) = ctx.cycle_guard_config.as_ref() else {
             return Ok(None);
         };
@@ -605,6 +616,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         envelope: &DeliveredRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let _publishing = phase(Phase::Publish);
         let _ = forward_control_event_helper(
             envelope,
             self.stage_id,

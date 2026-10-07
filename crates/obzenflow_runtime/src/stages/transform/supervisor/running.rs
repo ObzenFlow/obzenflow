@@ -26,6 +26,7 @@ use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageF
 use crate::stages::observer::dispatch::{
     run_after_handler_observers, run_before_handler_observers,
 };
+use crate::supervised_base::loop_timing::{begin, input_delivered, phase, Phase};
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::provenance::FlowContext;
@@ -35,6 +36,7 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tracing::Instrument;
 
 use super::TransformSupervisor;
 use crate::stages::transform::fsm::{TransformEvent, TransformResources, TransformState};
@@ -44,6 +46,12 @@ use crate::stages::transform::fsm::{TransformEvent, TransformResources, Transfor
 /// This is a free function taking `sup: &mut TransformSupervisor<H>` rather
 /// than a trait method, keeping the decomposition mechanical and avoiding
 /// trait complexity.
+#[tracing::instrument(
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "transform_running_dispatch",
+    skip_all
+)]
 pub(super) async fn dispatch_running<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
@@ -51,6 +59,8 @@ pub(super) async fn dispatch_running<
     state: &TransformState<H>,
     ctx: &mut TransformResources<H>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut cycle = begin("Running");
+    let preparing = phase(Phase::Prepare);
     let loop_count = ctx
         .instrumentation
         .event_loops_total
@@ -76,7 +86,10 @@ pub(super) async fn dispatch_running<
         sup.subscription = ctx.subscription.take();
     }
 
-    dispatch_running_inner(sup, state, ctx, loop_count, &flow_context).await
+    drop(preparing);
+    let result = dispatch_running_inner(sup, state, ctx, loop_count, &flow_context).await;
+    cycle.complete(&result);
+    result
 }
 
 async fn dispatch_running_inner<
@@ -89,6 +102,7 @@ async fn dispatch_running_inner<
     flow_context: &FlowContext,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if sup.subscription.is_some() {
+        let _preparing = phase(Phase::Prepare);
         while let Some(pending) = ctx.pending_outputs.pop_front() {
             match drain_one_pending(
                 pending,
@@ -104,6 +118,7 @@ async fn dispatch_running_inner<
                 Some(&ctx.output_contract),
                 &mut ctx.pending_outputs,
             )
+            .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_pending_output_drain"))
             .await?
             {
                 DrainOutcome::Committed { was_data } => {
@@ -117,30 +132,49 @@ async fn dispatch_running_inner<
             }
         }
 
-        if let Some(upstream) = ctx.pending_ack_upstream.take() {
-            if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                reader.ack_consumed(1);
-            } else {
-                tracing::warn!(
-                    stage_name = %ctx.stage_name,
-                    upstream = ?upstream,
-                    "Transform backpressure ack skipped: missing reader handle"
-                );
-            }
+        if ctx.pending_ack_upstream.is_some() {
+            tracing::debug_span!(target: "obzenflow::performance", "transform_input_ack").in_scope(
+                || {
+                    let _acknowledging = phase(Phase::Acknowledge);
+                    if let Some(upstream) = ctx.pending_ack_upstream.take() {
+                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                            reader.ack_consumed(1);
+                            crate::supervised_base::loop_timing::acknowledgement();
+                        } else {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                "Transform backpressure ack skipped: missing reader handle"
+                            );
+                        }
+                    }
+                },
+            );
         }
         ctx.pending_parent = None;
     }
 
     if ctx.direct_fact_continuation.is_some() {
-        return super::direct_fact_continuation::service(sup, ctx, flow_context).await;
+        return super::direct_fact_continuation::service(sup, ctx, flow_context)
+            .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_direct_fact_continuation"))
+            .await;
     }
 
-    if let Some(directive) = sup.maybe_release_buffered_terminal(ctx).await? {
+    if let Some(directive) = sup
+        .maybe_release_buffered_terminal(ctx)
+        .instrument(
+            tracing::debug_span!(target: "obzenflow::performance", "transform_terminal_release"),
+        )
+        .await?
+    {
         return Ok(directive);
     }
 
     if sup.subscription.is_none() {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _idle = phase(Phase::Idle);
+        tokio::time::sleep(Duration::from_millis(100))
+            .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_missing_subscription_wait"))
+            .await;
         return Ok(EventLoopDirective::Continue);
     };
 
@@ -152,17 +186,25 @@ async fn dispatch_running_inner<
     );
 
     let poll_result = {
+        let _reading = phase(Phase::Read);
         let subscription = sup
             .subscription
             .as_mut()
             .expect("subscription presence checked above");
         subscription
             .poll_next_with_state(state.variant_name(), Some(&mut ctx.contract_state[..]))
+            .instrument(
+                tracing::debug_span!(target: "obzenflow::performance", "transform_upstream_poll"),
+            )
             .await
     };
 
     match poll_result {
         PollResult::Event(mut envelope) => {
+            let _preparing = phase(Phase::Prepare);
+            if envelope.consumes_data_credit() {
+                input_delivered();
+            }
             tracing::trace!(
                 target: "flowip-080o",
                 stage_name = %ctx.stage_name,
@@ -222,9 +264,13 @@ async fn dispatch_running_inner<
                     upstream_stage,
                     "Failed to write cycle guard error event",
                 )
+                .instrument(
+                    tracing::debug_span!(target: "obzenflow::performance", "transform_cycle_guard"),
+                )
                 .await?;
 
             if suppress_event {
+                let _control = phase(Phase::Control);
                 let directive = EventLoopDirective::Continue;
 
                 if let Some(subscription) = sup.subscription.as_mut() {
@@ -233,6 +279,7 @@ async fn dispatch_running_inner<
                             &mut ctx.contract_state[..],
                             &mut ctx.last_contract_check,
                         )
+                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                         .await
                     {
                         match status {
@@ -272,6 +319,7 @@ async fn dispatch_running_inner<
 
             let directive = match &envelope.payload {
                 ChainPayload::FlowControl(signal) => {
+                    let _control = phase(Phase::Control);
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; each stage authors its own.
                     if let obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete {
@@ -301,6 +349,7 @@ async fn dispatch_running_inner<
                             &ctx.runtime_execution,
                             &mut ctx.catch_up_flip,
                         )
+                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_control_resolution"))
                         .await;
                         return Ok(match disposition {
                             CatchUpDisposition::Consumed => EventLoopDirective::Continue,
@@ -334,6 +383,7 @@ async fn dispatch_running_inner<
                             &ctx.runtime_execution,
                             &mut ctx.catch_up_flip,
                         )
+                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_control_resolution"))
                         .await
                         {
                             return Ok(EventLoopDirective::Transition(TransformEvent::Error(
@@ -359,6 +409,7 @@ async fn dispatch_running_inner<
                         /* drain_is_terminal */ true,
                         &ctx.stage_name,
                     )
+                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_control_resolution"))
                     .await;
 
                     match resolution {
@@ -369,12 +420,14 @@ async fn dispatch_running_inner<
                                         if is_terminal_eof(&envelope, upstream_stage) {
                                             subscription
                                                 .check_contracts(&mut ctx.contract_state[..])
+                                                .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                                                 .await
                                                 .into_result()?;
                                         }
                                     } else {
                                         subscription
                                             .check_contracts(&mut ctx.contract_state[..])
+                                            .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                                             .await
                                             .into_result()?;
                                         let _ = subscription.take_last_eof_outcome();
@@ -383,6 +436,7 @@ async fn dispatch_running_inner<
                             }
 
                             sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
+                                .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_control_forward"))
                                 .await?;
                             EventLoopDirective::Continue
                         }
@@ -393,6 +447,7 @@ async fn dispatch_running_inner<
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     subscription
                                         .check_contracts(&mut ctx.contract_state[..])
+                                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                                         .await
                                         .into_result()?;
                                     if !is_cycle_entry_point {
@@ -407,6 +462,7 @@ async fn dispatch_running_inner<
                                 "Transform stage transitioning to draining"
                             );
                             sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
+                                .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_control_forward"))
                                 .await?;
                             EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
                         }
@@ -437,6 +493,7 @@ async fn dispatch_running_inner<
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     subscription
                                         .check_contracts(&mut ctx.contract_state[..])
+                                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                                         .await
                                         .into_result()?;
                                 }
@@ -452,6 +509,7 @@ async fn dispatch_running_inner<
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     subscription
                                         .check_contracts(&mut ctx.contract_state[..])
+                                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                                         .await
                                         .into_result()?;
                                 }
@@ -488,9 +546,11 @@ async fn dispatch_running_inner<
                         scope,
                         flow_context,
                     )
+                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_direct_fact_continuation"))
                     .await?
                     {
                         return super::direct_fact_continuation::service(sup, ctx, flow_context)
+                            .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_direct_fact_continuation"))
                             .await;
                     }
 
@@ -542,7 +602,8 @@ async fn dispatch_running_inner<
                             observer_input_position,
                         );
                     }
-                    let result =
+                    let result = {
+                        let _handling = phase(Phase::Handler);
                         process_with_instrumentation(&ctx.instrumentation, || async move {
                             let event = envelope_clone.authored();
                             let event_id = event.id;
@@ -567,7 +628,10 @@ async fn dispatch_running_inner<
                                 )
                             });
 
-                            match handler.process(event, effect_context, scope).await {
+                            match handler.process(event, effect_context, scope)
+                                .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_handler_invoke"))
+                                .await
+                            {
                                 Ok(outputs) => {
                                     if let Some(state) = &handler_heartbeat_state {
                                         state.record_last_consumed(event_id);
@@ -589,7 +653,9 @@ async fn dispatch_running_inner<
                                 }
                             }
                         })
-                        .await;
+                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_handler"))
+                        .await
+                    };
 
                     match result {
                         Ok(transformed_events) => {
@@ -610,8 +676,10 @@ async fn dispatch_running_inner<
                                 crate::stages::common::supervision::backpressure_drain::PendingOutput,
                             >::new();
 
+                            async {
                             for event in transformed_events {
                                 if is_framework_middleware_observability_event(&event) {
+                                    let _publishing = phase(Phase::Publish);
                                     commit_framework_observability_events(
                                         vec![event],
                                         FrameworkObservabilityCommit {
@@ -628,6 +696,7 @@ async fn dispatch_running_inner<
                                             observer_scope: scope,
                                         },
                                     )
+                                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_framework_publish"))
                                     .await
                                     .map_err(|e| {
                                         format!(
@@ -645,6 +714,7 @@ async fn dispatch_running_inner<
                                 }
 
                                 if route_to_error_journal(&event) {
+                                    let _publishing = phase(Phase::Publish);
                                     tracing::info!(
                                         stage_name = %ctx.stage_name,
                                         event_id = %event.id,
@@ -655,6 +725,7 @@ async fn dispatch_running_inner<
                                         event,
                                         AppendOptions::from_record(Some(&envelope))?,
                                     )
+                                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_error_publish"))
                                     .await
                                     .map_err(|e| format!("Failed to write error event: {e}"))?;
                                 } else {
@@ -667,6 +738,10 @@ async fn dispatch_running_inner<
                                     );
                                 }
                             }
+                            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+                            }
+                            .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_output_prepare"))
+                            .await?;
 
                             while let Some(event) = stage_outputs.pop_front() {
                                 match drain_one_pending(
@@ -683,6 +758,7 @@ async fn dispatch_running_inner<
                                     Some(&ctx.output_contract),
                                     &mut stage_outputs,
                                 )
+                                .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_output_publish"))
                                 .await?
                                 {
                                     DrainOutcome::Committed { was_data } => {
@@ -705,7 +781,12 @@ async fn dispatch_running_inner<
                             if ctx.pending_outputs.is_empty() {
                                 if let Some(upstream) = upstream_stage {
                                     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                                        reader.ack_consumed(1);
+                                        tracing::debug_span!(target: "obzenflow::performance", "transform_input_ack")
+                                            .in_scope(|| {
+                                                let _acknowledging = phase(Phase::Acknowledge);
+                                                reader.ack_consumed(1);
+                                                crate::supervised_base::loop_timing::acknowledgement();
+                                            });
                                     } else {
                                         tracing::warn!(
                                             stage_name = %ctx.stage_name,
@@ -724,6 +805,8 @@ async fn dispatch_running_inner<
                                     let writer_id = ctx.writer_id.ok_or_else(|| {
                                         "fatal transform input has no stage writer id".to_string()
                                     })?;
+                                    {
+                                    let _publishing = phase(Phase::Publish);
                                     record_stage_fatal(
                                         fatal,
                                         StageFatalCommit {
@@ -736,12 +819,19 @@ async fn dispatch_running_inner<
                                             lineage: ctx.lineage_policy,
                                         },
                                     )
+                                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_error_publish"))
                                     .await?;
+                                    }
                                     if let Some(upstream) = upstream_stage {
                                         if let Some(reader) =
                                             ctx.backpressure_readers.get(&upstream)
                                         {
-                                            reader.ack_consumed(1);
+                                            tracing::debug_span!(target: "obzenflow::performance", "transform_input_ack")
+                                                .in_scope(|| {
+                                                    let _acknowledging = phase(Phase::Acknowledge);
+                                                    reader.ack_consumed(1);
+                                                    crate::supervised_base::loop_timing::acknowledgement();
+                                                });
                                         }
                                     }
                                     if let Some(state) = &heartbeat_state {
@@ -763,19 +853,23 @@ async fn dispatch_running_inner<
                     EventLoopDirective::Continue
                 }
                 _ => {
+                    let _control = phase(Phase::Control);
                     // Other content types: forward them.
                     sup.forward_control_event(&envelope, &ctx.stage_name)
+                        .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_control_forward"))
                         .await?;
                     EventLoopDirective::Continue
                 }
             };
 
             if let Some(subscription) = sup.subscription.as_mut() {
+                let _control = phase(Phase::Control);
                 if let Some(status) = subscription
                     .maybe_check_contracts_tick(
                         &mut ctx.contract_state[..],
                         &mut ctx.last_contract_check,
                     )
+                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                     .await
                 {
                     match status {
@@ -816,10 +910,15 @@ async fn dispatch_running_inner<
             upstream,
             completed_data_rows,
         } => {
-            crate::backpressure::complete_filtered_data_rows(
-                &ctx.backpressure_readers,
-                upstream,
-                completed_data_rows,
+            tracing::debug_span!(target: "obzenflow::performance", "transform_input_ack").in_scope(
+                || {
+                    let _acknowledging = phase(Phase::Acknowledge);
+                    crate::backpressure::complete_filtered_data_rows(
+                        &ctx.backpressure_readers,
+                        upstream,
+                        completed_data_rows,
+                    );
+                },
             );
             ctx.instrumentation
                 .event_loops_with_work_total
@@ -827,6 +926,7 @@ async fn dispatch_running_inner<
             Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {
+            let _control = phase(Phase::Control);
             // FLOWIP-095d: a canonical merge that delivered nothing because an
             // input is quiet is idle-by-rule; name the awaited input.
             crate::stages::common::heartbeat::note_merge_wait(
@@ -834,7 +934,10 @@ async fn dispatch_running_inner<
                 sup.subscription.as_ref().and_then(|s| s.merge_wait()),
             );
 
-            if let Some(directive) = sup.maybe_release_buffered_terminal(ctx).await? {
+            if let Some(directive) = sup.maybe_release_buffered_terminal(ctx)
+                .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_terminal_release"))
+                .await?
+            {
                 return Ok(directive);
             }
 
@@ -844,6 +947,7 @@ async fn dispatch_running_inner<
                         &mut ctx.contract_state[..],
                         &mut ctx.last_contract_check,
                     )
+                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_contract_check"))
                     .await
             } else {
                 None
@@ -880,10 +984,14 @@ async fn dispatch_running_inner<
             }
 
             tracing::trace!(stage_name = %ctx.stage_name, "No events available, sleeping");
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _idle = phase(Phase::Idle);
+            tokio::time::sleep(Duration::from_millis(10))
+                .instrument(tracing::debug_span!(target: "obzenflow::performance", "transform_empty_input_wait"))
+                .await;
             Ok(EventLoopDirective::Continue)
         }
         PollResult::Error(e) => {
+            let _control = phase(Phase::Control);
             tracing::error!(
                 stage_name = %ctx.stage_name,
                 error = ?e,

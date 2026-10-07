@@ -161,7 +161,6 @@ impl<T: JournalEvent> MemoryJournal<T> {
             })?
         };
 
-        obzenflow_core::journal::limits::validate_group(std::slice::from_ref(&envelope))?;
         // Store event
         state.last_commit = Some(commitment);
         state.events.push(envelope.clone());
@@ -207,7 +206,6 @@ impl<T: JournalEvent> MemoryJournal<T> {
             source: "atomic journal group is too large".into(),
         })?;
         let mut envelopes = Vec::with_capacity(events.len());
-        let mut budget = obzenflow_core::journal::limits::GroupBudget::default();
 
         for (index, event) in events.into_iter().enumerate() {
             let (commitment, predecessor) = JournalClock::prepare(
@@ -243,7 +241,6 @@ impl<T: JournalEvent> MemoryJournal<T> {
                     source: Box::new(error),
                 })?
             });
-            budget.admit(envelopes.last().expect("prepared record"))?;
         }
         state.last_commit = next_last_commit;
         state.events.extend(envelopes.iter().cloned());

@@ -23,6 +23,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError, Weak};
+use tracing::Instrument;
 
 const REBUILD_FRAMES: usize = 256;
 const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
@@ -156,6 +157,12 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         }
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_observation_writer_open",
+        skip_all
+    )]
     pub(super) fn open_writer<R>(
         path: PathBuf,
         recover: impl FnOnce(Option<u64>) -> Result<(R, u64), JournalError>,
@@ -209,6 +216,12 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         (end != NO_WRITER).then_some(end)
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_observation_publish",
+        skip_all
+    )]
     pub(super) fn committed(
         &self,
         records: &[JournalRecord<T::Payload>],
@@ -284,6 +297,12 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         }
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_metrics_tail",
+        skip_all
+    )]
     pub(super) async fn metrics_tail(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -300,7 +319,7 @@ impl<T: JournalEvent> DiskObservationReader<T> {
             return Ok(Vec::new());
         }
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
+        super::performance::blocking(move || {
             let mut frames = HashMap::new();
             let mut decoder = Decoder::new(&path);
             let mut result = Vec::with_capacity(carriers.len());
@@ -334,6 +353,12 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         .map_err(|error| unavailable(error.to_string()))?
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_observation_lookup",
+        skip_all
+    )]
     async fn lookup(
         &self,
         key: Option<ObservationKey>,
@@ -342,8 +367,10 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         let this = self.clone();
         // Wait asynchronously, before occupying a blocking worker. The worker
         // owns this guard even if its caller cancels the lookup.
-        let guard = this.shared.maintenance.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
+        let guard = this.shared.maintenance.clone().lock_owned()
+            .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_observation_lock_wait"))
+            .await;
+        super::performance::blocking(move || {
             let _guard = guard;
             let mut state = this
                 .shared
@@ -548,6 +575,12 @@ impl<T: JournalEvent> JournalObservationReader for DiskObservationReader<T> {
     }
 }
 
+#[tracing::instrument(
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "disk_journal_observation_file_read",
+    skip_all
+)]
 fn read_at(
     path: &Path,
     offset: u64,
@@ -571,6 +604,12 @@ enum RebuildProgress {
     BudgetExhausted,
 }
 
+#[tracing::instrument(
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "disk_journal_observation_rebuild",
+    skip_all
+)]
 fn rebuild<T: JournalEvent>(
     path: &Path,
     state: &mut State,
@@ -652,6 +691,12 @@ fn checkpoint_path(path: &Path) -> PathBuf {
     path.with_extension("observations.json")
 }
 
+#[tracing::instrument(
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "disk_journal_observation_checkpoint_write",
+    skip_all
+)]
 fn write_checkpoint(path: &Path, state: &State) -> Result<(), JournalError> {
     let (Some(first), Some(last)) = (&state.first, &state.last) else {
         return Ok(());
@@ -691,6 +736,12 @@ fn write_checkpoint(path: &Path, state: &State) -> Result<(), JournalError> {
         .map_err(|error| unavailable(error.to_string()))
 }
 
+#[tracing::instrument(
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "disk_journal_observation_checkpoint_read",
+    skip_all
+)]
 fn load_checkpoint(path: &Path, committed_end: u64) -> Option<State> {
     let checkpoint_path = checkpoint_path(path);
     if std::fs::metadata(&checkpoint_path).ok()?.len() > MAX_CHECKPOINT_BYTES {

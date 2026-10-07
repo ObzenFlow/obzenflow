@@ -39,7 +39,8 @@ struct FileStamp {
 
 impl FileStamp {
     fn read(path: &Path) -> Result<Self> {
-        let metadata = std::fs::symlink_metadata(path)?;
+        let metadata = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_metadata")
+            .in_scope(|| std::fs::symlink_metadata(path))?;
         if !metadata.is_file() {
             return Err(invalid("definition carrier must be a regular archive file"));
         }
@@ -112,7 +113,8 @@ impl DefinitionStore {
         type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Cache>>>>;
         static REGISTRY: OnceLock<Registry> = OnceLock::new();
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let key = std::fs::canonicalize(parent)
+        let key = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_archive_canonicalize")
+            .in_scope(|| std::fs::canonicalize(parent))
             .unwrap_or_else(|_| std::path::absolute(parent).unwrap_or_else(|_| parent.into()));
         let mut registry = REGISTRY
             .get_or_init(Mutex::default)
@@ -275,6 +277,7 @@ pub(super) struct ReadTable<'a, const MEASURE: bool> {
     decoded: HashMap<usize, Value>,
     store: &'a DefinitionStore,
     path: &'a Path,
+    journal: String,
     offset: u64,
     costs: Vec<usize>,
     usage: Vec<u8>,
@@ -294,7 +297,7 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         offset: u64,
     ) -> Result<Self> {
         let mut costs = Vec::new();
-        let entries = read_entries(input, path, MEASURE.then_some(&mut costs))?;
+        let (journal, entries) = read_entries(input, path, MEASURE.then_some(&mut costs))?;
         let usage = if MEASURE {
             vec![0; entries.len()]
         } else {
@@ -305,6 +308,7 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
             decoded: HashMap::new(),
             store,
             path,
+            journal,
             offset,
             costs,
             usage,
@@ -349,8 +353,14 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         (counts, bytes, references)
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_definition_resolve",
+        skip_all
+    )]
     fn definition(&mut self, kind: DefinitionKind, locator: &Locator) -> Result<Definition> {
-        if locator.journal == journal_name(self.path)? && locator.offset >= self.offset {
+        if locator.journal == self.journal && locator.offset >= self.offset {
             return Err(invalid(
                 "definition reference is not before the consuming frame",
             ));
@@ -390,27 +400,36 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
             }
         }
         // No aliases out of the archive through symlinks, even with a valid basename.
-        let archive = std::fs::canonicalize(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
-        let canonical = std::fs::canonicalize(&path)?;
+        let archive = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_archive_canonicalize")
+            .in_scope(|| std::fs::canonicalize(self.path.parent().unwrap_or_else(|| Path::new("."))))?;
+        let canonical = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_archive_canonicalize")
+            .in_scope(|| std::fs::canonicalize(&path))?;
         if canonical.parent() != Some(archive.as_path()) {
             return Err(invalid("definition escapes the archive"));
         }
-        let mut file = std::fs::File::open(path)?;
-        file.seek(SeekFrom::Start(locator.offset))?;
-        let mut header = [0u8; frame::HEADER_LEN];
-        file.read_exact(&mut header)?;
-        let length = frame::frame_length(&header).map_err(frame::io_error)?;
-        let remaining = file.metadata()?.len().saturating_sub(locator.offset);
-        if length as u64 > remaining {
-            return Err(invalid("definition carrier is uncommitted"));
-        }
-        let mut bytes = header.to_vec();
-        file.take((length - frame::HEADER_LEN) as u64)
-            .read_to_end(&mut bytes)?;
+        let bytes = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_file_read")
+            .in_scope(|| -> Result<Vec<u8>> {
+                let mut file = std::fs::File::open(path)?;
+                file.seek(SeekFrom::Start(locator.offset))?;
+                let mut header = [0u8; frame::HEADER_LEN];
+                file.read_exact(&mut header)?;
+                let length = frame::frame_length(&header).map_err(frame::io_error)?;
+                let remaining = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_metadata")
+                    .in_scope(|| file.metadata())?
+                    .len()
+                    .saturating_sub(locator.offset);
+                if length as u64 > remaining {
+                    return Err(invalid("definition carrier is uncommitted"));
+                }
+                let mut bytes = header.to_vec();
+                file.take((length - frame::HEADER_LEN) as u64)
+                    .read_to_end(&mut bytes)?;
+                Ok(bytes)
+            })?;
         let body = frame::validate(&bytes).map_err(frame::io_error)?;
         let envelope = super::routing::Envelope::parse(body)?;
         let mut cursor = Cursor::new(envelope.definitions);
-        let entries = read_entries(&mut cursor, &canonical, None)?;
+        let (_, entries) = read_entries(&mut cursor, &canonical, None)?;
         cursor.finish()?;
         let definition = match entries.get(locator.slot) {
             Some(Entry::Local(definition)) if definition.kind == kind => definition.clone(),
@@ -496,7 +515,7 @@ fn read_entries(
     input: &mut Cursor<'_>,
     path: &Path,
     mut costs: Option<&mut Vec<usize>>,
-) -> Result<Vec<Entry>> {
+) -> Result<(String, Vec<Entry>)> {
     let journal_count = values::bounded_count(input)?;
     let mut journals = vec![journal_name(path)?];
     for _ in 0..journal_count {
@@ -533,7 +552,9 @@ fn read_entries(
             costs.push(input.position() - start);
         }
     }
-    Ok(entries)
+    // Retain the validated ordinal-zero basename for this frame's lookups.
+    // Moving it out avoids revalidating and reallocating the immutable path.
+    Ok((journals.swap_remove(0), entries))
 }
 
 fn write_journal_name(name: &str, out: &mut Vec<u8>) {

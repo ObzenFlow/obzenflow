@@ -256,6 +256,12 @@ where
             .collect()
     }
 
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_feed_emit"
+    )]
     async fn emit_direct_feed_contract_facts(
         &self,
         tracker: &ContractTracker,
@@ -394,6 +400,12 @@ where
             .collect()
     }
 
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_feed_progress_emit"
+    )]
     async fn emit_direct_feed_progress_contract_results(
         &mut self,
         writer_id: obzenflow_core::WriterId,
@@ -495,6 +507,10 @@ where
             .await
     }
 
+    #[tracing::instrument(
+        skip_all, target = "obzenflow::performance", level = "debug",
+        name = "subscription_contract_check", fields(owner = %self.owner_label, mode = ?mode)
+    )]
     async fn check_contracts_with_mode(
         &mut self,
         reader_progress: &mut [ReaderProgress],
@@ -556,6 +572,12 @@ where
         status
     }
 
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_progress_check"
+    )]
     async fn check_progress_contracts_for_reader(
         &mut self,
         progress: &mut ReaderProgress,
@@ -765,6 +787,12 @@ where
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_progress_emit"
+    )]
     async fn emit_progress_for_reader(
         &mut self,
         progress: &mut ReaderProgress,
@@ -833,6 +861,12 @@ where
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_eof_check"
+    )]
     async fn verify_eof_contracts_for_reader(
         &mut self,
         progress: &mut ReaderProgress,
@@ -1212,6 +1246,12 @@ where
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_stall_check"
+    )]
     async fn check_stall_for_reader(
         &mut self,
         progress: &mut ReaderProgress,

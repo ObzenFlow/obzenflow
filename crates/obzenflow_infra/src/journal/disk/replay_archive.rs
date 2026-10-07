@@ -45,6 +45,12 @@ pub struct DiskReplayArchive {
 }
 
 impl DiskReplayArchive {
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_archive_open",
+        skip_all
+    )]
     pub async fn open(
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
@@ -419,6 +425,12 @@ impl ReplayArchive for DiskReplayArchive {
 /// maximum (F18) seeds the resuming run's flow sequencer above every
 /// re-admitted sequence. Cost: one sequential read per source journal at
 /// bootstrap, journals resume re-reads anyway.
+#[tracing::instrument(
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "disk_journal_archive_scan_maxima",
+    skip_all
+)]
 fn scan_recorded_maxima(
     archive_path: &Path,
     manifest: &RunManifest,
@@ -517,6 +529,12 @@ fn scan_recorded_maxima(
     ))
 }
 
+#[tracing::instrument(
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "disk_journal_archive_scan_status",
+    skip_all
+)]
 pub(crate) fn derive_status_derivation_from_system_log(
     path: &Path,
 ) -> Result<StatusDerivation, ReplayError> {

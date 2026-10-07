@@ -89,9 +89,7 @@ impl<'a> Envelope<'a> {
                 _ => return Err(invalid("unknown observation presence tag")),
             }
             let payload = fields.bytes()?;
-            if payload.is_empty()
-                || payload.len() > obzenflow_core::journal::limits::MAX_RECORD_BYTES
-            {
+            if payload.is_empty() {
                 return Err(invalid("invalid payload extent"));
             }
             fields.finish()?;

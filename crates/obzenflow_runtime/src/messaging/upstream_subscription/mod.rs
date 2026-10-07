@@ -70,6 +70,12 @@ impl ReceiptSettlement {
     }
 }
 
+#[tracing::instrument(
+    skip_all,
+    target = "obzenflow::performance",
+    level = "debug",
+    name = "subscription_receipt_progress"
+)]
 fn record_receipt(
     receipt: &ChainEvent,
     owner_label: &str,
@@ -545,6 +551,12 @@ where
     /// This is used by sink supervisors to feed `ChainPayload::Delivery`
     /// events (written to the sink's own journal) into the same per-edge
     /// contract chain that observed the consumed input event via `on_read`.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_receipt_contract"
+    )]
     pub fn notify_delivery_receipt(&mut self, receipt: &ChainEvent, upstream_stage: StageId) {
         let Some(reader_stage) = self.contract_tracker.as_ref().and_then(|t| t.reader_stage) else {
             // Contracts are not configured for this subscription.

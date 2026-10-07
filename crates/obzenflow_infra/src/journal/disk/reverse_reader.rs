@@ -30,6 +30,12 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ReverseFrameReader<R> {
         self.offset
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_reverse_read_at",
+        skip_all
+    )]
     async fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
         self.reader.seek(SeekFrom::Start(offset)).await?;
         self.reader.read_exact(bytes).await?;
@@ -60,6 +66,12 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ReverseFrameReader<R> {
         Ok(previous)
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_reverse_read_frame",
+        skip_all
+    )]
     pub(super) async fn read_frame(
         &mut self,
         bytes: &mut Vec<u8>,

@@ -13,9 +13,11 @@ pub mod builder;
 pub mod handle;
 pub mod handler_supervised;
 pub(crate) mod idle_backoff;
+pub(crate) mod loop_timing;
 pub(crate) mod publication;
 #[doc(hidden)]
 pub mod self_supervised;
+mod timing;
 pub(crate) mod with_external_events;
 
 #[cfg(test)]

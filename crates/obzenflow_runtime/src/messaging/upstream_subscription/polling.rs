@@ -22,6 +22,7 @@ use obzenflow_core::{StageId, WriterId};
 use std::any::Any;
 use std::io;
 use tokio::time::Instant;
+use tracing::Instrument;
 
 /// Outcome of one read-side step on a single reader (FLOWIP-095d D8 split).
 ///
@@ -56,6 +57,10 @@ where
     /// Delivery order depends on the configured `ReaderSelectionPolicy`
     /// (FLOWIP-095d): availability-driven round-robin by default, or the
     /// canonical deterministic merge on ordered stages.
+    #[tracing::instrument(
+        skip_all, target = "obzenflow::performance", level = "debug",
+        name = "subscription_poll", fields(owner = %self.owner_label, state = fsm_state)
+    )]
     pub async fn poll_next_with_state(
         &mut self,
         fsm_state: &str,
@@ -88,15 +93,33 @@ where
     /// One read-side step for a single reader: read the next journal record,
     /// clear the tail-start baseline, apply the transport filter, and
     /// classify EOF/drain authorship.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_read_step"
+    )]
     async fn read_transport_step(
         &mut self,
         index: usize,
     ) -> std::result::Result<ReadStep<T>, JournalError> {
         let stage_id = self.readers[index].stage_id;
-        let next = self.readers[index].reader.next().await?;
+        // This span lives for one next() future, including Pending time. Its
+        // enter/exit pairs measure individual polls, not the time between them.
+        let next = self.readers[index]
+            .reader
+            .next()
+            .instrument(tracing::debug_span!(
+                target: "obzenflow::performance", "subscription_journal_next"
+            ))
+            .await?;
         let Some(envelope) = next else {
             return Ok(ReadStep::Empty);
         };
+        let _classification = tracing::debug_span!(
+            target: "obzenflow::performance", "subscription_classify_transport"
+        )
+        .entered();
 
         // The reader has observed post-baseline data; it is no longer
         // logically at EOF due to a tail-start baseline.
@@ -309,6 +332,12 @@ where
     ///
     /// Cycles through readers and delivers whatever is available first, so
     /// delivery order depends on arrival timing.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_round_robin"
+    )]
     async fn poll_round_robin(
         &mut self,
         fsm_state: &str,
@@ -407,6 +436,12 @@ where
     /// `StageInputPosition` assignment, and the per-reader delivered ordinal.
     /// Exhaustion happens strictly at EOF delivery, never when an EOF head is
     /// merely held.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_deliver"
+    )]
     fn deliver_from_reader(
         &mut self,
         reader_index: usize,
@@ -422,7 +457,11 @@ where
             catch_up,
             orders_by_own_seq,
         } = head;
-        if let Err(error) = crate::supervised_base::publication::observe_record(&envelope) {
+        let observed = tracing::debug_span!(
+            target: "obzenflow::performance", "subscription_observe_causality"
+        )
+        .in_scope(|| crate::supervised_base::publication::observe_record(&envelope));
+        if let Err(error) = observed {
             return PollResult::Error(Box::new(error));
         }
         // FLOWIP-120n F18: a delivered positional row advances the inherited
@@ -462,6 +501,10 @@ where
         self.last_delivered_generation = Some(reader_generation);
         let mut envelope = DeliveredRecord::from(envelope);
         if let Some(specs) = self.composite_entries_by_stage.get(&stage_id) {
+            let _activation = tracing::debug_span!(
+                target: "obzenflow::performance", "subscription_composite_activation"
+            )
+            .entered();
             if let Some(event) =
                 (envelope.authored_mut() as &mut dyn Any).downcast_mut::<ChainEvent>()
             {
@@ -581,6 +624,12 @@ where
     /// Selected-feed EOF normalization for contract accounting: when this
     /// edge filters by selected event types, contracts must see the selected
     /// writer count rather than the upstream's raw count.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_normalize_eof"
+    )]
     fn normalized_eof_for_contracts(
         &self,
         _reader_index: usize,
@@ -610,6 +659,12 @@ where
     }
 
     /// Per-reader selected-data counters (delivery side).
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_selected_counts"
+    )]
     fn bump_selected_data_counters(
         &mut self,
         reader_index: usize,
@@ -641,6 +696,12 @@ where
     /// tracking for data events, advertised positions from an authored EOF,
     /// and the last-seen identifiers. Returns the post-update reader_seq for
     /// contract chains.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_delivery_progress"
+    )]
     fn record_delivery_progress(
         &mut self,
         reader_index: usize,
@@ -721,6 +782,12 @@ where
 
     /// Feed the delivered event into this edge's `ContractChain` and any
     /// selected-feed chains, if contracts are configured.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_delivery"
+    )]
     fn feed_contract_chains_on_delivery(
         &mut self,
         reader_index: usize,
@@ -764,6 +831,12 @@ where
         );
     }
 
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_contract_selected_feeds"
+    )]
     fn feed_selected_contract_chains_on_event(
         &mut self,
         reader_index: usize,
@@ -864,6 +937,12 @@ where
 
     /// EOF exhaustion accounting (delivery side): a reader leaves the head
     /// set only when its authored EOF is delivered, never when merely held.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_eof_exhaustion"
+    )]
     fn record_eof_exhaustion(
         &mut self,
         reader_index: usize,
@@ -910,6 +989,12 @@ where
     /// this return `NoEvents` with `merge_wait()` naming the awaited inputs,
     /// and the supervisor dispatch loop keeps cycling, so heartbeats, contract
     /// ticks, drain handling, and shutdown stay live while the merge waits.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_canonical_merge"
+    )]
     async fn poll_canonical_merge(
         &mut self,
         fsm_state: &str,
@@ -946,6 +1031,10 @@ where
     /// The Kahn discipline: while any non-exhausted reader has no head, the
     /// merge decides nothing. Heads are acquired post-filter; filtered events
     /// are drained from the journal without becoming heads or taking ordinals.
+    #[tracing::instrument(
+        skip_all, target = "obzenflow::performance", level = "debug",
+        name = "subscription_merge_candidate", fields(owner = %self.owner_label, state = fsm_state)
+    )]
     pub async fn ensure_merge_candidate(
         &mut self,
         fsm_state: &str,
@@ -1016,6 +1105,12 @@ where
     /// exempt from the quiet-input wait. A reader below the entered
     /// generation may still present re-admitted rows with recorded (smaller)
     /// sequences, so it keeps the Kahn wait until its F17 crossing.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_seq_merge_candidate"
+    )]
     async fn ensure_seq_merge_candidate(
         &mut self,
         fsm_state: &str,
@@ -1120,6 +1215,12 @@ where
     /// exactly as in Kahn mode, then min by `(generation, effective sequence,
     /// reader key)`. The reader key breaks the one reachable tie, two
     /// first-row control heads both inheriting sequence zero.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_seq_merge_select"
+    )]
     fn select_seq_winner(
         &self,
         candidates: &[usize],
@@ -1186,6 +1287,12 @@ where
     ///
     /// A filtered row returns its physical completion immediately. It never
     /// becomes a logical delivery or takes a canonical merge ordinal.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_refill_head"
+    )]
     async fn acquire_head(
         &mut self,
         index: usize,
@@ -1232,6 +1339,12 @@ where
     /// the tiebreak alone. Happened-before is acyclic, so the candidate set
     /// cannot empty; the fallback is defensive only and remains
     /// deterministic.
+    #[tracing::instrument(
+        skip_all,
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "subscription_merge_select"
+    )]
     fn select_merge_winner(&self, candidates: &[usize]) -> Option<usize> {
         let head = |index: usize| self.held_heads[index].as_ref().expect("candidate has head");
         // Compared as the ordinal the delivery would take, the same key shape
@@ -1318,6 +1431,10 @@ where
 
     /// Deliver the selected merge candidate through the shared delivery-side
     /// accounting. Returns `NoEvents` if no candidate is selected.
+    #[tracing::instrument(
+        skip_all, target = "obzenflow::performance", level = "debug",
+        name = "subscription_take_candidate", fields(owner = %self.owner_label, state = fsm_state)
+    )]
     pub fn take_merge_candidate(
         &mut self,
         fsm_state: &str,

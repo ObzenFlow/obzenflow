@@ -6,6 +6,7 @@
 
 #[cfg(feature = "tokio-console")]
 mod console_connections;
+mod performance;
 #[cfg(test)]
 mod tests;
 
@@ -17,6 +18,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 /// Prepared before an owned runtime is created, so its earliest tasks are visible.
 pub(super) struct PreparedObservability {
+    performance: Option<performance::PerformanceCapture>,
     #[cfg(feature = "tokio-console")]
     console: Option<PreparedConsole>,
 }
@@ -27,6 +29,7 @@ impl PreparedObservability {
         bind: Option<&str>,
         filter: EnvFilter,
     ) -> Result<Self, ApplicationError> {
+        let performance = performance::PerformanceCapture::default();
         if requested {
             #[cfg(not(feature = "tokio-console"))]
             {
@@ -55,6 +58,14 @@ impl PreparedObservability {
                     .server_addr(listener.local_addr()?)
                     .build();
                 tracing_subscriber::registry()
+                    .with(
+                        performance
+                            .layer()
+                            .with_filter(tracing_subscriber::filter::FilterFn::new(
+                                performance::accepts,
+                            ))
+                            .with_filter(filter.clone()),
+                    )
                     // Match Console's own spawn() filter without relinquishing
                     // ownership of the aggregation and transport tasks.
                     .with(layer.with_filter(tracing_subscriber::filter::FilterFn::new(
@@ -79,16 +90,27 @@ impl PreparedObservability {
                         )
                     })?;
                 return Ok(Self {
+                    performance: Some(performance),
                     console: Some(PreparedConsole { listener, server }),
                 });
             }
         }
 
         // An embedding application may already own ordinary tracing.
-        let _ = tracing_subscriber::registry()
+        let installed = tracing_subscriber::registry()
+            .with(
+                performance
+                    .layer()
+                    .with_filter(tracing_subscriber::filter::FilterFn::new(
+                        performance::accepts,
+                    ))
+                    .with_filter(filter.clone()),
+            )
             .with(tracing_subscriber::fmt::layer().with_filter(filter))
-            .try_init();
+            .try_init()
+            .is_ok();
         Ok(Self {
+            performance: installed.then_some(performance),
             #[cfg(feature = "tokio-console")]
             console: None,
         })
@@ -97,9 +119,20 @@ impl PreparedObservability {
     pub(super) fn start(self) -> Result<ApplicationDiagnostics, ApplicationError> {
         #[cfg(feature = "tokio-console")]
         if let Some(console) = self.console {
-            return console.start();
+            let mut diagnostics = console.start()?;
+            diagnostics.performance = self.performance;
+            return Ok(diagnostics);
         }
-        Ok(ApplicationDiagnostics::default())
+        Ok(ApplicationDiagnostics {
+            performance: self.performance,
+            tasks: Vec::new(),
+            #[cfg(feature = "tokio-console")]
+            failure: Default::default(),
+            #[cfg(feature = "tokio-console")]
+            connections: Default::default(),
+            #[cfg(all(test, feature = "tokio-console"))]
+            address: None,
+        })
     }
 }
 
@@ -107,6 +140,7 @@ impl PreparedObservability {
 /// and post-replay verification, using the host's existing task guards and joins.
 #[derive(Default)]
 pub(super) struct ApplicationDiagnostics {
+    performance: Option<performance::PerformanceCapture>,
     tasks: Vec<ApplicationTask>,
     #[cfg(feature = "tokio-console")]
     failure: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -136,6 +170,9 @@ impl ApplicationDiagnostics {
         }
         #[cfg(feature = "tokio-console")]
         self.connections.wait_closed().await;
+        if let Some(performance) = self.performance.take() {
+            performance.emit(false);
+        }
         #[cfg(feature = "tokio-console")]
         if let Some(error) = self
             .failure
@@ -155,6 +192,9 @@ impl ApplicationDiagnostics {
 
 impl Drop for ApplicationDiagnostics {
     fn drop(&mut self) {
+        if let Some(performance) = self.performance.take() {
+            performance.emit(true);
+        }
         #[cfg(feature = "tokio-console")]
         self.connections.close();
         // ApplicationTask's existing Drop requests cancellation of both tasks.
@@ -217,6 +257,7 @@ impl PreparedConsole {
         let failure = Arc::new(Mutex::new(None));
         let connections = Arc::new(console_connections::ConsoleConnections::default());
         let mut diagnostics = ApplicationDiagnostics {
+            performance: None,
             tasks: Vec::with_capacity(2),
             failure: failure.clone(),
             connections: connections.clone(),

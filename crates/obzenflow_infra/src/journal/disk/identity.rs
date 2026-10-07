@@ -188,6 +188,12 @@ impl CommitmentAdmission {
         Ok(Self::new(read_identity(path)?))
     }
 
+    #[tracing::instrument(
+        target = "obzenflow::performance",
+        level = "debug",
+        name = "disk_journal_commitment_admit",
+        skip_all
+    )]
     pub(crate) fn admit<P: obzenflow_core::event::payloads::JournalPayload>(
         &mut self,
         record: &obzenflow_core::JournalRecord<P>,

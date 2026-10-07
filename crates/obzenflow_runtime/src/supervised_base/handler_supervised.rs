@@ -8,7 +8,9 @@
 //! such as source, transform, and sink supervisors.
 
 use super::base::{self, EventLoopDirective, Supervisor};
+use super::loop_timing::{self, Phase as CyclePhase};
 use super::publication::BoxError;
+use super::timing::{Phase, RunnerTiming, Selection};
 use crate::stages::common::stage_handle::StageError;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use futures::future::BoxFuture;
@@ -17,11 +19,12 @@ use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::ChainEvent;
-use obzenflow_fsm::{FsmAction, FsmError};
+use obzenflow_fsm::{FsmAction, FsmError, StateVariant};
 use std::collections::VecDeque;
 use std::error::Error;
 use std::future::Future;
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 /// Host obligations selected explicitly by a stage transition.
 #[derive(Clone, Debug)]
@@ -189,12 +192,30 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
             })
         }
 
+        let mut timing = RunnerTiming::new(
+            self.name(),
+            self.supervisor_kind(),
+            self.writer_id(),
+            self.supervision_mode(),
+            initial_state.variant_name(),
+        );
+        let root_span = timing.root();
+        let cycle_supervisor = self.name().to_owned();
+        let cycle_kind = self.supervisor_kind();
+        let cycle_writer = self.writer_id();
+        let cycle_mode = self.supervision_mode();
+        let result = loop_timing::scope(
+            &cycle_supervisor, cycle_kind, cycle_writer, cycle_mode, async {
         let mut machine = self.build_state_machine(initial_state);
         let mut actions = VecDeque::new();
         let mut operation: Option<OwnedAction<Self::Context, Self::Event>> = None;
         let mut dispatch: Option<OwnedDispatch<Self>> = None;
         let mut publication_failure_delivered = false;
         loop {
+            // A retained dispatch owns its cycle through control interruptions.
+            // This override lasts through handling the selected control event.
+            let mut _cycle_control = None;
+            timing.turn();
             let state = machine.state().clone();
             let publications = super::publication::PublicationScope::current();
             let mut failure = None;
@@ -204,6 +225,8 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 message
             };
             let directive = if let Some(future) = operation.as_mut() {
+                let _cycle_action = loop_timing::phase(CyclePhase::Control);
+                let mut phase = timing.phase(Phase::PendingAction);
                 tokio::select! {
                     biased;
                     error = async {
@@ -211,14 +234,20 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             Some(scope) => scope.wait_for_failure().await,
                             None => std::future::pending().await,
                         }
-                    }, if !publication_failure_delivered => {
+                    }.instrument(phase.span()), if !publication_failure_delivered => {
+                        phase.selected(Selection::PublicationFailure);
                         publication_failure_delivered = true;
                         EventLoopDirective::Transition(self.event_for_action_error(retain_error(error.into())))
                     }
-                    Some(event) = self.next_control(&state, &mut context) => EventLoopDirective::Transition(event),
-                    complete = future => {
+                    Some(event) = loop_timing::control_poll(self.next_control(&state, &mut context)).instrument(phase.span()) => {
+                        phase.selected(Selection::Control);
+                        _cycle_control = Some(loop_timing::phase(CyclePhase::Control));
+                        EventLoopDirective::Transition(event)
+                    },
+                    complete = future.instrument(phase.span()) => {
+                        phase.selected(Selection::ActionComplete);
                         operation = None;
-                        match complete(&mut context) {
+                        match phase.span().in_scope(|| complete(&mut context)) {
                             Ok(None) => continue,
                             Ok(Some(event)) => EventLoopDirective::Transition(event),
                             Err(error) => EventLoopDirective::Transition(self.event_for_action_error(retain_error(error))),
@@ -226,6 +255,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                     }
                 }
             } else if let Some(future) = dispatch.as_mut() {
+                let mut phase = timing.phase(Phase::PendingDispatch);
                 tokio::select! {
                     biased;
                     error = async {
@@ -233,35 +263,41 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             Some(scope) => scope.wait_for_failure().await,
                             None => std::future::pending().await,
                         }
-                    }, if !publication_failure_delivered => {
+                    }.instrument(phase.span()), if !publication_failure_delivered => {
+                        phase.selected(Selection::PublicationFailure);
+                        _cycle_control = Some(loop_timing::phase(CyclePhase::Control));
                         publication_failure_delivered = true;
                         EventLoopDirective::Transition(self.event_for_action_error(retain_error(error.into())))
                     }
-                    Some(event) = self.next_control(&state, &mut context) => EventLoopDirective::Transition(event),
-                    complete = future => {
+                    Some(event) = loop_timing::control_poll(self.next_control(&state, &mut context)).instrument(phase.span()) => {
+                        phase.selected(Selection::Control);
+                        _cycle_control = Some(loop_timing::phase(CyclePhase::Control));
+                        EventLoopDirective::Transition(event)
+                    },
+                    complete = future.instrument(phase.span()) => {
+                        phase.selected(Selection::DispatchComplete);
                         dispatch = None;
-                        match complete(&mut self, &mut context) {
+                        match phase.span().in_scope(|| complete(&mut self, &mut context)) {
                             Ok(directive) => directive,
                             Err(error) => EventLoopDirective::Transition(self.event_for_action_error(retain_error(error))),
                         }
                     }
                 }
             } else if let Some(action) = actions.pop_front() {
-                match self.supervisor_action(&action) {
+                let _cycle_action = loop_timing::phase(CyclePhase::Control);
+                let phase = timing.phase(Phase::InlineAction);
+                match phase.span().in_scope(|| self.supervisor_action(&action)) {
                     Some(SupervisorAction::Register) => {
-                        operation = Some(owned_unit(base::register(
-                            &self,
-                            &context,
-                            self.writer_id(),
-                            self.supervision_mode(),
-                        )));
+                        operation = Some(owned_unit(phase.span().in_scope(|| {
+                            base::register(&self, &context, self.writer_id(), self.supervision_mode())
+                        })));
                         continue;
                     }
                     Some(SupervisorAction::CloseMailbox) => {
-                        operation = Some(owned_unit(self.close_mailbox(&state)));
+                        operation = Some(owned_unit(phase.span().in_scope(|| self.close_mailbox(&state))));
                         continue;
                     }
-                    Some(SupervisorAction::Cleanup) => match self.execute_cleanup(&context).await {
+                    Some(SupervisorAction::Cleanup) => match self.execute_cleanup(&context).instrument(phase.span()).await {
                         Ok(ActionExecution::Completed) => continue,
                         Ok(ActionExecution::Pending(future)) => {
                             operation = Some(future);
@@ -281,7 +317,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         continue;
                     }
                     Some(SupervisorAction::Emit(event)) => EventLoopDirective::Transition(event),
-                    None => match self.execute_action(action, &mut context).await {
+                    None => match self.execute_action(action, &mut context).instrument(phase.span()).await {
                         Ok(ActionExecution::Completed) => continue,
                         Ok(ActionExecution::Pending(future)) => {
                             operation = Some(future);
@@ -292,11 +328,13 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         ),
                     },
                 }
-            } else if let Some(owned) = self.owned_dispatch(&state, &mut context) {
-                dispatch = Some(owned);
-                continue;
             } else {
-                match self.dispatch_state(&state, &mut context).await {
+                let phase = timing.phase(Phase::DirectDispatch);
+                if let Some(owned) = phase.span().in_scope(|| self.owned_dispatch(&state, &mut context)) {
+                    dispatch = Some(owned);
+                    continue;
+                }
+                match self.dispatch_state(&state, &mut context).instrument(phase.span()).await {
                     Ok(directive) => directive,
                     Err(error) => EventLoopDirective::Transition(
                         self.event_for_action_error(retain_error(error)),
@@ -305,28 +343,44 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
             };
             let event = match directive {
                 EventLoopDirective::Continue => {
-                    tokio::task::yield_now().await;
+                    let _cycle_idle = loop_timing::phase(CyclePhase::Idle);
+                    let phase = timing.phase(Phase::Yield);
+                    tokio::task::yield_now().instrument(phase.span()).await;
                     continue;
                 }
                 EventLoopDirective::Terminate => return Ok(()),
                 EventLoopDirective::Transition(event) => event,
             };
+            let _cycle_transition = loop_timing::phase(CyclePhase::Control);
             let previous_state = machine.state().clone();
-            let selected = machine
+            let selected = {
+                let phase = timing.phase(Phase::Transition);
+                machine
                 .handle(event, &mut context)
+                .instrument(phase.span())
                 .await
-                .map_err(|error| format!("FSM error: {error}"))?;
+                .map_err(|error| format!("FSM error: {error}"))?
+            };
             let state = machine.state().clone();
-            self.after_transition(&state, &context);
-            LifecycleResults::observe(
-                &self.lifecycle_phase(&state),
-                self.accounting(&context),
-                failure,
-            );
-            if state != previous_state || !selected.is_empty() {
-                actions = selected.into();
-            }
+            // The FSM has assigned its new state. Charge subsequent bookkeeping
+            // to that state, rather than extending the previous state's interval.
+            timing.state(state.variant_name());
+            let phase = timing.phase(Phase::Transition);
+            phase.span().in_scope(|| {
+                self.after_transition(&state, &context);
+                LifecycleResults::observe(
+                    &self.lifecycle_phase(&state),
+                    self.accounting(&context),
+                    failure,
+                );
+                if state != previous_state || !selected.is_empty() {
+                    actions = selected.into();
+                }
+            });
         }
+        }.instrument(root_span)).await;
+        timing.complete();
+        result
     }
 
     /// Helper to spawn a task and return the handle
