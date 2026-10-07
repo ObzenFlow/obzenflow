@@ -16,6 +16,8 @@
 //!
 //! Event volume is operator-tunable via `PROMETHEUS_EVENT_COUNT` (default
 //! 100000), so varying the load needs no code change.
+//! With the `tokio-console` feature, `PROMETHEUS_TOKIO_CONSOLE=1` also enables
+//! Tokio Console diagnostics. Unset or `0` leaves diagnostics disabled.
 //!
 //! This example explicitly opts into hosting and monitoring through its config:
 //! - /metrics endpoint for Prometheus metrics (framework-level metrics)
@@ -181,6 +183,16 @@ fn main() -> Result<()> {
     // Operator-tunable event volume through the framework env helpers, so the
     // load varies without a code change (default 100k).
     let total_events = env_var_or::<usize>("PROMETHEUS_EVENT_COUNT", DEFAULT_EVENT_COUNT)?;
+    let console_enabled = match std::env::var_os("PROMETHEUS_TOKIO_CONSOLE").as_deref() {
+        None => false,
+        Some(value) if value == "0" => false,
+        Some(value) if value == "1" => true,
+        Some(_) => anyhow::bail!("PROMETHEUS_TOKIO_CONSOLE must be unset, 0, or 1"),
+    };
+    anyhow::ensure!(
+        !console_enabled || cfg!(feature = "tokio-console"),
+        "PROMETHEUS_TOKIO_CONSOLE=1 requires building with --features tokio-console"
+    );
 
     let presentation = Presentation::new(
         Banner::new("Prometheus Demo")
@@ -207,14 +219,19 @@ fn main() -> Result<()> {
     });
 
     // Use FlowApplication builder - handles runtime, observability, and features automatically.
-    FlowApplication::builder()
+    let application = FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
-        .with_presentation(presentation)
-        .run_blocking(flow_definition(
-            total_events,
-            std::path::PathBuf::from("target/prometheus_demo_journal"),
-        ))?;
+        .with_presentation(presentation);
+    let application = if console_enabled {
+        application.with_console_subscriber()
+    } else {
+        application
+    };
+    application.run_blocking(flow_definition(
+        total_events,
+        std::path::PathBuf::from("target/prometheus_demo_journal"),
+    ))?;
 
     Ok(())
 }

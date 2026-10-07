@@ -11,4 +11,5 @@ mod machine;
 #[cfg(feature = "warp-server")]
 mod signals;
 
+pub(super) use driver::abort_and_join;
 pub(super) use driver::{ApplicationLifecycle, ApplicationTask};

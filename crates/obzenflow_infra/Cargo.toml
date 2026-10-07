@@ -61,6 +61,7 @@ tokio-stream = { workspace = true, optional = true }
 
 # Tokio-console for debugging (optional)
 console-subscriber = { workspace = true, optional = true }
+tonic = { version = "0.14.2", features = ["transport"], optional = true }
 
 # HTTP client implementations (optional)
 reqwest = { workspace = true, optional = true }
@@ -74,7 +75,7 @@ tiktoken-rs = { version = "0.9", optional = true }
 default = []
 prometheus = []
 warp-server = ["dep:warp", "dep:headers", "dep:bytes", "dep:tokio-stream", "dep:hyper", "dep:hyper-util", "dep:tower-service"]
-tokio-console = ["dep:console-subscriber"]
+tokio-console = ["dep:console-subscriber", "dep:tonic", "dep:tokio-stream", "tokio-stream/net", "obzenflow_runtime/tokio-console"]
 reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
 # FLOWIP-114d: Studio phonebook registration (heartbeat client + [studio] config).
 studio-registration = ["prometheus", "warp-server", "reqwest-client"]
@@ -95,6 +96,7 @@ tokio-test = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
+console-api = "0.9.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }

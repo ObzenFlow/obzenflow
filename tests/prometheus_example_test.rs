@@ -27,11 +27,119 @@ mod prometheus_demo;
 #[path = "test_support/exported_jsonl.rs"]
 mod exported_jsonl;
 
+#[cfg(all(feature = "web-host", feature = "prometheus"))]
+#[path = "test_support/prometheus_measurement.rs"]
+mod prometheus_measurement;
+
 // These are bounded CI correctness proofs. Use the shipped example explicitly
 // for 100k storage measurements; larger workloads belong in benchmark coverage.
 const CI_EVENT_LIMIT: usize = 5_000;
 const ERROR_EVERY: usize = 100;
 const EXPECTED_UNKNOWN_ERRORS: u64 = (CI_EVENT_LIMIT / ERROR_EVERY) as u64;
+
+/// Keep multiplicity as well as identity: a set alone would hide a repeated
+/// committed input or transform outcome. The error journal legitimately keeps
+/// the source event's identity/context, so classify its status before its stage.
+#[cfg(all(feature = "web-host", feature = "prometheus"))]
+#[derive(Default)]
+struct DemoBusinessCohort {
+    inputs: Vec<u64>,
+    successes: Vec<u64>,
+    errors: Vec<u64>,
+}
+
+#[cfg(all(feature = "web-host", feature = "prometheus"))]
+impl DemoBusinessCohort {
+    fn record(&mut self, event: &obzenflow_core::ChainEvent) {
+        use obzenflow_core::event::chain_event::ChainPayload;
+
+        let ChainPayload::Fact(payload) = &event.payload else {
+            return;
+        };
+        let cohort = if !event.processing.status.is_success() {
+            &mut self.errors
+        } else {
+            match event.flow_context.stage_name.as_str() {
+                "high_volume_source" => &mut self.inputs,
+                "error_processor" => &mut self.successes,
+                _ => return,
+            }
+        };
+        cohort.push(payload["id"].as_u64().expect("business input identity"));
+    }
+
+    fn assert_complete(mut self, count: u64) {
+        self.inputs.sort_unstable();
+        self.successes.sort_unstable();
+        self.errors.sort_unstable();
+        assert_eq!(
+            self.inputs,
+            (0..count).collect::<Vec<_>>(),
+            "each source input must be committed exactly once"
+        );
+        assert_eq!(
+            self.successes,
+            (0..count)
+                .filter(|id| !id.is_multiple_of(ERROR_EVERY as u64))
+                .collect::<Vec<_>>(),
+            "each successful transform outcome must be committed exactly once"
+        );
+        assert_eq!(
+            self.errors,
+            (0..count).step_by(ERROR_EVERY).collect::<Vec<_>>(),
+            "each intended transform error must be committed exactly once"
+        );
+    }
+}
+
+/// Negative controls use the same exported events and oracle as the real proof.
+/// An extra or absent business record must fail even when all other journal,
+/// aggregate, receipt and terminal evidence is left intact.
+#[cfg(all(feature = "web-host", feature = "prometheus"))]
+fn assert_demo_cohort_rejects_incomplete_and_duplicate_records(
+    events: &[obzenflow_core::ChainEvent],
+    count: u64,
+) {
+    let verify = |events: &[obzenflow_core::ChainEvent]| {
+        let mut cohort = DemoBusinessCohort::default();
+        for event in events {
+            cohort.record(event);
+        }
+        cohort.assert_complete(count);
+    };
+    verify(events);
+    for (stage, failed) in [
+        ("high_volume_source", false),
+        ("error_processor", false),
+        // Error routing retains the source context, including its event ID.
+        ("high_volume_source", true),
+    ] {
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(event.payload, obzenflow_core::event::ChainPayload::Fact(_))
+                    && event.flow_context.stage_name == stage
+                    && event.processing.status.is_success() != failed
+            })
+            .expect("the positive archive includes each business cohort");
+        let mut duplicated = events.to_vec();
+        let mut repeated = events[index].clone();
+        // A second authored event with the same business input is still a
+        // duplicate outcome, even when event-ID uniqueness checks would pass.
+        repeated.envelope.provenance.event.id = obzenflow_core::EventId::new();
+        duplicated.push(repeated);
+        assert!(
+            std::panic::catch_unwind(|| verify(&duplicated)).is_err(),
+            "the oracle accepted a duplicated record: stage={stage}, failed={failed}"
+        );
+        let mut incomplete = events.to_vec();
+        incomplete.remove(index);
+        assert!(
+            std::panic::catch_unwind(|| verify(&incomplete)).is_err(),
+            "the oracle accepted an incomplete cohort: stage={stage}, failed={failed}"
+        );
+    }
+}
 
 /// Exercise the shipped policies with a bounded outage schedule. Both cooldowns
 /// remain five seconds, and every input must survive the failed source polls.
@@ -605,9 +713,7 @@ interval_ms = 250
         let mut data_types = BTreeMap::<String, usize>::new();
         let mut deliveries = 0;
         let mut errors = 0;
-        let mut inputs = BTreeSet::new();
-        let mut outputs = BTreeSet::new();
-        let mut failed_inputs = BTreeSet::new();
+        let mut cohort = DemoBusinessCohort::default();
         let mut summaries = Vec::new();
         let records = exported_jsonl::chain_records(&jsonl);
         let committed_inputs: BTreeMap<_, _> = records
@@ -617,23 +723,15 @@ interval_ms = 250
             .collect();
         for record in &records {
             let event = record.authored();
-            if let ChainPayload::Fact(payload) = &event.payload {
-                if !event.processing.status.is_success() {
-                    failed_inputs.insert(payload["id"].as_u64().unwrap());
-                } else {
-                    match event.flow_context.stage_name.as_str() {
-                        "high_volume_source" => {
-                            inputs.insert(payload["id"].as_u64().unwrap());
-                        }
-                        "error_processor" => {
-                            outputs.insert(payload["id"].as_u64().unwrap());
-                        }
-                        "event_counter" => {
-                            summaries.push(payload["event_count"].as_u64().unwrap());
-                        }
-                        _ => {}
-                    }
+            cohort.record(&event);
+            match &event.payload {
+                ChainPayload::Fact(payload)
+                    if event.processing.status.is_success()
+                        && event.flow_context.stage_name == "event_counter" =>
+                {
+                    summaries.push(payload["event_count"].as_u64().unwrap());
                 }
+                _ => {}
             }
             if matches!(event.payload, ChainPayload::FlowControl(_)) {
                 let context = &event.flow_context;
@@ -754,14 +852,7 @@ interval_ms = 250
             deliveries, 1,
             "the summary must retain its delivery receipt"
         );
-        assert_eq!(inputs, (0..1_000).collect());
-        assert_eq!(
-            outputs,
-            (0_u64..1_000)
-                .filter(|id| !id.is_multiple_of(100))
-                .collect()
-        );
-        assert_eq!(failed_inputs, (0..1_000).step_by(100).collect());
+        cohort.assert_complete(1_000);
         assert_eq!(summaries, [990]);
         assert!(
             !data_types
@@ -804,7 +895,7 @@ mod managed_lifecycle_regressions {
     use obzenflow_runtime::pipeline::FlowHandle;
     use std::sync::{Arc, Mutex};
 
-    use super::{prometheus_demo, CI_EVENT_LIMIT};
+    use super::{prometheus_demo, DemoBusinessCohort, CI_EVENT_LIMIT};
 
     /// Read the shipped endpoint in this existing finite-example proof. HTTP/1.0
     /// supplies a close-delimited body; HTTP/1.1 transport framing and keep-alives
@@ -1568,9 +1659,7 @@ enabled = {prometheus}
             )
         };
         let mut receipts = Vec::new();
-        let mut inputs = BTreeSet::new();
-        let mut successes = BTreeSet::new();
-        let mut errors = BTreeSet::new();
+        let mut cohort = DemoBusinessCohort::default();
         let mut summaries = Vec::new();
         let mut summary_outputs = Vec::new();
         for line in reader.lines() {
@@ -1603,44 +1692,40 @@ enabled = {prometheus}
             };
             event_ids.insert(event.id);
             parents.extend(event.causality.parent_ids.iter().copied());
+            cohort.record(&event);
             if let ChainPayload::Delivery(receipt) = &event.payload {
                 assert_eq!(event.flow_context.stage_name, "summary_sink");
                 receipts.push(receipt_output(receipt, expected_live_bytes));
             }
-            if let ChainPayload::Fact(payload) = &event.payload {
-                // Error routing retains the failed parent's source context.
-                // Count its payload identity independently of the producing stage.
-                if !event.processing.status.is_success() {
-                    errors.insert(payload["id"].as_u64().unwrap());
-                    continue;
+            match &event.payload {
+                ChainPayload::Fact(payload)
+                    if event.processing.status.is_success()
+                        && event.flow_context.stage_name == "event_counter" =>
+                {
+                    summaries.push(payload["event_count"].as_u64().unwrap());
+                    let summary = prometheus_demo::EventCountState::try_from_event(&event)
+                        .expect("recorded summary has the example's typed schema");
+                    summary_outputs.push(prometheus_demo::format_summary(&summary));
                 }
-                match event.flow_context.stage_name.as_str() {
-                    "high_volume_source" => {
-                        inputs.insert(payload["id"].as_u64().unwrap());
-                    }
-                    "error_processor" => {
-                        successes.insert(payload["id"].as_u64().unwrap());
-                    }
-                    "event_counter" => {
-                        summaries.push(payload["event_count"].as_u64().unwrap());
-                        let summary = prometheus_demo::EventCountState::try_from_event(&event)
-                            .expect("recorded summary has the example's typed schema");
-                        summary_outputs.push(prometheus_demo::format_summary(&summary));
-                    }
-                    _ => {}
-                }
+                _ => {}
             }
         }
         assert!(
             committed_records.is_empty(),
             "export must contain every admitted record"
         );
-        assert_eq!(inputs, (0..count).collect());
-        assert_eq!(
-            successes,
-            (0..count).filter(|id| !id.is_multiple_of(100)).collect()
-        );
-        assert_eq!(errors, (0..count).step_by(100).collect());
+        cohort.assert_complete(count);
+        if count == 100 && matches!(mode, MetricsProofMode::InjectedSnapshots) {
+            // Keep the retained-run measurement oracle aligned with a real
+            // shipped-example archive, not only its rejection fixtures.
+            super::prometheus_measurement::inspect_archive(&archive, count)
+                .await
+                .expect("measurement oracle accepts the complete real demo archive");
+            super::assert_demo_cohort_rejects_incomplete_and_duplicate_records(
+                &super::exported_jsonl::chain_events(&std::fs::read_to_string(&export).unwrap()),
+                count,
+            );
+        }
         assert_eq!(summaries, [count - count / 100]);
         assert_eq!(summary_outputs, std::slice::from_ref(&expected_summary));
         assert_eq!(receipts.len(), 1);

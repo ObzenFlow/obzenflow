@@ -51,7 +51,7 @@ impl Drop for ApplicationTask {
     }
 }
 
-async fn abort_and_join(tasks: Vec<ApplicationTask>) -> Vec<JoinError> {
+pub(in crate::application) async fn abort_and_join(tasks: Vec<ApplicationTask>) -> Vec<JoinError> {
     // Cancel the whole group before waiting, including tasks after blocking work.
     for task in &tasks {
         task.0.abort();

@@ -12,6 +12,7 @@
 //! - Graceful shutdown handling
 
 use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
+use super::observability::{ApplicationDiagnostics, PreparedObservability};
 use super::web_surface::label_endpoint;
 use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
@@ -50,6 +51,7 @@ type FlowHandleHook =
 
 #[derive(Default)]
 struct LaunchParams {
+    diagnostics: ApplicationDiagnostics,
     builder_config_file: Option<PathBuf>,
     enable_autodiscovery: bool,
     web_surfaces: Vec<WebSurfaceAttachment>,
@@ -170,6 +172,8 @@ pub struct FlowApplicationBuilder {
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
+    #[cfg(all(test, feature = "tokio-console"))]
+    test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
     test_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
 }
@@ -180,15 +184,14 @@ impl FlowApplicationBuilder {
     /// This allows you to connect with `tokio-console` CLI tool to inspect
     /// tasks, async operations, and resource usage in real-time.
     ///
-    /// This method is always available, but only takes effect when the `tokio-console`
-    /// feature is enabled at compile time. This allows user code to be written
-    /// once without #[cfg] attributes.
+    /// This method is always available. An explicit request fails at startup if
+    /// the `tokio-console` feature or `tokio_unstable` compile support is missing.
     ///
     /// # Example
     /// ```ignore
-    /// // This works whether or not 'tokio-console' feature is enabled!
+    /// // Build with --features tokio-console and --cfg tokio_unstable.
     /// FlowApplication::builder()
-    ///     .with_console_subscriber()  // No-op if feature disabled
+    ///     .with_console_subscriber()
     ///     .run_blocking(build_flow())
     /// ```
     pub fn with_console_subscriber(mut self) -> Self {
@@ -347,14 +350,12 @@ impl FlowApplicationBuilder {
     /// Use this when you have a plain `fn main()` and want FlowApplication to
     /// manage the entire runtime lifecycle.
     pub fn run_blocking(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
-        // Build tokio runtime so we have a handle for console-subscriber
+        let observability = self.prepare_observability()?;
+        // Tracing is installed before runtime construction and task creation.
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| ApplicationError::RuntimeCreationFailed(e.to_string()))?;
-
-        // Initialize tracing/console-subscriber using the runtime handle
-        self.init_observability(Some(runtime.handle()));
 
         let FlowApplicationBuilder {
             config_file,
@@ -363,30 +364,43 @@ impl FlowApplicationBuilder {
             flow_handle_hooks,
             presentation,
             cli_args,
+            #[cfg(all(test, feature = "tokio-console"))]
+            test_console_bound_address,
             #[cfg(all(test, feature = "warp-server"))]
             test_bound_address,
             ..
         } = self;
 
         // Run the flow in the runtime
-        runtime.block_on(FlowApplication::launch(
-            flow,
-            LaunchParams {
-                builder_config_file: config_file,
-                enable_autodiscovery: true,
-                web_surfaces,
-                extra_endpoints: web_endpoints,
-                flow_handle_hooks,
-                presentation,
-                cli_args,
-                #[cfg(all(test, feature = "warp-server"))]
-                test_shutdown_signal: None,
-                #[cfg(all(test, feature = "warp-server"))]
-                test_bound_address,
-                #[cfg(all(test, feature = "warp-server"))]
-                test_host_task: None,
-            },
-        ))
+        runtime.block_on(async move {
+            let diagnostics = observability.start()?;
+            #[cfg(all(test, feature = "tokio-console"))]
+            if let (Some(sender), Some(address)) =
+                (test_console_bound_address, diagnostics.address())
+            {
+                let _ = sender.send(address);
+            }
+            FlowApplication::launch(
+                flow,
+                LaunchParams {
+                    diagnostics,
+                    builder_config_file: config_file,
+                    enable_autodiscovery: true,
+                    web_surfaces,
+                    extra_endpoints: web_endpoints,
+                    flow_handle_hooks,
+                    presentation,
+                    cli_args,
+                    #[cfg(all(test, feature = "warp-server"))]
+                    test_shutdown_signal: None,
+                    #[cfg(all(test, feature = "warp-server"))]
+                    test_bound_address,
+                    #[cfg(all(test, feature = "warp-server"))]
+                    test_host_task: None,
+                },
+            )
+            .await
+        })
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
@@ -394,8 +408,7 @@ impl FlowApplicationBuilder {
     /// Use this when you already have a tokio runtime (e.g., from #[tokio::main])
     /// and just want FlowApplication to handle observability setup.
     pub async fn run_async(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
-        // Initialize tracing/console-subscriber with the current runtime handle
-        self.init_observability(Some(&tokio::runtime::Handle::current()));
+        let diagnostics = self.prepare_observability()?.start()?;
 
         let FlowApplicationBuilder {
             config_file,
@@ -404,15 +417,23 @@ impl FlowApplicationBuilder {
             flow_handle_hooks,
             presentation,
             cli_args,
+            #[cfg(all(test, feature = "tokio-console"))]
+            test_console_bound_address,
             #[cfg(all(test, feature = "warp-server"))]
             test_bound_address,
             ..
         } = self;
 
+        #[cfg(all(test, feature = "tokio-console"))]
+        if let (Some(sender), Some(address)) = (test_console_bound_address, diagnostics.address()) {
+            let _ = sender.send(address);
+        }
+
         // Run the flow
         FlowApplication::launch(
             flow,
             LaunchParams {
+                diagnostics,
                 builder_config_file: config_file,
                 enable_autodiscovery: true,
                 web_surfaces,
@@ -431,10 +452,7 @@ impl FlowApplicationBuilder {
         .await
     }
 
-    /// Initialize observability (tracing + console-subscriber)
-    fn init_observability(&self, _runtime_handle: Option<&tokio::runtime::Handle>) {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
+    fn prepare_observability(&self) -> Result<PreparedObservability, ApplicationError> {
         use tracing_subscriber::EnvFilter;
 
         // Determine log level (RUST_LOG env var takes precedence)
@@ -447,85 +465,11 @@ impl FlowApplicationBuilder {
             EnvFilter::new(level)
         });
 
-        #[cfg(feature = "tokio-console")]
-        if self.console_subscriber {
-            // Set bind address for console-subscriber (honor existing env override)
-            let bind = std::env::var("TOKIO_CONSOLE_BIND")
-                .ok()
-                .or_else(|| self.console_bind.clone())
-                .unwrap_or_else(|| "127.0.0.1:6669".to_string());
-            let addr: std::net::SocketAddr = bind.parse().unwrap_or_else(|err| {
-                let fallback = "127.0.0.1:6669";
-                eprintln!(
-                    "❌ Invalid TOKIO_CONSOLE_BIND '{bind}': {err}. Falling back to {fallback}",
-                );
-                fallback.parse().expect("fallback address should parse")
-            });
-            // Ensure downstream tooling that relies on the env var still sees the effective address
-            std::env::set_var("TOKIO_CONSOLE_BIND", &bind);
-            eprintln!("ℹ️  tokio-console attempting to bind to {addr}");
-
-            let builder = console_subscriber::ConsoleLayer::builder()
-                .with_default_env()
-                .server_addr(addr);
-            let (console_layer, server) = builder.build();
-
-            // Spawn console server with error logging so bind failures are visible instead of silent
-            let bind_for_log = bind.clone();
-            let spawn_server = async move {
-                if let Err(err) = server.serve().await {
-                    eprintln!("❌ tokio-console failed to bind on {bind_for_log}: {err}");
-                }
-            };
-            // Small self-connect probe to surface connectivity issues early
-            let addr_for_probe = addr;
-            let spawn_probe = async move {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                match tokio::net::TcpStream::connect(addr_for_probe).await {
-                    Ok(_) => {
-                        eprintln!("✅ tokio-console TCP probe successful on {addr_for_probe}")
-                    }
-                    Err(err) => {
-                        eprintln!("❌ tokio-console TCP probe failed on {addr_for_probe}: {err}")
-                    }
-                }
-            };
-
-            if let Some(handle) = _runtime_handle {
-                handle.spawn(spawn_server);
-                handle.spawn(spawn_probe);
-            } else {
-                // Fallback: attempt to spawn on whatever runtime is available
-                tokio::spawn(spawn_server);
-                tokio::spawn(spawn_probe);
-            }
-
-            tracing_subscriber::registry()
-                .with(console_layer)
-                .with(tracing_subscriber::fmt::layer())
-                .with(filter)
-                .try_init()
-                .ok();
-
-            eprintln!("🚦 tokio-console enabled on {bind}");
-            eprintln!("   Connect with: tokio-console http://{bind}");
-            if !cfg!(tokio_unstable) {
-                eprintln!("⚠️  Built without `--cfg tokio_unstable`; console may show limited data. Run with RUSTFLAGS=\"--cfg tokio_unstable\" for full instrumentation.");
-            }
-            return;
-        }
-
-        #[cfg(not(feature = "tokio-console"))]
-        if self.console_subscriber {
-            eprintln!("⚠️  Console subscriber requested but 'tokio-console' feature not enabled");
-            eprintln!("   Recompile with the obzenflow feature: --features tokio-console");
-        }
-
-        // Standard tracing setup (no console-subscriber)
-        let _ = tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
-            .with(filter)
-            .try_init();
+        PreparedObservability::install(
+            self.console_subscriber,
+            self.console_bind.as_deref(),
+            filter,
+        )
     }
 }
 
@@ -639,8 +583,21 @@ impl FlowApplication {
         .await
     }
 
-    async fn launch(flow: FlowDefinition, params: LaunchParams) -> Result<(), ApplicationError> {
+    async fn launch(
+        flow: FlowDefinition,
+        mut params: LaunchParams,
+    ) -> Result<(), ApplicationError> {
+        let diagnostics = std::mem::take(&mut params.diagnostics);
+        let result = Self::launch_inner(flow, params).await;
+        diagnostics.finish(result).await
+    }
+
+    async fn launch_inner(
+        flow: FlowDefinition,
+        params: LaunchParams,
+    ) -> Result<(), ApplicationError> {
         let LaunchParams {
+            diagnostics: _,
             builder_config_file,
             enable_autodiscovery,
             web_surfaces,
@@ -772,9 +729,6 @@ impl FlowApplication {
                     )
                 })?
             };
-
-            // Note: Logging/console-subscriber should be initialized in main() before
-            // the tokio runtime is created for console_subscriber to work properly
 
             tracing::info!("🚀 Starting FlowApplication");
 

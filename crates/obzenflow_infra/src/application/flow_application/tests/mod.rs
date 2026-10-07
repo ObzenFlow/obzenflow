@@ -18,6 +18,8 @@ use std::net::TcpListener;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
+#[cfg(all(feature = "tokio-console", tokio_unstable))]
+mod console_telemetry;
 mod lifecycle;
 mod startup;
 

@@ -25,6 +25,7 @@ doctest = true
 
 [features]
 test-support = ["tokio/test-util"]
+tokio-console = ["tokio/tracing"]
 
 [dependencies]
 # Internal dependencies
@@ -51,3 +52,6 @@ ring = { workspace = true }
 [dev-dependencies]
 tokio-test = { workspace = true }
 ulid = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
