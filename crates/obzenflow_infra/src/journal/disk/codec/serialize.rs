@@ -25,6 +25,9 @@ pub(super) fn write<T: Serialize + ?Sized>(
     out: &mut Vec<u8>,
     definitions: &mut impl WriteDefinitions,
 ) -> Result<u64> {
+    if matches!(kind, Kind::Clock) {
+        return super::clock::write(value, out, definitions);
+    }
     if matches!(
         kind,
         Kind::Struct(_)

@@ -5,6 +5,7 @@
 //! Private current-schema storage adapter for the current Core provenance schema.
 //! See README.md for the wire contract and scalar-preservation invariants.
 
+mod clock;
 mod definitions;
 mod deserialize;
 pub(crate) mod frame;

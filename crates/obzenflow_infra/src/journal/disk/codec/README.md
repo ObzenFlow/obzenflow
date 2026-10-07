@@ -132,6 +132,9 @@ capture has tag `0` plus a complete structure, or tag `1` for exact equality
 with the current record's complete packet capture. Capture state is cleared
 between group members. Equal owners or event IDs alone never select this tag.
 Clock components always carry their own complete unsigned values.
+Clock writes split Core's serialized entries directly into the coordinate
+definition and current numbers, without constructing intermediate JSON objects.
+Core's clock serializer still enforces its coordinate and nonzero-counter limits.
 
 A clock carries a reference to its complete ordered coordinate list, followed
 by one complete absolute unsigned value for every coordinate. Each coordinate
@@ -158,7 +161,9 @@ optional observation. No per-record numerical snapshot is interned.
 
 Writer interning and reader definition caches share an 8-MiB retained-memory
 budget per active archive. Accounting conservatively includes bucket slack,
-both lookup maps, locator strings, scalar metadata and definition bodies. A
+all lookup maps, locator strings, scalar metadata, encoded definition bodies and
+shared decoded values. Decoded strings and arrays are charged by capacity, with
+a conservative allowance for object nodes, once on a cache miss. A
 budget eviction releases map capacity as well as entries. Cache metrics report
 hits, misses, carrier I/O and peak charged bytes. Transient frame/group bodies
 are separate and proportional to the addressed frames, including carrier frames.
@@ -168,7 +173,12 @@ publishes none. The provider never waits for another journal's pending definitio
 while holding its write lock. Required definitions live in retained journal
 frames; caches and indexes are disposable accelerators.
 
-Cached values carry file identity, length and modification stamps. Referenced
+Decoded values are shared by exact definition kind and encoded contents across
+frames. Validated locators can link directly to a budgeted decoded value;
+eviction clears those links too. Oversized decoded values are returned to the
+current reader without retention. Numeric clock values are never cached.
+
+Cached locators carry file identity, length and modification stamps. Referenced
 files must still exist as regular files; replacements, truncations and
 same-length edits force validation of the carrier bytes. Open journals retain
 their append-only contract. Relocation works because durable references contain

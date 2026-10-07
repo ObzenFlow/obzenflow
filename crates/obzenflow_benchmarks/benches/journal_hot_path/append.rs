@@ -74,6 +74,7 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
     group.throughput(Throughput::Elements(64));
     for (name, payload, group_size, every) in [
         ("ordinary_business_64", 256, 1, 0),
+        ("ordinary_business_group_64", 256, 64, 0),
         ("large_business_64", 8192, 1, 0),
         ("mixed_group_64", 256, 64, 8),
         ("execution_fact_group_64", 256, 64, 1),
