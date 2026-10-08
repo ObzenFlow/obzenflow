@@ -520,10 +520,12 @@ pub fn spawn_heartbeat(
                         last_output_event_id,
                     });
                     for (index, edge) in edges_snapshot.iter().enumerate() {
-                        if previous_states[index] == edge.state {
-                            continue;
-                        }
-                        let observed_state = if edge.state == EdgeLivenessState::Healthy {
+                        // The optional handoff can drop any sample. Refresh
+                        // current state on every tick so a lost transition
+                        // cannot leave the latest view permanently stale.
+                        let observed_state = if edge.state == EdgeLivenessState::Healthy
+                            && previous_states[index] != EdgeLivenessState::Healthy
+                        {
                             EdgeLivenessState::Recovered
                         } else {
                             edge.state

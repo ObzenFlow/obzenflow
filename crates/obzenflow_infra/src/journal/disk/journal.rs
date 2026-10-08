@@ -675,7 +675,6 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         })?;
         let mut next_last_commit = self.last_commit.read().await.clone();
         let mut envelopes = Vec::with_capacity(events.len());
-        let mut budget = obzenflow_core::journal::limits::GroupBudget::default();
 
         for (index, event) in events.into_iter().enumerate() {
             let (commitment, predecessor) = JournalClock::prepare(
@@ -712,7 +711,6 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                     source: Box::new(error),
                 })?
             });
-            budget.admit(envelopes.last().expect("prepared record"))?;
         }
 
         let mut prepared = codec::prepare(

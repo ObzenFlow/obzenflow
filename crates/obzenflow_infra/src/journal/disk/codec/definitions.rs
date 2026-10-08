@@ -80,6 +80,17 @@ struct Cache {
 }
 
 impl Cache {
+    fn reserve(&mut self, charge: usize) -> bool {
+        if charge > CACHE_BYTES {
+            return false;
+        }
+        if self.bytes + charge > CACHE_BYTES {
+            *self = Self::default();
+        }
+        self.bytes += charge;
+        true
+    }
+
     fn insert(&mut self, definition: Definition, locator: Locator, stamp: Option<FileStamp>) {
         if self.by_location.contains_key(&locator) {
             return;
@@ -89,15 +100,9 @@ impl Cache {
             .body
             .len()
             .saturating_add(locator.journal.len() * 2 + 512);
-        if charge > CACHE_BYTES {
+        if !self.reserve(charge) {
             return;
         }
-        if self.bytes + charge > CACHE_BYTES {
-            self.by_value = HashMap::new();
-            self.by_location = HashMap::new();
-            self.bytes = 0;
-        }
-        self.bytes += charge;
         self.by_value.insert(definition.clone(), locator.clone());
         self.by_location
             .insert(locator, CachedDefinition { definition, stamp });
@@ -132,6 +137,10 @@ impl DefinitionStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(definition, locator, stamp);
+    }
+
+    fn decode(&self, definition: &Definition) -> Result<Arc<Value>> {
+        Ok(Arc::new(decode_definition(definition)?))
     }
 }
 
@@ -239,9 +248,12 @@ impl WriteDefinitions for WriteTable {
     fn matches_capture(&self, capture: &Value) -> bool {
         self.capture.as_ref() == Some(capture)
     }
-    fn reference(&mut self, kind: DefinitionKind, value: &Value, out: &mut Vec<u8>) -> Result<()> {
-        let mut body = Vec::new();
-        values::write(kind.body(), value, &mut body, &mut Standalone)?;
+    fn reference_encoded(
+        &mut self,
+        kind: DefinitionKind,
+        body: Vec<u8>,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         let definition = Definition {
             kind,
             body: body.into(),
@@ -272,9 +284,10 @@ impl WriteDefinitions for WriteTable {
 
 pub(super) struct ReadTable<'a, const MEASURE: bool> {
     entries: Vec<Entry>,
-    decoded: HashMap<usize, Value>,
+    decoded: HashMap<usize, Arc<Value>>,
     store: &'a DefinitionStore,
     path: &'a Path,
+    journal: String,
     offset: u64,
     costs: Vec<usize>,
     usage: Vec<u8>,
@@ -294,7 +307,7 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         offset: u64,
     ) -> Result<Self> {
         let mut costs = Vec::new();
-        let entries = read_entries(input, path, MEASURE.then_some(&mut costs))?;
+        let (journal, entries) = read_entries(input, path, MEASURE.then_some(&mut costs))?;
         let usage = if MEASURE {
             vec![0; entries.len()]
         } else {
@@ -305,6 +318,7 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
             decoded: HashMap::new(),
             store,
             path,
+            journal,
             offset,
             costs,
             usage,
@@ -349,8 +363,8 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         (counts, bytes, references)
     }
 
-    fn definition(&mut self, kind: DefinitionKind, locator: &Locator) -> Result<Definition> {
-        if locator.journal == journal_name(self.path)? && locator.offset >= self.offset {
+    fn definition(&mut self, kind: DefinitionKind, locator: &Locator) -> Result<Arc<Value>> {
+        if locator.journal == self.journal && locator.offset >= self.offset {
             return Err(invalid(
                 "definition reference is not before the consuming frame",
             ));
@@ -386,7 +400,7 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
                 .as_ref()
                 .is_some_and(|prior| stamp.preserves(prior))
             {
-                return Ok(cached.definition);
+                return self.store.decode(&cached.definition);
             }
         }
         // No aliases out of the archive through symlinks, even with a valid basename.
@@ -395,22 +409,25 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         if canonical.parent() != Some(archive.as_path()) {
             return Err(invalid("definition escapes the archive"));
         }
-        let mut file = std::fs::File::open(path)?;
-        file.seek(SeekFrom::Start(locator.offset))?;
-        let mut header = [0u8; frame::HEADER_LEN];
-        file.read_exact(&mut header)?;
-        let length = frame::frame_length(&header).map_err(frame::io_error)?;
-        let remaining = file.metadata()?.len().saturating_sub(locator.offset);
-        if length as u64 > remaining {
-            return Err(invalid("definition carrier is uncommitted"));
-        }
-        let mut bytes = header.to_vec();
-        file.take((length - frame::HEADER_LEN) as u64)
-            .read_to_end(&mut bytes)?;
+        let bytes = {
+            let mut file = std::fs::File::open(path)?;
+            file.seek(SeekFrom::Start(locator.offset))?;
+            let mut header = [0u8; frame::HEADER_LEN];
+            file.read_exact(&mut header)?;
+            let length = frame::frame_length(&header).map_err(frame::io_error)?;
+            let remaining = file.metadata()?.len().saturating_sub(locator.offset);
+            if length as u64 > remaining {
+                return Err(invalid("definition carrier is uncommitted"));
+            }
+            let mut bytes = header.to_vec();
+            file.take((length - frame::HEADER_LEN) as u64)
+                .read_to_end(&mut bytes)?;
+            bytes
+        };
         let body = frame::validate(&bytes).map_err(frame::io_error)?;
         let envelope = super::routing::Envelope::parse(body)?;
         let mut cursor = Cursor::new(envelope.definitions);
-        let entries = read_entries(&mut cursor, &canonical, None)?;
+        let (_, entries) = read_entries(&mut cursor, &canonical, None)?;
         cursor.finish()?;
         let definition = match entries.get(locator.slot) {
             Some(Entry::Local(definition)) if definition.kind == kind => definition.clone(),
@@ -423,11 +440,6 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         // Several requested definitions usually share one carrier. Validate
         // and cache its complete local bodies together, without following any
         // of that carrier's references or materialising its event history.
-        for entry in &entries {
-            if let Entry::Local(definition) = entry {
-                decode_definition(definition)?;
-            }
-        }
         for (slot, entry) in entries.into_iter().enumerate() {
             if let Entry::Local(definition) = entry {
                 self.store.publish(
@@ -441,7 +453,7 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
                 );
             }
         }
-        Ok(definition)
+        self.store.decode(&definition)
     }
 }
 
@@ -452,7 +464,7 @@ impl<const MEASURE: bool> ReadDefinitions for ReadTable<'_, MEASURE> {
     fn capture(&self) -> Option<Value> {
         self.capture.clone()
     }
-    fn resolve(&mut self, kind: DefinitionKind, input: &mut Cursor<'_>) -> Result<Value> {
+    fn resolve(&mut self, kind: DefinitionKind, input: &mut Cursor<'_>) -> Result<Arc<Value>> {
         let slot = input.length()?;
         let entry = self
             .entries
@@ -471,15 +483,14 @@ impl<const MEASURE: bool> ReadDefinitions for ReadTable<'_, MEASURE> {
         if let Some(value) = self.decoded.get(&slot) {
             return Ok(value.clone());
         }
-        let definition = match entry {
-            Entry::Local(definition) => definition.clone(),
+        let value = match entry {
+            Entry::Local(definition) => self.store.decode(definition)?,
             Entry::External(kind, locator) => {
                 let kind = *kind;
                 let locator = locator.clone();
                 self.definition(kind, &locator)?
             }
         };
-        let value = decode_definition(&definition)?;
         self.decoded.insert(slot, value.clone());
         Ok(value)
     }
@@ -496,7 +507,7 @@ fn read_entries(
     input: &mut Cursor<'_>,
     path: &Path,
     mut costs: Option<&mut Vec<usize>>,
-) -> Result<Vec<Entry>> {
+) -> Result<(String, Vec<Entry>)> {
     let journal_count = values::bounded_count(input)?;
     let mut journals = vec![journal_name(path)?];
     for _ in 0..journal_count {
@@ -533,7 +544,9 @@ fn read_entries(
             costs.push(input.position() - start);
         }
     }
-    Ok(entries)
+    // Retain the validated ordinal-zero basename for this frame's lookups.
+    // Moving it out avoids revalidating and reallocating the immutable path.
+    Ok((journals.swap_remove(0), entries))
 }
 
 fn write_journal_name(name: &str, out: &mut Vec<u8>) {
@@ -616,6 +629,9 @@ mod tests {
             table
                 .reference(DefinitionKind::Descriptor, &value, &mut Vec::new())
                 .unwrap();
+            if let Entry::Local(definition) = &table.entries[0] {
+                assert_eq!(store.decode(definition).unwrap().as_ref(), &value);
+            }
             table.commit(index);
             assert!(store.0.lock().unwrap().bytes <= CACHE_BYTES);
         }
@@ -627,6 +643,90 @@ mod tests {
             matches!(&table.entries[0], Entry::Local(_)),
             "evicted values are written completely again"
         );
+    }
+
+    #[test]
+    fn definitions_preserve_distinct_frame_sequences() {
+        let store = DefinitionStore::default();
+        let path = Path::new("shared.log");
+        let mut writer = WriteTable::new(store.clone(), path).unwrap();
+        let keys = serde_json::json!([{
+            "journal_writer_id": obzenflow_core::JournalWriterId::new()
+        }]);
+        let mut ordinal = Vec::new();
+        writer
+            .reference(DefinitionKind::ClockKeys, &keys, &mut ordinal)
+            .unwrap();
+        let mut encoded = Vec::new();
+        writer.encode(&mut encoded);
+        let mut first =
+            ReadTable::<false>::new(&mut Cursor::new(&encoded), &store, path, 0).unwrap();
+        let mut second =
+            ReadTable::<false>::new(&mut Cursor::new(&encoded), &store, path, 0).unwrap();
+        let first_keys = first
+            .resolve(DefinitionKind::ClockKeys, &mut Cursor::new(&ordinal))
+            .unwrap();
+        let second_keys = second
+            .resolve(DefinitionKind::ClockKeys, &mut Cursor::new(&ordinal))
+            .unwrap();
+        assert_eq!(first_keys, second_keys);
+        for (table, sequence) in [(&mut first, 1), (&mut second, 9)] {
+            let mut bytes = ordinal.clone();
+            unsigned(sequence, &mut bytes);
+            let clock = values::read(
+                super::super::layout::Kind::Clock,
+                &mut Cursor::new(&bytes),
+                table,
+            )
+            .unwrap();
+            assert_eq!(clock["entries"][0]["sequence"], sequence);
+        }
+        assert_eq!(first_keys.as_ref(), &keys);
+        assert_eq!(second_keys.as_ref(), &keys);
+    }
+
+    #[test]
+    fn decoded_values_do_not_consume_the_encoded_definition_budget() {
+        let store = DefinitionStore::default();
+        let value = Value::String("x".repeat(CACHE_BYTES / 2 + 1024));
+        let mut body = Vec::new();
+        values::write(
+            DefinitionKind::Descriptor.body(),
+            &value,
+            &mut body,
+            &mut Standalone,
+        )
+        .unwrap();
+        let definition = Definition {
+            kind: DefinitionKind::Descriptor,
+            body: body.into(),
+        };
+        assert!(definition.body.len() < CACHE_BYTES);
+        assert_eq!(store.decode(&definition).unwrap().as_ref(), &value);
+        let cache = store.0.lock().unwrap();
+        assert!(cache.by_value.is_empty());
+        assert!(cache.by_location.is_empty());
+        assert_eq!(cache.bytes, 0);
+        drop(cache);
+
+        // Publishing a locator charges only its encoded definition.
+        let mut body = Vec::new();
+        text(&"y".repeat(CACHE_BYTES / 3), &mut body);
+        let definition = Definition {
+            kind: DefinitionKind::Descriptor,
+            body: body.into(),
+        };
+        store.decode(&definition).unwrap();
+        assert_eq!(store.0.lock().unwrap().bytes, 0);
+        let locator = Locator {
+            journal: "bounded.log".into(),
+            offset: 0,
+            slot: 0,
+        };
+        store.publish(definition, locator.clone(), None);
+        let cache = store.0.lock().unwrap();
+        assert!(cache.by_location.contains_key(&locator));
+        assert!(cache.bytes <= CACHE_BYTES);
     }
 
     #[test]

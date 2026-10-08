@@ -63,11 +63,12 @@ unsafe impl GlobalAlloc for Allocator {
 }
 
 pub(super) struct Start(u64);
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Work {
     pub allocation_and_reallocation_calls: u64,
     pub requested_allocation_bytes: u64,
     pub peak_heap_bytes_above_start: u64,
+    pub retained_heap_bytes_above_start: u64,
 }
 impl Start {
     /// Call immediately before enabling the exclusive work scope.
@@ -83,6 +84,7 @@ impl Start {
             allocation_and_reallocation_calls: CALLS.load(Relaxed),
             requested_allocation_bytes: BYTES.load(Relaxed),
             peak_heap_bytes_above_start: PEAK.load(Relaxed).saturating_sub(self.0),
+            retained_heap_bytes_above_start: LIVE.load(Relaxed).saturating_sub(self.0),
         }
     }
 }

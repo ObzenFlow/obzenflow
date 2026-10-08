@@ -133,3 +133,6 @@ impl TailReaders {
         self.0.shutdown().await;
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -25,8 +25,8 @@ pub struct Meter {
 
 impl Meter {
     pub fn start() -> Self {
-        let census =
-            (!super::work::active()).then(|| (allocations::Start::new(), WorkScope::start()));
+        let census = (cfg!(feature = "allocation-census") && !super::work::active())
+            .then(|| (allocations::Start::new(), WorkScope::start()));
         Self {
             census,
             start: Instant::now(),
@@ -52,6 +52,7 @@ impl Meter {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Sample {
     pub elapsed: Duration,
     pub work: BTreeMap<String, u64>,
@@ -88,7 +89,7 @@ pub fn measure(
     input: &Value,
     mut operation: impl FnMut() -> Sample,
 ) {
-    if !*taken {
+    if cfg!(feature = "allocation-census") && !*taken {
         let sample = operation();
         censuses.push(Census {
             case: name.to_owned(),
@@ -100,15 +101,11 @@ pub fn measure(
         *taken = true;
     }
     b.iter_custom(|iterations| {
-        // An outer scope suppresses per-iteration census allocation. Framework
-        // code contains no counters or measurement-session state.
-        let scope = WorkScope::start();
         let mut elapsed = Duration::ZERO;
         for _ in 0..iterations {
             let sample = operation();
             elapsed += sample.elapsed;
         }
-        drop(scope);
         elapsed
     });
 }

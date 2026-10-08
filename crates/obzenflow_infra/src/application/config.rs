@@ -10,6 +10,7 @@ use obzenflow_runtime::bootstrap::{BootstrapConfig, ReplayVerb};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -58,6 +59,14 @@ pub struct FlowConfig {
     /// Path to a startup config file.
     #[arg(long)]
     pub config: Option<PathBuf>,
+
+    /// Enable Tokio Console task diagnostics (requires a Console-capable build).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub tokio_console: Option<bool>,
+
+    /// Tokio Console listener address (default: 127.0.0.1:6669).
+    #[arg(long)]
+    pub tokio_console_bind: Option<String>,
 
     /// Start HTTP server for metrics and topology visualization
     #[arg(long, action = ArgAction::SetTrue)]
@@ -196,6 +205,7 @@ pub struct FlowConfig {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedStartupConfig {
+    pub tokio_console: ResolvedConsoleConfig,
     pub server: ResolvedServerConfig,
     pub runtime: ResolvedStartupRuntimeConfig,
     pub metrics: ResolvedMetricsConfig,
@@ -207,6 +217,21 @@ pub(crate) struct ResolvedStartupConfig {
     /// FLOWIP-010 §7: the immutable runtime config snapshot, host-owned for
     /// the run and handed to the flow build as `FlowBuildContext`.
     pub runtime_config: std::sync::Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
+}
+
+/// Process-local diagnostics; never an archived execution setting.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedConsoleConfig {
+    pub enabled: bool,
+    // Resolve and validate requests even when the transport was not compiled.
+    #[cfg_attr(not(feature = "tokio-console"), allow(dead_code))]
+    pub bind: SocketAddr,
+}
+
+#[derive(Default)]
+pub(crate) struct ConsoleDefaults {
+    pub enabled: bool,
+    pub bind: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +358,7 @@ impl std::error::Error for ConfigError {}
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawFileStartupConfig {
+    diagnostics: RawFileDiagnosticsConfig,
     server: RawFileServerConfig,
     pub(crate) runtime: RawFileRuntimeConfig,
     metrics: RawFileMetricsConfig,
@@ -346,6 +372,58 @@ pub(crate) struct RawFileStartupConfig {
     pub(crate) sinks: RawFileSinksConfig,
     /// FLOWIP-114d: Studio phonebook registration (010h startup layer).
     studio: RawFileStudioConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawFileDiagnosticsConfig {
+    tokio_console: RawFileConsoleConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawFileConsoleConfig {
+    enabled: Option<bool>,
+    bind: Option<String>,
+}
+
+fn resolve_console(
+    cli_enabled: Option<bool>,
+    cli_bind: Option<String>,
+    file: RawFileConsoleConfig,
+    defaults: ConsoleDefaults,
+) -> Result<ResolvedConsoleConfig, ConfigError> {
+    let enabled = cli_enabled.or(file.enabled).unwrap_or(defaults.enabled);
+    let default_bind = SocketAddr::from(([127, 0, 0, 1], 6669));
+    // Disabled diagnostics neither consult nor validate inactive transport inputs.
+    if !enabled {
+        return Ok(ResolvedConsoleConfig {
+            enabled,
+            bind: default_bind,
+        });
+    }
+    let bind = match cli_bind.or(file.bind) {
+        Some(bind) => Some(bind),
+        None => match std::env::var("TOKIO_CONSOLE_BIND") {
+            Ok(bind) => Some(bind),
+            Err(std::env::VarError::NotPresent) => defaults.bind,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::at(
+                    "diagnostics.tokio_console.bind",
+                    "TOKIO_CONSOLE_BIND must be a Unicode socket address",
+                ));
+            }
+        },
+    };
+    let bind = bind.map_or(Ok(default_bind), |bind| {
+        bind.parse().map_err(|error| {
+            ConfigError::at(
+                "diagnostics.tokio_console.bind",
+                format!("invalid socket address {bind:?}: {error}"),
+            )
+        })
+    })?;
+    Ok(ResolvedConsoleConfig { enabled, bind })
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -600,14 +678,16 @@ impl FlowConfig {
     pub(crate) fn parse_and_resolve(
         builder_config_file: Option<PathBuf>,
         enable_autodiscovery: bool,
+        console: ConsoleDefaults,
     ) -> Result<ResolvedStartupConfig, ConfigError> {
-        Self::parse().resolve(builder_config_file, enable_autodiscovery)
+        Self::parse().resolve_with_console(builder_config_file, enable_autodiscovery, console)
     }
 
     pub(crate) fn parse_and_resolve_from<I, T>(
         args: I,
         builder_config_file: Option<PathBuf>,
         enable_autodiscovery: bool,
+        console: ConsoleDefaults,
     ) -> Result<ResolvedStartupConfig, ConfigError>
     where
         I: IntoIterator<Item = T>,
@@ -615,13 +695,27 @@ impl FlowConfig {
     {
         Self::try_parse_from(args)
             .map_err(|err| ConfigError::global(err.to_string()))?
-            .resolve(builder_config_file, enable_autodiscovery)
+            .resolve_with_console(builder_config_file, enable_autodiscovery, console)
     }
 
-    pub(crate) fn resolve(
+    #[cfg(test)]
+    fn resolve(
         self,
         builder_config_file: Option<PathBuf>,
         enable_autodiscovery: bool,
+    ) -> Result<ResolvedStartupConfig, ConfigError> {
+        self.resolve_with_console(
+            builder_config_file,
+            enable_autodiscovery,
+            ConsoleDefaults::default(),
+        )
+    }
+
+    fn resolve_with_console(
+        self,
+        builder_config_file: Option<PathBuf>,
+        enable_autodiscovery: bool,
+        console: ConsoleDefaults,
     ) -> Result<ResolvedStartupConfig, ConfigError> {
         if std::env::var_os("OBZENFLOW_METRICS_EXPORTER").is_some() {
             return Err(ConfigError::at(
@@ -642,6 +736,12 @@ impl FlowConfig {
             super::runtime_config_sources::build_runtime_config_snapshot(&self, &file)?,
         );
         let control_plane_auth = self.resolve_control_plane_auth(&file)?;
+        let tokio_console = resolve_console(
+            self.tokio_console,
+            self.tokio_console_bind,
+            file.diagnostics.tokio_console,
+            console,
+        )?;
         let studio_enabled = resolve_positive_flag(
             self.studio_enabled,
             file.studio.enabled,
@@ -883,6 +983,7 @@ impl FlowConfig {
         let studio = resolve_studio(studio_inputs, &server)?;
 
         Ok(ResolvedStartupConfig {
+            tokio_console,
             server,
             runtime,
             metrics,
@@ -1461,6 +1562,127 @@ mod tests {
     use super::*;
     use crate::env::test_support::{env_lock, EnvGuard};
     use std::fs;
+
+    #[test]
+    fn console_cli_file_and_builder_enablement_preserve_explicit_false() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["TOKIO_CONSOLE_BIND"]);
+        guard.remove("TOKIO_CONSOLE_BIND");
+        for (file, args, expected) in [
+            ("", vec![], false),
+            ("", vec!["--tokio-console"], true),
+            ("[diagnostics.tokio_console]\nenabled = true", vec![], true),
+            (
+                "[diagnostics.tokio_console]\nenabled = true",
+                vec!["--tokio-console=false"],
+                false,
+            ),
+            (
+                "[diagnostics.tokio_console]\nenabled = false",
+                vec!["--tokio-console"],
+                true,
+            ),
+        ] {
+            let resolved = resolve_studio_file(file, &args).unwrap();
+            assert_eq!(resolved.tokio_console.enabled, expected, "{file} {args:?}");
+        }
+        for cli in [None, Some(false), Some(true)] {
+            for file in [None, Some(false), Some(true)] {
+                for builder in [false, true] {
+                    let resolved = resolve_console(
+                        cli,
+                        None,
+                        RawFileConsoleConfig {
+                            enabled: file,
+                            bind: None,
+                        },
+                        ConsoleDefaults {
+                            enabled: builder,
+                            bind: None,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(resolved.enabled, cli.or(file).unwrap_or(builder));
+                }
+            }
+        }
+        assert!(FlowConfig::try_parse_from(["test", "--tokio-console=maybe"]).is_err());
+    }
+
+    #[test]
+    fn console_bind_has_one_resolution_authority() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["TOKIO_CONSOLE_BIND"]);
+        guard.set("TOKIO_CONSOLE_BIND", "invalid lower-precedence address");
+        let file = "[diagnostics.tokio_console]\nenabled = true\nbind = '127.0.0.1:6671'";
+        assert_eq!(
+            resolve_studio_file(file, &[])
+                .unwrap()
+                .tokio_console
+                .bind
+                .port(),
+            6671
+        );
+        assert_eq!(
+            resolve_studio_file(file, &["--tokio-console-bind", "127.0.0.1:6672"])
+                .unwrap()
+                .tokio_console
+                .bind
+                .port(),
+            6672
+        );
+        let error = resolve_studio_file("", &["--tokio-console"]).unwrap_err();
+        assert!(error.to_string().contains("diagnostics.tokio_console.bind"));
+        assert!(
+            !resolve_studio_file(file, &["--tokio-console=false"])
+                .unwrap()
+                .tokio_console
+                .enabled
+        );
+        guard.set("TOKIO_CONSOLE_BIND", "127.0.0.1:6673");
+        let defaults = || ConsoleDefaults {
+            enabled: true,
+            bind: Some("127.0.0.1:6674".into()),
+        };
+        assert_eq!(
+            resolve_console(None, None, RawFileConsoleConfig::default(), defaults())
+                .unwrap()
+                .bind
+                .port(),
+            6673
+        );
+        guard.remove("TOKIO_CONSOLE_BIND");
+        assert_eq!(
+            resolve_console(None, None, RawFileConsoleConfig::default(), defaults())
+                .unwrap()
+                .bind
+                .port(),
+            6674
+        );
+        assert_eq!(
+            resolve_studio_file("", &["--tokio-console"])
+                .unwrap()
+                .tokio_console
+                .bind
+                .port(),
+            6669
+        );
+        for bad in ["not a socket", "127.0.0.1:65536"] {
+            let error = resolve_studio_file("", &["--tokio-console", "--tokio-console-bind", bad])
+                .unwrap_err();
+            assert!(error.to_string().contains("diagnostics.tokio_console.bind"));
+        }
+    }
+
+    #[test]
+    fn console_file_rejects_unknown_fields() {
+        for file in [
+            "[diagnostics.tokio_console]\nenable = true",
+            "[diagnostics]\nconsole = true",
+        ] {
+            assert!(toml::from_str::<RawFileStartupConfig>(file).is_err());
+        }
+    }
 
     #[test]
     fn metrics_reporting_admission_matrix_in_both_startup_modes() {

@@ -45,6 +45,16 @@ test = "product_catalog_enrichment_completes"
 owner = "intentional manual rate-limited example proof, outside required acceptance"
 
 [[ignored]]
+binary = "obzenflow::prometheus_example_test"
+test = "prometheus_measurement::measure_retained_prometheus_archive"
+owner = "manual FLOWIP-080n retained-archive measurement; requires explicit archive and input count, outside required acceptance"
+
+[[ignored]]
+binary = "obzenflow::prometheus_example_test"
+test = "prometheus_measurement::measure_demo_process_completion"
+owner = "manual FLOWIP-080n separate demo integration check; built example and explicit result path required, not Criterion timing evidence"
+
+[[ignored]]
 binary = "obzenflow::product_catalog_enrichment"
 test = "explicit_join_topology_current_schema_live_replay_and_rejected_control"
 owner = "intentional manual rate-limited example proof, outside required acceptance"
@@ -66,6 +76,104 @@ owner = "real_nextest_leaks_fail_acceptance_with_identity independent completion
 
 # FLOWIP-145i B10: audited case prerequisites, independent of scheduling groups.
 # Lanes identify applicable inventories only. Undeclared cases are not certified hermetic.
+
+[[prerequisites]]
+binary = "obzenflow_infra::supervision_journals"
+test = "physical_group_limits_reject_before_commit_and_members_stream_in_order"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Owned disk journals prove physical frame/member rejection before commitment and ordered group reads."
+
+[[prerequisites]]
+binary = "obzenflow_infra::supervision_journals"
+test = "large_in_process_documents_roundtrip_through_memory_and_reopened_disk"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "A public in-process source emits a document above the retired logical cap; owned journals prove memory, live disk and reopened disk agreement."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::observability::tests::console_recording_is_rejected_before_binding_or_creating_a_file"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
+rationale = "Isolated environment proves unsupported upstream recording is rejected before its detached worker, file or listener can be created."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::console_telemetry::blocking_console_disk_flow_preserves_filtering_and_completed_journal"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Isolated process creates the instrumented runtime through run_blocking, observes real Console updates and disk outcomes, and rejects leaked TRACE output or formatter panics."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::observability::tests::ordinary_tracing_accepts_an_existing_subscriber"
+lanes = ["default","production-features","test-support"]
+capabilities = ["owned-child"]
+rationale = "Isolated process preserves global tracing ownership without opening a listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::observability::tests::console_setup_reports_bind_and_subscriber_errors"
+lanes = ["production-features"]
+capabilities = ["owned-child","ipv4-loopback-bind"]
+rationale = "Isolated global subscriber and retained port conflict prove explicit setup failure and listener release."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::observability::tests::console_owner_joins_both_tasks_and_closes_idle_clients"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned loopback peers prove Console task and transport cleanup on a still-live runtime."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::observability::tests::console_owner_drop_terminates_tasks_and_idle_clients"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned loopback peers prove Console task and transport cleanup on a still-live runtime."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::observability::tests::console_owner_closes_a_watch_stream_with_no_receive_window"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned loopback peers prove Console task and transport cleanup on a still-live runtime."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::console_telemetry::console_configuration_failure_precedes_subscriber_and_listener"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
+rationale = "Isolated process proves malformed application configuration precedes subscriber installation, Console binding and flow construction."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::console_telemetry::console_uses_prepared_config_and_closes_after_build_failure"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
+rationale = "Startup resolves once, ignores shadowed legacy bind input, and releases Console after a flow-build failure."
+
+[[prerequisites]]
+binary = "obzenflow::typed_sync_transform_journal_parity_test"
+test = "console_preserves_composed_live_replay_journals"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
+rationale = "Native application children prove Console preserves fan-out/fan-in identities, errors, EOF and deliveries through current-schema replay."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::console_telemetry::console_stream_reports_real_supervisor_activity_and_closes_on_completion"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Isolated subscriber process observes real supervisor poll updates and joined Console shutdown on a still-live caller runtime."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::console_telemetry::console_stream_reports_real_supervisor_activity_and_closes_on_cancellation"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Isolated subscriber process observes real supervisor activity, cancels the owning application, and proves active stream closure and listener release."
 
 [[prerequisites]]
 binary = "xtask::bin/xtask"
@@ -590,7 +698,7 @@ binary = "obzenflow::prometheus_example_test"
 test = "managed_lifecycle_regressions::prometheus_example_5k_completes_without_reporting"
 lanes = ["production-features"]
 capabilities = ["target-files"]
-rationale = "Unhosted or pre-bind admission assertions require only unique target-directory configuration and journal fixtures."
+rationale = "Unhosted 5k live execution and current-schema replay verify the complete cohort and summary receipt using unique target-directory fixtures."
 
 [[prerequisites]]
 binary = "obzenflow::prometheus_example_test"

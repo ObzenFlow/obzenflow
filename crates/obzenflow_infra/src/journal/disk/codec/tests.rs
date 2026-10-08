@@ -590,6 +590,80 @@ fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip
 }
 
 #[test]
+fn streamed_clock_writes_preserve_definition_bytes_presence_and_current_numbers() {
+    use obzenflow_core::event::{vector_clock::VectorClock, CausalCoordinate};
+
+    for width in [0, 1, 33, 1025] {
+        let mut clock = VectorClock::new();
+        for _ in 0..width {
+            clock
+                .clocks
+                .insert(CausalCoordinate::new(JournalWriterId::new()), 1);
+        }
+        let path = Path::new("clock.log");
+        let mut expected_definitions = WriteTable::new(DefinitionStore::default(), path).unwrap();
+        let mut actual_definitions = WriteTable::new(DefinitionStore::default(), path).unwrap();
+        for sequence in [1, 128, u64::MAX] {
+            clock
+                .clocks
+                .values_mut()
+                .for_each(|value| *value = sequence);
+            let mut expected = Vec::new();
+            values::write(
+                Kind::Clock,
+                &serde_json::to_value(&clock).unwrap(),
+                &mut expected,
+                &mut expected_definitions,
+            )
+            .unwrap();
+            let mut actual = Vec::new();
+            assert_eq!(
+                serialize::write(
+                    Kind::Clock,
+                    &clock,
+                    None,
+                    &mut actual,
+                    &mut actual_definitions
+                )
+                .unwrap(),
+                3
+            );
+            assert_eq!(actual, expected);
+        }
+        let mut expected = Vec::new();
+        let mut actual = Vec::new();
+        expected_definitions.encode(&mut expected);
+        actual_definitions.encode(&mut actual);
+        assert_eq!(actual, expected);
+    }
+    let mut out = Vec::new();
+    assert_eq!(
+        serialize::write(
+            Kind::Clock,
+            &None::<VectorClock>,
+            None,
+            &mut out,
+            &mut values::Standalone,
+        )
+        .unwrap(),
+        1
+    );
+    assert!(out.is_empty());
+    let mut invalid_clock = VectorClock::new();
+    invalid_clock
+        .clocks
+        .insert(CausalCoordinate::new(JournalWriterId::new()), 0);
+    assert!(serialize::write(
+        Kind::Clock,
+        &invalid_clock,
+        None,
+        &mut out,
+        &mut values::Standalone,
+    )
+    .is_err());
+}
+
+#[test]
 fn streamed_scalars_preserve_the_existing_wire_bytes_and_presence_states() {
     use super::layout::DefaultValue;
 

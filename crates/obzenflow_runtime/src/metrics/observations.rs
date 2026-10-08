@@ -634,6 +634,61 @@ mod tests {
         assert_eq!(observations.latest.dropped.load(Ordering::Relaxed), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::await_holding_lock)] // Deliberately force the sampler's nonblocking offer to lose contention.
+    async fn heartbeat_refreshes_an_edge_after_a_dropped_transition() {
+        use crate::stages::common::heartbeat::{
+            spawn_heartbeat, HeartbeatConfig, HeartbeatProcessingGuard, HeartbeatState,
+            LivenessSnapshots,
+        };
+
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        let observations = execution.observations();
+        let stage = StageId::new();
+        let idle = StageId::new();
+        let active = StageId::new();
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        instrumentation.bind_observations(FlowId::new(), stage.into(), &execution);
+        let snapshots = LivenessSnapshots::new();
+        let state = HeartbeatState::new(vec![idle, active]);
+        let event = obzenflow_core::EventId::new();
+        state.record_data_read(active, event);
+        let _processing = HeartbeatProcessingGuard::new(state.clone(), Some(active), event);
+        let heartbeat = spawn_heartbeat(
+            stage,
+            "join".into(),
+            instrumentation,
+            snapshots.clone(),
+            state,
+            HeartbeatConfig::default(),
+            execution.clone(),
+        );
+        tokio::task::yield_now().await;
+        {
+            let _held = observations.latest.view.lock().unwrap();
+            tokio::time::advance(Duration::from_secs(8)).await;
+            tokio::task::yield_now().await;
+            let snapshot = snapshots
+                .get(stage)
+                .expect("sampler ran while the handoff was locked");
+            assert_eq!(snapshot.edges[0].state, EdgeLivenessState::Idle);
+            assert_eq!(snapshot.edges[1].state, EdgeLivenessState::Healthy);
+            assert!(observations.latest.dropped.load(Ordering::Relaxed) > 0);
+        }
+        assert!(!observations.snapshot().iter().any(|packet| {
+            packet.records.iter().any(|record|
+            matches!(record, ObservationRecord::EdgeLiveness { upstream, .. } if *upstream == idle)
+        )
+        }));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        heartbeat.cancel();
+        assert!(observations.snapshot().iter().any(|packet| packet.records.iter().any(|record|
+            matches!(record, ObservationRecord::EdgeLiveness { upstream, reader, state: EdgeLivenessState::Idle, .. }
+                if *upstream == idle && *reader == stage)
+        )), "a dropped transition must not hide an unchanged edge state forever");
+    }
+
     #[test]
     fn family_freshness_and_active_generation_are_independent_of_arrival_order() {
         let observations = LatestObservationMap::default();

@@ -31,6 +31,45 @@ To replay, repeat the run command with `--replay-from <archive> --verify` append
 using the archive path printed by the live run. Replay also waits for Play;
 send the same control request again. Verification compares durable output.
 
+For Tokio Console diagnostics, build with `tokio-console` and opt in explicitly:
+
+```sh
+cargo run -p obzenflow --example prometheus_demo \
+  --features prometheus,web-host,tokio-console -- \
+  --config examples/prometheus_demo/obzenflow.prometheus.toml --startup-mode auto --tokio-console
+```
+
+This starts the flow automatically. Connect the Tokio Console client to
+`http://127.0.0.1:6669`. The repository's
+Cargo configuration already enables `tokio_unstable`, which diagnostics require.
+Console is disabled by default. `--tokio-console=false` disables it in the same
+binary, including when the config file enables it. These are shared framework
+options; the demo does not initialise Console. The equivalent startup config is:
+
+```toml
+[diagnostics.tokio_console]
+enabled = true
+bind = "127.0.0.1:6669"
+```
+
+`--tokio-console-bind 127.0.0.1:6670` overrides the file's listener address.
+An explicit Console request without build support fails before the flow starts.
+Console poll durations are elapsed time within polls; they do
+not by themselves establish CPU time or the cause of pending waits.
+Managed Console rejects `TOKIO_CONSOLE_RECORD_PATH`: the upstream recorder's
+separate thread cannot join the application's shutdown lifecycle.
+
+`PROMETHEUS_RATE_LIMIT=0` removes the source limiter; unset or `1` retains the default
+1,000/s policy. Other values fail before launch. Window 64 and the breaker remain in place.
+The existing outcome checker verifies a retained synthetic archive without parsing logs:
+
+```sh
+PROMETHEUS_MEASUREMENT_ARCHIVE=<archive> PROMETHEUS_MEASUREMENT_INPUTS=20000 \
+  PROMETHEUS_MEASUREMENT_RATE_LIMIT=0 cargo test --locked -p obzenflow \
+  --features studio,tokio-console --test prometheus_example_test \
+  measure_retained_prometheus_archive -- --ignored --nocapture
+```
+
 To run without reporting, select [the disabled configuration](obzenflow.disabled.toml);
 it starts immediately. For Prometheus and Grafana setup, see
 [the monitoring guide](../../monitoring/README.md).

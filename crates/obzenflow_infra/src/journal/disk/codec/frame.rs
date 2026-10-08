@@ -74,7 +74,7 @@ pub(crate) fn frame_length(header: &[u8]) -> Result<usize, FrameProblem> {
         ));
     }
     let body_length = u64::from_le_bytes(header[MAGIC.len()..checksum_offset].try_into().unwrap());
-    if body_length > obzenflow_core::journal::limits::MAX_GROUP_BYTES as u64 {
+    if body_length > obzenflow_core::journal::limits::MAX_FRAME_BODY_BYTES as u64 {
         return Err(FrameProblem::Corrupt("frame byte budget exceeded".into()));
     }
     usize::try_from(body_length)

@@ -27,6 +27,10 @@ mod prometheus_demo;
 #[path = "test_support/exported_jsonl.rs"]
 mod exported_jsonl;
 
+#[cfg(all(feature = "web-host", feature = "prometheus"))]
+#[path = "test_support/prometheus_measurement.rs"]
+mod prometheus_measurement;
+
 // These are bounded CI correctness proofs. Use the shipped example explicitly
 // for 100k storage measurements; larger workloads belong in benchmark coverage.
 const CI_EVENT_LIMIT: usize = 5_000;
@@ -605,9 +609,6 @@ interval_ms = 250
         let mut data_types = BTreeMap::<String, usize>::new();
         let mut deliveries = 0;
         let mut errors = 0;
-        let mut inputs = BTreeSet::new();
-        let mut outputs = BTreeSet::new();
-        let mut failed_inputs = BTreeSet::new();
         let mut summaries = Vec::new();
         let records = exported_jsonl::chain_records(&jsonl);
         let committed_inputs: BTreeMap<_, _> = records
@@ -617,23 +618,14 @@ interval_ms = 250
             .collect();
         for record in &records {
             let event = record.authored();
-            if let ChainPayload::Fact(payload) = &event.payload {
-                if !event.processing.status.is_success() {
-                    failed_inputs.insert(payload["id"].as_u64().unwrap());
-                } else {
-                    match event.flow_context.stage_name.as_str() {
-                        "high_volume_source" => {
-                            inputs.insert(payload["id"].as_u64().unwrap());
-                        }
-                        "error_processor" => {
-                            outputs.insert(payload["id"].as_u64().unwrap());
-                        }
-                        "event_counter" => {
-                            summaries.push(payload["event_count"].as_u64().unwrap());
-                        }
-                        _ => {}
-                    }
+            match &event.payload {
+                ChainPayload::Fact(payload)
+                    if event.processing.status.is_success()
+                        && event.flow_context.stage_name == "event_counter" =>
+                {
+                    summaries.push(payload["event_count"].as_u64().unwrap());
                 }
+                _ => {}
             }
             if matches!(event.payload, ChainPayload::FlowControl(_)) {
                 let context = &event.flow_context;
@@ -754,14 +746,10 @@ interval_ms = 250
             deliveries, 1,
             "the summary must retain its delivery receipt"
         );
-        assert_eq!(inputs, (0..1_000).collect());
-        assert_eq!(
-            outputs,
-            (0_u64..1_000)
-                .filter(|id| !id.is_multiple_of(100))
-                .collect()
-        );
-        assert_eq!(failed_inputs, (0..1_000).step_by(100).collect());
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(prometheus_measurement::inspect_archive(&archives[0], 1_000))
+            .unwrap();
         assert_eq!(summaries, [990]);
         assert!(
             !data_types
@@ -1568,9 +1556,6 @@ enabled = {prometheus}
             )
         };
         let mut receipts = Vec::new();
-        let mut inputs = BTreeSet::new();
-        let mut successes = BTreeSet::new();
-        let mut errors = BTreeSet::new();
         let mut summaries = Vec::new();
         let mut summary_outputs = Vec::new();
         for line in reader.lines() {
@@ -1607,40 +1592,26 @@ enabled = {prometheus}
                 assert_eq!(event.flow_context.stage_name, "summary_sink");
                 receipts.push(receipt_output(receipt, expected_live_bytes));
             }
-            if let ChainPayload::Fact(payload) = &event.payload {
-                // Error routing retains the failed parent's source context.
-                // Count its payload identity independently of the producing stage.
-                if !event.processing.status.is_success() {
-                    errors.insert(payload["id"].as_u64().unwrap());
-                    continue;
+            match &event.payload {
+                ChainPayload::Fact(payload)
+                    if event.processing.status.is_success()
+                        && event.flow_context.stage_name == "event_counter" =>
+                {
+                    summaries.push(payload["event_count"].as_u64().unwrap());
+                    let summary = prometheus_demo::EventCountState::try_from_event(&event)
+                        .expect("recorded summary has the example's typed schema");
+                    summary_outputs.push(prometheus_demo::format_summary(&summary));
                 }
-                match event.flow_context.stage_name.as_str() {
-                    "high_volume_source" => {
-                        inputs.insert(payload["id"].as_u64().unwrap());
-                    }
-                    "error_processor" => {
-                        successes.insert(payload["id"].as_u64().unwrap());
-                    }
-                    "event_counter" => {
-                        summaries.push(payload["event_count"].as_u64().unwrap());
-                        let summary = prometheus_demo::EventCountState::try_from_event(&event)
-                            .expect("recorded summary has the example's typed schema");
-                        summary_outputs.push(prometheus_demo::format_summary(&summary));
-                    }
-                    _ => {}
-                }
+                _ => {}
             }
         }
         assert!(
             committed_records.is_empty(),
             "export must contain every admitted record"
         );
-        assert_eq!(inputs, (0..count).collect());
-        assert_eq!(
-            successes,
-            (0..count).filter(|id| !id.is_multiple_of(100)).collect()
-        );
-        assert_eq!(errors, (0..count).step_by(100).collect());
+        super::prometheus_measurement::inspect_archive(&archive, count)
+            .await
+            .expect("complete demo outcomes");
         assert_eq!(summaries, [count - count / 100]);
         assert_eq!(summary_outputs, std::slice::from_ref(&expected_summary));
         assert_eq!(receipts.len(), 1);
@@ -1846,8 +1817,9 @@ enabled = {prometheus}
             "Prometheus proof phase: audit and handle drop complete; total={:?}",
             proof_started.elapsed()
         );
-        // Existing 100-input cases retain the current-schema replay proof.
-        if count != 100 {
+        // Keep the short host-mode proofs and exercise the full 5k correctness
+        // witness once, using the reporting-disabled case's current archive.
+        if count != 100 && !matches!(mode, MetricsProofMode::Disabled) {
             return;
         }
 
@@ -1859,7 +1831,7 @@ enabled = {prometheus}
         .unwrap();
         // Keeping the old port bound also proves replay needs no listener.
         // This example performs no live external I/O; zero configured source
-        // inputs force the proof to reconstruct the recorded 100-input archive.
+        // inputs force the proof to reconstruct the complete recorded cohort.
         let replay_model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
         let replay_root = dir.join("replay");
         FlowApplication::builder()

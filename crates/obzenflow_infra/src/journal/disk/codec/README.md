@@ -31,11 +31,13 @@ witness lists, and readers do not reconstruct an exact merge proof. Clock
 propagation is checked by tests using known incorporated inputs and committed
 predecessors.
 
-Records are limited to 8 MiB of canonical JSON, atomic groups to 4,096 records
-and 64 MiB of canonical JSON, and encoded frame bodies to 64 MiB. Providers
-reject oversized appends before commitment; decoders enforce the same limits
-before exposing group members. Sequential readers decode frames on the blocking
-pool, outside Tokio worker threads.
+Atomic groups are limited to 4,096 records and encoded frame bodies to 64 MiB.
+The disk writer checks its encoded buffer before commitment; readers check the
+frame header before allocating the body. There is no separate 8 MiB payload cap
+or canonical-JSON record/group accounting pass. Memory journals enforce the member
+count but have no encoded frame. These limits do not describe heap/RSS usage after
+JSON and immutable definitions are materialised. Sequential readers decode frames
+on the blocking pool, outside Tokio worker threads.
 
 ## Framing
 
@@ -130,6 +132,9 @@ capture has tag `0` plus a complete structure, or tag `1` for exact equality
 with the current record's complete packet capture. Capture state is cleared
 between group members. Equal owners or event IDs alone never select this tag.
 Clock components always carry their own complete unsigned values.
+Clock writes split Core's serialized entries directly into the coordinate
+definition and current numbers, without constructing intermediate JSON objects.
+Core's clock serializer still enforces its coordinate and nonzero-counter limits.
 
 A clock carries a reference to its complete ordered coordinate list, followed
 by one complete absolute unsigned value for every coordinate. Each coordinate
@@ -154,11 +159,10 @@ Locators cannot escape the archive directory, name an uncommitted frame, or
 resolve a different definition kind. Required provenance never depends on an
 optional observation. No per-record numerical snapshot is interned.
 
-Writer interning and reader definition caches share an 8-MiB retained-memory
+Writer interning and reader locator caches share an 8-MiB retained-memory
 budget per active archive. Accounting conservatively includes bucket slack,
-both lookup maps, locator strings, scalar metadata and definition bodies. A
-budget eviction releases map capacity as well as entries. Cache metrics report
-hits, misses, carrier I/O and peak charged bytes. Transient frame/group bodies
+all lookup maps, locator strings, scalar metadata and encoded definition bodies.
+A budget eviction releases map capacity as well as entries. Transient frame/group bodies
 are separate and proportional to the addressed frames, including carrier frames.
 Cache misses and concurrent first sightings may produce duplicate definitions.
 Definitions become reusable only after successful frame commitment. A rollback
@@ -166,7 +170,10 @@ publishes none. The provider never waits for another journal's pending definitio
 while holding its write lock. Required definitions live in retained journal
 frames; caches and indexes are disposable accelerators.
 
-Cached values carry file identity, length and modification stamps. Referenced
+Decoded values are memoised within the current frame and are not retained by
+the archive-wide cache. Numeric clock values are never cached.
+
+Cached locators carry file identity, length and modification stamps. Referenced
 files must still exist as regular files; replacements, truncations and
 same-length edits force validation of the carrier bytes. Open journals retain
 their append-only contract. Relocation works because durable references contain

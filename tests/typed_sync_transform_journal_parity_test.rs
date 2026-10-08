@@ -478,7 +478,41 @@ fn assert_derived_stage_authorship<T: TypedPayload>(
     }
 }
 
-async fn run(journal_base: &Path, replay_from: Option<&Path>) {
+async fn run(journal_base: &Path, replay_from: Option<&Path>, console: bool) {
+    // Each Console application owns a process-global subscriber. Exercise live
+    // and replay through separate native test processes, as real CLI runs do.
+    if console {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "console_preserves_composed_live_replay_journals",
+                "--nocapture",
+            ])
+            .env("OBZENFLOW_CONSOLE_PARITY_JOURNALS", journal_base)
+            .env_remove("OBZENFLOW_CONSOLE_PARITY_REPLAY")
+            .env("RUST_LOG", "warn")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if let Some(archive) = replay_from {
+            command.env("OBZENFLOW_CONSOLE_PARITY_REPLAY", archive);
+        }
+        let mut child = command
+            .spawn()
+            .expect("start native Console composition proof");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await;
+        if result.is_err() {
+            child
+                .kill()
+                .await
+                .expect("terminate and reap timed-out child");
+        }
+        assert!(result
+            .expect("bounded composition proof")
+            .unwrap()
+            .success());
+        return;
+    }
     let mut args = vec![OsString::from("obzenflow")];
     if let Some(archive) = replay_from {
         args.push(OsString::from("--replay-from"));
@@ -493,10 +527,37 @@ async fn run(journal_base: &Path, replay_from: Option<&Path>) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scalar_and_dynamic_typed_outputs_have_live_replay_journal_parity() {
+    assert_journal_parity(false).await;
+}
+
+#[cfg(feature = "tokio-console")]
+#[tokio::test(flavor = "multi_thread")]
+async fn console_preserves_composed_live_replay_journals() {
+    if let Some(journals) = std::env::var_os("OBZENFLOW_CONSOLE_PARITY_JOURNALS") {
+        let mut args = vec![
+            OsString::from("console-parity"),
+            "--tokio-console".into(),
+            "--tokio-console-bind".into(),
+            "127.0.0.1:0".into(),
+        ];
+        if let Some(archive) = std::env::var_os("OBZENFLOW_CONSOLE_PARITY_REPLAY") {
+            args.extend(["--replay-from".into(), archive, "--verify".into()]);
+        }
+        FlowApplication::builder()
+            .with_cli_args(args)
+            .run_async(build_flow(journals.into()))
+            .await
+            .expect("Console preserves composed application completion");
+        return;
+    }
+    assert_journal_parity(true).await;
+}
+
+async fn assert_journal_parity(console: bool) {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
 
-    run(&journal_base, None).await;
+    run(&journal_base, None, console).await;
     let live = latest_run_dir(&journal_base);
     let live_tickets = read_stage(&live, "tickets").await;
     let live_triage = read_stage(&live, "triage").await;
@@ -647,7 +708,7 @@ async fn scalar_and_dynamic_typed_outputs_have_live_replay_journal_parity() {
             .parent_ids
     );
 
-    run(&journal_base, Some(&live)).await;
+    run(&journal_base, Some(&live), console).await;
     let replay = latest_run_dir(&journal_base);
     assert_ne!(live, replay);
     let replay_tickets = read_stage(&replay, "tickets").await;

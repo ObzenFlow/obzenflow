@@ -6,9 +6,20 @@ use super::layout::{DefaultValue, DefinitionKind, Kind, Layout, NAMES};
 use super::primitives::{bytes, text, unsigned, Cursor};
 use super::{invalid, Result};
 use serde_json::{Map, Value};
+use std::sync::Arc;
 
 pub(super) trait WriteDefinitions {
-    fn reference(&mut self, kind: DefinitionKind, value: &Value, out: &mut Vec<u8>) -> Result<()>;
+    fn reference(&mut self, kind: DefinitionKind, value: &Value, out: &mut Vec<u8>) -> Result<()> {
+        let mut body = Vec::new();
+        write(kind.body(), value, &mut body, &mut Standalone)?;
+        self.reference_encoded(kind, body, out)
+    }
+    fn reference_encoded(
+        &mut self,
+        kind: DefinitionKind,
+        body: Vec<u8>,
+        out: &mut Vec<u8>,
+    ) -> Result<()>;
     fn remember_capture(&mut self, _capture: &Value) {}
     fn matches_capture(&self, _capture: &Value) -> bool {
         false
@@ -16,7 +27,7 @@ pub(super) trait WriteDefinitions {
 }
 
 pub(super) trait ReadDefinitions {
-    fn resolve(&mut self, kind: DefinitionKind, input: &mut Cursor<'_>) -> Result<Value>;
+    fn resolve(&mut self, kind: DefinitionKind, input: &mut Cursor<'_>) -> Result<Arc<Value>>;
     fn remember_capture(&mut self, _capture: &Value) {}
     fn capture(&self) -> Option<Value> {
         None
@@ -26,12 +37,12 @@ pub(super) trait ReadDefinitions {
 /// Definition bodies are complete values, never another layer of references.
 pub(super) struct Standalone;
 impl WriteDefinitions for Standalone {
-    fn reference(&mut self, _: DefinitionKind, _: &Value, _: &mut Vec<u8>) -> Result<()> {
+    fn reference_encoded(&mut self, _: DefinitionKind, _: Vec<u8>, _: &mut Vec<u8>) -> Result<()> {
         Err(invalid("reference inside an immutable definition"))
     }
 }
 impl ReadDefinitions for Standalone {
-    fn resolve(&mut self, _: DefinitionKind, _: &mut Cursor<'_>) -> Result<Value> {
+    fn resolve(&mut self, _: DefinitionKind, _: &mut Cursor<'_>) -> Result<Arc<Value>> {
         Err(invalid("reference inside an immutable definition"))
     }
 }
@@ -305,7 +316,7 @@ pub(super) fn read(
             }
             serde_json::json!({"entries": entries})
         }
-        Kind::Definition(kind) => definitions.resolve(kind, input)?,
+        Kind::Definition(kind) => definitions.resolve(kind, input)?.as_ref().clone(),
     })
 }
 

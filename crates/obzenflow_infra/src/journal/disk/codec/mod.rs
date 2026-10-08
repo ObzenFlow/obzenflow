@@ -5,6 +5,7 @@
 //! Private current-schema storage adapter for the current Core provenance schema.
 //! See README.md for the wire contract and scalar-preservation invariants.
 
+mod clock;
 mod definitions;
 mod deserialize;
 pub(crate) mod frame;
@@ -59,9 +60,6 @@ fn read_provenance<E: serde::de::DeserializeOwned, const MEASURE: bool>(
 }
 
 fn read_payload<P: JournalPayload>(provenance: &P::Provenance, bytes: &[u8]) -> Result<P> {
-    if bytes.len() > obzenflow_core::journal::limits::MAX_RECORD_BYTES {
-        return Err(invalid("payload byte budget exceeded"));
-    }
     let payload: serde_json::Value = serde_json::from_slice(bytes)?;
     let payload = P::decode(provenance, payload)?;
     payload.validate(provenance)?;
@@ -102,7 +100,7 @@ pub(crate) fn prepare<P: JournalPayload>(
     store: DefinitionStore,
 ) -> Result<PreparedFrame> {
     validate_membership(records, group)?;
-    obzenflow_core::journal::limits::validate_group(records)
+    obzenflow_core::journal::limits::validate_group_size(records.len())
         .map_err(|error| invalid(error.to_string()))?;
     let mut definitions = WriteTable::new(store, path)?;
     let mut content = Vec::new();
@@ -147,7 +145,7 @@ pub(crate) fn prepare<P: JournalPayload>(
     definitions.encode(&mut table);
     bytes(&table, &mut body);
     body.extend_from_slice(&content);
-    if body.len() > obzenflow_core::journal::limits::MAX_GROUP_BYTES {
+    if body.len() > obzenflow_core::journal::limits::MAX_FRAME_BODY_BYTES {
         return Err(invalid("frame byte budget exceeded"));
     }
     Ok(PreparedFrame {
@@ -224,7 +222,6 @@ impl Decoder {
         let mut definitions =
             ReadTable::<MEASURE>::new(&mut table, &self.store, &self.path, offset)?;
         table.finish()?;
-        let mut decoded_bytes = 0usize;
         let mut records = Vec::new();
         let mut previous = envelope.summary.previous;
         for (index, member) in envelope.members.iter().enumerate() {
@@ -303,10 +300,6 @@ impl Decoder {
             );
             if *record.id() != reference.event_id || record.local_sequence() != reference.sequence {
                 return Err(invalid("record disagrees with routing commitment"));
-            }
-            decoded_bytes += obzenflow_core::journal::limits::record_bytes(&record)?;
-            if decoded_bytes > obzenflow_core::journal::limits::MAX_GROUP_BYTES {
-                return Err(invalid("decoded frame byte budget exceeded"));
             }
             records.push(record);
             input.finish()?;

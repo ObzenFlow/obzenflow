@@ -451,7 +451,7 @@ where
         let lifecycle = self.lifecycle;
         let task_lifecycle = lifecycle.clone();
         let task_publications = publications.clone();
-        let handle = tokio::spawn(async move {
+        let task_future = async move {
             struct CloseOnExit(Arc<PublicationScope>);
             impl Drop for CloseOnExit {
                 fn drop(&mut self) {
@@ -462,7 +462,16 @@ where
             task_lifecycle
                 .enter(task_publications.enter(wrapped_future))
                 .await
-        });
+        };
+        // Name the same owned task: cancellation, joins, lifecycle task locals,
+        // and accepted publications must continue to refer to this execution.
+        #[cfg(all(feature = "tokio-console", tokio_unstable))]
+        let handle = tokio::task::Builder::new()
+            .name(&name)
+            .spawn(task_future)
+            .expect("spawn named supervisor task");
+        #[cfg(not(all(feature = "tokio-console", tokio_unstable)))]
+        let handle = tokio::spawn(task_future);
         tracing::trace!("⚡ tokio::spawn returned for {}", name_clone2);
         tracing::debug!(
             "🚀 SupervisorTaskBuilder::spawn returning handle for {}",
@@ -546,7 +555,7 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let task = {
             let dropped = dropped.clone();
-            tokio::spawn(async move {
+            SupervisorTaskBuilder::<()>::new("abort-join-test").spawn_for_test(move || async move {
                 let _flag = DropFlag(dropped);
                 let _ = started_tx.send(());
                 std::future::pending::<()>().await;
@@ -566,6 +575,54 @@ mod tests {
 
         assert!(dropped.load(Ordering::SeqCst));
         assert!(!handle.is_running());
+    }
+
+    #[cfg(all(feature = "tokio-console", tokio_unstable))]
+    #[tokio::test]
+    async fn supervisor_name_reaches_the_tokio_task_span() {
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata, Subscriber};
+
+        struct TaskNames(Arc<Mutex<Vec<String>>>);
+
+        impl Visit for TaskNames {
+            fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+                if field.name() == "task.name" {
+                    self.0.lock().unwrap().push(format!("{value:?}"));
+                }
+            }
+        }
+
+        impl Subscriber for TaskNames {
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                metadata.target() == "tokio::task" && metadata.name() == "runtime.spawn"
+            }
+
+            fn new_span(&self, attributes: &Attributes<'_>) -> Id {
+                attributes.record(&mut TaskNames(self.0.clone()));
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &Record<'_>) {}
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+            fn event(&self, _event: &Event<'_>) {}
+            fn enter(&self, _span: &Id) {}
+            fn exit(&self, _span: &Id) {}
+        }
+
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let task = tracing::subscriber::with_default(TaskNames(names.clone()), || {
+            SupervisorTaskBuilder::<()>::new("transform:error_processor")
+                .spawn_for_test(|| async { Ok(()) })
+        });
+        task.task.await.unwrap().unwrap();
+        assert_eq!(
+            *names.lock().unwrap(),
+            ["transform:error_processor"],
+            "the existing supervisor name must identify its one Tokio task"
+        );
     }
 }
 

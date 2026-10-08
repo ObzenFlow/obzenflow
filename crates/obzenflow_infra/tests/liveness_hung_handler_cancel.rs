@@ -233,7 +233,8 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
             .await
     });
 
-    // Wait for FlowHandle to be available and running before requesting stop.
+    // is_running() means the supervisor task is alive, not that startup has
+    // settled. Stop must honour its deadline on either side of that boundary.
     let flow_handle = {
         let mut captured_running = None;
         for _ in 0..200 {
@@ -261,11 +262,15 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
         .await
         .expect("stop_graceful request");
 
-    // The supervisor uses real-time deadlines for graceful stop escalation, so use real time here.
-    let _ = tokio::time::timeout(Duration::from_secs(5), run_task)
+    tokio::time::timeout(Duration::from_secs(5), run_task)
         .await
         .expect("flow should terminate after graceful stop timeout escalation")
-        .expect("flow task join");
+        .expect("flow task join")
+        .expect("requested cancellation must not become an execution failure");
+    assert!(
+        matches!(flow_handle.current_state(), obzenflow_runtime::pipeline::PipelineState::Cancelled { reason }
+        if reason == STOP_REASON_TIMEOUT)
+    );
 
     // The application has joined the owners and settled their publications.
     let mut envelopes = Vec::new();
