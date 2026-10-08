@@ -84,14 +84,22 @@ unrelated test could otherwise keep a finished test's output pipe open and cause
 a false leak failure. The 200 ms leak deadline and failure policy remain unchanged.
 
 Every PR update requires the six correctness lanes and the existing formatting,
-Clippy and policy checks. Pushes to `main` and manual CI dispatches also require the
-complete performance lane. Changes claiming performance improvements or changing
-the benchmark driver, baseline or comparison policy require an explicit comparison
+Clippy and policy checks. It also runs all targets declared in
+`crates/obzenflow_benchmarks/Cargo.toml` as parallel Criterion jobs on separate
+runners, using each target's required features and existing sampling settings.
+Download `criterion-<target>` from the CI run's artefacts for raw measurements and
+HTML reports. Benchmark command failures fail their jobs; timing values add no
+speed threshold. Available reports are uploaded even after failure, and sibling
+benchmark jobs continue.
+
+Pushes to `main` and manual CI dispatches require the complete performance lane.
+Changes claiming performance improvements or changing the benchmark driver,
+baseline or comparison policy require an explicit comparison
 before merge, identifying the measured revision. Publication and release dry-runs
 require successful main-push CI for the exact release SHA, including an executed,
 passing performance job; a skipped job cannot qualify a release.
 
-All acceptance uses `ci-fast`, four Nextest process slots, no fail-fast and zero
+Nextest correctness acceptance uses `ci-fast`, four process slots, no fail-fast and zero
 retries, on pull requests and on `main`. The expensive journal proofs share two
 slots and can overlap. All 5,000-record workloads and three reporting interval
 variants remain selected. The small archive-reference and result-integrity

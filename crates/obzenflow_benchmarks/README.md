@@ -26,13 +26,29 @@ Historical results retain their original contracts; they are not comparable to
 
 ## Run and validate
 
+Every PR update runs all 16 targets declared in this crate's `Cargo.toml` through
+ordinary optimised `cargo bench --locked`, with each target's required features.
+The CI matrix in `.github/workflows/ci.yml` gives each target its own runner and
+keeps independent jobs running when a sibling fails. Keep that matrix aligned
+with the manifest when adding or removing targets or changing required features.
+
+Download the `criterion-<target>` artefact from the PR's CI run and open
+`report/index.html`. Each artefact contains that job's `target/criterion/`,
+including raw measurements and HTML reports; available output is retained after
+failure. A failed benchmark command fails the job. These jobs use existing
+workloads, sampling settings and assertions, with no timing regression threshold.
+The native performance comparison lane continues to run on main pushes and
+manual CI dispatches.
+
 Run from the implementation repository root. Correctness-only execution performs
 each workload and checks its output without collecting a timing baseline:
 
 ```sh
 cargo test --locked -p obzenflow_benchmarks --features journal-benchmarks,validation-benchmarks --bench journal_hot_path --bench journal_components --bench validation_boundaries -- --test
-cargo xtask test --lane performance
 ```
+
+Use `cargo xtask test --lane performance` for the native performance comparison
+and its validity gates.
 
 For a selected diagnostic measurement:
 

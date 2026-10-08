@@ -256,9 +256,74 @@ jobs:
           path: target/test-runs/
           if-no-files-found: error
 
+  benchmarks:
+    name: Criterion (${{ matrix.bench }})
+    if: github.event_name == 'pull_request'
+    needs: fmt
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "4"
+    strategy:
+      fail-fast: false
+      # Keep targets and required features aligned with the benchmark manifest.
+      # Each target measures on its own runner, without competing workloads.
+      matrix:
+        include:
+          - bench: per_event_latency_1_stage
+            features: ""
+          - bench: per_event_latency_2_stage
+            features: ""
+          - bench: per_event_latency_3_stage
+            features: ""
+          - bench: per_event_latency_4_stage
+            features: ""
+          - bench: per_event_latency_5_stage
+            features: ""
+          - bench: per_event_latency_20_stage
+            features: ""
+          - bench: per_event_latency_100_stage
+            features: ""
+          - bench: per_event_latency_100_stage_memory
+            features: ""
+          - bench: pipeline_throughput
+            features: ""
+          - bench: idle_cpu_usage
+            features: ""
+          - bench: waiting_for_gun_cpu_usage
+            features: ""
+          - bench: tokio_worker_3_stage_experiment
+            features: ""
+          - bench: pipeline_execution
+            features: ""
+          - bench: journal_components
+            features: components
+          - bench: journal_hot_path
+            features: journal-benchmarks
+          - bench: validation_boundaries
+            features: validation-benchmarks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: criterion-${{ matrix.bench }}
+      - name: Measure existing benchmarks
+        run: cargo bench --locked -p obzenflow_benchmarks --bench "${{ matrix.bench }}" --features "${{ matrix.features }}"
+      - name: Preserve Criterion measurements and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-${{ matrix.bench }}
+          path: target/criterion/
+          if-no-files-found: error
+
   performance:
-    # FLOWIP-145i B12: PR iteration proves correctness; main and explicit
-    # requests also qualify performance. Skipped is not measured or passed.
+    # FLOWIP-145i B12: main and explicit requests qualify performance through
+    # the native comparison lane. FLOWIP-080v adds separate PR measurements.
+    # Skipped is not measured or passed.
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch'
