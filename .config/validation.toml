@@ -142,10 +142,24 @@ rationale = "Owned loopback peers prove Console task and transport cleanup on a 
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "application::flow_application::tests::console_telemetry::console_listener_closes_when_application_configuration_fails_before_flow_build"
+test = "application::flow_application::tests::console_telemetry::console_configuration_failure_precedes_subscriber_and_listener"
 lanes = ["production-features"]
 capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
-rationale = "Isolated subscriber process proves malformed application configuration releases Console before flow construction."
+rationale = "Isolated process proves malformed application configuration precedes subscriber installation, Console binding and flow construction."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::console_telemetry::console_uses_prepared_config_and_closes_after_build_failure"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
+rationale = "Startup resolves once, ignores shadowed legacy bind input, and releases Console after a flow-build failure."
+
+[[prerequisites]]
+binary = "obzenflow::typed_sync_transform_journal_parity_test"
+test = "console_preserves_composed_live_replay_journals"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child","ipv4-loopback-bind"]
+rationale = "Native application children prove Console preserves fan-out/fan-in identities, errors, EOF and deliveries through current-schema replay."
 
 [[prerequisites]]
 binary = "obzenflow_infra"

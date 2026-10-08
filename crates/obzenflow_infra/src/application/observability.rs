@@ -9,6 +9,7 @@ mod console_connections;
 #[cfg(test)]
 mod tests;
 
+use super::config::ResolvedConsoleConfig;
 use super::managed_lifecycle::{abort_and_join, ApplicationTask};
 use super::ApplicationError;
 use tracing_subscriber::layer::SubscriberExt;
@@ -23,14 +24,12 @@ pub(super) struct PreparedObservability {
 
 impl PreparedObservability {
     pub(super) fn install(
-        requested: bool,
-        bind: Option<&str>,
+        config: &ResolvedConsoleConfig,
         filter: EnvFilter,
     ) -> Result<Self, ApplicationError> {
-        if requested {
+        if config.enabled {
             #[cfg(not(feature = "tokio-console"))]
             {
-                let _ = bind;
                 return Err(ApplicationError::FeatureNotEnabled("tokio-console".into()));
             }
             #[cfg(feature = "tokio-console")]
@@ -49,11 +48,9 @@ impl PreparedObservability {
                         "Managed Tokio Console recording is unsupported; unset TOKIO_CONSOLE_RECORD_PATH".into(),
                     ));
                 }
-                let listener = bind_console(bind)?;
-                let (layer, server) = console_subscriber::ConsoleLayer::builder()
-                    .with_default_env()
-                    .server_addr(listener.local_addr()?)
-                    .build();
+                let builder = console_builder()?;
+                let listener = bind_console(config.bind)?;
+                let (layer, server) = builder.server_addr(listener.local_addr()?).build();
                 tracing_subscriber::registry()
                     // Match Console's own spawn() filter without relinquishing
                     // ownership of the aggregation and transport tasks.
@@ -176,8 +173,7 @@ struct PreparedConsole {
 }
 
 #[cfg(feature = "tokio-console")]
-fn bind_console(bind: Option<&str>) -> Result<std::net::TcpListener, ApplicationError> {
-    let address = console_address(bind, std::env::var("TOKIO_CONSOLE_BIND"))?;
+fn bind_console(address: std::net::SocketAddr) -> Result<std::net::TcpListener, ApplicationError> {
     let listener = std::net::TcpListener::bind(address).map_err(|error| {
         ApplicationError::ServerStartFailed(format!(
             "Tokio Console could not bind to {address}: {error}"
@@ -188,24 +184,37 @@ fn bind_console(bind: Option<&str>) -> Result<std::net::TcpListener, Application
 }
 
 #[cfg(feature = "tokio-console")]
-fn console_address(
-    bind: Option<&str>,
-    environment: Result<String, std::env::VarError>,
-) -> Result<std::net::SocketAddr, ApplicationError> {
-    let bind = match environment {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => bind.unwrap_or("127.0.0.1:6669").into(),
-        Err(std::env::VarError::NotUnicode(_)) => {
+fn console_builder() -> Result<console_subscriber::Builder, ApplicationError> {
+    // Preserve upstream tuning without with_default_env(): that helper also
+    // resolves TOKIO_CONSOLE_BIND and could override or panic behind our resolver.
+    fn setting<T: std::str::FromStr>(name: &str) -> Result<Option<T>, ApplicationError>
+    where
+        T::Err: std::fmt::Display,
+    {
+        crate::env::env_var(name)
+            .map_err(|error| ApplicationError::InvalidConfiguration(error.to_string()))
+    }
+    let mut builder = console_subscriber::ConsoleLayer::builder();
+    if let Some(retention) = setting::<humantime::Duration>("TOKIO_CONSOLE_RETENTION")? {
+        builder = builder.retention(retention.into());
+    }
+    if let Some(interval) = setting::<humantime::Duration>("TOKIO_CONSOLE_PUBLISH_INTERVAL")? {
+        if interval.is_zero() {
             return Err(ApplicationError::InvalidConfiguration(
-                "TOKIO_CONSOLE_BIND must be a Unicode socket address".into(),
+                "TOKIO_CONSOLE_PUBLISH_INTERVAL must be greater than zero".into(),
             ));
         }
-    };
-    bind.parse::<std::net::SocketAddr>().map_err(|error| {
-        ApplicationError::InvalidConfiguration(format!(
-            "Invalid Tokio Console address '{bind}': {error}"
-        ))
-    })
+        builder = builder.publish_interval(interval.into());
+    }
+    if let Some(capacity) = setting::<usize>("TOKIO_CONSOLE_BUFFER_CAPACITY")? {
+        if capacity == 0 {
+            return Err(ApplicationError::InvalidConfiguration(
+                "TOKIO_CONSOLE_BUFFER_CAPACITY must be greater than zero".into(),
+            ));
+        }
+        builder = builder.event_buffer_capacity(capacity);
+    }
+    Ok(builder)
 }
 
 #[cfg(feature = "tokio-console")]
@@ -231,10 +240,15 @@ impl PreparedConsole {
             #[cfg(test)]
             address: Some(address),
         };
+        // Register the silent dispatcher. Dispatch::none() is unregistered:
+        // when it first encounters a Tokio callsite, tracing's single-dispatch
+        // fast path can cache "never" for that callsite process-wide. This is
+        // especially visible when attaching inside an existing runtime.
+        let observer_dispatch =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let spawn =
             |name: &'static str, work: futures::future::BoxFuture<'static, Result<(), String>>| {
                 let failure = failure.clone();
-                let observer_dispatch = tracing::Dispatch::none();
                 let work = std::panic::AssertUnwindSafe(work)
                     .catch_unwind()
                     .with_subscriber(observer_dispatch.clone());

@@ -6,6 +6,23 @@
 //!
 //! Run configured flows, choose presentation, verify recorded runs, and attach
 //! ingress or other web surfaces.
+//!
+//! Tokio Console is configured by `--tokio-console` or the startup file:
+//!
+//! ```toml
+//! [diagnostics.tokio_console]
+//! enabled = true
+//! bind = "127.0.0.1:6669"
+//! ```
+//!
+//! Build with `tokio-console` and `--cfg tokio_unstable`. Diagnostics are off by
+//! default; `--tokio-console=false` overrides file or builder enablement. The
+//! address resolves from `--tokio-console-bind`, file, `TOKIO_CONSOLE_BIND`,
+//! builder default, then `127.0.0.1:6669`. No application-specific setup is needed.
+//! Blocking launch installs instrumentation before creating its runtime; async
+//! launch observes framework tasks created afterwards, not earlier caller tasks.
+//! An existing global tracing subscriber prevents an explicit Console request;
+//! ordinary launches continue to respect an embedding application's subscriber.
 
 pub use obzenflow_infra::application::{
     ApplicationError, Banner, ControlPlaneAuthModeArg, CorsModeArg, CurrentRunLocator,

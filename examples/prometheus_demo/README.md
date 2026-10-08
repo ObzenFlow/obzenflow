@@ -34,17 +34,27 @@ send the same control request again. Verification compares durable output.
 For Tokio Console diagnostics, build with `tokio-console` and opt in explicitly:
 
 ```sh
-PROMETHEUS_TOKIO_CONSOLE=1 cargo run -p obzenflow --example prometheus_demo \
+cargo run -p obzenflow --example prometheus_demo \
   --features prometheus,web-host,tokio-console -- \
-  --config examples/prometheus_demo/obzenflow.prometheus.toml --startup-mode auto
+  --config examples/prometheus_demo/obzenflow.prometheus.toml --startup-mode auto --tokio-console
 ```
 
 This starts the flow automatically. Connect the Tokio Console client to
 `http://127.0.0.1:6669`. The repository's
 Cargo configuration already enables `tokio_unstable`, which diagnostics require.
-`PROMETHEUS_TOKIO_CONSOLE` unset or `0` leaves the subscriber disabled, including
-in the same Console-capable binary. Other values, or `1` without the feature,
-fail explicitly. Console poll durations are elapsed time within polls; they do
+Console is disabled by default. `--tokio-console=false` disables it in the same
+binary, including when the config file enables it. These are shared framework
+options; the demo does not initialise Console. The equivalent startup config is:
+
+```toml
+[diagnostics.tokio_console]
+enabled = true
+bind = "127.0.0.1:6669"
+```
+
+`--tokio-console-bind 127.0.0.1:6670` overrides the file's listener address.
+An explicit Console request without build support fails before the flow starts.
+Console poll durations are elapsed time within polls; they do
 not by themselves establish CPU time or the cause of pending waits.
 Managed Console rejects `TOKIO_CONSOLE_RECORD_PATH`: the upstream recorder's
 separate thread cannot join the application's shutdown lifecycle.

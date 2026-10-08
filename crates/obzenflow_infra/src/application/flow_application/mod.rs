@@ -12,7 +12,7 @@
 //! - Graceful shutdown handling
 
 use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
-use super::observability::{ApplicationDiagnostics, PreparedObservability};
+use super::observability::PreparedObservability;
 use super::web_surface::label_endpoint;
 use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
@@ -20,7 +20,7 @@ use super::{
 };
 #[cfg(feature = "warp-server")]
 use crate::application::config::CorsModeArg;
-use crate::application::config::ResolvedStartupConfig;
+use crate::application::config::{ConsoleDefaults, ResolvedStartupConfig};
 use crate::web::endpoints::event_ingestion::{
     http_ingress, HostedIngressSource, HttpIngressAttachment, IngestionConfig, Ingress,
     IngressDecoder, IngressHandle,
@@ -51,7 +51,8 @@ type FlowHandleHook =
 
 #[derive(Default)]
 struct LaunchParams {
-    diagnostics: ApplicationDiagnostics,
+    console_defaults: ConsoleDefaults,
+    log_level: Option<LogLevel>,
     builder_config_file: Option<PathBuf>,
     enable_autodiscovery: bool,
     web_surfaces: Vec<WebSurfaceAttachment>,
@@ -59,6 +60,8 @@ struct LaunchParams {
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
+    #[cfg(all(test, feature = "tokio-console"))]
+    test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
     test_shutdown_signal: Option<tokio::sync::oneshot::Receiver<ShutdownSignal>>,
     #[cfg(all(test, feature = "warp-server"))]
@@ -80,6 +83,33 @@ impl LaunchParams {
             ..Self::default()
         }
     }
+
+    fn prepare(&mut self) -> Result<PreparedLaunch, ApplicationError> {
+        let config = resolve_startup_config(
+            self.builder_config_file.take(),
+            self.enable_autodiscovery,
+            self.cli_args.take(),
+            std::mem::take(&mut self.console_defaults),
+        )?;
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new(
+                self.log_level
+                    .as_ref()
+                    .unwrap_or(&LogLevel::Info)
+                    .as_filter_string(),
+            )
+        });
+        let observability = PreparedObservability::install(&config.tokio_console, filter)?;
+        Ok(PreparedLaunch {
+            config,
+            observability,
+        })
+    }
+}
+
+struct PreparedLaunch {
+    config: ResolvedStartupConfig,
+    observability: PreparedObservability,
 }
 
 /// Application identity and shutdown ownership passed together to the host.
@@ -105,11 +135,17 @@ fn resolve_startup_config(
     builder_config_file: Option<PathBuf>,
     enable_autodiscovery: bool,
     cli_args: Option<Vec<OsString>>,
+    console_defaults: ConsoleDefaults,
 ) -> Result<ResolvedStartupConfig, ApplicationError> {
     let result = if let Some(cli_args) = cli_args {
-        FlowConfig::parse_and_resolve_from(cli_args, builder_config_file, enable_autodiscovery)
+        FlowConfig::parse_and_resolve_from(
+            cli_args,
+            builder_config_file,
+            enable_autodiscovery,
+            console_defaults,
+        )
     } else {
-        FlowConfig::parse_and_resolve(builder_config_file, enable_autodiscovery)
+        FlowConfig::parse_and_resolve(builder_config_file, enable_autodiscovery, console_defaults)
     };
 
     result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
@@ -148,8 +184,9 @@ impl LogLevel {
 /// Builder for advanced FlowApplication configuration.
 ///
 /// **Prefer `FlowApplication::run()` with `#[tokio::main]` for most use cases.** The builder
-/// is only needed when you require web endpoints, flow handle hooks, or console-subscriber
-/// integration. If you only need a log level, set the `RUST_LOG` environment variable instead.
+/// is needed for an owned runtime, web endpoints, presentation or flow handle hooks.
+/// All launch paths accept shared CLI/TOML diagnostics settings. If you only need
+/// a log level, set the `RUST_LOG` environment variable instead.
 ///
 /// # Example
 /// ```ignore
@@ -179,7 +216,7 @@ pub struct FlowApplicationBuilder {
 }
 
 impl FlowApplicationBuilder {
-    /// Enable tokio-console-subscriber for runtime introspection
+    /// Enable Tokio Console by default; explicit CLI/file settings take precedence.
     ///
     /// This allows you to connect with `tokio-console` CLI tool to inspect
     /// tasks, async operations, and resource usage in real-time.
@@ -199,7 +236,7 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Set the bind address for console-subscriber
+    /// Set the default Console bind address, below CLI, file and TOKIO_CONSOLE_BIND.
     ///
     /// Default is "127.0.0.1:6669"
     pub fn with_console_bind(mut self, bind: impl Into<String>) -> Self {
@@ -350,126 +387,50 @@ impl FlowApplicationBuilder {
     /// Use this when you have a plain `fn main()` and want FlowApplication to
     /// manage the entire runtime lifecycle.
     pub fn run_blocking(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
-        let observability = self.prepare_observability()?;
+        let mut params = self.into_launch_params();
+        let prepared = params.prepare()?;
         // Tracing is installed before runtime construction and task creation.
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| ApplicationError::RuntimeCreationFailed(e.to_string()))?;
 
-        let FlowApplicationBuilder {
-            config_file,
-            web_surfaces,
-            web_endpoints,
-            flow_handle_hooks,
-            presentation,
-            cli_args,
-            #[cfg(all(test, feature = "tokio-console"))]
-            test_console_bound_address,
-            #[cfg(all(test, feature = "warp-server"))]
-            test_bound_address,
-            ..
-        } = self;
-
-        // Run the flow in the runtime
-        runtime.block_on(async move {
-            let diagnostics = observability.start()?;
-            #[cfg(all(test, feature = "tokio-console"))]
-            if let (Some(sender), Some(address)) =
-                (test_console_bound_address, diagnostics.address())
-            {
-                let _ = sender.send(address);
-            }
-            FlowApplication::launch(
-                flow,
-                LaunchParams {
-                    diagnostics,
-                    builder_config_file: config_file,
-                    enable_autodiscovery: true,
-                    web_surfaces,
-                    extra_endpoints: web_endpoints,
-                    flow_handle_hooks,
-                    presentation,
-                    cli_args,
-                    #[cfg(all(test, feature = "warp-server"))]
-                    test_shutdown_signal: None,
-                    #[cfg(all(test, feature = "warp-server"))]
-                    test_bound_address,
-                    #[cfg(all(test, feature = "warp-server"))]
-                    test_host_task: None,
-                },
-            )
-            .await
-        })
+        runtime.block_on(FlowApplication::launch_prepared(flow, params, prepared))
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
     ///
     /// Use this when you already have a tokio runtime (e.g., from #[tokio::main])
-    /// and just want FlowApplication to handle observability setup.
+    /// and want FlowApplication to handle startup and observability. Console
+    /// observes framework tasks created after setup; it cannot reconstruct the
+    /// creation of tasks already running in the caller's runtime.
     pub async fn run_async(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
-        let diagnostics = self.prepare_observability()?.start()?;
-
-        let FlowApplicationBuilder {
-            config_file,
-            web_surfaces,
-            web_endpoints,
-            flow_handle_hooks,
-            presentation,
-            cli_args,
-            #[cfg(all(test, feature = "tokio-console"))]
-            test_console_bound_address,
-            #[cfg(all(test, feature = "warp-server"))]
-            test_bound_address,
-            ..
-        } = self;
-
-        #[cfg(all(test, feature = "tokio-console"))]
-        if let (Some(sender), Some(address)) = (test_console_bound_address, diagnostics.address()) {
-            let _ = sender.send(address);
-        }
-
-        // Run the flow
-        FlowApplication::launch(
-            flow,
-            LaunchParams {
-                diagnostics,
-                builder_config_file: config_file,
-                enable_autodiscovery: true,
-                web_surfaces,
-                extra_endpoints: web_endpoints,
-                flow_handle_hooks,
-                presentation,
-                cli_args,
-                #[cfg(all(test, feature = "warp-server"))]
-                test_shutdown_signal: None,
-                #[cfg(all(test, feature = "warp-server"))]
-                test_bound_address,
-                #[cfg(all(test, feature = "warp-server"))]
-                test_host_task: None,
-            },
-        )
-        .await
+        FlowApplication::launch(flow, self.into_launch_params()).await
     }
 
-    fn prepare_observability(&self) -> Result<PreparedObservability, ApplicationError> {
-        use tracing_subscriber::EnvFilter;
-
-        // Determine log level (RUST_LOG env var takes precedence)
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            let level = self
-                .log_level
-                .as_ref()
-                .unwrap_or(&LogLevel::Info)
-                .as_filter_string();
-            EnvFilter::new(level)
-        });
-
-        PreparedObservability::install(
-            self.console_subscriber,
-            self.console_bind.as_deref(),
-            filter,
-        )
+    fn into_launch_params(self) -> LaunchParams {
+        LaunchParams {
+            console_defaults: ConsoleDefaults {
+                enabled: self.console_subscriber,
+                bind: self.console_bind,
+            },
+            log_level: self.log_level,
+            builder_config_file: self.config_file,
+            enable_autodiscovery: true,
+            web_surfaces: self.web_surfaces,
+            extra_endpoints: self.web_endpoints,
+            flow_handle_hooks: self.flow_handle_hooks,
+            presentation: self.presentation,
+            cli_args: self.cli_args,
+            #[cfg(all(test, feature = "tokio-console"))]
+            test_console_bound_address: self.test_console_bound_address,
+            #[cfg(all(test, feature = "warp-server"))]
+            test_bound_address: self.test_bound_address,
+            #[cfg(all(test, feature = "warp-server"))]
+            test_shutdown_signal: None,
+            #[cfg(all(test, feature = "warp-server"))]
+            test_host_task: None,
+        }
     }
 }
 
@@ -493,13 +454,12 @@ impl FlowApplicationBuilder {
 /// }
 /// ```
 ///
-/// # Example with builder (console-subscriber, no #[tokio::main])
+/// # Example with builder (owned runtime, no #[tokio::main])
 /// ```ignore
 /// use obzenflow_infra::application::{FlowApplication, LogLevel};
 ///
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     FlowApplication::builder()
-///         .with_console_subscriber()
 ///         .with_log_level(LogLevel::Info)
 ///         .run_blocking(build_flow())?;
 ///     Ok(())
@@ -511,14 +471,12 @@ impl FlowApplication {
     /// Create a builder for advanced configuration
     ///
     /// Use this when you need:
-    /// - Console-subscriber integration
     /// - Custom log levels
     /// - Runtime creation without #[tokio::main]
     ///
     /// # Example
     /// ```ignore
     /// FlowApplication::builder()
-    ///     .with_console_subscriber()
     ///     .with_log_level(LogLevel::Info)
     ///     .run_blocking(build_flow())
     /// ```
@@ -587,47 +545,45 @@ impl FlowApplication {
         flow: FlowDefinition,
         mut params: LaunchParams,
     ) -> Result<(), ApplicationError> {
-        let diagnostics = std::mem::take(&mut params.diagnostics);
-        let result = Self::launch_inner(flow, params).await;
+        let prepared = params.prepare()?;
+        Self::launch_prepared(flow, params, prepared).await
+    }
+
+    async fn launch_prepared(
+        flow: FlowDefinition,
+        mut params: LaunchParams,
+        prepared: PreparedLaunch,
+    ) -> Result<(), ApplicationError> {
+        let diagnostics = prepared.observability.start()?;
+        #[cfg(all(test, feature = "tokio-console"))]
+        if let (Some(sender), Some(address)) = (
+            params.test_console_bound_address.take(),
+            diagnostics.address(),
+        ) {
+            let _ = sender.send(address);
+        }
+        let result = Self::launch_inner(flow, &mut params, prepared.config).await;
         diagnostics.finish(result).await
     }
 
     async fn launch_inner(
         flow: FlowDefinition,
-        params: LaunchParams,
+        params: &mut LaunchParams,
+        config: ResolvedStartupConfig,
     ) -> Result<(), ApplicationError> {
         let LaunchParams {
-            diagnostics: _,
-            builder_config_file,
-            enable_autodiscovery,
             web_surfaces,
             extra_endpoints,
             flow_handle_hooks,
             presentation,
-            cli_args,
             #[cfg(all(test, feature = "warp-server"))]
             test_shutdown_signal,
             #[cfg(all(test, feature = "warp-server"))]
             test_bound_address,
             #[cfg(all(test, feature = "warp-server"))]
             test_host_task,
-        } = params;
-
-        // Best-effort tracing initialization when the builder isn't used.
-        // This ensures examples like char_transform still emit logs without
-        // requiring callers to wire tracing explicitly.
-        {
-            use tracing_subscriber::prelude::*;
-            // Try env filter first; fall back to info if unset.
-            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-            let _ = tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer())
-                .with(filter)
-                .try_init();
-        }
-
-        let config = resolve_startup_config(builder_config_file, enable_autodiscovery, cli_args)?;
+            ..
+        } = std::mem::take(params);
 
         // FLOWIP-120i: resolve the run mode once, for banner and footer copy.
         let run_mode = match &config.replay {

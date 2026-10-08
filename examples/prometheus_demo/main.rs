@@ -16,8 +16,8 @@
 //!
 //! Event volume is operator-tunable via `PROMETHEUS_EVENT_COUNT` (default
 //! 100000), so varying the load needs no code change.
-//! With the `tokio-console` feature, `PROMETHEUS_TOKIO_CONSOLE=1` also enables
-//! Tokio Console diagnostics. Unset or `0` leaves diagnostics disabled.
+//! With the `tokio-console` feature, the framework's `--tokio-console` flag enables
+//! Tokio Console diagnostics. Diagnostics are disabled by default.
 //!
 //! This example explicitly opts into hosting and monitoring through its config:
 //! - /metrics endpoint for Prometheus metrics (framework-level metrics)
@@ -189,16 +189,6 @@ fn main() -> Result<()> {
         Some(value) if value == "0" => SourceRateLimit::Disabled,
         Some(_) => anyhow::bail!("PROMETHEUS_RATE_LIMIT must be unset, 0, or 1"),
     };
-    let console_enabled = match std::env::var_os("PROMETHEUS_TOKIO_CONSOLE").as_deref() {
-        None => false,
-        Some(value) if value == "0" => false,
-        Some(value) if value == "1" => true,
-        Some(_) => anyhow::bail!("PROMETHEUS_TOKIO_CONSOLE must be unset, 0, or 1"),
-    };
-    anyhow::ensure!(
-        !console_enabled || cfg!(feature = "tokio-console"),
-        "PROMETHEUS_TOKIO_CONSOLE=1 requires building with --features tokio-console"
-    );
 
     let presentation = Presentation::new(
         Banner::new("Prometheus Demo")
@@ -232,11 +222,6 @@ fn main() -> Result<()> {
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation);
-    let application = if console_enabled {
-        application.with_console_subscriber()
-    } else {
-        application
-    };
     let journal_root = std::path::PathBuf::from("target/prometheus_demo_journal");
     let definition = match source_rate_limit {
         SourceRateLimit::Enabled => flow_definition(total_events, journal_root),

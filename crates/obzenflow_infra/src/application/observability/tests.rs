@@ -4,6 +4,13 @@
 
 use super::*;
 
+fn console(bind: &str) -> ResolvedConsoleConfig {
+    ResolvedConsoleConfig {
+        enabled: true,
+        bind: bind.parse().unwrap(),
+    }
+}
+
 fn isolated(name: &str) -> bool {
     let name = name.strip_prefix("obzenflow_infra::").unwrap_or(name);
     const MARKER: &str = "OBZENFLOW_CONSOLE_SETUP_TEST";
@@ -31,19 +38,23 @@ fn ordinary_tracing_accepts_an_existing_subscriber() {
         return;
     }
     tracing_subscriber::registry().try_init().unwrap();
-    assert!(PreparedObservability::install(
-        false,
-        Some("invalid and ignored"),
-        EnvFilter::new("info")
-    )
-    .is_ok());
+    let mut config = console("127.0.0.1:6669");
+    config.enabled = false;
+    let diagnostics = PreparedObservability::install(&config, EnvFilter::new("info"))
+        .unwrap()
+        .start()
+        .unwrap();
+    // Even a Console-capable build needs no runtime when diagnostics are off.
+    assert!(diagnostics.tasks.is_empty());
+    #[cfg(feature = "tokio-console")]
+    assert!(diagnostics.address().is_none());
 }
 
 #[cfg(not(feature = "tokio-console"))]
 #[test]
 fn console_request_without_feature_fails() {
     assert!(matches!(
-        PreparedObservability::install(true, None, EnvFilter::new("info")),
+        PreparedObservability::install(&console("127.0.0.1:6669"), EnvFilter::new("info")),
         Err(ApplicationError::FeatureNotEnabled(feature)) if feature == "tokio-console"
     ));
 }
@@ -52,30 +63,8 @@ fn console_request_without_feature_fails() {
 #[test]
 fn console_request_without_unstable_fails() {
     assert!(matches!(
-        PreparedObservability::install(true, None, EnvFilter::new("info")),
+        PreparedObservability::install(&console("127.0.0.1:6669"), EnvFilter::new("info")),
         Err(ApplicationError::InvalidConfiguration(message)) if message.contains("tokio_unstable")
-    ));
-}
-
-#[cfg(feature = "tokio-console")]
-#[test]
-fn console_address_validation_and_precedence() {
-    use std::env::VarError;
-    assert_eq!(
-        console_address(Some("127.0.0.1:1234"), Ok("127.0.0.1:5678".into())).unwrap(),
-        "127.0.0.1:5678".parse::<std::net::SocketAddr>().unwrap()
-    );
-    assert_eq!(
-        console_address(Some("127.0.0.1:1234"), Err(VarError::NotPresent)).unwrap(),
-        "127.0.0.1:1234".parse::<std::net::SocketAddr>().unwrap()
-    );
-    assert!(matches!(
-        console_address(None, Ok("not an address".into())),
-        Err(ApplicationError::InvalidConfiguration(_))
-    ));
-    assert!(matches!(
-        console_address(None, Err(VarError::NotUnicode(std::ffi::OsString::new()))),
-        Err(ApplicationError::InvalidConfiguration(_))
     ));
 }
 
@@ -89,21 +78,17 @@ fn console_setup_reports_bind_and_subscriber_errors() {
     if !isolated(name) {
         return;
     }
-    assert!(matches!(
-        PreparedObservability::install(true, Some("invalid"), EnvFilter::new("info")),
-        Err(ApplicationError::InvalidConfiguration(_))
-    ));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     assert!(matches!(
-        PreparedObservability::install(true, Some(&address.to_string()), EnvFilter::new("info")),
+        PreparedObservability::install(&console(&address.to_string()), EnvFilter::new("info")),
         Err(ApplicationError::ServerStartFailed(_))
     ));
     // Neither failed setup installed a subscriber or leaked its retained socket.
     tracing_subscriber::registry().try_init().unwrap();
     drop(listener);
     let error =
-        PreparedObservability::install(true, Some(&address.to_string()), EnvFilter::new("info"))
+        PreparedObservability::install(&console(&address.to_string()), EnvFilter::new("info"))
             .err()
             .expect("an explicit request must reject a subscriber conflict");
     assert!(error
@@ -129,7 +114,7 @@ fn console_recording_is_rejected_before_binding_or_creating_a_file() {
     let address = listener.local_addr().unwrap();
     // An attempted bind would report ServerStartFailed for this occupied port.
     assert!(matches!(
-        PreparedObservability::install(true, Some(&address.to_string()), EnvFilter::new("info")),
+        PreparedObservability::install(&console(&address.to_string()), EnvFilter::new("info")),
         Err(ApplicationError::InvalidConfiguration(message))
             if message.contains("Managed Tokio Console recording is unsupported")
     ));

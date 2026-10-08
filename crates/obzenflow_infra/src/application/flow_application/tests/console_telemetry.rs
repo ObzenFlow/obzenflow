@@ -66,10 +66,10 @@ fn console_stream_reports_real_supervisor_activity_and_closes_on_cancellation() 
 }
 
 #[test]
-fn console_listener_closes_when_application_configuration_fails_before_flow_build() {
+fn console_configuration_failure_precedes_subscriber_and_listener() {
     if !isolated(concat!(
         "application::flow_application::tests::console_telemetry::",
-        "console_listener_closes_when_application_configuration_fails_before_flow_build"
+        "console_configuration_failure_precedes_subscriber_and_listener"
     )) {
         return;
     }
@@ -85,10 +85,13 @@ fn console_listener_closes_when_application_configuration_fails_before_flow_buil
             let (bound_tx, bound_rx) = oneshot::channel();
             let mut app = FlowApplication::builder()
                 .with_config_file(config)
-                .with_cli_args(["console-config-failure-proof"])
-                .with_log_level(LogLevel::Info)
-                .with_console_subscriber()
-                .with_console_bind("127.0.0.1:0");
+                .with_cli_args([
+                    "console-config-failure-proof",
+                    "--tokio-console",
+                    "--tokio-console-bind",
+                    "127.0.0.1:0",
+                ])
+                .with_log_level(LogLevel::Info);
             app.test_console_bound_address = Some(bound_tx);
             let definition = FlowDefinition::materialize(|_| {
                 panic!("invalid configuration must be rejected before flow construction")
@@ -100,12 +103,64 @@ fn console_listener_closes_when_application_configuration_fails_before_flow_buil
                 matches!(result, Err(ApplicationError::InvalidConfiguration(_))),
                 "the original configuration error must remain the result: {result:?}"
             );
+            assert!(
+                bound_rx.await.is_err(),
+                "invalid config must not start Console"
+            );
+            use tracing_subscriber::util::SubscriberInitExt;
+            tracing_subscriber::registry()
+                .try_init()
+                .expect("invalid config must not install a subscriber");
+            assert_eq!(tokio::spawn(async { 7 }).await.unwrap(), 7);
+        });
+}
+
+#[test]
+fn console_uses_prepared_config_and_closes_after_build_failure() {
+    if !isolated(concat!(
+        "application::flow_application::tests::console_telemetry::",
+        "console_uses_prepared_config_and_closes_after_build_failure"
+    )) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("console.toml");
+    std::fs::write(
+        &config,
+        "[diagnostics.tokio_console]\nenabled = true\nbind = '127.0.0.1:0'\n",
+    )
+    .unwrap();
+    // A shadowed legacy value must not be parsed again by Console's builder.
+    std::env::set_var("TOKIO_CONSOLE_BIND", "invalid lower-precedence address");
+    let (bound_tx, bound_rx) = oneshot::channel();
+    let mut params = LaunchParams {
+        builder_config_file: Some(config.clone()),
+        cli_args: Some(vec!["console-once-proof".into()]),
+        test_console_bound_address: Some(bound_tx),
+        ..LaunchParams::default()
+    };
+    let prepared = params.prepare().unwrap();
+    std::fs::write(config, "invalid configuration after preparation").unwrap();
+    let definition = FlowDefinition::materialize(|_| {
+        Err(obzenflow_dsl::FlowBuildError::BindingConfiguration {
+            binding: "controlled-build-failure".into(),
+            detail: "after diagnostics started".into(),
+        })
+    });
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let result = FlowApplication::launch_prepared(definition, params, prepared).await;
+            assert!(
+                matches!(result, Err(ApplicationError::FlowBuildFailed(message))
+                if message.contains("controlled-build-failure"))
+            );
             let address = bound_rx
                 .await
-                .expect("Console started and retained its listener before config resolution");
-            let _rebound = TcpListener::bind(address)
-                .expect("early application failure must release the Console listener");
-            assert_eq!(tokio::spawn(async { 7 }).await.unwrap(), 7);
+                .expect("diagnostics acquired before flow build");
+            let _rebound = TcpListener::bind(address).expect("failed build releases Console");
         });
 }
 
@@ -187,10 +242,15 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
     let (proved_tx, proved_rx) = std::sync::mpsc::sync_channel(1);
     let mut app = FlowApplication::builder()
         .with_config_file(config)
-        .with_cli_args(["blocking-console-proof", "--server-port", "0"])
+        .with_cli_args([
+            "blocking-console-proof",
+            "--server-port",
+            "0",
+            "--tokio-console",
+            "--tokio-console-bind",
+            "127.0.0.1:0",
+        ])
         .with_log_level(LogLevel::Info)
-        .with_console_subscriber()
-        .with_console_bind("127.0.0.1:0")
         .with_flow_handle_hook(move |flow| {
             let (console_rx, source_input, mut source_entered) =
                 driver.lock().unwrap().take().expect("one flow driver");
@@ -474,8 +534,10 @@ impl Telemetry {
         .await;
         assert!(
             observed.is_ok(),
-            "{reason}; updates={}, named tasks={:?}",
+            "{reason}; updates={}, metadata={}, tasks={}, named tasks={:?}",
             self.updates,
+            self.metadata.len(),
+            self.tasks.len(),
             self.tasks
                 .values()
                 .filter_map(|task| self.task_name(task))
@@ -495,7 +557,7 @@ fn telemetry_proof(cancel: bool) {
             let config = dir.path().join("console.toml");
             std::fs::write(
                 &config,
-                "[server]\nenabled = true\nhost = '127.0.0.1'\nport = 8080\nstartup_mode = 'manual'\non_terminal = 'exit'\n[metrics]\nenabled = true\n",
+                "[server]\nenabled = true\nhost = '127.0.0.1'\nport = 8080\nstartup_mode = 'manual'\non_terminal = 'exit'\n[metrics]\nenabled = true\n[diagnostics.tokio_console]\nenabled = true\nbind = '127.0.0.1:0'\n",
             )
             .unwrap();
             let (source_input, input) = mpsc::channel(1);
@@ -515,8 +577,6 @@ fn telemetry_proof(cancel: bool) {
                 .with_config_file(config)
                 .with_cli_args(["console-telemetry-proof", "--server-port", "0"])
                 .with_log_level(LogLevel::Info)
-                .with_console_subscriber()
-                .with_console_bind("127.0.0.1:0")
                 .with_flow_handle_hook(move |flow| {
                     assert!(flow_tx.lock().unwrap().take().unwrap().send(flow.clone()).is_ok());
                     tokio::spawn(async {})
