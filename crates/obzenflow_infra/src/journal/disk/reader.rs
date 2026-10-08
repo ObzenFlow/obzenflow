@@ -27,7 +27,6 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, BufReader};
 use tokio::sync::{RwLock, RwLockReadGuard};
-use tracing::Instrument;
 
 /// Live-tail polls allowed at the same unterminated record before a stuck or
 /// crashed writer is treated as a hard error rather than an endless retry
@@ -111,12 +110,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     }
 
     /// Create a new live-tail reader starting from the beginning
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_reader_open",
-        skip_all
-    )]
     pub async fn new(
         path: PathBuf,
         journal_id: JournalId,
@@ -169,12 +162,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     /// Open an existing journal for read-only sequential access under an explicit
     /// read policy. Missing journals are never created by readers.
     /// Archive readers pass a sealed policy (FLOWIP-120q).
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_reader_open_existing",
-        skip_all
-    )]
     pub(crate) async fn open_existing(
         path: PathBuf,
         journal_id: JournalId,
@@ -224,18 +211,12 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     }
 
     /// Read-only consumer admission with a fixed, verified committed prefix.
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_reader_admit_snapshot",
-        skip_all
-    )]
     pub(crate) async fn open_observer(
         path: PathBuf,
         journal_id: JournalId,
     ) -> Result<Self, JournalError> {
         let scan_path = path.clone();
-        let (file, end) = super::performance::blocking(move || {
+        let (file, end) = tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let file = open_existing_std_file(&scan_path)?;
             let scan = || -> Result<u64, JournalError> {
@@ -319,12 +300,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     /// driving the same framed scanner and `dispose` path as `next()`. Stops
     /// early at a clean EOF or an unterminated torn tail; fails loud on committed
     /// corruption before the target.
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_reader_advance",
-        skip_all
-    )]
     async fn advance_to(&mut self, target: u64) -> Result<(), JournalError> {
         if self.position >= target {
             return Ok(());
@@ -333,15 +308,11 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         // leaving `self` free for the `&mut self` advance below.
         let lock = self.read_write_lock.clone();
         let mut reader = {
-            let _read_guard = lock.read()
-                .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_reader_lock_wait"))
-                .await;
+            let _read_guard = lock.read().await;
             self.reader_at_offset().await?
         };
         while self.position < target {
-            let read_guard = lock.read()
-                .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_reader_lock_wait"))
-                .await;
+            let read_guard = lock.read().await;
             let (disposition, frame_start) = self.advance_one(&mut reader, read_guard).await?;
             match disposition {
                 Disposition::Yield(_) => {}
@@ -441,7 +412,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             // a fresh decoder here would canonicalize the archive directory
             // and lock the global registry for every physical frame.
             let mut decoder = self.decoder.clone();
-            let (classification, decoder, bytes) = super::performance::blocking(move || {
+            let (classification, decoder, bytes) = tokio::task::spawn_blocking(move || {
                 let classification = classify_frame::<T>(&bytes, &mut decoder, frame_start);
                 (classification, decoder, bytes)
             })
@@ -513,12 +484,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         }
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_reader_reopen_seek",
-        skip_all
-    )]
     async fn reader_at_offset(&self) -> Result<BufReader<File>, JournalError> {
         let std_file = open_existing_std_file(&self.path)?;
         if let Some(pinned) = &self.pinned_file {
@@ -566,12 +531,6 @@ impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for DiskJ
         Ok(self.read_offset > end || (self.read_offset == end && self.pending.is_empty()))
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_read_next",
-        skip_all
-    )]
     async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         // Don't permanently latch at_end: a live-tail reader retries after EOF to
         // pick up new appends. Only previously buffered complete frames can be
@@ -580,9 +539,7 @@ impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for DiskJ
         // Lock through a cloned Arc so the guard borrows a local, not `self`,
         // leaving `self` free for the `&mut self` advance below.
         let lock = self.read_write_lock.clone();
-        let read_guard = lock.read()
-            .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_reader_lock_wait"))
-            .await;
+        let read_guard = lock.read().await;
         let mut reader = match self.buffered_reader.take() {
             Some(reader)
                 if !self.pending.is_empty()

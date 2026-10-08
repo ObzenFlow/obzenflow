@@ -60,14 +60,10 @@ fn read_provenance<E: serde::de::DeserializeOwned, const MEASURE: bool>(
 }
 
 fn read_payload<P: JournalPayload>(provenance: &P::Provenance, bytes: &[u8]) -> Result<P> {
-    let payload: serde_json::Value = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_decode_payload_json")
-        .in_scope(|| serde_json::from_slice(bytes))?;
-    tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_decode_typed_payload")
-        .in_scope(|| {
-            let payload = P::decode(provenance, payload)?;
-            payload.validate(provenance)?;
-            Ok(payload)
-        })
+    let payload: serde_json::Value = serde_json::from_slice(bytes)?;
+    let payload = P::decode(provenance, payload)?;
+    payload.validate(provenance)?;
+    Ok(payload)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -97,12 +93,6 @@ impl PreparedFrame {
     }
 }
 
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "disk_journal_codec_encode",
-    skip_all
-)]
 pub(crate) fn prepare<P: JournalPayload>(
     records: &[JournalRecord<P>],
     group: Option<&str>,
@@ -119,64 +109,49 @@ pub(crate) fn prepare<P: JournalPayload>(
         let member_start = content.len();
         definitions.begin_record();
         record.payload.validate(&record.envelope.provenance.event)?;
-        tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_encode_provenance")
-            .in_scope(|| -> Result<()> {
-                let mut provenance = Vec::new();
+        let mut provenance = Vec::new();
+        serialize::write(
+            Kind::Struct(Layout::RecordBody),
+            &BodyProvenanceRef {
+                event: &record.envelope.provenance.event,
+                vector_clock: &record.envelope.provenance.journal.vector_clock,
+                timestamp: &record.envelope.provenance.journal.timestamp,
+            },
+            None,
+            &mut provenance,
+            &mut definitions,
+        )?;
+        bytes(&provenance, &mut content);
+        match record.envelope.observability.as_ref() {
+            None => content.push(0),
+            Some(observation) => {
+                content.push(2);
+                let mut encoded = Vec::new();
                 serialize::write(
-                    Kind::Struct(Layout::RecordBody),
-                    &BodyProvenanceRef {
-                        event: &record.envelope.provenance.event,
-                        vector_clock: &record.envelope.provenance.journal.vector_clock,
-                        timestamp: &record.envelope.provenance.journal.timestamp,
-                    },
+                    Kind::Struct(Layout::Observation),
+                    observation,
                     None,
-                    &mut provenance,
+                    &mut encoded,
                     &mut definitions,
                 )?;
-                bytes(&provenance, &mut content);
-                Ok(())
-            })?;
-        tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_encode_observability")
-            .in_scope(|| -> Result<()> {
-                match record.envelope.observability.as_ref() {
-                    None => content.push(0),
-                    Some(observation) => {
-                        content.push(2);
-                        let mut encoded = Vec::new();
-                        serialize::write(
-                            Kind::Struct(Layout::Observation),
-                            observation,
-                            None,
-                            &mut encoded,
-                            &mut definitions,
-                        )?;
-                        bytes(&encoded, &mut content);
-                    }
-                }
-                Ok(())
-            })?;
-        tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_encode_payload_json")
-            .in_scope(|| -> Result<()> {
-                bytes(&serde_json::to_vec(&record.payload)?, &mut content);
-                Ok(())
-            })?;
+                bytes(&encoded, &mut content);
+            }
+        }
+        bytes(&serde_json::to_vec(&record.payload)?, &mut content);
         lengths.push(content.len() - member_start);
     }
-    tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_encode_frame")
-        .in_scope(|| {
-            let mut body = routing::encode(records, group, &lengths)?;
-            let mut table = Vec::new();
-            definitions.encode(&mut table);
-            bytes(&table, &mut body);
-            body.extend_from_slice(&content);
-            if body.len() > obzenflow_core::journal::limits::MAX_FRAME_BODY_BYTES {
-                return Err(invalid("frame byte budget exceeded"));
-            }
-            Ok(PreparedFrame {
-                bytes: frame::encode(&body),
-                definitions,
-            })
-        })
+    let mut body = routing::encode(records, group, &lengths)?;
+    let mut table = Vec::new();
+    definitions.encode(&mut table);
+    bytes(&table, &mut body);
+    body.extend_from_slice(&content);
+    if body.len() > obzenflow_core::journal::limits::MAX_FRAME_BODY_BYTES {
+        return Err(invalid("frame byte budget exceeded"));
+    }
+    Ok(PreparedFrame {
+        bytes: frame::encode(&body),
+        definitions,
+    })
 }
 
 #[derive(Clone)]
@@ -236,27 +211,17 @@ impl Decoder {
 
     // Byte attribution uses the same ordinary parsing and validation. It is a
     // diagnostic cost, not part of a normal journal read.
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_codec_decode",
-        skip_all
-    )]
     fn decode_inner<T: JournalEvent, const MEASURE: bool>(
         &mut self,
         body: &[u8],
         offset: u64,
     ) -> Result<(LogFrame<T>, FrameSizes)> {
         let mut sizes = FrameSizes::default();
-        let (envelope, mut definitions) = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_decode_routing")
-            .in_scope(|| -> Result<_> {
-                let envelope = routing::Envelope::parse(body)?;
-                let mut table = Cursor::new(envelope.definitions);
-                let definitions =
-                    ReadTable::<MEASURE>::new(&mut table, &self.store, &self.path, offset)?;
-                table.finish()?;
-                Ok((envelope, definitions))
-            })?;
+        let envelope = routing::Envelope::parse(body)?;
+        let mut table = Cursor::new(envelope.definitions);
+        let mut definitions =
+            ReadTable::<MEASURE>::new(&mut table, &self.store, &self.path, offset)?;
+        table.finish()?;
         let mut records = Vec::new();
         let mut previous = envelope.summary.previous;
         for (index, member) in envelope.members.iter().enumerate() {
@@ -274,55 +239,49 @@ impl Decoder {
             }
             let start = input.position();
             definitions.section(1);
-            let provenance = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_decode_provenance")
-                .in_scope(|| -> Result<_> {
-                    let stored = read_provenance::<<T::Payload as JournalPayload>::Provenance, MEASURE>(
-                        input.bytes()?,
-                        &mut definitions,
-                    )?;
-                    Ok(obzenflow_core::event::provenance::Provenance {
-                        event: stored.event,
-                        journal: obzenflow_core::event::provenance::JournalProvenance {
-                            run_id: reference.run_id,
-                            journal_writer_id: reference.journal_writer_id,
-                            previous: predecessor,
-                            vector_clock: stored.vector_clock,
-                            timestamp: stored.timestamp,
-                            journal_group_id: envelope.summary.group.clone(),
-                            journal_group_member: envelope.summary.group.as_ref().map(|_| {
-                                JournalGroupMember {
-                                    index: index as u32,
-                                    size: envelope.summary.count as u32,
-                                }
-                            }),
-                        },
-                    })
-                })?;
+            let stored = read_provenance::<<T::Payload as JournalPayload>::Provenance, MEASURE>(
+                input.bytes()?,
+                &mut definitions,
+            )?;
+            let provenance = obzenflow_core::event::provenance::Provenance {
+                event: stored.event,
+                journal: obzenflow_core::event::provenance::JournalProvenance {
+                    run_id: reference.run_id,
+                    journal_writer_id: reference.journal_writer_id,
+                    previous: predecessor,
+                    vector_clock: stored.vector_clock,
+                    timestamp: stored.timestamp,
+                    journal_group_id: envelope.summary.group.clone(),
+                    journal_group_member: envelope.summary.group.as_ref().map(|_| {
+                        JournalGroupMember {
+                            index: index as u32,
+                            size: envelope.summary.count as u32,
+                        }
+                    }),
+                },
+            };
             if MEASURE {
                 sizes.provenance += input.position() - start;
             }
             let start = input.position();
             definitions.section(2);
-            let observability = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_decode_observability")
-                .in_scope(|| -> Result<_> {
-                    Ok(match input.byte()? {
-                        0 | 1 => None,
-                        2 => {
-                            if MEASURE {
-                                sizes.packets += 1;
-                            }
-                            let mut observation_input = Cursor::new(input.bytes()?);
-                            let observation = deserialize::read(
-                                Kind::Struct(Layout::Observation),
-                                &mut observation_input,
-                                &mut definitions,
-                            )?;
-                            observation_input.finish()?;
-                            Some(observation)
-                        }
-                        _ => return Err(invalid("unknown observation presence tag")),
-                    })
-                })?;
+            let observability = match input.byte()? {
+                0 | 1 => None,
+                2 => {
+                    if MEASURE {
+                        sizes.packets += 1;
+                    }
+                    let mut observation_input = Cursor::new(input.bytes()?);
+                    let observation = deserialize::read(
+                        Kind::Struct(Layout::Observation),
+                        &mut observation_input,
+                        &mut definitions,
+                    )?;
+                    observation_input.finish()?;
+                    Some(observation)
+                }
+                _ => return Err(invalid("unknown observation presence tag")),
+            };
             if MEASURE && observability.is_some() {
                 sizes.observability += input.position() - start;
             }
@@ -332,20 +291,16 @@ impl Decoder {
             if MEASURE {
                 sizes.payload += input.position() - start;
             }
-            let record: LogRecord<T> = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_codec_decode_record")
-                .in_scope(|| -> Result<_> {
-                    let record: LogRecord<T> = JournalRecord::from_parts(
-                        obzenflow_core::event::envelope::EventEnvelope {
-                            provenance,
-                            observability,
-                        },
-                        payload,
-                    );
-                    if *record.id() != reference.event_id || record.local_sequence() != reference.sequence {
-                        return Err(invalid("record disagrees with routing commitment"));
-                    }
-                    Ok(record)
-                })?;
+            let record: LogRecord<T> = JournalRecord::from_parts(
+                obzenflow_core::event::envelope::EventEnvelope {
+                    provenance,
+                    observability,
+                },
+                payload,
+            );
+            if *record.id() != reference.event_id || record.local_sequence() != reference.sequence {
+                return Err(invalid("record disagrees with routing commitment"));
+            }
             records.push(record);
             input.finish()?;
         }

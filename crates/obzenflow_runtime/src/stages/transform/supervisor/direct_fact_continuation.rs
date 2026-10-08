@@ -30,7 +30,6 @@ use crate::stages::transform::fsm::{
     DirectFactContinuation, DirectFactContinuationStart, DirectFactPollState, TransformEvent,
     TransformResources,
 };
-use crate::supervised_base::loop_timing::{phase, Phase};
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -60,7 +59,6 @@ pub(super) async fn start_if_eligible<
     scope: MiddlewareExecutionScope,
     flow_context: &FlowContext,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let _preparing = phase(Phase::Prepare);
     if matches!(
         envelope.envelope.provenance.event.processing.status,
         ProcessingStatus::Error { .. }
@@ -204,10 +202,8 @@ fn acknowledge<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Syn
     let Some(upstream) = upstream else {
         return;
     };
-    let _acknowledging = phase(Phase::Acknowledge);
     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
         reader.ack_consumed(1);
-        crate::supervised_base::loop_timing::acknowledgement();
     } else {
         tracing::warn!(
             stage_name = %ctx.stage_name,
@@ -223,27 +219,23 @@ async fn fail<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync
     continuation: DirectFactContinuation,
     fatal: StageFatal,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    let _preparing = phase(Phase::Prepare);
     close_and_track(sup, &continuation).await?;
     let writer_id = ctx
         .writer_id
         .ok_or_else(|| "fatal generated input has no stage writer id".to_string())?;
-    {
-        let _publishing = phase(Phase::Publish);
-        record_stage_fatal(
-            &fatal,
-            StageFatalCommit {
-                error_journal: &ctx.error_journal,
-                writer_id,
-                stage_id: ctx.stage_id,
-                stage_key: &ctx.stage_name,
-                input_position: continuation.input_position,
-                parent: Some(&continuation.envelope),
-                lineage: ctx.lineage_policy,
-            },
-        )
-        .await?;
-    }
+    record_stage_fatal(
+        &fatal,
+        StageFatalCommit {
+            error_journal: &ctx.error_journal,
+            writer_id,
+            stage_id: ctx.stage_id,
+            stage_key: &ctx.stage_name,
+            input_position: continuation.input_position,
+            parent: Some(&continuation.envelope),
+            lineage: ctx.lineage_policy,
+        },
+    )
+    .await?;
     acknowledge(ctx, continuation.upstream_stage);
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat
@@ -296,7 +288,6 @@ async fn finish_success<
             .await;
         }
         if is_framework_middleware_observability_event(&event) {
-            let _publishing = phase(Phase::Publish);
             if let Err(error) = commit_framework_observability_events(
                 vec![event],
                 FrameworkObservabilityCommit {
@@ -331,7 +322,6 @@ async fn finish_success<
                 .record_error(kind.clone().unwrap_or(ErrorKind::Unknown));
         }
         if route_to_error_journal(&event) {
-            let _publishing = phase(Phase::Publish);
             if let Err(error) = crate::supervised_base::publication::append(
                 &ctx.error_journal,
                 event,
@@ -421,7 +411,6 @@ pub(super) async fn service<
     ctx: &mut TransformResources<H>,
     flow_context: &FlowContext,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    let _preparing = phase(Phase::Prepare);
     let mut continuation = ctx
         .direct_fact_continuation
         .take()
@@ -504,11 +493,7 @@ pub(super) async fn service<
                 continuation.poll_state = DirectFactPollState::LiveLeased;
             }
             DirectFactPollState::DrivingReconstruction | DirectFactPollState::LiveLeased => {
-                let polled = {
-                    let _handling = phase(Phase::Handler);
-                    continuation.poll_once().await
-                };
-                match polled {
+                match continuation.poll_once().await {
                     Poll::Ready(Ok(events)) => {
                         return finish_success(sup, ctx, continuation, flow_context, events).await;
                     }
@@ -531,10 +516,7 @@ pub(super) async fn service<
                             continuation.poll_state = DirectFactPollState::ResumeAtLiveBarrier;
                             continue;
                         }
-                        {
-                            let _handling = phase(Phase::Handler);
-                            continuation.wait_one_ready_chunk().await;
-                        }
+                        continuation.wait_one_ready_chunk().await;
                         ctx.direct_fact_continuation = Some(continuation);
                         return Ok(EventLoopDirective::Continue);
                     }

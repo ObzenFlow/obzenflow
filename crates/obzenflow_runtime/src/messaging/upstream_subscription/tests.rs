@@ -41,8 +41,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
-#[path = "performance_tests.rs"]
-mod performance;
+#[path = "pending_read_tests.rs"]
+mod pending_read;
 
 fn committed_input(event: ChainEvent, vector_clock: VectorClock) -> JournalRecord<ChainPayload> {
     let mut record = JournalRecord::new(JournalWriterId::new(), event);

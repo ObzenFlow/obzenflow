@@ -12,7 +12,6 @@ use crate::messaging::DeliveredRecord;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{CreditWaker, WakeOn};
 use crate::stages::common::supervision::suspension::suspend_until;
-use crate::supervised_base::loop_timing::{self, Phase};
 use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
@@ -23,7 +22,6 @@ use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use std::sync::Arc;
-use tracing::Instrument;
 
 use crate::backpressure::{BackpressureWriter, DirectFactLease, LimitingEdgeDetail};
 use crate::feed_plan::StageOutputContract;
@@ -92,12 +90,6 @@ pub(crate) struct PendingOutput {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "backpressure_drain",
-    skip_all
-)]
 pub(crate) async fn drain_one_pending(
     pending: PendingOutput,
     flow_context: &FlowContext,
@@ -112,7 +104,6 @@ pub(crate) async fn drain_one_pending(
     output_contract: Option<&StageOutputContract>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
-    let _publish = loop_timing::phase(Phase::Publish);
     match drain_one_pending_resolve(
         pending,
         flow_context,
@@ -136,11 +127,7 @@ pub(crate) async fn drain_one_pending(
             // Only the anchored deadline in `backpressure_stall` can author
             // the stall fact, so intermediate wakes never extend the episode.
             let wait_started = tokio::time::Instant::now();
-            let credit_wait = loop_timing::phase(Phase::CreditWait);
-            let _ = suspend_until(&WakeOn::Notify(waker), Some(bound))
-                .instrument(tracing::debug_span!(target: "obzenflow::performance", "backpressure_credit_wait"))
-                .await;
-            drop(credit_wait);
+            let _ = suspend_until(&WakeOn::Notify(waker), Some(bound)).await;
             let measured = wait_started.elapsed();
             backpressure_writer.record_wait(measured);
             emit_blocked_pulse(
@@ -175,16 +162,9 @@ pub(crate) struct DirectFactLeaseRequest<'a> {
     pub backpressure_stall: &'a mut Option<tokio::time::Instant>,
 }
 
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "backpressure_direct_fact_admission",
-    skip_all
-)]
 pub(crate) async fn acquire_direct_fact_lease(
     request: DirectFactLeaseRequest<'_>,
 ) -> Result<Option<DirectFactLease>, Box<dyn std::error::Error + Send + Sync>> {
-    let _publish = loop_timing::phase(Phase::Publish);
     let DirectFactLeaseRequest {
         writer,
         bound,
@@ -195,9 +175,7 @@ pub(crate) async fn acquire_direct_fact_lease(
         backpressure_pulse,
         backpressure_stall,
     } = request;
-    match tracing::debug_span!(target: "obzenflow::performance", "backpressure_reserve")
-        .in_scope(|| DirectFactLease::try_acquire(writer, bound))
-    {
+    match DirectFactLease::try_acquire(writer, bound) {
         Ok(Some(lease)) => {
             *backpressure_stall = None;
             Ok(Some(lease))
@@ -239,11 +217,7 @@ pub(crate) async fn acquire_direct_fact_lease(
                 .credit_waker()
                 .ok_or_else(|| "generated direct-fact admission has no credit waker".to_string())?;
             let wait_started = tokio::time::Instant::now();
-            let credit_wait = loop_timing::phase(Phase::CreditWait);
-            let _ = suspend_until(&WakeOn::Notify(waker), Some(wait_bound))
-                .instrument(tracing::debug_span!(target: "obzenflow::performance", "backpressure_credit_wait"))
-                .await;
-            drop(credit_wait);
+            let _ = suspend_until(&WakeOn::Notify(waker), Some(wait_bound)).await;
             let measured = wait_started.elapsed();
             writer.record_wait(measured);
             emit_blocked_pulse(
@@ -269,12 +243,6 @@ pub(crate) async fn acquire_direct_fact_lease(
 /// and the caller owns the chunked wait (for example inside a
 /// `tokio::select!` that stays responsive to external events).
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "backpressure_attempt",
-    skip_all
-)]
 pub(crate) async fn drain_one_pending_resolve(
     pending: PendingOutput,
     flow_context: &FlowContext,
@@ -331,8 +299,7 @@ pub(crate) async fn drain_one_pending_resolve(
             // resume handoff while no wait, ceiling, stall fact, or pulse exists
             // on this path. The scope is the one frozen at production time.
             if pending.scope.is_deterministic_replay() {
-                let reservation = tracing::debug_span!(target: "obzenflow::performance", "backpressure_reserve_tracked")
-                    .in_scope(|| backpressure_writer.reserve_tracked(1));
+                let reservation = backpressure_writer.reserve_tracked(1);
                 committer
                     .commit_reserved_prebuilt(
                         pending.event,
@@ -360,8 +327,7 @@ pub(crate) async fn drain_one_pending_resolve(
             )
             .await;
 
-            let Some(reservation) = tracing::debug_span!(target: "obzenflow::performance", "backpressure_reserve")
-                .in_scope(|| backpressure_writer.reserve(1)) else {
+            let Some(reservation) = backpressure_writer.reserve(1) else {
                 pending_outputs.push_front(pending);
 
                 // The stall episode anchors at the first credit miss and only

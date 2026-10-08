@@ -102,7 +102,6 @@ use crate::stages::observer::{
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
-use crate::supervised_base::loop_timing::{self, Phase};
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::MiddlewareExecutionScope;
 use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
@@ -117,7 +116,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::Instrument;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -218,7 +216,6 @@ pub(crate) async fn record_source_stage_fatal(
     stage_key: &str,
     error_journal: &Arc<dyn Journal<ChainEvent>>,
 ) -> Result<(), BoxError> {
-    let _publish = loop_timing::phase(Phase::Publish);
     record_stage_fatal(
         fatal,
         StageFatalCommit {
@@ -279,12 +276,6 @@ pub(crate) fn per_data_event_duration_for_batch(
     Duration::from_nanos(nanos)
 }
 
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "source_output_enqueue",
-    skip_all
-)]
 pub(crate) fn emit_batch_to_pending_outputs(
     events: impl IntoIterator<Item = ChainEvent>,
     stage_flow_context: &FlowContext,
@@ -357,9 +348,7 @@ impl<'a> SourcePollObservation<'a> {
         }
         let observer_ctx =
             SourcePollObserverContext::new(self.flow_id, self.stage_flow_context, outcome);
-        tracing::debug_span!(target: "obzenflow::performance", "source_poll_observers").in_scope(
-            || run_source_poll_observers(self.observers, self.scope, &observer_ctx, outputs),
-        );
+        run_source_poll_observers(self.observers, self.scope, &observer_ctx, outputs);
     }
 
     pub(crate) async fn observe_empty(
@@ -393,12 +382,6 @@ pub(crate) async fn observe_source_boundary_rejection(
     }
 }
 
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "source_output_prepare",
-    skip_all
-)]
 pub(crate) fn stage_source_poll_outputs(
     events: Vec<ChainEvent>,
     stage_flow_context: &FlowContext,
@@ -450,12 +433,6 @@ pub(crate) fn stage_boundary_control_events(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "source_pending_output_drain",
-    skip_all
-)]
 pub(crate) async fn drain_pending_outputs_sync(
     pending_outputs: &mut VecDeque<
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
@@ -471,7 +448,6 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
 ) -> Result<bool, BoxError> {
-    let _publish = loop_timing::phase(Phase::Publish);
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
             pending.event.processing.status,
@@ -517,12 +493,6 @@ pub(crate) async fn drain_pending_outputs_sync(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "source_pending_output_drain",
-    skip_all
-)]
 pub(crate) async fn drain_pending_outputs_async<E>(
     pending_outputs: &mut VecDeque<
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
@@ -543,7 +513,6 @@ pub(crate) async fn drain_pending_outputs_async<E>(
 where
     E: Send,
 {
-    let _publish = loop_timing::phase(Phase::Publish);
     let mut on_channel_closed = Some(on_channel_closed);
 
     while let Some(pending) = pending_outputs.pop_front() {
@@ -591,11 +560,9 @@ where
                 // `backpressure_stall` decides the stall on re-entry.
                 let wait_started = tokio::time::Instant::now();
                 let wake = crate::stages::common::control_strategies::WakeOn::Notify(waker);
-                let credit_wait = loop_timing::phase(Phase::CreditWait);
                 let waited = tokio::select! {
                     biased;
                     maybe_event = receive_control => {
-                        let _control = loop_timing::phase(Phase::Control);
                         match maybe_event {
                             Some(event) => return Ok(Some(EventLoopDirective::Transition(event))),
                             None => {
@@ -607,9 +574,8 @@ where
                     _ = crate::stages::common::supervision::suspension::suspend_until(
                         &wake,
                         Some(bound),
-                    ).instrument(tracing::debug_span!(target: "obzenflow::performance", "backpressure_credit_wait")) => wait_started.elapsed(),
+                    ) => wait_started.elapsed(),
                 };
-                drop(credit_wait);
                 // The chunk elapsed (the external-event arm returns early
                 // above, so this only runs on a real wait): record the wait
                 // and feed the blocked pulse through the same append/mirror

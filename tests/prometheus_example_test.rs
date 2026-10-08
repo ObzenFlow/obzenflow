@@ -37,110 +37,6 @@ const CI_EVENT_LIMIT: usize = 5_000;
 const ERROR_EVERY: usize = 100;
 const EXPECTED_UNKNOWN_ERRORS: u64 = (CI_EVENT_LIMIT / ERROR_EVERY) as u64;
 
-/// Keep multiplicity as well as identity: a set alone would hide a repeated
-/// committed input or transform outcome. The error journal legitimately keeps
-/// the source event's identity/context, so classify its status before its stage.
-#[cfg(all(feature = "web-host", feature = "prometheus"))]
-#[derive(Default)]
-struct DemoBusinessCohort {
-    inputs: Vec<u64>,
-    successes: Vec<u64>,
-    errors: Vec<u64>,
-}
-
-#[cfg(all(feature = "web-host", feature = "prometheus"))]
-impl DemoBusinessCohort {
-    fn record(&mut self, event: &obzenflow_core::ChainEvent) {
-        use obzenflow_core::event::chain_event::ChainPayload;
-
-        let ChainPayload::Fact(payload) = &event.payload else {
-            return;
-        };
-        let cohort = if !event.processing.status.is_success() {
-            &mut self.errors
-        } else {
-            match event.flow_context.stage_name.as_str() {
-                "high_volume_source" => &mut self.inputs,
-                "error_processor" => &mut self.successes,
-                _ => return,
-            }
-        };
-        cohort.push(payload["id"].as_u64().expect("business input identity"));
-    }
-
-    fn assert_complete(mut self, count: u64) {
-        self.inputs.sort_unstable();
-        self.successes.sort_unstable();
-        self.errors.sort_unstable();
-        assert_eq!(
-            self.inputs,
-            (0..count).collect::<Vec<_>>(),
-            "each source input must be committed exactly once"
-        );
-        assert_eq!(
-            self.successes,
-            (0..count)
-                .filter(|id| !id.is_multiple_of(ERROR_EVERY as u64))
-                .collect::<Vec<_>>(),
-            "each successful transform outcome must be committed exactly once"
-        );
-        assert_eq!(
-            self.errors,
-            (0..count).step_by(ERROR_EVERY).collect::<Vec<_>>(),
-            "each intended transform error must be committed exactly once"
-        );
-    }
-}
-
-/// Negative controls use the same exported events and oracle as the real proof.
-/// An extra or absent business record must fail even when all other journal,
-/// aggregate, receipt and terminal evidence is left intact.
-#[cfg(all(feature = "web-host", feature = "prometheus"))]
-fn assert_demo_cohort_rejects_incomplete_and_duplicate_records(
-    events: &[obzenflow_core::ChainEvent],
-    count: u64,
-) {
-    let verify = |events: &[obzenflow_core::ChainEvent]| {
-        let mut cohort = DemoBusinessCohort::default();
-        for event in events {
-            cohort.record(event);
-        }
-        cohort.assert_complete(count);
-    };
-    verify(events);
-    for (stage, failed) in [
-        ("high_volume_source", false),
-        ("error_processor", false),
-        // Error routing retains the source context, including its event ID.
-        ("high_volume_source", true),
-    ] {
-        let index = events
-            .iter()
-            .position(|event| {
-                matches!(event.payload, obzenflow_core::event::ChainPayload::Fact(_))
-                    && event.flow_context.stage_name == stage
-                    && event.processing.status.is_success() != failed
-            })
-            .expect("the positive archive includes each business cohort");
-        let mut duplicated = events.to_vec();
-        let mut repeated = events[index].clone();
-        // A second authored event with the same business input is still a
-        // duplicate outcome, even when event-ID uniqueness checks would pass.
-        repeated.envelope.provenance.event.id = obzenflow_core::EventId::new();
-        duplicated.push(repeated);
-        assert!(
-            std::panic::catch_unwind(|| verify(&duplicated)).is_err(),
-            "the oracle accepted a duplicated record: stage={stage}, failed={failed}"
-        );
-        let mut incomplete = events.to_vec();
-        incomplete.remove(index);
-        assert!(
-            std::panic::catch_unwind(|| verify(&incomplete)).is_err(),
-            "the oracle accepted an incomplete cohort: stage={stage}, failed={failed}"
-        );
-    }
-}
-
 /// Exercise the shipped policies with a bounded outage schedule. Both cooldowns
 /// remain five seconds, and every input must survive the failed source polls.
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
@@ -713,7 +609,6 @@ interval_ms = 250
         let mut data_types = BTreeMap::<String, usize>::new();
         let mut deliveries = 0;
         let mut errors = 0;
-        let mut cohort = DemoBusinessCohort::default();
         let mut summaries = Vec::new();
         let records = exported_jsonl::chain_records(&jsonl);
         let committed_inputs: BTreeMap<_, _> = records
@@ -723,7 +618,6 @@ interval_ms = 250
             .collect();
         for record in &records {
             let event = record.authored();
-            cohort.record(&event);
             match &event.payload {
                 ChainPayload::Fact(payload)
                     if event.processing.status.is_success()
@@ -852,7 +746,10 @@ interval_ms = 250
             deliveries, 1,
             "the summary must retain its delivery receipt"
         );
-        cohort.assert_complete(1_000);
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(prometheus_measurement::inspect_archive(&archives[0], 1_000))
+            .unwrap();
         assert_eq!(summaries, [990]);
         assert!(
             !data_types
@@ -895,7 +792,7 @@ mod managed_lifecycle_regressions {
     use obzenflow_runtime::pipeline::FlowHandle;
     use std::sync::{Arc, Mutex};
 
-    use super::{prometheus_demo, DemoBusinessCohort, CI_EVENT_LIMIT};
+    use super::{prometheus_demo, CI_EVENT_LIMIT};
 
     /// Read the shipped endpoint in this existing finite-example proof. HTTP/1.0
     /// supplies a close-delimited body; HTTP/1.1 transport framing and keep-alives
@@ -1659,7 +1556,6 @@ enabled = {prometheus}
             )
         };
         let mut receipts = Vec::new();
-        let mut cohort = DemoBusinessCohort::default();
         let mut summaries = Vec::new();
         let mut summary_outputs = Vec::new();
         for line in reader.lines() {
@@ -1692,7 +1588,6 @@ enabled = {prometheus}
             };
             event_ids.insert(event.id);
             parents.extend(event.causality.parent_ids.iter().copied());
-            cohort.record(&event);
             if let ChainPayload::Delivery(receipt) = &event.payload {
                 assert_eq!(event.flow_context.stage_name, "summary_sink");
                 receipts.push(receipt_output(receipt, expected_live_bytes));
@@ -1714,18 +1609,9 @@ enabled = {prometheus}
             committed_records.is_empty(),
             "export must contain every admitted record"
         );
-        cohort.assert_complete(count);
-        if count == 100 && matches!(mode, MetricsProofMode::InjectedSnapshots) {
-            // Keep the retained-run measurement oracle aligned with a real
-            // shipped-example archive, not only its rejection fixtures.
-            super::prometheus_measurement::inspect_archive(&archive, count)
-                .await
-                .expect("measurement oracle accepts the complete real demo archive");
-            super::assert_demo_cohort_rejects_incomplete_and_duplicate_records(
-                &super::exported_jsonl::chain_events(&std::fs::read_to_string(&export).unwrap()),
-                count,
-            );
-        }
+        super::prometheus_measurement::inspect_archive(&archive, count)
+            .await
+            .expect("complete demo outcomes");
         assert_eq!(summaries, [count - count / 100]);
         assert_eq!(summary_outputs, std::slice::from_ref(&expected_summary));
         assert_eq!(receipts.len(), 1);
@@ -1931,8 +1817,9 @@ enabled = {prometheus}
             "Prometheus proof phase: audit and handle drop complete; total={:?}",
             proof_started.elapsed()
         );
-        // Existing 100-input cases retain the current-schema replay proof.
-        if count != 100 {
+        // Keep the short host-mode proofs and exercise the full 5k correctness
+        // witness once, using the reporting-disabled case's current archive.
+        if count != 100 && !matches!(mode, MetricsProofMode::Disabled) {
             return;
         }
 
@@ -1944,7 +1831,7 @@ enabled = {prometheus}
         .unwrap();
         // Keeping the old port bound also proves replay needs no listener.
         // This example performs no live external I/O; zero configured source
-        // inputs force the proof to reconstruct the recorded 100-input archive.
+        // inputs force the proof to reconstruct the complete recorded cohort.
         let replay_model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
         let replay_root = dir.join("replay");
         FlowApplication::builder()

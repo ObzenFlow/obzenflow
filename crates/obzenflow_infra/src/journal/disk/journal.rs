@@ -41,7 +41,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::RwLock;
-use tracing::{instrument::WithSubscriber, Instrument};
 use ulid::Ulid;
 
 /// Global registry of per-path read/write locks so all DiskJournal instances
@@ -161,31 +160,23 @@ fn append_frame<S: FrameSink>(
     bytes: &[u8],
     path: &Path,
 ) -> Result<CommittedAppend, AppendFailure> {
-    let offset = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_file_seek")
-        .in_scope(|| sink.end_offset())
-        .map_err(|e| {
-            // Nothing was written, so the file is unchanged and still usable.
-            AppendFailure::RolledBack(JournalError::Implementation {
-                message: format!(
-                    "Failed to seek journal end before append: {}",
-                    path.display()
-                ),
-                source: Box::new(e),
-            })
-        })?;
+    let offset = sink.end_offset().map_err(|e| {
+        // Nothing was written, so the file is unchanged and still usable.
+        AppendFailure::RolledBack(JournalError::Implementation {
+            message: format!(
+                "Failed to seek journal end before append: {}",
+                path.display()
+            ),
+            source: Box::new(e),
+        })
+    })?;
 
-    let written = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_file_write")
-        .in_scope(|| sink.write_all(bytes));
-    match written.and_then(|()| {
-        tracing::debug_span!(target: "obzenflow::performance", "disk_journal_file_flush")
-            .in_scope(|| sink.flush())
-    }) {
+    match sink.write_all(bytes).and_then(|()| sink.flush()) {
         Ok(()) => Ok(CommittedAppend {
             offset,
             next_offset: offset + bytes.len() as u64,
         }),
-        Err(write_error) => match tracing::debug_span!(target: "obzenflow::performance", "disk_journal_file_rollback")
-            .in_scope(|| sink.rollback_to(offset)) {
+        Err(write_error) => match sink.rollback_to(offset) {
             Ok(()) => Err(AppendFailure::RolledBack(JournalError::Implementation {
                 message: format!(
                     "Failed to append record to {}; rolled back to offset {offset}",
@@ -228,12 +219,6 @@ impl<T: JournalEvent> DiskJournal<T> {
         Self::open(log_path, Some(owner), Some(run_id))
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_open",
-        skip_all
-    )]
     fn open(
         log_path: PathBuf,
         owner: Option<JournalOwner>,
@@ -349,12 +334,6 @@ fn recover_torn_tail(file: &StdFile, path: &Path, committed_end: u64) -> Result<
 /// `DiskJournal::with_owner` so the two constructors cannot diverge. Uses the
 /// sealed full-scan policy: fail loud on committed corruption, tolerate only a
 /// final torn tail (a crash mid-append leaves an unterminated last record).
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "disk_journal_rebuild_index",
-    skip_all
-)]
 fn rebuild_index_from_path<T: JournalEvent>(
     log_path: &Path,
     confirmed_end: Option<u64>,
@@ -455,7 +434,7 @@ async fn retain_commit<R: Send + 'static>(
     operation: impl std::future::Future<Output = Result<R, JournalError>> + Send + 'static,
 ) -> Result<R, JournalError> {
     use futures::FutureExt;
-    let task = async move {
+    tokio::spawn(async move {
         match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
             Ok(result) => result,
             Err(_) => {
@@ -465,25 +444,14 @@ async fn retain_commit<R: Send + 'static>(
                 })
             }
         }
-    };
-    let task = if tracing::span_enabled!(target: "obzenflow::performance", tracing::Level::DEBUG) {
-        tokio::spawn(task.in_current_span().with_current_subscriber())
-    } else {
-        tokio::spawn(task)
-    };
-    task.await
-        .map_err(|error| JournalError::CommitIndeterminate {
-            source: error.into(),
-        })?
+    })
+    .await
+    .map_err(|error| JournalError::CommitIndeterminate {
+        source: error.into(),
+    })?
 }
 
 impl<T: JournalEvent + 'static> DiskJournal<T> {
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_append_record",
-        skip_all
-    )]
     async fn append_record(
         &self,
         mut event: T,
@@ -504,9 +472,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         //
         // This serialises append operations and ensures concurrent appends
         // cannot compute the same `writer_seq` from a stale snapshot.
-        let _lock = self.read_write_lock.write()
-            .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_writer_lock_wait"))
-            .await;
+        let _lock = self.read_write_lock.write().await;
         if self.poisoned.load(Ordering::SeqCst) {
             return Err(JournalError::Implementation {
                 message: "journal publication is closed after indeterminate commit".into(),
@@ -583,9 +549,8 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             u32::from_le_bytes(write_bytes[trailer..trailer + 4].try_into().unwrap());
 
         let outcome =
-            super::performance::blocking(move || -> Result<CommittedAppend, AppendFailure> {
-                let mut file = match tracing::debug_span!(target: "obzenflow::performance", "disk_journal_file_lock_wait")
-                    .in_scope(|| write_file.lock()) {
+            tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
+                let mut file = match write_file.lock() {
                     Ok(guard) => guard,
                     Err(e) => {
                         // A poisoned mutex means a prior writer panicked
@@ -632,8 +597,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             }
         };
 
-        tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_publish")
-            .in_scope(|| prepared.commit(committed.offset));
+        prepared.commit(committed.offset);
         self.last_frame.store(committed.offset, Ordering::Relaxed);
         tracing::debug!(
             path = %self.path.display(),
@@ -644,31 +608,21 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         );
 
         // Commit in-memory state only after the durable write succeeded.
-        async {
-            self.index
-                .write()
-                .await
-                .insert(envelope.id().as_ulid(), committed.offset);
-            *self.last_commit.write().await = Some(commitment);
-            self.observations.committed(
-                std::slice::from_ref(&envelope),
-                committed.offset,
-                committed.next_offset,
-                observation_crc,
-            );
-        }
-        .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_publish"))
-        .await;
+        self.index
+            .write()
+            .await
+            .insert(envelope.id().as_ulid(), committed.offset);
+        *self.last_commit.write().await = Some(commitment);
+        self.observations.committed(
+            std::slice::from_ref(&envelope),
+            committed.offset,
+            committed.next_offset,
+            observation_crc,
+        );
 
         Ok(envelope)
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_append_group",
-        skip_all
-    )]
     async fn append_records(
         &self,
         group_id: &str,
@@ -698,9 +652,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
 
         // One write lock covers clock calculation, construction, the single
         // physical frame append, and publication of every member.
-        let _lock = self.read_write_lock.write()
-            .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_writer_lock_wait"))
-            .await;
+        let _lock = self.read_write_lock.write().await;
         if self.poisoned.load(Ordering::SeqCst) {
             return Err(JournalError::Implementation {
                 message: "journal publication is closed after indeterminate commit".into(),
@@ -778,9 +730,8 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         let path = self.path.clone();
         let write_file = self.write_file.clone();
         let outcome =
-            super::performance::blocking(move || -> Result<CommittedAppend, AppendFailure> {
-                let mut file = match tracing::debug_span!(target: "obzenflow::performance", "disk_journal_file_lock_wait")
-                    .in_scope(|| write_file.lock()) {
+            tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
+                let mut file = match write_file.lock() {
                     Ok(guard) => guard,
                     Err(e) => {
                         return Err(AppendFailure::Poisoned(JournalError::Implementation {
@@ -816,8 +767,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             }
         };
 
-        tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_publish")
-            .in_scope(|| prepared.commit(committed.offset));
+        prepared.commit(committed.offset);
         self.last_frame.store(committed.offset, Ordering::Relaxed);
         tracing::debug!(
             path = %self.path.display(),
@@ -828,23 +778,19 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             "DiskJournal appended atomic group frame"
         );
 
-        async {
-            {
-                let mut index = self.index.write().await;
-                for record in &envelopes {
-                    index.insert(record.id().as_ulid(), committed.offset);
-                }
+        {
+            let mut index = self.index.write().await;
+            for record in &envelopes {
+                index.insert(record.id().as_ulid(), committed.offset);
             }
-            *self.last_commit.write().await = next_last_commit;
-            self.observations.committed(
-                &envelopes,
-                committed.offset,
-                committed.next_offset,
-                observation_crc,
-            );
         }
-        .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_publish"))
-        .await;
+        *self.last_commit.write().await = next_last_commit;
+        self.observations.committed(
+            &envelopes,
+            committed.offset,
+            committed.next_offset,
+            observation_crc,
+        );
 
         Ok(envelopes)
     }
@@ -870,12 +816,6 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         self.observability.configure(config.observability)
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_append",
-        skip_all
-    )]
     async fn storage_append(
         &self,
         event: T,
@@ -895,12 +835,6 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         .await
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_append",
-        skip_all
-    )]
     async fn storage_append_group(
         &self,
         group_id: &str,
@@ -919,12 +853,6 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         .await
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_read_all",
-        skip_all
-    )]
     async fn storage_read_all_unordered(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -938,9 +866,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         // append cannot be observed mid-frame, and scan with sealed/full-scan
         // policy so corruption fails loud instead of silently shortening the
         // causally-ordered snapshot derived from this enumeration.
-        let _read_guard = self.read_write_lock.read()
-            .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_reader_lock_wait"))
-            .await;
+        let _read_guard = self.read_write_lock.read().await;
 
         let file = File::open(&self.path)
             .await
@@ -995,12 +921,6 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         Ok(events)
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_read_event",
-        skip_all
-    )]
     async fn storage_read_event(
         &self,
         event_id: &EventId,
@@ -1021,9 +941,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
 
         // Keep direct reads under the same journal read lock as full scans. Drop
         // the index lock first so read_event never holds both locks with append.
-        let _read_guard = self.read_write_lock.read()
-            .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_reader_lock_wait"))
-            .await;
+        let _read_guard = self.read_write_lock.read().await;
 
         // Read from file at specific offset
         let mut file = File::open(&self.path)
@@ -1124,12 +1042,6 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         self.observations.metrics_tail().await
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_read_tail",
-        skip_all
-    )]
     async fn storage_read_last_n(
         &self,
         count: usize,
@@ -1141,9 +1053,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         }
 
         // Acquire read lock to prevent torn reads
-        let _read_guard = self.read_write_lock.read()
-            .instrument(tracing::debug_span!(target: "obzenflow::performance", "disk_journal_reader_lock_wait"))
-            .await;
+        let _read_guard = self.read_write_lock.read().await;
 
         let mut file = File::open(&self.path)
             .await

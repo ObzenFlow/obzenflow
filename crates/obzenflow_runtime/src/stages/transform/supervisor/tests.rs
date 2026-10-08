@@ -47,8 +47,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_test::{assert_pending, assert_ready};
 
-#[path = "performance_tests.rs"]
-mod performance;
+#[path = "deferred_ack_tests.rs"]
+mod deferred_ack;
 
 async fn build_cycle_entry_harness<
     H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,

@@ -1151,7 +1151,6 @@ pub(crate) fn complete_filtered_data_rows(
 
     if let Some(reader) = readers.get(&upstream) {
         reader.ack_consumed(completed_data_rows);
-        crate::supervised_base::loop_timing::acknowledgements(completed_data_rows);
     } else {
         tracing::warn!(
             ?upstream,

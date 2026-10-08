@@ -128,6 +128,7 @@ struct Executable {
     path: PathBuf,
     compiled_manifest_dir: PathBuf,
     sha256: String,
+    census: Option<Box<Executable>>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -344,10 +345,14 @@ fn validate_workloads(
     ] {
         let census = directory.join(format!("{label}.work.json"));
         let status = process::execute(
-            process::command(root, tools, &binary.path)
-                .env("OBZENFLOW_WORK_CENSUS", &census)
-                .env_remove("OBZENFLOW_BENCH_CONTROL")
-                .arg("--test"),
+            process::command(
+                root,
+                tools,
+                &binary.census.as_deref().unwrap_or(binary).path,
+            )
+            .env("OBZENFLOW_WORK_CENSUS", &census)
+            .env_remove("OBZENFLOW_BENCH_CONTROL")
+            .arg("--test"),
             directory,
             label,
             Duration::from_secs(tools.command_watchdog_seconds),
@@ -532,7 +537,21 @@ fn build(
     // A later build must never replace a binary whose samples are retained.
     let preserved = directory.join(format!("{label}.executable"));
     fs::copy(executables.into_iter().next().unwrap(), &preserved)?;
+    let census = if target == "journal_hot_path" && !features.contains("allocation-census") {
+        Some(Box::new(build(
+            root,
+            source,
+            target_directory,
+            tools,
+            directory,
+            &format!("{label}-census"),
+            (target, "journal-benchmarks,allocation-census"),
+        )?))
+    } else {
+        None
+    };
     let executable = Executable {
+        census,
         sha256: driver::sha256(&fs::read(&preserved)?),
         path: preserved,
         compiled_manifest_dir: source.join("crates/obzenflow_benchmarks"),
@@ -557,8 +576,12 @@ fn measure(
     fs::create_dir(&artifacts)?;
     let census = artifacts.join("work.json");
     let mut command = process::command(root, tools, &binary.path);
+    if binary.census.is_none() {
+        command.env("OBZENFLOW_WORK_CENSUS", &census);
+    } else {
+        command.env_remove("OBZENFLOW_WORK_CENSUS");
+    }
     command
-        .env("OBZENFLOW_WORK_CENSUS", &census)
         .env("CRITERION_HOME", root.join("target/criterion"))
         .env_remove("OBZENFLOW_BENCH_CONTROL")
         .env("RUST_LOG", "warn")
@@ -590,6 +613,29 @@ fn measure(
         return Err(failed(format!(
             "{label}: Criterion rejected the workload or could not complete it"
         )));
+    }
+    // Allocation atomics are excluded from the timing executable. Qualify the
+    // same selected operation separately through its existing output oracle.
+    if let Some(instrumented) = &binary.census {
+        let mut command = process::command(root, tools, &instrumented.path);
+        command
+            .env("OBZENFLOW_WORK_CENSUS", &census)
+            .env_remove("OBZENFLOW_BENCH_CONTROL")
+            .args(["--test", &policy.filter()]);
+        if let Some(control) = control {
+            command.env("OBZENFLOW_BENCH_CONTROL", control);
+        }
+        let status = process::execute(
+            &mut command,
+            &artifacts,
+            "census",
+            Duration::from_secs(tools.command_watchdog_seconds),
+        )?;
+        if !status.success() {
+            return Err(failed(format!(
+                "{label}: separate census rejected the workload"
+            )));
+        }
     }
     let mut work = read_work(&census, binary)?;
     let expected: BTreeSet<_> = policy.cases.iter().cloned().collect();
@@ -784,6 +830,7 @@ mod tests {
         let binary = Executable {
             path: PathBuf::new(),
             compiled_manifest_dir: PathBuf::from("/candidate"),
+            census: None,
             sha256: String::new(),
         };
         let mut census = json!({

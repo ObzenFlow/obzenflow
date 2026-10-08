@@ -45,7 +45,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::Instrument;
 
 type FlowHandleHook =
     Box<dyn Fn(&Arc<FlowHandle>) -> Result<JoinHandle<()>, ApplicationError> + Send + Sync>;
@@ -589,11 +588,7 @@ impl FlowApplication {
         mut params: LaunchParams,
     ) -> Result<(), ApplicationError> {
         let diagnostics = std::mem::take(&mut params.diagnostics);
-        let result = Self::launch_inner(flow, params)
-            .instrument(
-                tracing::debug_span!(target: "obzenflow::performance", "application_launch"),
-            )
-            .await;
+        let result = Self::launch_inner(flow, params).await;
         diagnostics.finish(result).await
     }
 
@@ -711,7 +706,6 @@ impl FlowApplication {
                         replay.archive_path,
                         replay.allow_incomplete_archive,
                     )
-                    .instrument(tracing::debug_span!(target: "obzenflow::performance", "application_replay_open"))
                     .await
                     .map_err(|e| {
                         ApplicationError::InvalidConfiguration(format!(
@@ -758,13 +752,7 @@ impl FlowApplication {
                 Some(exporter) => build_context.with_metrics_exporter(exporter),
                 None => build_context,
             };
-            let flow_handle = match flow
-                .build(build_context)
-                .instrument(
-                    tracing::debug_span!(target: "obzenflow::performance", "application_build"),
-                )
-                .await
-            {
+            let flow_handle = match flow.build(build_context).await {
                 Ok(handle) => handle,
                 Err(failure) => {
                     // FLOWIP-120u F2: the failure carrier holds substrate state; None
@@ -1093,12 +1081,6 @@ impl FlowApplication {
     /// replay run against the source archive it replayed and maps the verdict
     /// onto the exit-code contract (`Ok(())` is exit 0, the fully certified
     /// match; codes 1/2/3 travel as `ApplicationError::Verification`).
-    #[tracing::instrument(
-        skip_all,
-        level = "debug",
-        target = "obzenflow::performance",
-        name = "application_replay_verify"
-    )]
     async fn run_post_replay_verification(
         baseline: PathBuf,
         candidate: Option<PathBuf>,
@@ -1127,24 +1109,8 @@ impl FlowApplication {
         }
 
         let options = crate::verify::VerifyOptions::default();
-        let diagnostic_parent =
-            tracing::span_enabled!(target: "obzenflow::performance", tracing::Level::DEBUG).then(
-                || {
-                    (
-                        tracing::Span::current(),
-                        tracing::dispatcher::get_default(Clone::clone),
-                    )
-                },
-            );
         let outcome = tokio::task::spawn_blocking(move || {
-            let verify = || crate::verify::verify_run_dirs(&baseline, &candidate, &options);
-            match diagnostic_parent {
-                Some((parent, dispatch)) => tracing::dispatcher::with_default(&dispatch, || {
-                    tracing::debug_span!(target: "obzenflow::performance", parent: &parent, "application_replay_verify_work")
-                        .in_scope(verify)
-                }),
-                None => verify(),
-            }
+            crate::verify::verify_run_dirs(&baseline, &candidate, &options)
         })
         .await
         .map_err(|err| ApplicationError::Other(Box::new(err)))?

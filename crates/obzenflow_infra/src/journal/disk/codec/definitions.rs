@@ -39,8 +39,7 @@ struct FileStamp {
 
 impl FileStamp {
     fn read(path: &Path) -> Result<Self> {
-        let metadata = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_metadata")
-            .in_scope(|| std::fs::symlink_metadata(path))?;
+        let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.is_file() {
             return Err(invalid("definition carrier must be a regular archive file"));
         }
@@ -71,14 +70,12 @@ impl FileStamp {
 struct CachedDefinition {
     definition: Definition,
     stamp: Option<FileStamp>,
-    decoded: Option<Arc<Value>>,
 }
 
 #[derive(Default)]
 struct Cache {
     by_value: HashMap<Definition, Locator>,
     by_location: HashMap<Locator, CachedDefinition>,
-    decoded: HashMap<Definition, Arc<Value>>,
     bytes: usize,
 }
 
@@ -106,54 +103,9 @@ impl Cache {
         if !self.reserve(charge) {
             return;
         }
-        // Look up after reserve: eviction may have released the decoded budget.
-        let decoded = self.decoded.get(&definition).cloned();
         self.by_value.insert(definition.clone(), locator.clone());
-        self.by_location.insert(
-            locator,
-            CachedDefinition {
-                definition,
-                stamp,
-                decoded,
-            },
-        );
-    }
-
-    fn retain_decoded(&mut self, definition: &Definition, value: Arc<Value>) -> Arc<Value> {
-        if let Some(prior) = self.decoded.get(definition) {
-            return Arc::clone(prior);
-        }
-        let charge = definition
-            .body
-            .len()
-            .saturating_add(decoded_heap_charge(&value))
-            .saturating_add(512);
-        if self.reserve(charge) {
-            self.decoded.insert(definition.clone(), Arc::clone(&value));
-        }
-        value
-    }
-}
-
-/// Conservative retained-heap charge, computed once on a decoded-cache miss.
-/// A full KiB per map entry covers even a sparsely occupied B-tree node;
-/// string/array capacities and nested containers are charged separately.
-fn decoded_heap_charge(value: &Value) -> usize {
-    match value {
-        Value::String(value) => value.capacity(),
-        Value::Array(values) => values.iter().fold(
-            values
-                .capacity()
-                .saturating_mul(std::mem::size_of::<Value>()),
-            |charge, value| charge.saturating_add(decoded_heap_charge(value)),
-        ),
-        Value::Object(values) => values.iter().fold(0usize, |charge, (key, value)| {
-            charge
-                .saturating_add(1024)
-                .saturating_add(key.capacity())
-                .saturating_add(decoded_heap_charge(value))
-        }),
-        _ => 0,
+        self.by_location
+            .insert(locator, CachedDefinition { definition, stamp });
     }
 }
 
@@ -165,8 +117,7 @@ impl DefinitionStore {
         type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Cache>>>>;
         static REGISTRY: OnceLock<Registry> = OnceLock::new();
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let key = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_archive_canonicalize")
-            .in_scope(|| std::fs::canonicalize(parent))
+        let key = std::fs::canonicalize(parent)
             .unwrap_or_else(|_| std::path::absolute(parent).unwrap_or_else(|_| parent.into()));
         let mut registry = REGISTRY
             .get_or_init(Mutex::default)
@@ -189,37 +140,7 @@ impl DefinitionStore {
     }
 
     fn decode(&self, definition: &Definition) -> Result<Arc<Value>> {
-        if let Some(value) = self
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .decoded
-            .get(definition)
-            .cloned()
-        {
-            return Ok(value);
-        }
-        // Decode outside the archive lock. The key includes all encoded bytes,
-        // so this memoisation grants no authority to a stale file locator.
-        let value = Arc::new(decode_definition(definition)?);
-        Ok(self
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain_decoded(definition, value))
-    }
-
-    fn link_decoded(&self, locator: &Locator, definition: &Definition) {
-        let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        // Only link values already charged to this cache. An oversized value
-        // or an eviction must not leave unbudgeted decoded data at a locator.
-        if let Some(decoded) = cache.decoded.get(definition).cloned() {
-            if let Some(entry) = cache.by_location.get_mut(locator) {
-                if entry.definition == *definition {
-                    entry.decoded = Some(decoded);
-                }
-            }
-        }
+        Ok(Arc::new(decode_definition(definition)?))
     }
 }
 
@@ -442,12 +363,6 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         (counts, bytes, references)
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "disk_journal_definition_resolve",
-        skip_all
-    )]
     fn definition(&mut self, kind: DefinitionKind, locator: &Locator) -> Result<Arc<Value>> {
         if locator.journal == self.journal && locator.offset >= self.offset {
             return Err(invalid(
@@ -485,41 +400,30 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
                 .as_ref()
                 .is_some_and(|prior| stamp.preserves(prior))
             {
-                if let Some(decoded) = cached.decoded {
-                    return Ok(decoded);
-                }
-                let decoded = self.store.decode(&cached.definition)?;
-                self.store.link_decoded(locator, &cached.definition);
-                return Ok(decoded);
+                return self.store.decode(&cached.definition);
             }
         }
         // No aliases out of the archive through symlinks, even with a valid basename.
-        let archive = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_archive_canonicalize")
-            .in_scope(|| std::fs::canonicalize(self.path.parent().unwrap_or_else(|| Path::new("."))))?;
-        let canonical = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_archive_canonicalize")
-            .in_scope(|| std::fs::canonicalize(&path))?;
+        let archive = std::fs::canonicalize(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
+        let canonical = std::fs::canonicalize(&path)?;
         if canonical.parent() != Some(archive.as_path()) {
             return Err(invalid("definition escapes the archive"));
         }
-        let bytes = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_file_read")
-            .in_scope(|| -> Result<Vec<u8>> {
-                let mut file = std::fs::File::open(path)?;
-                file.seek(SeekFrom::Start(locator.offset))?;
-                let mut header = [0u8; frame::HEADER_LEN];
-                file.read_exact(&mut header)?;
-                let length = frame::frame_length(&header).map_err(frame::io_error)?;
-                let remaining = tracing::debug_span!(target: "obzenflow::performance", "disk_journal_definition_metadata")
-                    .in_scope(|| file.metadata())?
-                    .len()
-                    .saturating_sub(locator.offset);
-                if length as u64 > remaining {
-                    return Err(invalid("definition carrier is uncommitted"));
-                }
-                let mut bytes = header.to_vec();
-                file.take((length - frame::HEADER_LEN) as u64)
-                    .read_to_end(&mut bytes)?;
-                Ok(bytes)
-            })?;
+        let bytes = {
+            let mut file = std::fs::File::open(path)?;
+            file.seek(SeekFrom::Start(locator.offset))?;
+            let mut header = [0u8; frame::HEADER_LEN];
+            file.read_exact(&mut header)?;
+            let length = frame::frame_length(&header).map_err(frame::io_error)?;
+            let remaining = file.metadata()?.len().saturating_sub(locator.offset);
+            if length as u64 > remaining {
+                return Err(invalid("definition carrier is uncommitted"));
+            }
+            let mut bytes = header.to_vec();
+            file.take((length - frame::HEADER_LEN) as u64)
+                .read_to_end(&mut bytes)?;
+            bytes
+        };
         let body = frame::validate(&bytes).map_err(frame::io_error)?;
         let envelope = super::routing::Envelope::parse(body)?;
         let mut cursor = Cursor::new(envelope.definitions);
@@ -536,11 +440,6 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         // Several requested definitions usually share one carrier. Validate
         // and cache its complete local bodies together, without following any
         // of that carrier's references or materialising its event history.
-        for entry in &entries {
-            if let Entry::Local(definition) = entry {
-                self.store.decode(definition)?;
-            }
-        }
         for (slot, entry) in entries.into_iter().enumerate() {
             if let Entry::Local(definition) = entry {
                 self.store.publish(
@@ -747,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn decoded_definitions_are_shared_across_frames_without_sharing_mutable_values() {
+    fn definitions_preserve_distinct_frame_sequences() {
         let store = DefinitionStore::default();
         let path = Path::new("shared.log");
         let mut writer = WriteTable::new(store.clone(), path).unwrap();
@@ -770,7 +669,7 @@ mod tests {
         let second_keys = second
             .resolve(DefinitionKind::ClockKeys, &mut Cursor::new(&ordinal))
             .unwrap();
-        assert!(Arc::ptr_eq(&first_keys, &second_keys));
+        assert_eq!(first_keys, second_keys);
         for (table, sequence) in [(&mut first, 1), (&mut second, 9)] {
             let mut bytes = ordinal.clone();
             unsigned(sequence, &mut bytes);
@@ -787,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn a_decoded_value_over_the_cache_budget_is_returned_without_retention() {
+    fn decoded_values_do_not_consume_the_encoded_definition_budget() {
         let store = DefinitionStore::default();
         let value = Value::String("x".repeat(CACHE_BYTES / 2 + 1024));
         let mut body = Vec::new();
@@ -805,12 +704,12 @@ mod tests {
         assert!(definition.body.len() < CACHE_BYTES);
         assert_eq!(store.decode(&definition).unwrap().as_ref(), &value);
         let cache = store.0.lock().unwrap();
-        assert!(cache.decoded.is_empty());
+        assert!(cache.by_value.is_empty());
+        assert!(cache.by_location.is_empty());
         assert_eq!(cache.bytes, 0);
         drop(cache);
 
-        // A decoded value can fit by itself but be evicted when its locator is
-        // published. The locator must not retain it outside the decoded budget.
+        // Publishing a locator charges only its encoded definition.
         let mut body = Vec::new();
         text(&"y".repeat(CACHE_BYTES / 3), &mut body);
         let definition = Definition {
@@ -818,7 +717,7 @@ mod tests {
             body: body.into(),
         };
         store.decode(&definition).unwrap();
-        assert_eq!(store.0.lock().unwrap().decoded.len(), 1);
+        assert_eq!(store.0.lock().unwrap().bytes, 0);
         let locator = Locator {
             journal: "bounded.log".into(),
             offset: 0,
@@ -826,8 +725,7 @@ mod tests {
         };
         store.publish(definition, locator.clone(), None);
         let cache = store.0.lock().unwrap();
-        assert!(cache.decoded.is_empty());
-        assert!(cache.by_location[&locator].decoded.is_none());
+        assert!(cache.by_location.contains_key(&locator));
         assert!(cache.bytes <= CACHE_BYTES);
     }
 

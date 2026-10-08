@@ -7,6 +7,7 @@ mod append;
 mod control;
 mod dispatch;
 mod record;
+mod workloads;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::time::Duration;
@@ -15,14 +16,22 @@ use obzenflow_benchmarks::support;
 pub(crate) use support::{journal as fixtures, measure, timed, Census, Meter, Sample};
 
 #[global_allocator]
+#[cfg(feature = "allocation-census")]
 static ALLOCATOR: support::allocations::Allocator = support::allocations::Allocator;
 
 fn bench(c: &mut Criterion) {
     let runtime = fixtures::runtime();
     let mut censuses = Vec::new();
+    workloads::bench(c, &runtime, &mut censuses);
     record::bench(c, &runtime, &mut censuses);
     dispatch::bench(c, &runtime, &mut censuses);
     append::bench(c, &runtime, &mut censuses);
+    #[cfg(not(feature = "allocation-census"))]
+    assert!(
+        std::env::var_os("OBZENFLOW_WORK_CENSUS").is_none(),
+        "allocation census requires --features allocation-census; run separately from timing"
+    );
+    #[cfg(feature = "allocation-census")]
     if let Ok(path) = std::env::var("OBZENFLOW_WORK_CENSUS") {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -30,6 +39,7 @@ fn bench(c: &mut Criterion) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let report = serde_json::json!({
             "measurement_contract": support::MEASUREMENT_CONTRACT,
+            // Local validator source-identity check; omit this from shared summaries.
             "compiled_manifest_dir": env!("CARGO_MANIFEST_DIR"),
             "cases": censuses,
         });

@@ -38,7 +38,6 @@
 //! its compatibility append until typed outcome facts replace it.
 
 use crate::messaging::DeliveredRecord;
-use crate::supervised_base::loop_timing::{self, Phase};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::journal::AppendOptions;
 use std::sync::Arc;
@@ -396,7 +395,6 @@ impl OutputCommitter<'_> {
         parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
-        let _publish = loop_timing::phase(Phase::Publish);
         let intent = if event.consumes_data_credit() {
             StageAppendIntent::NormalStageData
         } else if is_framework_middleware_observability_event(&event) {
@@ -418,7 +416,6 @@ impl OutputCommitter<'_> {
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
-        let _publish = loop_timing::phase(Phase::Publish);
         let owned = self.owned();
         let parent = parent.cloned();
         crate::supervised_base::publication::commit(async move {
@@ -479,12 +476,6 @@ impl OutputCommitter<'_> {
         Ok(written)
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "output_commit_reserved",
-        skip_all
-    )]
     pub(crate) async fn commit_reserved_prebuilt(
         &self,
         event: ChainEvent,
@@ -492,7 +483,6 @@ impl OutputCommitter<'_> {
         options: CommitOptions,
         reservation: BackpressureReservation,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
-        let _publish = loop_timing::phase(Phase::Publish);
         let owned = self.owned();
         let parent = parent.cloned();
         crate::supervised_base::publication::commit(async move {
@@ -543,7 +533,6 @@ impl OutputCommitter<'_> {
         event: ChainEvent,
         parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
-        let _publish = loop_timing::phase(Phase::Publish);
         let owned = self.owned();
         let parent = parent.cloned();
         crate::supervised_base::publication::commit(async move {
@@ -642,7 +631,6 @@ impl OutputCommitter<'_> {
         entries: Vec<AtomicCommitEntry>,
         parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
-        let _publish = loop_timing::phase(Phase::Publish);
         let owned = self.owned();
         let parent = parent.cloned();
         let group_id = group_id.to_owned();
@@ -755,12 +743,6 @@ impl OutputCommitter<'_> {
         Ok(written)
     }
 
-    #[tracing::instrument(
-        target = "obzenflow::performance",
-        level = "debug",
-        name = "output_prepare",
-        skip_all
-    )]
     async fn prepare_prebuilt_with_intent(
         &self,
         event: ChainEvent,

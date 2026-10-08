@@ -56,32 +56,23 @@ pub(crate) enum Disposition<R: JournalEvent> {
 
 /// The decoder only runs after the whole carrier passes framing and CRC checks.
 /// Definitions are resolved directly from committed frames in the same archive.
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "disk_journal_frame_classify",
-    skip_all
-)]
 pub(crate) fn classify_frame<R: JournalEvent>(
     bytes: &[u8],
     decoder: &mut Decoder,
     offset: u64,
 ) -> ParseOutcome<R> {
-    let body =
-        match tracing::debug_span!(target: "obzenflow::performance", "disk_journal_frame_validate")
-            .in_scope(|| frame::validate(bytes))
-        {
-            Ok(body) => body,
-            Err(frame::FrameProblem::Incomplete(message)) => {
-                return ParseOutcome::Incomplete(ParseProblem::Invalid(message))
-            }
-            Err(frame::FrameProblem::SchemaMismatch) => {
-                return ParseOutcome::Corrupt(ParseProblem::SchemaMismatch)
-            }
-            Err(frame::FrameProblem::Corrupt(message)) => {
-                return ParseOutcome::Corrupt(ParseProblem::Invalid(message))
-            }
-        };
+    let body = match frame::validate(bytes) {
+        Ok(body) => body,
+        Err(frame::FrameProblem::Incomplete(message)) => {
+            return ParseOutcome::Incomplete(ParseProblem::Invalid(message))
+        }
+        Err(frame::FrameProblem::SchemaMismatch) => {
+            return ParseOutcome::Corrupt(ParseProblem::SchemaMismatch)
+        }
+        Err(frame::FrameProblem::Corrupt(message)) => {
+            return ParseOutcome::Corrupt(ParseProblem::Invalid(message))
+        }
+    };
     match decoder.decode::<R>(body, offset) {
         Ok(record) => ParseOutcome::Complete(record),
         Err(error) => ParseOutcome::Corrupt(ParseProblem::Invalid(error.to_string())),
@@ -117,12 +108,6 @@ pub(crate) fn dispose<R: JournalEvent>(
 
 /// Read incrementally rather than allocating the untrusted declared length.
 /// Invalid headers are handed to the classifier without following their length.
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "disk_journal_buffered_read_sync",
-    skip_all
-)]
 pub(crate) fn read_frame_sync<B: std::io::BufRead>(
     reader: &mut B,
     buf: &mut Vec<u8>,
@@ -149,12 +134,6 @@ pub(crate) fn read_frame_sync<B: std::io::BufRead>(
     Ok(Some((buf.len(), FrameTermination::Incomplete)))
 }
 
-#[tracing::instrument(
-    target = "obzenflow::performance",
-    level = "debug",
-    name = "disk_journal_buffered_read_async",
-    skip_all
-)]
 pub(crate) async fn read_frame_async<B: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut B,
     buf: &mut Vec<u8>,

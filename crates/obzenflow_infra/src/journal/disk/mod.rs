@@ -12,7 +12,6 @@ pub mod journal;
 pub mod log_record;
 pub(crate) mod manifest_gate;
 pub mod observations;
-mod performance;
 pub mod reader;
 pub mod replay_archive;
 mod reverse_reader;

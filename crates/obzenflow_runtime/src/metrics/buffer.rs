@@ -5,16 +5,12 @@
 //! Journal tail -> overwrite slots -> independently scheduled publisher.
 
 use super::fsm::{MetricsAggregatorContext, MetricsJournalKind};
-use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::vocabulary::supervisor::METRICS_NAME;
 use obzenflow_core::event::{ChainPayload, JournalEvent, PipelineLifecycleEvent, SystemPayload};
 use obzenflow_core::{Journal, JournalId, JournalRecord, StageId, WriterId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
-use tracing::instrument::WithSubscriber;
-use tracing::Instrument;
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -84,8 +80,6 @@ impl TailReaders {
                 readers.spawn(
                     journal.clone(),
                     ctx.metrics_store.buffer.clone(),
-                    ctx.system_id.into(),
-                    Some(kind),
                     move |buffer_state, records| {
                         buffer_state.stage_records.insert((stage, kind), records);
                     },
@@ -95,8 +89,6 @@ impl TailReaders {
         readers.spawn(
             ctx.system_journal.clone(),
             ctx.metrics_store.buffer.clone(),
-            ctx.system_id.into(),
-            None,
             |buffer_state, records| buffer_state.system_records = records,
         );
         readers
@@ -106,32 +98,11 @@ impl TailReaders {
         &mut self,
         journal: Arc<dyn Journal<T>>,
         buffer: Arc<MetricsBuffer>,
-        writer_id: WriterId,
-        journal_kind: Option<MetricsJournalKind>,
         replace_records: impl Fn(&mut MetricsBufferSnapshot, Arc<[JournalRecord<T::Payload>]>)
             + Send
             + 'static,
     ) {
-        let diagnostics =
-            tracing::span_enabled!(target: "obzenflow::performance", tracing::Level::DEBUG).then(
-                || {
-                    let journal_kind = match journal_kind {
-                        Some(MetricsJournalKind::Data) => "data",
-                        Some(MetricsJournalKind::Error) => "error",
-                        None => "system",
-                    };
-                    // Readers outlive the startup action and run concurrently with
-                    // the supervisor. Their independent root must not charge read
-                    // lifetimes to that action or its assigned FSM state.
-                    let span = tracing::debug_span!(target: "obzenflow::performance",
-                    parent: None, "metrics_tail_reader",
-                    supervisor = METRICS_NAME,
-                    supervisor_kind = ?SupervisorKind::MetricsAggregator,
-                    %writer_id, supervision_mode = "self_supervised", journal_kind);
-                    (span, tracing::dispatcher::get_default(Clone::clone))
-                },
-            );
-        let work = async move {
+        self.0.spawn(async move {
             let mut interval = tokio::time::interval(REFRESH_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -145,21 +116,11 @@ impl TailReaders {
                             replace_records(&mut buffer_state, records.into());
                         }
                         Ok(_) => {}
-                        Err(error) => {
-                            tracing::debug!(journal_id = %journal.id(), %error, "Metrics tail unavailable; retaining buffered records")
-                        }
+                        Err(error) => tracing::debug!(journal_id = %journal.id(), %error, "Metrics tail unavailable; retaining buffered records"),
                     }
-                    buffer_state
-                        .refreshed_at_by_journal
-                        .insert(*journal.id(), started);
+                    buffer_state.refreshed_at_by_journal.insert(*journal.id(), started);
                 }
                 buffer.updated.notify_one();
-            }
-        };
-        self.0.spawn(async move {
-            match diagnostics {
-                Some((span, dispatch)) => work.instrument(span).with_subscriber(dispatch).await,
-                None => work.await,
             }
         });
     }

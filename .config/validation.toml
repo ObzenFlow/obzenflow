@@ -50,6 +50,11 @@ test = "prometheus_measurement::measure_retained_prometheus_archive"
 owner = "manual FLOWIP-080n retained-archive measurement; requires explicit archive and input count, outside required acceptance"
 
 [[ignored]]
+binary = "obzenflow::prometheus_example_test"
+test = "prometheus_measurement::measure_demo_process_completion"
+owner = "manual FLOWIP-080n separate demo integration check; built example and explicit result path required, not Criterion timing evidence"
+
+[[ignored]]
 binary = "obzenflow::product_catalog_enrichment"
 test = "explicit_join_topology_current_schema_live_replay_and_rejected_control"
 owner = "intentional manual rate-limited example proof, outside required acceptance"
@@ -71,13 +76,6 @@ owner = "real_nextest_leaks_fail_acceptance_with_identity independent completion
 
 # FLOWIP-145i B10: audited case prerequisites, independent of scheduling groups.
 # Lanes identify applicable inventories only. Undeclared cases are not certified hermetic.
-
-[[prerequisites]]
-binary = "obzenflow_infra"
-test = "journal::disk::performance::tests::disk_read_write_and_codec_keep_ancestry_across_tasks"
-lanes = ["default","production-features","test-support"]
-capabilities = ["temp-files"]
-rationale = "Real disk append/read in an owned temporary directory proves nested span ancestry through retained commits and blocking work."
 
 [[prerequisites]]
 binary = "obzenflow_infra::supervision_journals"
@@ -686,7 +684,7 @@ binary = "obzenflow::prometheus_example_test"
 test = "managed_lifecycle_regressions::prometheus_example_5k_completes_without_reporting"
 lanes = ["production-features"]
 capabilities = ["target-files"]
-rationale = "Unhosted or pre-bind admission assertions require only unique target-directory configuration and journal fixtures."
+rationale = "Unhosted 5k live execution and current-schema replay verify the complete cohort and summary receipt using unique target-directory fixtures."
 
 [[prerequisites]]
 binary = "obzenflow::prometheus_example_test"
