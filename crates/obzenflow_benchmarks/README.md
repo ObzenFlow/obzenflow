@@ -138,20 +138,11 @@ window. The required gate has its own sampling policy. Compare identical
 profiles, contracts, dimensions and runtime limits; run timings without concurrent
 builds or tests. Test-profile and optimised bench-profile results are separate.
 
-Raw samples live under `target/criterion`; required-gate artifacts live under
-`target/test-runs`. The capture utility preserves existing samples without
-performing measurements:
-
-```sh
-python3 crates/obzenflow_benchmarks/scripts/capture_component_baseline.py --help
-```
-
-Full component captures require 23 cases; hot-path captures use the count in
-`.config/performance.toml` and a matching `--work-json` census. For a declared
-investigation subset, repeat `--case <exact-name>` for every required case. The
-capture rejects absent cases and records the selection explicitly. Shared captures
-omit the local compile-time directory. Old capacity captures remain historical artefacts.
-Use `--suite flows` to capture all six `pipeline_throughput` Criterion cases.
+Criterion writes its HTML reports, raw samples and statistical estimates under
+`target/criterion`; open `target/criterion/report/index.html` for the report.
+Use `--save-baseline <name>` to retain a named baseline and `--baseline <name>`
+to compare a later run of the same cases and build profile against it.
+Required-gate artifacts live under `target/test-runs`.
 
 ## Policies
 
