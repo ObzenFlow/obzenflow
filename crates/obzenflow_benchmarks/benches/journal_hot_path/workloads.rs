@@ -3,6 +3,9 @@
 // https://obzenflow.dev
 
 //! Codec-independent workloads derived from the 080n native CPU profile.
+mod fresh_process;
+pub(super) use fresh_process::run_child;
+
 use super::{fixtures, measure, timed, Census};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::event::journal_record::ChainJournalRecord;
@@ -335,6 +338,7 @@ pub fn bench(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
             sample.completed("complete_records", RECORDS as u64);
             sample
         }));
+    fresh_process::bench(&mut group, rt, censuses);
     group.finish();
     cross_journal_reads(c, rt, censuses);
     observations(c, rt, censuses);

@@ -1,11 +1,11 @@
 # FLOWIP-080n extends ordinary-operation validity coverage and separates allocation
 # census binaries from timing; selected timing cases and thresholds stay fixed.
 # FLOWIP-145i B8: public-operations-v1, without framework instrumentation.
-# All 74 public-operation validity cases are required on both implementations.
+# All 75 public-operation validity cases are required on both implementations.
 # This contract measures median sampled time, not a tail-latency SLO.
 version = 4
 baseline_revision = "854c04bab261477ad4bec813369244e84f2ffb20"
-hot_path_validity_cases = 74
+hot_path_validity_cases = 75
 statistic = "median"
 sample_size = 40
 warm_up_ms = 1000
@@ -24,7 +24,7 @@ cases = [
     "journal_append_cost/complete_append/ordinary_business_64",
     "journal_append_cost/complete_append/large_business_64",
 ]
-# Single-reader dispatch and grouped append remain in the 74 required validity
+# Single-reader dispatch and grouped append remain in the 75 required validity
 # cases and the ordinary Criterion suite. Their short operations did not qualify
 # for stable timing gates; preserved trials exceeded the same precision/drift
 # rules. The selected timing gate covers 8/32-reader work and ordinary/large

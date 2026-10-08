@@ -63,7 +63,7 @@ unsafe impl GlobalAlloc for Allocator {
 }
 
 pub(super) struct Start(u64);
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Work {
     pub allocation_and_reallocation_calls: u64,
     pub requested_allocation_bytes: u64,

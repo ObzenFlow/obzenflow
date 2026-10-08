@@ -9,7 +9,7 @@ mod dispatch;
 mod record;
 mod workloads;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, Criterion};
 use std::time::Duration;
 
 use obzenflow_benchmarks::support;
@@ -53,4 +53,11 @@ criterion_group! {
         .warm_up_time(Duration::from_millis(300)).measurement_time(Duration::from_secs(1));
     targets = bench
 }
-criterion_main!(benches);
+fn main() {
+    // Dispatch before Criterion or any fixture can open an archive in this process.
+    if workloads::run_child() {
+        return;
+    }
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}

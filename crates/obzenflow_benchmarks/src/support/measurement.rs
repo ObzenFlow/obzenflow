@@ -52,6 +52,7 @@ impl Meter {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Sample {
     pub elapsed: Duration,
     pub work: BTreeMap<String, u64>,
