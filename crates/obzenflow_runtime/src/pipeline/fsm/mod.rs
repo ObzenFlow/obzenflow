@@ -124,6 +124,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineFsmState) -> Pipe
         }
         state PipelineFsmState::CancellingChildren {
             on PipelineFsmEvent::PhaseSatisfied => transitions::children_settled;
+            on PipelineFsmEvent::GracefulStopExpired => transitions::stop;
             on PipelineFsmEvent::StageCleanupExpired => transitions::expire_children;
             on PipelineFsmEvent::ChildExited => transitions::child_exited;
             on PipelineFsmEvent::ChildFailed => transitions::failure;

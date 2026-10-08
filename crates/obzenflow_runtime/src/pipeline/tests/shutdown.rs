@@ -558,43 +558,68 @@ pub async fn expired_graceful_stop_aborts_and_joins_without_a_fresh_cleanup_budg
         startup_mode: StartupMode::Auto,
         ..Default::default()
     });
-    let mut journals = make_journals();
-    let system_id = SystemId::new();
-    let journal = new_system_journal(&mut *journals, system_id);
-    let (topology, source, sink) = source_sink_topology_with_source();
-    let mut ctx = test_context(topology, system_id, journal.clone());
-    let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
-    let mut source_handle =
-        owned_test_stage(source, StageType::InfiniteSource, Some(probes[0].clone()));
-    source_handle.stall_drain = true;
-    ctx.source_supervisors
-        .insert(source, Arc::new(source_handle));
-    ctx.stage_supervisors.insert(
-        sink,
-        Arc::new(owned_test_stage(
+    for during_startup in [false, true] {
+        let mut journals = make_journals();
+        let system_id = SystemId::new();
+        let journal = new_system_journal(&mut *journals, system_id);
+        let (topology, source, sink) = source_sink_topology_with_source();
+        let mut ctx = test_context(topology, system_id, journal.clone());
+        let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
+        let source_type = if during_startup {
+            StageType::FiniteSource
+        } else {
+            StageType::InfiniteSource
+        };
+        let mut source_handle = owned_test_stage(source, source_type, Some(probes[0].clone()));
+        source_handle.stall_drain = true;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+        if during_startup {
+            source_handle.start_gate = Some(StartGate {
+                entered: std::sync::Mutex::new(Some(entered_tx)),
+                release: tokio::sync::Mutex::new(Some(release_rx)),
+                count: Default::default(),
+            });
+        }
+        ctx.source_supervisors
+            .insert(source, Arc::new(source_handle));
+        ctx.stage_supervisors.insert(
             sink,
-            StageType::Sink,
-            Some(probes[1].clone()),
-        )),
-    );
-    let (sender, receiver, watcher) = ChannelBuilder::new().build(S::Created);
-    let mut states = watcher.subscribe();
-    let task = spawn_supervisor_loop(S::Created, system_id, ctx, receiver, watcher);
-    wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
-    sender
-        .send(E::GracefulStop {
-            timeout: Duration::from_millis(5),
-        })
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(*states.borrow(), S::Cancelled { .. }));
-    for probe in probes {
-        assert!(probe.request_abort_count.load(Ordering::Relaxed) > 0);
-        assert!(probe.wait_for_completion_count.load(Ordering::Relaxed) > 0);
+            Arc::new(owned_test_stage(
+                sink,
+                StageType::Sink,
+                Some(probes[1].clone()),
+            )),
+        );
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(S::Created);
+        let mut states = watcher.subscribe();
+        let task = spawn_supervisor_loop(S::Created, system_id, ctx, receiver, watcher);
+        if during_startup {
+            tokio::time::timeout(Duration::from_secs(2), entered_rx)
+                .await
+                .expect("source start command entered")
+                .unwrap();
+            assert_eq!(*states.borrow(), S::StartingSources);
+        } else {
+            wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
+        }
+        sender
+            .send(E::GracefulStop {
+                timeout: Duration::from_millis(5),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&*states.borrow(), S::Cancelled { reason } if reason == crate::stages::common::stage_handle::STOP_REASON_TIMEOUT)
+        );
+        for probe in probes {
+            assert!(probe.request_abort_count.load(Ordering::Relaxed) > 0);
+            assert!(probe.wait_for_completion_count.load(Ordering::Relaxed) > 0);
+        }
     }
 }

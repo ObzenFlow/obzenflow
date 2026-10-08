@@ -11,13 +11,14 @@ use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure,
     TypedAsyncFiniteSourceHandler, TypedJoinHandler,
 };
-use obzenflow_runtime::stages::{LivenessSnapshots, SourceError};
+use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the join-fan-in test. The two legs (reference
@@ -55,7 +56,7 @@ struct EnrichedRecord {
 impl TypedPayload for EnrichedRecord {
     const EVENT_TYPE: &'static str = "join.enriched_record";
 }
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -116,7 +117,9 @@ impl TypedAsyncFiniteSourceHandler for DelayedStreamSource {
 }
 
 #[derive(Clone, Debug)]
-struct SlowJoin;
+struct SlowJoin {
+    release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+}
 
 impl TypedJoinHandler for SlowJoin {
     type State = ();
@@ -137,7 +140,10 @@ impl TypedJoinHandler for SlowJoin {
         _references: &mut JoinReferenceView<'_, u64, CatalogRecord>,
         stream: LiveEvent,
     ) -> Result<Vec<EnrichedRecord>, HandlerError> {
-        std::thread::sleep(Duration::from_secs(8));
+        // Keep this synchronous invocation in flight until the test observes
+        // the idle reference edge. Dropping the sender also releases this wait
+        // if the driver fails, so runtime shutdown cannot strand the worker.
+        let _ = self.release.lock().unwrap().recv();
         Ok(vec![EnrichedRecord {
             kind: stream.kind,
             value: stream.value,
@@ -161,30 +167,17 @@ impl InlineSink for NoopSink {
     }
 }
 
-fn stage_id_by_name(registry: &LivenessSnapshots, name: &str) -> StageId {
-    registry.with_read(|guard| {
-        guard
-            .iter()
-            .find_map(|(stage_id, snapshot)| {
-                if snapshot.stage_name == name {
-                    Some(*stage_id)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| panic!("expected stage '{name}' in liveness snapshots"))
-    })
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     type StageJournals = Vec<Arc<dyn Journal<ChainEvent>>>;
     let stage_journals_slot: Arc<Mutex<Option<StageJournals>>> = Arc::new(Mutex::new(None));
-    let registry_slot: Arc<Mutex<Option<LivenessSnapshots>>> = Arc::new(Mutex::new(None));
+    let stage_ids = Arc::new(Mutex::new(HashMap::<String, StageId>::new()));
     let stage_journals_slot_hook = stage_journals_slot.clone();
     let mut liveness = liveness_observations::LivenessTrace::default();
     let liveness_source = liveness.source.clone();
-    let registry_slot_hook = registry_slot.clone();
+    let stage_ids_hook = stage_ids.clone();
+    let (release_join, join_release) = std::sync::mpsc::channel();
+    let join_release = Arc::new(Mutex::new(join_release));
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *liveness_source.lock().unwrap() = Some(handle.observations());
@@ -196,17 +189,21 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         *stage_journals_slot_hook
             .lock()
             .expect("stage_journals_slot lock") = Some(stage_journals);
-        let registry = handle
-            .liveness_snapshots()
-            .expect("liveness snapshots available");
-        *registry_slot_hook.lock().expect("registry_slot lock") = Some(registry);
+        *stage_ids_hook.lock().unwrap() = handle
+            .topology()
+            .expect("flow topology")
+            .stages()
+            .map(|stage| (stage.name.clone(), StageId::from_topology_id(stage.id)))
+            .collect();
         tokio::spawn(async {})
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let reference_source = OneRefEventSource::new();
         let stream_source = DelayedStreamSource::new();
-        let slow_join = SlowJoin;
+        let slow_join = SlowJoin {
+            release: join_release,
+        };
         let noop_sink = NoopSink;
 
         Ok(flow! {
@@ -235,11 +232,25 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
             .await
     });
 
+    let mut released = false;
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             tokio::select! {
                 result = &mut run_handle => break result,
-                _ = tokio::time::sleep(Duration::from_millis(10)) => liveness.capture(),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    liveness.capture();
+                    if !released {
+                        let observed_idle = stage_ids.lock().unwrap().get("joiner").is_some_and(|joiner| {
+                            liveness.states.iter().any(|(_, reader, state)| {
+                                reader == joiner && *state == EdgeLivenessState::Idle
+                            })
+                        });
+                        if observed_idle {
+                            release_join.send(()).expect("release observed join invocation");
+                            released = true;
+                        }
+                    }
+                },
             }
         }
     })
@@ -256,13 +267,8 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         .clone()
         .expect("stage journals captured by hook");
 
-    let registry = registry_slot
-        .lock()
-        .expect("registry_slot lock")
-        .clone()
-        .expect("liveness registry captured by hook");
-
-    let joiner_id = stage_id_by_name(&registry, "joiner");
+    let stage_ids = stage_ids.lock().unwrap().clone();
+    let joiner_id = stage_ids["joiner"];
 
     let mut envelopes = Vec::new();
     for journal in stage_journals {
@@ -302,9 +308,17 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         "expected at least one Idle liveness transition on a non-processing join upstream"
     );
     assert_eq!(
-        idle_upstreams.len(),
-        1,
-        "expected exactly one join upstream edge to become Idle while the other is active"
+        idle_upstreams,
+        HashSet::from([stage_ids["ref_src"]]),
+        "only the reference edge may become Idle while the stream handler is active"
+    );
+    assert!(
+        liveness.states.contains(&(
+            stage_ids["stream_src"],
+            joiner_id,
+            EdgeLivenessState::Healthy
+        )),
+        "the in-flight stream edge remains healthy"
     );
 }
 

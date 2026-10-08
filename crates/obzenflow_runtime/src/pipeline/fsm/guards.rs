@@ -32,7 +32,25 @@ impl PipelineFsmState {
                 .stop_intent
                 .deadline
                 .map(|at| (at, PipelineDeadline::GracefulStop)),
-            Self::CancellingChildren | Self::FailingChildren { .. } => ctx
+            Self::CancellingChildren => {
+                // A graceful stop admitted during startup cancels children
+                // immediately, but still owns its original escalation deadline.
+                let graceful = ctx.stop_intent.deadline.filter(|_| {
+                    matches!(
+                        ctx.stop_intent.mode,
+                        Some(crate::pipeline::FlowStopMode::Graceful { .. })
+                    )
+                });
+                graceful
+                    .map(|at| (at, PipelineDeadline::GracefulStop))
+                    .into_iter()
+                    .chain(
+                        ctx.cleanup_deadline
+                            .map(|at| (at, PipelineDeadline::StageCleanup)),
+                    )
+                    .min_by_key(|(at, _)| *at)
+            }
+            Self::FailingChildren { .. } => ctx
                 .cleanup_deadline
                 .map(|at| (at, PipelineDeadline::StageCleanup)),
             Self::FinalisingMetrics => ctx
