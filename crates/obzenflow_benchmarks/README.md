@@ -33,12 +33,70 @@ keeps independent jobs running when a sibling fails. Keep that matrix aligned
 with the manifest when adding or removing targets or changing required features.
 
 Download the `criterion-<target>` artefact from the PR's CI run and open
-`report/index.html`. Each artefact contains that job's `target/criterion/`,
-including raw measurements and HTML reports; available output is retained after
+`report/index.html`. Each artefact contains that job's isolated `CRITERION_HOME`
+under `target/criterion/<target>/<run>-<attempt>/`, including raw measurements and
+HTML reports; available output is retained after
 failure. A failed benchmark command fails the job. These jobs use existing
 workloads, sampling settings and assertions, with no timing regression threshold.
 The native performance comparison lane continues to run on main pushes and
 manual CI dispatches.
+
+### Copyable CI reports
+
+Open a Criterion job's Actions summary and use the Markdown block's copy button.
+The same report is available as a direct `.md` artefact named
+`criterion-<target>-<checkout-sha>-<run>-attempt-<attempt>.md`, following the publishing
+dry-run report pattern. It includes the measured checkout SHA (the PR merge checkout),
+run/attempt link, target and features, command/profile, Rust version, runner image,
+OS, CPU model and logical CPU count, plus a link to the raw Criterion artefact.
+
+Each operation section uses the same columns: full Criterion case ID, timed work,
+median in microseconds, the median's confidence interval and confidence level,
+and sample count. The formatter reads Criterion's per-iteration median estimate;
+it does not divide it by the iteration count again or turn it into per-event time.
+Compare matching case IDs, work, profiles and environments. No cross-case totals,
+automatic baseline comparisons or timing thresholds are introduced.
+
+The current 148 cases across 16 targets fall into these categories. Each job shows
+only categories with measured rows:
+
+| Operation | Cases | Included work |
+| --- | ---: | --- |
+| Reading and upstream consumption | 30 | Journal reads, reader creation/dispatch, reopened/fresh-process scans and concurrent scans |
+| Journal appends | 11 | Complete appends and group appends, including encoding |
+| Journal write/read interaction | 2 | Append after EOF and interleaved write/read workloads |
+| Causal and record bookkeeping | 53 | Clock restoration/cloning, frontiers, append preparation and record byte accounting |
+| Observations, metrics and reporting | 16 | Observation capture/validation/submission, metrics refresh, rendering, publication and Studio projection |
+| Supervision and runtime scheduling | 11 | Idle/waiting lifecycle and Tokio worker experiments |
+| Complete pipeline processing | 22 | Completed flows, execution wrappers and event-latency measurements |
+| Archive and replay operations | 3 | Archive export, admission/read and streaming comparison |
+
+Reading cases measure journal operations beneath upstream subscriptions; subscription
+selection, merging, receipts and contract checks are not separately isolated. Likewise,
+runtime experiments do not isolate supervisor dispatch. CPU-labelled cases expose
+elapsed CPU-sampling routine time in Criterion output, not the calculated CPU percentage.
+Per-event latency cases expose a per-run median, while completed-flow cases time a
+whole batch. The row descriptions preserve those distinctions. Codec costs belong
+inside reads/appends; canonical JSON byte accounting is a separate diagnostic operation,
+not a measurement of the production disk codec.
+
+Reports consume only the current job's `new/` results. Failed or skipped measurement
+commands produce an incomplete report with any available rows. Missing, malformed or
+duplicate results are called out and fail report generation after the report is saved.
+Unknown operations remain visible under **Uncategorised**. Raw output and Markdown
+uploads run even after failures. Each run attempt has its own output directory so
+cached results cannot appear as new measurements.
+
+When adding or changing benchmark timing boundaries, update the operation rules in
+`.github/scripts/criterion_report.py` and the audited case inventory in
+`.github/scripts/test_criterion_report.py`. The existing CI policy job runs the focused
+formatter tests; locally use:
+
+```sh
+python3 -m unittest discover -s .github/scripts -p 'test_criterion_report.py'
+```
+
+### Local measurements
 
 Run from the implementation repository root. Correctness-only execution performs
 each workload and checks its output without collecting a timing baseline:

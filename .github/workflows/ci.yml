@@ -264,6 +264,9 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "4"
+      # Criterion honours this directory; never read a cached or previous attempt.
+      CRITERION_HOME: ${{ github.workspace }}/target/criterion/${{ matrix.bench }}/${{ github.run_id }}-${{ github.run_attempt }}
+      REPORT_DIR: ${{ github.workspace }}/target/benchmark-reports/${{ matrix.bench }}/${{ github.run_id }}-${{ github.run_attempt }}
     strategy:
       fail-fast: false
       # Keep targets and required features aligned with the benchmark manifest.
@@ -311,13 +314,34 @@ jobs:
         with:
           key: criterion-${{ matrix.bench }}
       - name: Measure existing benchmarks
+        id: measure
         run: cargo bench --locked -p obzenflow_benchmarks --bench "${{ matrix.bench }}" --features "${{ matrix.features }}"
       - name: Preserve Criterion measurements and reports
+        id: criterion_artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: criterion-${{ matrix.bench }}
-          path: target/criterion/
+          path: ${{ env.CRITERION_HOME }}/
+          if-no-files-found: error
+      - name: Write the grouped benchmark report
+        if: always()
+        env:
+          BENCH_TARGET: ${{ matrix.bench }}
+          BENCH_FEATURES: ${{ matrix.features }}
+          BENCH_OUTCOME: ${{ steps.measure.outcome }}
+          CRITERION_ARTIFACT_URL: ${{ steps.criterion_artifact.outputs.artifact-url }}
+        run: >-
+          python3 .github/scripts/criterion_report.py
+          --target "$BENCH_TARGET" --features "$BENCH_FEATURES"
+          --criterion-dir "$CRITERION_HOME" --output-dir "$REPORT_DIR"
+          --outcome "$BENCH_OUTCOME"
+      - name: Upload the copyable benchmark report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.REPORT_DIR }}/*.md
+          archive: false
           if-no-files-found: error
 
   performance:
@@ -366,6 +390,9 @@ jobs:
       - name: Verify lockfile
         run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
+
+      - name: Verify Criterion report formatting
+        run: python3 -m unittest discover -s .github/scripts -p 'test_criterion_report.py'
 
       - name: Verify validation cadence and release evidence
         uses: actions/github-script@v7

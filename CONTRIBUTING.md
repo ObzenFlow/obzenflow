@@ -92,6 +92,14 @@ HTML reports. Benchmark command failures fail their jobs; timing values add no
 speed threshold. Available reports are uploaded even after failure, and sibling
 benchmark jobs continue.
 
+Each Criterion job also provides a copyable Markdown report in its Actions summary
+and as a direct `.md` download, named with the target, checkout SHA, run and attempt.
+Rows are grouped by operation and retain their full case IDs, timed-work descriptions,
+median durations in microseconds, confidence intervals and sample counts. Compare
+matching cases and environments across runs. See the
+[benchmark report categories](crates/obzenflow_benchmarks/README.md#copyable-ci-reports)
+for measurement boundaries and how to maintain the mappings.
+
 Pushes to `main` and manual CI dispatches require the complete performance lane.
 Changes claiming performance improvements or changing the benchmark driver,
 baseline or comparison policy require an explicit comparison
