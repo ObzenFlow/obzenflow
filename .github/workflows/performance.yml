@@ -1,0 +1,119 @@
+name: Performance
+run-name: Performance ${{ inputs.revision || 'latest main' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Version (0.2.6 or v0.2.6) or commit SHA; blank = latest main"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  performance:
+    # Explicitly requested measurements; never a PR, main or release prerequisite.
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
+      REPORT_DIR: ${{ github.workspace }}/target/performance-reports/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Resolve measurement revision
+        id: revision
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_REVISION: ${{ inputs.revision }}
+        with:
+          script: |
+            const requested = (process.env.REQUESTED_REVISION || "").trim();
+            const version = requested.match(/^v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/);
+            let ref;
+            if (!requested) {
+              ref = "refs/heads/main";
+            } else if (version) {
+              ref = "refs/tags/v" + version[1];
+            } else if (/^[0-9a-fA-F]{7,40}$/.test(requested)) {
+              ref = requested;
+            } else {
+              throw new Error("revision must be a version (0.2.6 or v0.2.6), a commit SHA (7–40 hex characters), or blank for latest main");
+            }
+            const { data } = await github.request("GET /repos/{owner}/{repo}/commits/{ref}", {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref,
+            });
+            if (!/^[0-9a-f]{40}$/i.test(data.sha)) {
+              throw new Error("GitHub did not resolve the requested revision to a full commit SHA");
+            }
+            core.info(`Measurement revision ${ref} resolved to ${data.sha}`);
+            core.setOutput("sha", data.sha);
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.revision.outputs.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Restore intact performance builds
+        id: builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/validation-reference
+            target/validation-candidate
+          key: performance-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-${{ steps.revision.outputs.sha }}
+          restore-keys: |
+            performance-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-
+      - name: Qualify performance and measure every benchmark
+        id: measure
+        run: cargo xtask test --lane performance
+      - name: Save reusable compilation output
+        if: ${{ !cancelled() && steps.builds.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/validation-reference
+            target/validation-candidate
+          key: ${{ steps.builds.outputs.cache-primary-key }}
+      - name: Preserve validation and Criterion evidence
+        id: evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-performance
+          path: |
+            ${{ steps.measure.outputs.report_directory || 'target/test-runs/' }}
+            !target/test-runs/**/*.executable
+            !target/test-runs/**/baseline.tar
+            !target/test-runs/**/baseline-source/**
+          if-no-files-found: error
+      - name: Write the performance report
+        if: always()
+        env:
+          NATIVE_REPORT_DIR: ${{ steps.measure.outputs.report_directory }}
+          PERFORMANCE_OUTCOME: ${{ steps.measure.outcome }}
+          CRITERION_ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
+        run: >-
+          python3 .github/scripts/criterion_report.py
+          --performance-dir "$NATIVE_REPORT_DIR"
+          --output-dir "$REPORT_DIR"
+          --outcome "$PERFORMANCE_OUTCOME"
+      - name: Upload the copyable performance report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.REPORT_DIR }}/*.md
+          archive: false
+          if-no-files-found: error

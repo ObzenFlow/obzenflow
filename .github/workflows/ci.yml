@@ -256,85 +256,6 @@ jobs:
           path: target/test-runs/
           if-no-files-found: error
 
-  performance:
-    # One check owns both qualification and the complete operation report.
-    if: >-
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      github.event_name == 'workflow_dispatch'
-    needs: fmt
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_BUILD_JOBS: "4"
-      REPORT_DIR: ${{ github.workspace }}/target/performance-reports/${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.0
-      - name: Restore intact performance builds
-        id: builds
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/debug
-            target/validation-reference
-            target/validation-candidate
-          key: performance-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-${{ github.sha }}
-          restore-keys: |
-            performance-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-
-      - name: Qualify performance and measure every benchmark
-        id: measure
-        run: cargo xtask test --lane performance
-      - name: Save reusable compilation output
-        if: ${{ !cancelled() && steps.builds.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/debug
-            target/validation-reference
-            target/validation-candidate
-          key: ${{ steps.builds.outputs.cache-primary-key }}
-      - name: Preserve validation and Criterion evidence
-        id: evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-performance
-          path: |
-            ${{ steps.measure.outputs.report_directory || 'target/test-runs/' }}
-            !target/test-runs/**/*.executable
-            !target/test-runs/**/baseline.tar
-            !target/test-runs/**/baseline-source/**
-          if-no-files-found: error
-      - name: Write the performance report
-        if: always()
-        env:
-          NATIVE_REPORT_DIR: ${{ steps.measure.outputs.report_directory }}
-          PERFORMANCE_OUTCOME: ${{ steps.measure.outcome }}
-          CRITERION_ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
-        run: >-
-          python3 .github/scripts/criterion_report.py
-          --performance-dir "$NATIVE_REPORT_DIR"
-          --output-dir "$REPORT_DIR"
-          --outcome "$PERFORMANCE_OUTCOME"
-      - name: Upload the copyable performance report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          path: ${{ env.REPORT_DIR }}/*.md
-          archive: false
-          if-no-files-found: error
-
   policy:
     runs-on: ubuntu-latest
     steps:
@@ -356,22 +277,26 @@ jobs:
             const assert = require("node:assert/strict");
             const fs = require("node:fs");
             const workflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
-            const performance = workflow.split("\n  performance:\n")[1].split("\n  policy:\n")[0];
-            assert(!workflow.includes("\n  benchmarks:\n"), "performance must be one actual job");
+            const performance = fs.readFileSync(".github/workflows/performance.yml", "utf8");
+            function verifyManualPerformance(ci, manual) {
+              assert(!/\n  (performance|benchmarks):\n/.test(ci), "no performance job in ordinary CI");
+              assert(!/^\s+run: cargo xtask test --lane performance\s*$/m.test(ci), "CI must not execute performance");
+              const triggers = manual.split("\non:\n")[1]?.split(/\n\S/)[0] || "";
+              assert.deepEqual([...triggers.matchAll(/^  ([a-z_]+):/gm)].map(match => match[1]),
+                ["workflow_dispatch"], "performance requires an explicit manual dispatch");
+              assert.equal((manual.match(/\n  performance:\n/g) || []).length, 1, "one manual performance job");
+              assert(manual.includes("run: cargo xtask test --lane performance"), "manual action retains the native suite");
+            }
+            verifyManualPerformance(workflow, performance);
+            for (const event of ["push", "pull_request", "schedule", "workflow_run", "workflow_call"]) {
+              assert.throws(() => verifyManualPerformance(workflow,
+                performance.replace("  workflow_dispatch:", "  workflow_dispatch:\n  " + event + ":")));
+            }
+            assert.throws(() => verifyManualPerformance(workflow + "\n  performance:\n", performance));
             assert(!performance.includes("strategy:"), "no performance matrix");
             assert(!performance.includes("Swatinem/rust-cache"), "generic cleanup must not prune preserved reference source");
             assert(performance.includes("actions/cache/restore@") && performance.includes("actions/cache/save@"),
               "performance retains intact compilation output with explicit restore/save");
-            const condition = performance.match(/    if: >-\n((?:      .*\n)+)/)[1].trim();
-            const requestsPerformance = new Function("github", "return (" + condition + ");");
-            for (const [event, ref, expected] of [
-              ["pull_request", "refs/pull/129/merge", true],
-              ["push", "refs/heads/main", true],
-              ["push", "refs/heads/topic", false],
-              ["workflow_dispatch", "refs/heads/topic", true],
-            ]) {
-              assert.equal(requestsPerformance({event_name: event, ref}), expected);
-            }
 
             // Keep the existing required test-support job cold on both PR and
             // main. Tool installation and restored build output precede the
@@ -422,9 +347,9 @@ jobs:
             // Execute the actual scripts embedded in both release consumers.
             // API responses are controlled; these checks neither publish nor
             // query another run, and need no extra test service or credentials.
-            function releaseScript(path) {
+            function workflowScript(path, stepName) {
               const text = fs.readFileSync(path, "utf8");
-              const section = text.split("- name: Verify the release SHA passed full CI on main\n")[1];
+              const section = text.split("- name: " + stepName + "\n")[1];
               const lines = section.split("          script: |\n")[1].split("\n");
               const body = [];
               for (const line of lines) {
@@ -433,44 +358,80 @@ jobs:
               }
               return body.join("\n");
             }
-            const publish = releaseScript(".github/workflows/publish.yml");
-            assert.equal(publish, releaseScript(".github/workflows/dry-run.yml"));
+            const releaseStep = "Verify the release SHA passed full CI on main";
+            const publish = workflowScript(".github/workflows/publish.yml", releaseStep);
+            assert.equal(publish, workflowScript(".github/workflows/dry-run.yml", releaseStep));
             const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+            const resolveRevision = new AsyncFunction("github", "context", "core", "process",
+              workflowScript(".github/workflows/performance.yml", "Resolve measurement revision"));
+            const resolvedSha = "b".repeat(40);
+            for (const [requested, expectedRef] of [
+              ["", "refs/heads/main"],
+              ["   ", "refs/heads/main"],
+              ["0.2.6", "refs/tags/v0.2.6"],
+              [" v0.2.6 ", "refs/tags/v0.2.6"],
+              ["0.2.6-rc.1", "refs/tags/v0.2.6-rc.1"],
+              ["74125ce", "74125ce"],
+              ["a".repeat(40), "a".repeat(40)],
+            ]) {
+              const outputs = {};
+              let requests = 0;
+              await resolveRevision({request: async (route, query) => {
+                assert.equal(route, "GET /repos/{owner}/{repo}/commits/{ref}");
+                assert.equal(query.ref, expectedRef);
+                requests += 1;
+                return {data: {sha: resolvedSha}};
+              }}, {repo: {owner: "fixture", repo: "fixture"}},
+              {info: () => {}, setOutput: (key, value) => outputs[key] = value},
+              {env: {REQUESTED_REVISION: requested}});
+              assert.equal(requests, 1, "resolve once before checkout");
+              assert.deepEqual(outputs, {sha: resolvedSha});
+            }
+            for (const requested of ["main", "0.2", "refs/tags/v0.2.6", "x".repeat(40), "a".repeat(41)]) {
+              await assert.rejects(resolveRevision({request: async () => assert.fail("invalid input reached GitHub")},
+                {repo: {owner: "fixture", repo: "fixture"}},
+                {info: () => {}, setOutput: () => assert.fail("invalid input produced a commit")},
+                {env: {REQUESTED_REVISION: requested}}), /revision must be/);
+            }
+            for (const [request, expectedError] of [
+              [async () => { throw new Error("revision not found"); }, /revision not found/],
+              [async () => ({data: {sha: "not-a-commit"}}), /GitHub did not resolve/],
+            ]) {
+              const outputs = {};
+              await assert.rejects(resolveRevision({request},
+                {repo: {owner: "fixture", repo: "fixture"}},
+                {info: () => {}, setOutput: (key, value) => outputs[key] = value},
+                {env: {REQUESTED_REVISION: "0.2.6"}}), expectedError);
+              assert.deepEqual(outputs, {});
+            }
+            assert(performance.includes("ref: " + expression("steps.revision.outputs.sha")),
+              "checkout uses the resolved measurement SHA");
+            assert(performance.split("          key: ")[1].split("\n")[0].endsWith(expression("steps.revision.outputs.sha")),
+              "cache identity uses the measurement SHA, not the dispatch SHA");
             const qualify = new AsyncFunction("github", "context", "core", "process", publish);
             const sha = "qualified-revision";
             const run = {id: 1, head_sha: sha, head_branch: "main", event: "push",
               status: "completed", conclusion: "success", html_url: "fixture://main", run_number: 1};
-            const job = {name: "performance", head_sha: sha, status: "completed", conclusion: "success"};
-            for (const [name, candidate, jobs, passes] of [
-              ["complete", run, [job], true],
-              ["missing run", null, [job], false],
-              ["wrong revision", {...run, head_sha: "other"}, [job], false],
-              ["PR run", {...run, event: "pull_request"}, [job], false],
-              ["wrong branch", {...run, head_branch: "topic"}, [job], false],
-              ["unfinished run", {...run, status: "in_progress"}, [job], false],
-              ["failed sibling", {...run, conclusion: "failure"}, [job], false],
-              ["missing performance", run, [], false],
-              ["skipped performance", run, [{...job, conclusion: "skipped"}], false],
-              ["failed performance", run, [{...job, conclusion: "failure"}], false],
-              ["cancelled performance", run, [{...job, conclusion: "cancelled"}], false],
-              ["unfinished performance", run, [{...job, status: "in_progress", conclusion: null}], false],
-              ["wrong performance revision", run, [{...job, head_sha: "other"}], false],
-              ["ambiguous performance", run, [job, job], false],
+            for (const [name, candidate, passes] of [
+              ["complete without performance evidence", run, true],
+              ["missing run", null, false],
+              ["wrong revision", {...run, head_sha: "other"}, false],
+              ["PR run", {...run, event: "pull_request"}, false],
+              ["wrong branch", {...run, head_branch: "topic"}, false],
+              ["unfinished run", {...run, status: "in_progress"}, false],
+              ["failed sibling", {...run, conclusion: "failure"}, false],
+              ["cancelled run", {...run, conclusion: "cancelled"}, false],
             ]) {
               const outputs = {};
               const api = {
                 request: async (_, query) => {
+                  assert.equal(query.workflow_id, "ci.yml");
                   assert.equal(query.head_sha, sha);
                   assert.equal(query.branch, "main");
                   assert.equal(query.event, "push");
                   return {data: {workflow_runs: candidate ? [candidate] : []}};
                 },
-                rest: {actions: {listJobsForWorkflowRun: "jobs"}},
-                paginate: async (_, query) => {
-                  assert.equal(query.run_id, run.id);
-                  assert.equal(query.filter, "latest");
-                  return jobs;
-                },
+                paginate: async () => assert.fail("release acceptance must not request performance evidence"),
               };
               const attempt = qualify(api, {repo: {owner: "fixture", repo: "fixture"}},
                 {info: () => {}, setOutput: (key, value) => outputs[key] = value},

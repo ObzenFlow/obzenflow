@@ -26,9 +26,17 @@ Historical results retain their original contracts; they are not comparable to
 
 ## Run and validate
 
-PR updates, main pushes and manual CI runs execute one `performance` job:
-`cargo xtask test --lane performance`. It owns both the existing reference/current
-qualification and all 16 Criterion targets declared in this crate's `Cargo.toml`.
+Performance is optional and runs only on explicit request. In GitHub, open
+**Actions → Performance → Run workflow**. Set the optional `revision` input to a
+version (`0.2.6` or `v0.2.6`) or a commit SHA (7–40 hex characters), or leave it blank
+for the latest commit on `main`. Versions resolve through the corresponding `vX.Y.Z`
+tag. The workflow resolves the selection once and checks out that full SHA; caching
+and reports identify the measured commit. Unknown revisions fail without a fallback.
+The separate `performance.yml` workflow invokes `cargo xtask test --lane performance`;
+the same command runs locally. PRs, main pushes, ordinary CI dispatches, publishing
+and release dry runs neither execute nor require performance measurements.
+An explicitly requested run owns both the existing reference/current qualification
+and all 16 Criterion targets declared in this crate's `Cargo.toml`.
 
 Compilation is separate from timing. Targets with identical required features share
 one Cargo invocation. Reference and candidate builds have distinct output directories
@@ -49,8 +57,8 @@ The queue inventory must match the manifest exactly. Each executable lists its c
 before measurement, and missing/duplicate results fail completion. A comparison failure
 still permits the full suite to finish; a failed target does not cancel later targets.
 
-CI explicitly restores and saves dependency caches and intact compilation directories,
-including the content-verified reference source, but never measurement evidence. This
+The manual workflow restores and saves dependency caches and intact compilation
+directories, including the content-verified reference source, but never measurement evidence. This
 job does not invoke generic Rust-cache cleanup, which can prune that source even with
 target caching disabled. Every native run gets a fresh
 `target/test-runs/<run-id>/` directory. Download `test-results-performance` for the
@@ -58,14 +66,14 @@ comparison JSON, logs, phase timings and `performance/suite/<target>/criterion/`
 raw samples and HTML reports. Executable copies and source archives are excluded from
 the uploaded evidence to avoid transferring build-sized artefacts.
 
-The initial turnaround target is the existing roughly 16-minute CI duration; it is
-not an established runtime guarantee. `performance/phases.json` separates preparation,
+Full performance runs can exceed 30 minutes and have no PR turnaround target.
+`performance/phases.json` separates preparation,
 compilation, qualification and full-suite wall time. Each target also records elapsed
 time and CPU assignment. Assess cold and restored-cache runs separately.
 
 ### Copyable CI reports
 
-Open the CI run's **Summary** page and find **Performance report**. It shows rendered
+Open the Performance run's **Summary** page and find **Performance report**. It shows rendered
 tables and an expandable **Copy the complete report as Markdown** block. The same
 content is uploaded directly as `performance-<run>-attempt-<attempt>.md`, following
 the publishing dry-run pattern. A link to raw evidence accompanies the run identity,
@@ -207,8 +215,8 @@ OS-cache-warm files; the fresh-process case leaves filesystem cache uncontrolled
 
 ## Comparison policy and retained evidence
 
-The required gate uses `.config/performance.toml`: four hot-path timings and five
-validation operations. Before timing, both implementations pass all 75 hot-path
+Within an explicitly requested run, the gate uses `.config/performance.toml`: four
+hot-path timings and five validation operations. Before timing, both implementations pass all 75 hot-path
 oracles with identical case identities and input dimensions. Single-reader and
 grouped-append timings remain diagnostic; their correctness cases are required.
 

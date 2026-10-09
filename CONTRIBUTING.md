@@ -84,29 +84,35 @@ unrelated test could otherwise keep a finished test's output pipe open and cause
 a false leak failure. The 200 ms leak deadline and failure policy remain unchanged.
 
 Every PR update requires the six correctness lanes and the existing formatting,
-Clippy and policy checks. One `performance` job runs on PRs, main pushes and manual
-CI dispatches through `cargo xtask test --lane performance`. It executes the existing
-comparison/validity gate and retains all 148 observations across 16 benchmark targets.
+Clippy and policy checks. Performance is optional everywhere: PRs, main pushes,
+ordinary CI dispatches, publication and release dry runs do not request or require it.
+To measure performance, open **Actions → Performance → Run workflow**. The optional
+`revision` input accepts a version (`0.2.6` or `v0.2.6`) or a commit SHA (7–40 hex
+characters). Leave it blank for the latest commit on `main`. Versions select the
+corresponding `vX.Y.Z` tag; unresolved revisions fail without falling back to main.
+Checkout, build caching and measurement evidence use the resolved full commit SHA.
+Alternatively, run `cargo xtask test --lane performance` on the local checkout.
+The manual workflow executes the existing comparison/validity gate and
+retains all 148 observations across 16 benchmark targets.
 Compilation finishes before timing. The gate runs alone; full-suite observations use
 two CPU-partitioned queues on the standard four-CPU Linux runner, with existing
 sampling settings. Shared memory and disk bandwidth still affect those observations;
 compare only runs with the same recorded execution mode. Other platforms run serially.
 
-The CI run's **Summary** page shows a rendered **Performance report** and a copyable
-Markdown block, grouped by operation. The direct `.md` download contains the same
+The Performance run's **Summary** page shows a rendered **Performance report** and
+a copyable Markdown block, grouped by operation. The direct `.md` download contains the same
 report. It includes identified reference/current decisions, full-suite medians and
 confidence intervals, target outcomes, CPU assignments and separate phase durations.
 Download `test-results-performance` for raw evidence. Available evidence and the report
 are preserved after failure; missing work cannot qualify as success. See the
 [benchmark report categories](crates/obzenflow_benchmarks/README.md#copyable-ci-reports)
-for measurement boundaries and maintenance. The approximately 16-minute turnaround
-target must be checked against actual cold and restored-cache CI runs.
+for measurement boundaries and maintenance. A complete performance run can take
+more than 30 minutes; it has no PR turnaround target.
 
-Changes claiming performance improvements or changing the benchmark driver,
-baseline or comparison policy require an explicit comparison
-before merge, identifying the measured revision. Publication and release dry-runs
-require successful main-push CI for the exact release SHA, including an executed,
-passing performance job; a skipped job cannot qualify a release.
+Performance claims should cite an explicit comparison and identify the measured
+revision; absent measurements establish no performance result. Publication and
+release dry runs require successful main-push CI for the exact release SHA.
+They do not require a manual performance run or inspect its outcome.
 
 Nextest correctness acceptance uses `ci-fast`, four process slots, no fail-fast and zero
 retries, on pull requests and on `main`. The expensive journal proofs share two
