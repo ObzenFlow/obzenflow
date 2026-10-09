@@ -256,99 +256,10 @@ jobs:
           path: target/test-runs/
           if-no-files-found: error
 
-  benchmarks:
-    name: Criterion (${{ matrix.bench }})
-    if: github.event_name == 'pull_request'
-    needs: fmt
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_BUILD_JOBS: "4"
-      # Criterion honours this directory; never read a cached or previous attempt.
-      CRITERION_HOME: ${{ github.workspace }}/target/criterion/${{ matrix.bench }}/${{ github.run_id }}-${{ github.run_attempt }}
-      REPORT_DIR: ${{ github.workspace }}/target/benchmark-reports/${{ matrix.bench }}/${{ github.run_id }}-${{ github.run_attempt }}
-    strategy:
-      fail-fast: false
-      # Keep targets and required features aligned with the benchmark manifest.
-      # Each target measures on its own runner, without competing workloads.
-      matrix:
-        include:
-          - bench: per_event_latency_1_stage
-            features: ""
-          - bench: per_event_latency_2_stage
-            features: ""
-          - bench: per_event_latency_3_stage
-            features: ""
-          - bench: per_event_latency_4_stage
-            features: ""
-          - bench: per_event_latency_5_stage
-            features: ""
-          - bench: per_event_latency_20_stage
-            features: ""
-          - bench: per_event_latency_100_stage
-            features: ""
-          - bench: per_event_latency_100_stage_memory
-            features: ""
-          - bench: pipeline_throughput
-            features: ""
-          - bench: idle_cpu_usage
-            features: ""
-          - bench: waiting_for_gun_cpu_usage
-            features: ""
-          - bench: tokio_worker_3_stage_experiment
-            features: ""
-          - bench: pipeline_execution
-            features: ""
-          - bench: journal_components
-            features: components
-          - bench: journal_hot_path
-            features: journal-benchmarks
-          - bench: validation_boundaries
-            features: validation-benchmarks
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: criterion-${{ matrix.bench }}
-      - name: Measure existing benchmarks
-        id: measure
-        run: cargo bench --locked -p obzenflow_benchmarks --bench "${{ matrix.bench }}" --features "${{ matrix.features }}"
-      - name: Preserve Criterion measurements and reports
-        id: criterion_artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: criterion-${{ matrix.bench }}
-          path: ${{ env.CRITERION_HOME }}/
-          if-no-files-found: error
-      - name: Write the grouped benchmark report
-        if: always()
-        env:
-          BENCH_TARGET: ${{ matrix.bench }}
-          BENCH_FEATURES: ${{ matrix.features }}
-          BENCH_OUTCOME: ${{ steps.measure.outcome }}
-          CRITERION_ARTIFACT_URL: ${{ steps.criterion_artifact.outputs.artifact-url }}
-        run: >-
-          python3 .github/scripts/criterion_report.py
-          --target "$BENCH_TARGET" --features "$BENCH_FEATURES"
-          --criterion-dir "$CRITERION_HOME" --output-dir "$REPORT_DIR"
-          --outcome "$BENCH_OUTCOME"
-      - name: Upload the copyable benchmark report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          path: ${{ env.REPORT_DIR }}/*.md
-          archive: false
-          if-no-files-found: error
-
   performance:
-    # FLOWIP-145i B12: main and explicit requests qualify performance through
-    # the native comparison lane. FLOWIP-080v adds separate PR measurements.
-    # Skipped is not measured or passed.
+    # One check owns both qualification and the complete operation report.
     if: >-
+      github.event_name == 'pull_request' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch'
     needs: fmt
@@ -358,6 +269,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
+      REPORT_DIR: ${{ github.workspace }}/target/performance-reports/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -365,19 +277,62 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
-      - uses: Swatinem/rust-cache@v2
-      - name: Install pinned Nextest
-        uses: taiki-e/install-action@v2
+      - name: Restore intact performance builds
+        id: builds
+        uses: actions/cache/restore@v4
         with:
-          tool: cargo-nextest@0.9.146
-      - name: Validate performance
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/validation-reference
+            target/validation-candidate
+          key: performance-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-${{ github.sha }}
+          restore-keys: |
+            performance-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-
+      - name: Qualify performance and measure every benchmark
+        id: measure
         run: cargo xtask test --lane performance
-      - name: Preserve validation reports and phase output
+      - name: Save reusable compilation output
+        if: ${{ !cancelled() && steps.builds.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/validation-reference
+            target/validation-candidate
+          key: ${{ steps.builds.outputs.cache-primary-key }}
+      - name: Preserve validation and Criterion evidence
+        id: evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results-performance
-          path: target/test-runs/
+          path: |
+            ${{ steps.measure.outputs.report_directory || 'target/test-runs/' }}
+            !target/test-runs/**/*.executable
+            !target/test-runs/**/baseline.tar
+            !target/test-runs/**/baseline-source/**
+          if-no-files-found: error
+      - name: Write the performance report
+        if: always()
+        env:
+          NATIVE_REPORT_DIR: ${{ steps.measure.outputs.report_directory }}
+          PERFORMANCE_OUTCOME: ${{ steps.measure.outcome }}
+          CRITERION_ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
+        run: >-
+          python3 .github/scripts/criterion_report.py
+          --performance-dir "$NATIVE_REPORT_DIR"
+          --output-dir "$REPORT_DIR"
+          --outcome "$PERFORMANCE_OUTCOME"
+      - name: Upload the copyable performance report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.REPORT_DIR }}/*.md
+          archive: false
           if-no-files-found: error
 
   policy:
@@ -401,11 +356,16 @@ jobs:
             const assert = require("node:assert/strict");
             const fs = require("node:fs");
             const workflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
-            const performance = workflow.split("\n  performance:\n")[1];
+            const performance = workflow.split("\n  performance:\n")[1].split("\n  policy:\n")[0];
+            assert(!workflow.includes("\n  benchmarks:\n"), "performance must be one actual job");
+            assert(!performance.includes("strategy:"), "no performance matrix");
+            assert(!performance.includes("Swatinem/rust-cache"), "generic cleanup must not prune preserved reference source");
+            assert(performance.includes("actions/cache/restore@") && performance.includes("actions/cache/save@"),
+              "performance retains intact compilation output with explicit restore/save");
             const condition = performance.match(/    if: >-\n((?:      .*\n)+)/)[1].trim();
             const requestsPerformance = new Function("github", "return (" + condition + ");");
             for (const [event, ref, expected] of [
-              ["pull_request", "refs/pull/129/merge", false],
+              ["pull_request", "refs/pull/129/merge", true],
               ["push", "refs/heads/main", true],
               ["push", "refs/heads/topic", false],
               ["workflow_dispatch", "refs/heads/topic", true],

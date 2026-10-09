@@ -1,0 +1,11 @@
+# Stable measurement queues; grouping here does not change report categories.
+# Start from authored sampling budgets, then balance measured target wall times
+# from native run ec79682e-5623-4397-a5ae-1cde01385fdd: about 883s per queue.
+# That serial macOS evidence does not predict concurrent Linux/CI duration.
+# The manifest remains authoritative: omissions/duplicates fail before execution.
+# No sampling settings or workloads are overridden.
+version = 1
+groups = [
+  ["idle_cpu_usage", "per_event_latency_100_stage_memory", "per_event_latency_20_stage", "journal_components", "validation_boundaries", "per_event_latency_1_stage", "per_event_latency_2_stage", "per_event_latency_3_stage", "per_event_latency_5_stage"],
+  ["tokio_worker_3_stage_experiment", "pipeline_execution", "journal_hot_path", "waiting_for_gun_cpu_usage", "pipeline_throughput", "per_event_latency_4_stage", "per_event_latency_100_stage"],
+]

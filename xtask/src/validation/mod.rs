@@ -126,6 +126,15 @@ fn run_native_with_preparation(
     let run_id = uuid::Uuid::new_v4().to_string();
     let directory = root.join("target/test-runs").join(&run_id);
     fs::create_dir(&directory)?;
+    // The always-run CI formatter must select this attempt exactly, including
+    // early prerequisite failures. Never search for the newest cached report.
+    if let Some(path) = std::env::var_os("GITHUB_OUTPUT") {
+        let mut output = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(output, "report_directory={}", directory.display())?;
+    }
     let mut report = RunReport {
         version: 4,
         run_id,

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 # https://obzenflow.dev
-"""Format one job's Criterion WallTime results; never run or compare benchmarks."""
+"""Format identified native performance evidence; never run or judge benchmarks."""
 
 import argparse
 from dataclasses import dataclass
@@ -202,13 +202,136 @@ def render_report(target, rows, errors, context, outcome, preview=False):
     return "\n".join(lines) + "\n"
 
 
-def copyable_summary(report):
+def copyable_summary(report, title="Criterion"):
     fence = "`" * max(3, 1 + max((len(m[0]) for m in re.finditer(r"`+", report)), default=0))
-    summary = ("## Copyable Criterion report\n\nCopy the Markdown below, or download this job's `.md` report artefact.\n\n"
+    summary = (f"## Copyable {title} report\n\nCopy the Markdown below, or download this job's `.md` report artefact.\n\n"
                f"{fence}markdown\n{report}{fence}\n")
     if len(summary.encode("utf-8")) > 1_000_000:
-        return "## Criterion report\n\nThe report exceeds the Actions summary limit. Download this job's complete `.md` report artefact.\n"
+        return f"## {title} report\n\nThe report exceeds the Actions summary limit. Download this job's complete `.md` report artefact.\n"
     return summary
+
+
+def read_json(path, errors):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        errors.append(f"{path.name}: {error}")
+        return None
+
+
+def comparison_measurement(value):
+    estimate = value["estimate"]
+    interval = estimate["confidence_interval"]
+    point, low, high, confidence = map(number, (estimate["point_estimate"], interval["lower_bound"],
+                                               interval["upper_bound"], interval["confidence_level"]))
+    if not 0 <= low <= point <= high or not 0 < confidence < 1:
+        raise ValueError("invalid comparison estimate")
+    return f"{micros(point)} [{micros(low)}–{micros(high)}; {confidence * 100:g}%]"
+
+
+def render_performance(directory, outcome):
+    errors, rows, comparisons, target_rows = [], [], [], []
+    context = context_for("all declared targets", "per target below", False)
+    context.update({"Report format": "performance-operations-v2", "Command": "cargo xtask test --lane performance"})
+    native, phases, execution, qualification, controls = {}, {}, {}, {}, {}
+    if directory is None:
+        errors.append("The native validator did not identify a run directory; no previous run is substituted.")
+    else:
+        native = read_json(directory / "report.json", errors) or {}
+        performance = directory / "performance"
+        phases = read_json(performance / "phases.json", errors) or {}
+        execution = read_json(performance / "suite-execution.json", errors) or {}
+        qualification = read_json(performance / "qualification.json", errors) or {}
+        controls = read_json(performance / "negative-controls.json", errors) or {}
+        comparison = read_json(performance / "comparison.json", errors) or {}
+        plan = read_json(performance / "suite-plan.json", errors) or []
+        context["Measured checkout SHA"] = native.get("source", {}).get("commit", "unavailable")
+        context["Source content SHA256"] = native.get("source", {}).get("content_sha256", "unavailable")
+        context["Native run ID"] = native.get("run_id", "unavailable")
+        policy = read_json(performance / "comparison-policy.json", errors) or {}
+        driver = read_json(performance / "measurement-driver.json", errors) or {}
+        context["Reference SHA"] = policy.get("baseline_revision", "unavailable")
+        context["Reference public API adapter"] = driver.get("reference_public_api_adapter") or "none"
+        context["Qualification sampling"] = f"{policy.get('sample_size', '?')} samples; {policy.get('warm_up_ms', '?')} ms warm-up; {policy.get('measurement_ms', '?')} ms measurement"
+        context["Full-suite execution mode"] = execution.get("mode", "not executed")
+        context["CPU assignments"] = json.dumps(execution.get("cpu_groups", []))
+        context["Runtime workers / analysis threads"] = f"{execution.get('tokio_default_workers', '?')} / {execution.get('rayon_threads', '?')} (authored runtime overrides retained)"
+        if not plan:
+            errors.append("No declared full-suite inventory is available.")
+        for target in plan:
+            name = target["name"]
+            phase = performance / "suite" / name
+            record = read_json(phase / "outcome.json", errors) or {}
+            expected = read_json(phase / "cases.json", errors)
+            measured, problems = read_measurements(phase / "criterion")
+            errors.extend(f"{name}: {problem}" for problem in problems)
+            if expected is None or {row.case_id for row in measured} != set(expected):
+                errors.append(f"{name}: measured case IDs differ from the executable inventory.")
+            rows.extend((name, row) for row in measured)
+            elapsed = record.get("elapsed_seconds")
+            target_rows.append([name, ",".join(target.get("required-features", [])) or "default",
+                                record.get("cpus", []), f"{elapsed:.2f}" if isinstance(elapsed, (int, float)) else "unavailable",
+                                f"{len(measured)}/{len(expected) if expected is not None else '?'}",
+                                "passed" if record.get("passed") else record.get("error") or "not completed"])
+        for target, suite in comparison.get("suites", {}).items():
+            for case in suite["cases"]:
+                try:
+                    estimates = [comparison_measurement(comparison[phase][case]) for phase in ("before", "candidate", "after")]
+                    decision = comparison["decisions"][case]
+                    verdict = decision["outcome"] + (": " + decision["detail"] if decision.get("detail") else "")
+                    comparisons.append((target, case, estimates, verdict))
+                except (KeyError, ValueError, TypeError) as error:
+                    errors.append(f"comparison {case}: {error}")
+        if not comparisons:
+            errors.append("No completed native comparisons are available.")
+    status = native.get("outcome", {}).get("status", "incomplete")
+    if outcome != "success" or errors:
+        status = status if status in ("failed", "incomplete") else "incomplete"
+    lines = ["# Performance report", "", f"Native outcome: **{cell(status.upper())}**. CI measurement step: **{cell(outcome)}**.", "",
+             "| Context | Value |", "| --- | --- |"]
+    lines.extend(f"| {cell(key)} | {cell(value)} |" for key, value in context.items())
+    lines += ["", f"Full-suite observations: **{len(rows)} cases**. Native comparison results: **{len(comparisons)} cases**.",
+              "", "The comparison gate runs alone, with adjacent reference-before, candidate and reference-after trials. Its thresholds and controls are unchanged.",
+              "", "Full-suite observations retain authored sampling settings. On Linux, the two CPU partitions share memory, caches and disk bandwidth; compare only runs with the same execution mode, CPU capacity, case, features and profile. These observations do not apply regression thresholds and are not directly comparable to the former isolated-runner matrix.",
+              "", "All estimates are in **µs**. Category durations are not summed.", "", "## Qualification", "",
+              f"Result: **{'passed' if qualification.get('passed') else 'not passed'}**. {cell(qualification.get('error') or '')}",
+              f"Slowdown control: **{cell(controls.get('slowdown', {}).get('outcome', 'unavailable'))}**; missing-reader output rejected: **{cell(controls.get('missing_work_rejected_by_completion_oracle', 'unavailable'))}**; missing-Studio output rejected: **{cell(controls.get('missing_studio_projection_output_rejected', 'unavailable'))}**.",
+              "", "## Phase durations", "", "Elapsed wall time, including preparation and analysis. Concurrent target durations must not be summed to estimate job duration.", "",
+              "| Phase | Seconds |", "| --- | ---: |"]
+    lines.extend(f"| {cell(phase)} | {number(phases[phase]):.2f} |" for phase in ("prepare_reference", "build", "qualification", "full_suite") if phase in phases)
+    lines += ["", "## Target completion", "", "| Target | Features | CPUs | Seconds | Cases | Outcome |", "| --- | --- | --- | ---: | ---: | --- |"]
+    lines.extend("| " + " | ".join(cell(value) for value in row) + " |" for row in target_rows)
+    if errors:
+        lines += ["", "## Missing or unreadable evidence", ""]
+        lines.extend(f"- {cell(error)}" for error in errors)
+    for category, (title, note) in enumerate(CATEGORIES):
+        selected = [(target, row) for target, row in rows if classify(target, row.case_id)[0] == category]
+        qualified = [(target, case, estimates, verdict) for target, case, estimates, verdict in comparisons
+                     if classify(target, case)[0] == category]
+        if not selected and not qualified:
+            continue
+        lines += ["", f"## {title}", "", note]
+        if qualified:
+            lines += ["", "### Isolated comparison gate", "", "Estimates show median [confidence interval; level]. Decisions come from the native validator.", "",
+                      "| Case ID | Reference before (µs) | Candidate (µs) | Reference after (µs) | Decision |",
+                      "| --- | --- | --- | --- | --- |"]
+            for _, case, estimates, verdict in qualified:
+                lines.append("| " + " | ".join(cell(value) for value in [case, *estimates, verdict]) + " |")
+        if selected:
+            lines += ["", "### Full-suite observations", "", "| Target | Case ID | Timed work | Median (µs) | Median confidence interval (µs) | Samples |",
+                      "| --- | --- | --- | ---: | --- | ---: |"]
+            for target, row in sorted(selected, key=lambda pair: (pair[0], pair[1].case_id)):
+                interval = f"{micros(row.lower_ns)}–{micros(row.upper_ns)} ({row.confidence * 100:g}%)"
+                lines.append("| " + " | ".join(cell(value) for value in [target, row.case_id, classify(target, row.case_id)[1],
+                                                                          micros(row.median_ns), interval, row.samples]) + " |")
+    return "\n".join(lines) + "\n", errors
+
+
+def performance_summary(report):
+    copyable = copyable_summary(report, "performance")
+    # Show rendered tables as well as a single copyable Markdown block.
+    summary = report + "\n<details><summary>Copy the complete report as Markdown</summary>\n\n" + copyable + "\n</details>\n"
+    return summary if len(summary.encode("utf-8")) <= 1_000_000 else copyable
 
 
 def command_output(*command):
@@ -240,9 +363,12 @@ def context_for(target, features, preview):
     if preview:
         context["Environment"] = "unavailable for existing measurements; current host is not asserted as their origin"
     else:
+        run_url = "unavailable (local run)"
+        if os.getenv("GITHUB_RUN_ID") and os.getenv("GITHUB_REPOSITORY"):
+            run_url = f"{os.getenv('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/attempts/{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
         context.update({
             "Run / attempt": f"{os.getenv('GITHUB_RUN_ID', 'local')} / {os.getenv('GITHUB_RUN_ATTEMPT', '1')}",
-            "Run URL": f"{os.getenv('GITHUB_SERVER_URL', 'https://github.com')}/{os.getenv('GITHUB_REPOSITORY', '')}/actions/runs/{os.getenv('GITHUB_RUN_ID', '')}/attempts/{os.getenv('GITHUB_RUN_ATTEMPT', '1')}",
+            "Run URL": run_url,
             "Rust": command_output("rustc", "-Vv"),
             "Runner": f"{os.getenv('RUNNER_ENVIRONMENT', 'unknown')} / {os.getenv('ImageOS', 'unknown')} {os.getenv('ImageVersion', '')}",
             "OS / architecture": f"{platform.platform()} / {platform.machine()}",
@@ -255,13 +381,31 @@ def context_for(target, features, preview):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", required=True)
+    parser.add_argument("--target")
     parser.add_argument("--features", default="")
-    parser.add_argument("--criterion-dir", type=Path, required=True)
+    parser.add_argument("--criterion-dir", type=Path)
+    parser.add_argument("--performance-dir", help="Exact native run directory; empty means the validator did not start")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--outcome", choices=("success", "failure", "cancelled", "skipped"), required=True)
     parser.add_argument("--preview", action="store_true", help="Do not attribute existing local results to this checkout or host")
     args = parser.parse_args()
+    if args.performance_dir is not None:
+        try:
+            report, errors = render_performance(Path(args.performance_dir) if args.performance_dir else None, args.outcome)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            errors = [str(error)]
+            report = f"# Performance report\n\n**INCOMPLETE**: could not read native evidence: {cell(error)}\n"
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        identity = f"{os.getenv('GITHUB_RUN_ID', 'local')}-attempt-{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
+        path = args.output_dir / f"performance-{identity}.md"
+        path.write_text(report, encoding="utf-8")
+        if os.getenv("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                summary.write(performance_summary(report))
+        print(f"Wrote {path}: {len(errors)} evidence errors")
+        return 1 if errors else 0
+    if not args.target or args.criterion_dir is None:
+        parser.error("use --performance-dir or both --target and --criterion-dir")
     rows, errors = read_measurements(args.criterion_dir)
     context = context_for(args.target, args.features, args.preview)
     report = render_report(args.target, rows, errors, context, args.outcome, args.preview)

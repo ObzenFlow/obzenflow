@@ -6,6 +6,7 @@
 //! checks comparability/completion, and applies the declared acceptance rule.
 
 mod driver;
+mod suite;
 
 const MEASUREMENT_CONTRACT: &str = "public-operations-v1";
 
@@ -17,7 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -145,6 +146,90 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
         directory.join("comparison-policy.json"),
         serde_json::to_vec_pretty(&policy)?,
     )?;
+    let inventory = suite::inventory(root)?;
+    fs::write(
+        directory.join("suite-plan.json"),
+        serde_json::to_vec_pretty(&inventory)?,
+    )?;
+    let mut phases = BTreeMap::new();
+    let started = Instant::now();
+    let reference = prepare_reference(root, tools, directory, &policy).map_err(|e| e.to_string());
+    phases.insert("prepare_reference", started.elapsed().as_secs_f64());
+    let started = Instant::now();
+    // Two Cargo processes share the declared compilation budget, never target
+    // directories. Join both before any benchmark process can start.
+    let (reference, candidate) = std::thread::scope(|scope| {
+        let reference = scope.spawn(|| {
+            reference.and_then(|(source, target)| {
+                suite::build_reference(root, &source, &target, tools, directory)
+                    .map_err(|e| e.to_string())
+            })
+        });
+        let candidate = suite::build_candidate(root, tools, directory, &inventory);
+        (
+            reference.join().expect("reference build thread panicked"),
+            candidate,
+        )
+    });
+    phases.insert("build", started.elapsed().as_secs_f64());
+    fs::write(
+        directory.join("phases.json"),
+        serde_json::to_vec_pretty(&phases)?,
+    )?;
+    let started = Instant::now();
+    let qualification = match (&reference, &candidate) {
+        (Ok(reference), Ok(candidate)) => qualify(
+            root,
+            tools,
+            directory,
+            &policy,
+            (
+                &reference["journal_hot_path"],
+                &candidate["journal_hot_path"],
+                &reference["validation_boundaries"],
+                &candidate["validation_boundaries"],
+            ),
+        ),
+        _ => Err(error(format!(
+            "comparison build incomplete: reference={:?}; candidate={:?}",
+            reference.as_ref().err(),
+            candidate.as_ref().err().map(ToString::to_string)
+        ))),
+    };
+    phases.insert("qualification", started.elapsed().as_secs_f64());
+    fs::write(
+        directory.join("qualification.json"),
+        serde_json::to_vec_pretty(&json!({
+            "passed": qualification.is_ok(), "error": qualification.as_ref().err().map(ToString::to_string),
+        }))?,
+    )?;
+    fs::write(
+        directory.join("phases.json"),
+        serde_json::to_vec_pretty(&phases)?,
+    )?;
+    // A regression or inconclusive comparison must not discard the full report.
+    // Controls have finished and been reaped before ordinary measurements start.
+    let started = Instant::now();
+    let observations =
+        candidate.and_then(|binaries| suite::run(root, tools, directory, &inventory, &binaries));
+    phases.insert("full_suite", started.elapsed().as_secs_f64());
+    fs::write(
+        directory.join("phases.json"),
+        serde_json::to_vec_pretty(&phases)?,
+    )?;
+    if let Err(failure) = &observations {
+        eprintln!("validation: full benchmark suite incomplete: {failure}");
+    }
+    qualification?;
+    observations
+}
+
+fn prepare_reference(
+    root: &Path,
+    tools: &Policy,
+    directory: &Path,
+    policy: &ComparisonPolicy,
+) -> Result<(PathBuf, PathBuf)> {
     let baseline = directory.join("baseline-source");
     fs::create_dir(&baseline)?;
     let archive = directory.join("baseline.tar");
@@ -175,51 +260,25 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
             "could not extract the identified performance baseline",
         ));
     }
-    driver::install(root, &baseline, directory)?;
-    let (baseline, reference_target) = driver::reference(root, &baseline, directory)?;
-    let candidate_target = root.join("target/validation-candidate");
-    // Compile both versions before sampling, in separate target directories.
-    // Cargo freshness alone cannot distinguish two equal-named workspaces that
-    // write the same artifact paths. Preserve and identify every executable.
-    let base_binary = build(
-        root,
-        &baseline,
-        &reference_target,
-        tools,
-        directory,
-        "baseline-build",
-        ("journal_hot_path", "journal-benchmarks"),
-    )?;
-    let candidate_binary = build(
-        root,
-        root,
-        &candidate_target,
-        tools,
-        directory,
-        "candidate-build",
-        ("journal_hot_path", "journal-benchmarks"),
-    )?;
-    let base_boundaries = build(
-        root,
-        &baseline,
-        &reference_target,
-        tools,
-        directory,
-        "baseline-boundaries-build",
-        ("validation_boundaries", "validation-benchmarks"),
-    )?;
-    let candidate_boundaries = build(
-        root,
-        root,
-        &candidate_target,
-        tools,
-        directory,
-        "candidate-boundaries-build",
-        ("validation_boundaries", "validation-benchmarks"),
-    )?;
+    driver::install(root, &baseline, directory, &policy.baseline_revision)?;
+    driver::reference(root, &baseline, directory)
+}
+
+fn qualify(
+    root: &Path,
+    tools: &Policy,
+    directory: &Path,
+    policy: &ComparisonPolicy,
+    (base_binary, candidate_binary, base_boundaries, candidate_boundaries): (
+        &Executable,
+        &Executable,
+        &Executable,
+        &Executable,
+    ),
+) -> Result<()> {
     for (reference, current) in [
-        (&base_binary, &candidate_binary),
-        (&base_boundaries, &candidate_boundaries),
+        (base_binary, candidate_binary),
+        (base_boundaries, candidate_boundaries),
     ] {
         if reference.sha256 == current.sha256 {
             return Err(error(
@@ -230,10 +289,10 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
     validate_workloads(
         root,
         tools,
-        &policy,
+        policy,
         directory,
-        &base_binary,
-        &candidate_binary,
+        base_binary,
+        candidate_binary,
     )?;
     let nonce = directory
         .parent()
@@ -247,12 +306,12 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
     // whole suites away from its candidate. Both implementations are already
     // built; no compiler work overlaps these measurements.
     for (suite, cases, reference, current) in [
-        ("hot-path", &policy.cases, &base_binary, &candidate_binary),
+        ("hot-path", &policy.cases, base_binary, candidate_binary),
         (
             "boundaries",
             &policy.boundary_cases,
-            &base_boundaries,
-            &candidate_boundaries,
+            base_boundaries,
+            candidate_boundaries,
         ),
     ] {
         for (index, case) in cases.iter().enumerate() {
@@ -282,7 +341,7 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
     for case in policy.cases.iter().chain(&policy.boundary_cases) {
         decisions.insert(
             case.clone(),
-            compare(&before[case], &candidate[case], &after[case], &policy),
+            compare(&before[case], &candidate[case], &after[case], policy),
         );
     }
     fs::write(
@@ -304,9 +363,9 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
     let controls = qualify_controls(
         root,
         tools,
-        &policy,
+        policy,
         directory,
-        (&candidate_binary, &candidate_boundaries),
+        (candidate_binary, candidate_boundaries),
         &nonce,
         (&before, &after),
     );
@@ -492,27 +551,29 @@ fn build(
     tools: &Policy,
     directory: &Path,
     label: &str,
-    (target, features): (&str, &str),
-) -> Result<Executable> {
+    (targets, features): (&[String], &str),
+) -> Result<BTreeMap<String, Executable>> {
+    let mut command = process::command(root, tools, "cargo");
+    command
+        .env("CARGO_TARGET_DIR", target_directory)
+        .env(
+            "CARGO_BUILD_JOBS",
+            (tools.build_jobs / 2).max(1).to_string(),
+        )
+        .args([
+            "bench",
+            "--locked",
+            "--no-run",
+            "--message-format=json",
+            "--manifest-path",
+        ])
+        .arg(source.join("Cargo.toml"))
+        .args(["--package", "obzenflow_benchmarks", "--features", features]);
+    for target in targets {
+        command.args(["--bench", target]);
+    }
     let status = process::execute(
-        process::command(root, tools, "cargo")
-            .env("CARGO_TARGET_DIR", target_directory)
-            .args([
-                "bench",
-                "--locked",
-                "--no-run",
-                "--message-format=json",
-                "--manifest-path",
-            ])
-            .arg(source.join("Cargo.toml"))
-            .args([
-                "--package",
-                "obzenflow_benchmarks",
-                "--features",
-                features,
-                "--bench",
-                target,
-            ]),
+        &mut command,
         directory,
         label,
         Duration::from_secs(tools.command_watchdog_seconds),
@@ -520,47 +581,46 @@ fn build(
     if !status.success() {
         return Err(failed(format!("{label} failed")));
     }
-    let mut executables = BTreeSet::new();
+    let mut artifacts: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
     for line in fs::read_to_string(directory.join(format!("{label}.stdout.log")))?.lines() {
         let message: Value = serde_json::from_str(line)?;
-        if message["reason"] == "compiler-artifact" && message["target"]["name"] == target {
-            if let Some(path) = message["executable"].as_str() {
-                executables.insert(PathBuf::from(path));
+        if message["reason"] == "compiler-artifact" {
+            if let (Some(target), Some(path)) = (
+                message["target"]["name"].as_str(),
+                message["executable"].as_str(),
+            ) {
+                if targets.iter().any(|name| name == target) {
+                    artifacts
+                        .entry(target.into())
+                        .or_default()
+                        .insert(PathBuf::from(path));
+                }
             }
         }
     }
-    if executables.len() != 1 {
-        return Err(error(format!(
-            "{label} did not identify exactly one Criterion executable"
-        )));
+    let mut binaries = BTreeMap::new();
+    for target in targets {
+        let paths = artifacts
+            .remove(target)
+            .ok_or_else(|| error(format!("{label}: missing executable for {target}")))?;
+        if paths.len() != 1 {
+            return Err(error(format!("{label}: ambiguous executable for {target}")));
+        }
+        let preserved = directory.join(format!("{label}-{target}.executable"));
+        fs::copy(paths.into_iter().next().unwrap(), &preserved)?;
+        let executable = Executable {
+            census: None,
+            sha256: driver::sha256(&fs::read(&preserved)?),
+            path: preserved,
+            compiled_manifest_dir: source.join("crates/obzenflow_benchmarks"),
+        };
+        fs::write(
+            directory.join(format!("{label}-{target}.executable.json")),
+            serde_json::to_vec_pretty(&executable)?,
+        )?;
+        binaries.insert(target.clone(), executable);
     }
-    // A later build must never replace a binary whose samples are retained.
-    let preserved = directory.join(format!("{label}.executable"));
-    fs::copy(executables.into_iter().next().unwrap(), &preserved)?;
-    let census = if target == "journal_hot_path" && !features.contains("allocation-census") {
-        Some(Box::new(build(
-            root,
-            source,
-            target_directory,
-            tools,
-            directory,
-            &format!("{label}-census"),
-            (target, "journal-benchmarks,allocation-census"),
-        )?))
-    } else {
-        None
-    };
-    let executable = Executable {
-        census,
-        sha256: driver::sha256(&fs::read(&preserved)?),
-        path: preserved,
-        compiled_manifest_dir: source.join("crates/obzenflow_benchmarks"),
-    };
-    fs::write(
-        directory.join(format!("{label}.executable.json")),
-        serde_json::to_vec_pretty(&executable)?,
-    )?;
-    Ok(executable)
+    Ok(binaries)
 }
 
 fn measure(
@@ -582,7 +642,7 @@ fn measure(
         command.env_remove("OBZENFLOW_WORK_CENSUS");
     }
     command
-        .env("CRITERION_HOME", root.join("target/criterion"))
+        .env("CRITERION_HOME", directory.join("criterion-comparison"))
         .env_remove("OBZENFLOW_BENCH_CONTROL")
         .env("RUST_LOG", "warn")
         .args([
@@ -645,7 +705,7 @@ fn measure(
         ));
     }
     let mut found = BTreeMap::new();
-    collect_samples(&root.join("target/criterion"), label, &mut found)?;
+    collect_samples(&directory.join("criterion-comparison"), label, &mut found)?;
     if found.keys().cloned().collect::<BTreeSet<_>>() != expected {
         return Err(error(
             "Criterion samples do not cover the selected cases exactly",

@@ -14,7 +14,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<()> {
+const LEGACY_REFERENCE: &str = "854c04bab261477ad4bec813369244e84f2ffb20";
+
+pub(super) fn install(
+    root: &Path,
+    baseline: &Path,
+    artifacts: &Path,
+    revision: &str,
+) -> Result<()> {
     let mut applied = BTreeMap::new();
     let crate_path = Path::new("crates/obzenflow_benchmarks");
     // Copy an entire, coherent outer crate. Source layout and framework internals
@@ -40,6 +47,19 @@ pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<
             &fs::read(source)?,
             &mut applied,
         )?;
+    }
+    // A versioned outer adapter bridges this known public constructor change.
+    // Payloads and workloads stay the same; the preserved framework is untouched.
+    let adapter = (revision == LEGACY_REFERENCE).then_some("src/support/reference_854c04");
+    if let Some(adapter) = adapter {
+        for name in ["data_event.rs", "validation_sink.rs"] {
+            write(
+                baseline,
+                &format!("crates/obzenflow_benchmarks/src/support/{name}"),
+                &fs::read(root.join(crate_path).join(adapter).join(name))?,
+                &mut applied,
+            )?;
+        }
     }
     // The driver owns its dependency declaration. Synchronise only its package's
     // lock entry, preserving the reference's resolved production dependencies.
@@ -80,6 +100,7 @@ pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<
             "purpose": "identical public-operation benchmark driver for reference and candidate",
             "production_source_replaced": false,
             "framework_files_modified": [],
+            "reference_public_api_adapter": adapter,
             "applied_files_sha256": applied,
         }))?,
     )?;
@@ -197,6 +218,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn intact_reference_cache_is_reusable_but_pruned_source_is_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let extracted = workspace.path().join("extracted");
+        fs::create_dir(&extracted).unwrap();
+        fs::write(extracted.join("source.rs"), "reference").unwrap();
+        let (source, target) = reference(workspace.path(), &extracted, artifacts.path()).unwrap();
+        fs::create_dir(&extracted).unwrap();
+        fs::write(extracted.join("source.rs"), "reference").unwrap();
+        assert_eq!(
+            reference(workspace.path(), &extracted, artifacts.path()).unwrap(),
+            (source.clone(), target)
+        );
+        fs::remove_file(source.join("source.rs")).unwrap();
+        assert!(reference(workspace.path(), &extracted, artifacts.path())
+            .unwrap_err()
+            .to_string()
+            .contains("preserved reference source changed"));
+    }
+
+    #[test]
     fn public_driver_changes_only_its_outer_crate_and_lock_entry() {
         let candidate = tempfile::tempdir().unwrap();
         let reference = tempfile::tempdir().unwrap();
@@ -234,7 +276,23 @@ mod tests {
         )
         .unwrap();
         let before = tree(reference.path()).unwrap();
-        install(candidate.path(), reference.path(), artifacts.path()).unwrap();
+        let adapter = candidate
+            .path()
+            .join("crates/obzenflow_benchmarks/src/support/reference_854c04/data_event.rs");
+        fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+        fs::write(&adapter, "versioned public constructor adapter").unwrap();
+        fs::write(
+            adapter.with_file_name("validation_sink.rs"),
+            "versioned public sink adapter",
+        )
+        .unwrap();
+        install(
+            candidate.path(),
+            reference.path(),
+            artifacts.path(),
+            LEGACY_REFERENCE,
+        )
+        .unwrap();
         let after = tree(reference.path()).unwrap();
         for (path, identity) in &after {
             if before.get(path) != Some(identity) {
@@ -259,6 +317,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record["framework_files_modified"], json!([]));
+        assert_eq!(
+            record["reference_public_api_adapter"],
+            "src/support/reference_854c04"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                reference
+                    .path()
+                    .join("crates/obzenflow_benchmarks/src/support/data_event.rs")
+            )
+            .unwrap(),
+            "versioned public constructor adapter"
+        );
         assert_eq!(
             record["measurement_contract"],
             super::super::MEASUREMENT_CONTRACT

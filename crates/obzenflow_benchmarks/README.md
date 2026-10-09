@@ -26,39 +26,61 @@ Historical results retain their original contracts; they are not comparable to
 
 ## Run and validate
 
-Every PR update runs all 16 targets declared in this crate's `Cargo.toml` through
-ordinary optimised `cargo bench --locked`, with each target's required features.
-The CI matrix in `.github/workflows/ci.yml` gives each target its own runner and
-keeps independent jobs running when a sibling fails. Keep that matrix aligned
-with the manifest when adding or removing targets or changing required features.
+PR updates, main pushes and manual CI runs execute one `performance` job:
+`cargo xtask test --lane performance`. It owns both the existing reference/current
+qualification and all 16 Criterion targets declared in this crate's `Cargo.toml`.
 
-Download the `criterion-<target>` artefact from the PR's CI run and open
-`report/index.html`. Each artefact contains that job's isolated `CRITERION_HOME`
-under `target/criterion/<target>/<run>-<attempt>/`, including raw measurements and
-HTML reports; available output is retained after
-failure. A failed benchmark command fails the job. These jobs use existing
-workloads, sampling settings and assertions, with no timing regression threshold.
-The native performance comparison lane continues to run on main pushes and
-manual CI dispatches.
+Compilation is separate from timing. Targets with identical required features share
+one Cargo invocation. Reference and candidate builds have distinct output directories
+and share the four-job compilation budget. Timing binaries never enable allocation
+census; their separate census binaries retain the existing validity checks.
+
+The nine comparison cases and their controls run alone after all compilation finishes.
+Then the full suite uses two stable queues from `.config/performance-suite.toml` on
+Linux hosts with at least four allowed CPUs. Each queue is pinned to two distinct
+logical CPUs; descendants inherit that assignment. The queues share memory, CPU caches
+and filesystem bandwidth. These observations are not the regression gate and are not
+directly comparable to the old separate-runner matrix. Authored workloads, sample sizes
+and measurement windows are unchanged. Runtime defaults are two Tokio workers and two
+Criterion analysis threads; explicitly authored runtime configurations remain intact.
+Other platforms run serially and record a distinct execution mode.
+
+The queue inventory must match the manifest exactly. Each executable lists its cases
+before measurement, and missing/duplicate results fail completion. A comparison failure
+still permits the full suite to finish; a failed target does not cancel later targets.
+
+CI explicitly restores and saves dependency caches and intact compilation directories,
+including the content-verified reference source, but never measurement evidence. This
+job does not invoke generic Rust-cache cleanup, which can prune that source even with
+target caching disabled. Every native run gets a fresh
+`target/test-runs/<run-id>/` directory. Download `test-results-performance` for the
+comparison JSON, logs, phase timings and `performance/suite/<target>/criterion/`
+raw samples and HTML reports. Executable copies and source archives are excluded from
+the uploaded evidence to avoid transferring build-sized artefacts.
+
+The initial turnaround target is the existing roughly 16-minute CI duration; it is
+not an established runtime guarantee. `performance/phases.json` separates preparation,
+compilation, qualification and full-suite wall time. Each target also records elapsed
+time and CPU assignment. Assess cold and restored-cache runs separately.
 
 ### Copyable CI reports
 
-Open a Criterion job's Actions summary and use the Markdown block's copy button.
-The same report is available as a direct `.md` artefact named
-`criterion-<target>-<checkout-sha>-<run>-attempt-<attempt>.md`, following the publishing
-dry-run report pattern. It includes the measured checkout SHA (the PR merge checkout),
-run/attempt link, target and features, command/profile, Rust version, runner image,
-OS, CPU model and logical CPU count, plus a link to the raw Criterion artefact.
+Open the CI run's **Summary** page and find **Performance report**. It shows rendered
+tables and an expandable **Copy the complete report as Markdown** block. The same
+content is uploaded directly as `performance-<run>-attempt-<attempt>.md`, following
+the publishing dry-run pattern. A link to raw evidence accompanies the run identity,
+source commit/content hash, reference revision, features, compiler, host, execution
+mode, CPU assignments, phase durations and target outcomes.
 
-Each operation section uses the same columns: full Criterion case ID, timed work,
-median in microseconds, the median's confidence interval and confidence level,
-and sample count. The formatter reads Criterion's per-iteration median estimate;
-it does not divide it by the iteration count again or turn it into per-event time.
-Compare matching case IDs, work, profiles and environments. No cross-case totals,
-automatic baseline comparisons or timing thresholds are introduced.
+Each operation category contains the applicable isolated comparison decisions and
+full-suite observations. Comparison values come from the native `comparison.json`'s
+identified before/candidate/after fields, never the mutable Criterion `new/` directory
+used by reference and control trials. Observation rows retain the target, full case
+ID, timed work, median in microseconds, confidence interval/level and sample count.
+Medians are already per iteration; the formatter does not divide them again. There
+are no category totals or new regression thresholds.
 
-The current 148 cases across 16 targets fall into these categories. Each job shows
-only categories with measured rows:
+The current 148 observations across 16 targets fall into these categories:
 
 | Operation | Cases | Included work |
 | --- | ---: | --- |
@@ -80,7 +102,7 @@ whole batch. The row descriptions preserve those distinctions. Codec costs belon
 inside reads/appends; canonical JSON byte accounting is a separate diagnostic operation,
 not a measurement of the production disk codec.
 
-Reports consume only the current job's `new/` results. Failed or skipped measurement
+Observation rows consume only this native attempt's per-target `new/` results. Failed or skipped measurement
 commands produce an incomplete report with any available rows. Missing, malformed or
 duplicate results are called out and fail report generation after the report is saved.
 Unknown operations remain visible under **Uncategorised**. Raw output and Markdown
@@ -105,8 +127,8 @@ each workload and checks its output without collecting a timing baseline:
 cargo test --locked -p obzenflow_benchmarks --features journal-benchmarks,validation-benchmarks --bench journal_hot_path --bench journal_components --bench validation_boundaries -- --test
 ```
 
-Use `cargo xtask test --lane performance` for the native performance comparison
-and its validity gates.
+Use `cargo xtask test --lane performance` for the native comparison, the full suite
+and their validity gates.
 
 For a selected diagnostic measurement:
 
@@ -193,8 +215,17 @@ grouped-append timings remain diagnostic; their correctness cases are required.
 The comparison owner installs the same outer benchmark crate against the pinned
 reference and candidate. It changes no framework source or feature declaration.
 `measurement-driver.json` identifies the driver and its files; only the benchmark
-package lock entry is synchronised with the copied manifest. A future product API
-change needs an explicit outer compatibility adapter or a qualified new baseline.
+package lock entry is synchronised with the copied manifest. The pinned `854c04` reference
+predates the explicit schema-version argument on `ChainEventFactory::data_event`.
+The versioned `support/reference_854c04/data_event.rs` outer adapter calls that
+reference's three-argument public constructor; the current fixture calls the four-argument
+constructor with schema version 1. The adjacent `validation_sink.rs` adapter uses the
+reference's explicit successful Noop delivery result, where the current inline-sink
+API accepts `Ok(())`. Archive construction remains outside the timed operation; its
+existing source and sink-delivery completeness assertions remain required. `measurement-driver.json` records the adapter and
+its final file hash. Framework source, fixture payloads and workload dimensions remain
+unchanged. A future product API change needs an explicit outer adapter or a qualified
+new baseline.
 
 Separate, content-identified builds prevent Cargo artifact aliasing. Each case
 runs reference/candidate/unchanged-reference trials after compilation finishes.
@@ -212,8 +243,9 @@ window. The required gate has its own sampling policy. Compare identical
 profiles, contracts, dimensions and runtime limits; run timings without concurrent
 builds or tests. Test-profile and optimised bench-profile results are separate.
 
-Criterion writes its HTML reports, raw samples and statistical estimates under
-`target/criterion`; open `target/criterion/report/index.html` for the report.
+Direct `cargo bench` writes HTML and raw results under `target/criterion`. The native
+lane isolates comparisons in `target/test-runs/<run-id>/performance/criterion-comparison`
+and full-suite output in `performance/suite/<target>/criterion`.
 Use `--save-baseline <name>` to retain a named baseline and `--baseline <name>`
 to compare a later run of the same cases and build profile against it.
 Required-gate artifacts live under `target/test-runs`.

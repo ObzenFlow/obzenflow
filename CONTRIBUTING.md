@@ -84,23 +84,24 @@ unrelated test could otherwise keep a finished test's output pipe open and cause
 a false leak failure. The 200 ms leak deadline and failure policy remain unchanged.
 
 Every PR update requires the six correctness lanes and the existing formatting,
-Clippy and policy checks. It also runs all targets declared in
-`crates/obzenflow_benchmarks/Cargo.toml` as parallel Criterion jobs on separate
-runners, using each target's required features and existing sampling settings.
-Download `criterion-<target>` from the CI run's artefacts for raw measurements and
-HTML reports. Benchmark command failures fail their jobs; timing values add no
-speed threshold. Available reports are uploaded even after failure, and sibling
-benchmark jobs continue.
+Clippy and policy checks. One `performance` job runs on PRs, main pushes and manual
+CI dispatches through `cargo xtask test --lane performance`. It executes the existing
+comparison/validity gate and retains all 148 observations across 16 benchmark targets.
+Compilation finishes before timing. The gate runs alone; full-suite observations use
+two CPU-partitioned queues on the standard four-CPU Linux runner, with existing
+sampling settings. Shared memory and disk bandwidth still affect those observations;
+compare only runs with the same recorded execution mode. Other platforms run serially.
 
-Each Criterion job also provides a copyable Markdown report in its Actions summary
-and as a direct `.md` download, named with the target, checkout SHA, run and attempt.
-Rows are grouped by operation and retain their full case IDs, timed-work descriptions,
-median durations in microseconds, confidence intervals and sample counts. Compare
-matching cases and environments across runs. See the
+The CI run's **Summary** page shows a rendered **Performance report** and a copyable
+Markdown block, grouped by operation. The direct `.md` download contains the same
+report. It includes identified reference/current decisions, full-suite medians and
+confidence intervals, target outcomes, CPU assignments and separate phase durations.
+Download `test-results-performance` for raw evidence. Available evidence and the report
+are preserved after failure; missing work cannot qualify as success. See the
 [benchmark report categories](crates/obzenflow_benchmarks/README.md#copyable-ci-reports)
-for measurement boundaries and how to maintain the mappings.
+for measurement boundaries and maintenance. The approximately 16-minute turnaround
+target must be checked against actual cold and restored-cache CI runs.
 
-Pushes to `main` and manual CI dispatches require the complete performance lane.
 Changes claiming performance improvements or changing the benchmark driver,
 baseline or comparison policy require an explicit comparison
 before merge, identifying the measured revision. Publication and release dry-runs

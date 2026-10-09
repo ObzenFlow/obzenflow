@@ -18,7 +18,6 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -262,10 +261,9 @@ impl ObserverJournals {
         .unwrap();
         for n in 0..inputs {
             data.append(
-                ChainEventFactory::data_event(
+                super::data_event(
                     stage.into(),
                     "observer.business",
-                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"n":n,"body":"x".repeat(256)}),
                 ),
                 Default::default(),
@@ -292,10 +290,9 @@ impl ObserverJournals {
             )
             .await
             .unwrap();
-        let mut error_event = ChainEventFactory::data_event(
+        let mut error_event = super::data_event(
             stage.into(),
             "observer.error",
-            std::num::NonZeroU32::MIN,
             serde_json::json!({"kind":"fixture"}),
         )
         .with_runtime_provenance(RuntimeProvenance {
@@ -336,16 +333,5 @@ impl ObserverJournals {
 
 #[derive(Clone, Debug)]
 struct DiscardTicks;
-#[async_trait::async_trait]
-impl InlineSink for DiscardTicks {
-    type Input = Tick;
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-        )
-        .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
-    }
-    async fn write(&mut self, _input: Tick) -> Result<(), SinkWriteFailure> {
-        Ok(())
-    }
-}
+#[path = "validation_sink.rs"]
+mod sink_adapter;

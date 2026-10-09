@@ -228,6 +228,101 @@ class MeasurementTests(unittest.TestCase):
     def test_summary_fence_and_size_limit(self):
         self.assertIn("````markdown\ntext ``` text\n````", report.copyable_summary("text ``` text\n"))
         self.assertIn("exceeds the Actions summary limit", report.copyable_summary("µ" * 600_000))
+        markdown = "Criterion observations and artefact links\n"
+        self.assertIn(f"```markdown\n{markdown}```", report.performance_summary(markdown))
+
+
+class PerformanceReportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / "target", prefix="performance-report-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.performance = self.root / "performance"
+        self.performance.mkdir()
+
+    def write(self, path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+
+    def fixture(self):
+        inventory = current_inventory()
+        self.write(self.root / "report.json", {"source": {"commit": "measured-commit", "content_sha256": "measured-content"},
+                                              "run_id": "this-attempt", "outcome": {"status": "passed"}})
+        self.write(self.performance / "suite-plan.json", [{"name": target, "required-features": []} for target in inventory])
+        self.write(self.performance / "phases.json", {"build": 60, "qualification": 120, "full_suite": 700})
+        self.write(self.performance / "suite-execution.json", {"mode": "two-cpu-partitions-v1", "cpu_groups": [[0, 1], [2, 3]]})
+        self.write(self.performance / "comparison-policy.json", {"baseline_revision": "reference-commit", "sample_size": 40, "warm_up_ms": 1000, "measurement_ms": 3000})
+        self.write(self.performance / "measurement-driver.json", {"reference_public_api_adapter": "src/support/reference_854c04"})
+        self.write(self.performance / "qualification.json", {"passed": True, "error": None})
+        self.write(self.performance / "negative-controls.json", {"slowdown": {"outcome": "regressed"},
+                   "missing_work_rejected_by_completion_oracle": True, "missing_studio_projection_output_rejected": True})
+        for target, cases in inventory.items():
+            phase = self.performance / "suite" / target
+            self.write(phase / "outcome.json", {"passed": True, "elapsed_seconds": 20, "cpus": [0, 1]})
+            self.write(phase / "cases.json", cases)
+            for index, case in enumerate(cases):
+                directory = phase / "criterion" / str(index) / "new"
+                self.write(directory / "benchmark.json", {"full_id": case})
+                self.write(directory / "estimates.json", {"median": {"point_estimate": 3000, "confidence_interval": {
+                    "lower_bound": 2900, "upper_bound": 3100, "confidence_level": 0.95}}})
+                self.write(directory / "sample.json", {"times": [3000, 6000], "iters": [1, 2]})
+        case = "reader_dispatch/full/actual_reader/readers_8"
+        comparison = {"baseline_revision": "reference-commit", "suites": {"journal_hot_path": {"cases": [case]}},
+                      "decisions": {case: {"outcome": "passed"}}}
+        for phase, point in (("before", 1000), ("candidate", 1100), ("after", 1050)):
+            comparison[phase] = {case: {"estimate": {"point_estimate": point, "confidence_interval": {
+                "lower_bound": point - 10, "upper_bound": point + 10, "confidence_level": 0.95}}}}
+        self.write(self.performance / "comparison.json", comparison)
+
+    def test_full_inventory_is_grouped_and_comparison_uses_identified_candidate(self):
+        self.fixture()
+        markdown, errors = report.render_performance(self.root, "success")
+        self.assertFalse(errors)
+        self.assertIn("**148 cases**", markdown)
+        for title, _ in report.CATEGORIES[:-1]:
+            self.assertEqual(markdown.count("## " + title + "\n"), 1)
+        self.assertIn("| 1 [0.99–1.01; 95%] | 1.1 [1.09–1.11; 95%] | 1.05 [1.04–1.06; 95%] | passed |", markdown)
+        self.assertIn("measured-commit", markdown)
+        self.assertIn("measured-content", markdown)
+        self.assertIn("two-cpu-partitions-v1", markdown)
+        self.assertIn("| build | 60.00 |", markdown)
+        self.assertIn("| full_suite | 700.00 |", markdown)
+        self.assertLess(len(report.performance_summary(markdown).encode()), 1_000_000)
+
+    def test_missing_case_is_incomplete_even_when_measurement_process_succeeded(self):
+        self.fixture()
+        path = self.performance / "suite/per_event_latency_20_stage/criterion/0/new/sample.json"
+        path.unlink()
+        markdown, errors = report.render_performance(self.root, "success")
+        self.assertTrue(errors)
+        self.assertIn("**INCOMPLETE**", markdown)
+        self.assertIn("**147 cases**", markdown)
+        self.assertIn("per_event_latency_20_stage: measured case IDs differ", markdown)
+
+    def test_failed_gate_keeps_full_suite_and_native_decision(self):
+        self.fixture()
+        self.write(self.performance / "qualification.json", {"passed": False, "error": "regression found"})
+        self.write(self.root / "report.json", {"outcome": {"status": "failed"}})
+        markdown, errors = report.render_performance(self.root, "failure")
+        self.assertFalse(errors)
+        self.assertIn("**FAILED**", markdown)
+        self.assertIn("regression found", markdown)
+        self.assertIn("**148 cases**", markdown)
+
+    def test_early_failure_still_writes_copyable_report_and_does_not_find_previous_run(self):
+        self.fixture()  # Valid but unrelated evidence must not be selected.
+        output = self.root / "markdown"
+        summary = self.root / "summary.md"
+        with patch("sys.argv", ["criterion_report.py", "--performance-dir", "", "--output-dir", str(output), "--outcome", "failure"]), \
+             patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}, clear=True):
+            self.assertEqual(report.main(), 1)
+        markdown = next(output.glob("*.md")).read_text()
+        self.assertIn("**INCOMPLETE**", markdown)
+        self.assertIn("no previous run is substituted", markdown)
+        self.assertNotIn("measured-commit", markdown)
+        self.assertIn("| Run URL | unavailable (local run) |", markdown)
+        self.assertIn("Copy the complete report as Markdown", summary.read_text())
+        self.assertIn(f"```markdown\n{markdown}```", summary.read_text())
 
 
 if __name__ == "__main__":
