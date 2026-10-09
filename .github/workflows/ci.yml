@@ -104,8 +104,11 @@ jobs:
         include:
           - name: default
             cargo_args: ""
+            rustflags: ""
+          # Tokio Console instrumentation compiles only with tokio_unstable.
           - name: all-features
             cargo_args: "--all-features"
+            rustflags: "--cfg tokio_unstable"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -117,6 +120,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy (${{ matrix.name }})
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo clippy --workspace --all-targets --locked ${{ matrix.cargo_args }} -- -D warnings
 
   test:

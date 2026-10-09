@@ -33,8 +33,8 @@ use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::ConsoleSink;
-use obzenflow::stages::sources::SourceError;
 use obzenflow::stages::sources::TypedFiniteSourceHandler;
+use obzenflow::stages::sources::{SourceDiagnosticReason, SourceError};
 use obzenflow::stages::transforms::TryMapTyped;
 use obzenflow::stages::{stateful, transforms};
 use serde::{Deserialize, Serialize};
@@ -100,7 +100,7 @@ impl TypedFiniteSourceHandler for HighVolumeSource {
                 "Simulated source outage: circuit breaker will wait five seconds before probing"
             );
             return Err(SourceError::Timeout(
-                "Simulated input-service outage".into(),
+                SourceDiagnosticReason::TimedOut.into(),
             ));
         }
 

@@ -11,8 +11,11 @@ use obzenflow_adapters::sources::{
     simple_poll, HttpPollConfig, HttpPollSource, HttpPullConfig, HttpPullSource,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainPayload, ReplayLifecycleEvent};
+use obzenflow_core::event::{
+    ChainEvent, ChainPayload, ReplayLifecycleEvent, SourceDiagnosticReason,
+};
 use obzenflow_core::http_client::Url;
 use obzenflow_core::journal::read::{RunJournalKind, RunRecordData};
 use obzenflow_core::{StageId, TypedPayload};
@@ -488,10 +491,14 @@ async fn source_retry_observes_one_cached_initialization_failure() {
         }
     }
 
+    // The safe diagnostic classifies the failure without echoing client text.
     let error = terminal_error.expect("source retry eventually exhausts");
-    assert!(error
-        .to_string()
-        .contains("synthetic source initialization failure"));
+    assert_eq!(error.kind(), SourcePollErrorKind::Transport);
+    assert_eq!(
+        error.diagnostic().reason(),
+        SourceDiagnosticReason::InputUnavailable
+    );
+    assert!(!format!("{error} {error:?}").contains("synthetic source initialization failure"));
     assert_eq!(
         initializations.load(Ordering::SeqCst),
         1,

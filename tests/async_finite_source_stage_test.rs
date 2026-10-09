@@ -9,6 +9,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -254,7 +255,7 @@ impl TypedAsyncFiniteSourceHandler for CleanupFailureSource {
     async fn drain(&mut self) -> std::result::Result<(), SourceError> {
         self.drain_calls.fetch_add(1, Ordering::Relaxed);
         Err(SourceError::Other(
-            "cleanup exploded credential=SECRET_SENTINEL".to_string(),
+            SourceDiagnosticReason::Unclassified.into(),
         ))
     }
 }

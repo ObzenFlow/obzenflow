@@ -74,7 +74,9 @@ impl ChainPayload {
                     EventKind::CompositeData,
                     "ai.map_reduce.reduce_input" | "ai.map_reduce.chunk_failed",
                 )
-                | (EventKind::Execution, "obzenflow.sink_operation_failed") => 2,
+                | (EventKind::Execution, "obzenflow.sink_operation_failed" | "source.poll_error") => {
+                    2
+                }
                 _ => 1,
             };
             if payload_schema_version.get() != expected {
@@ -236,6 +238,7 @@ impl ChainPayload {
                 | ExecutionPayload::RateLimiter(_)
                 | ExecutionPayload::Backpressure(_)
                 | ExecutionPayload::SourcePollError(_)
+                | ExecutionPayload::SourceOpenFailed(_)
                 | ExecutionPayload::HttpPullState(_)
                 | ExecutionPayload::AiChunkingPlanned(_)
                 | ExecutionPayload::AccumulatorProgress { .. }

@@ -102,16 +102,17 @@ use crate::stages::observer::{
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
+use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::MiddlewareExecutionScope;
-use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
+use obzenflow_core::event::payloads::execution_payload::{SourcePollErrorKind, SourcePollKind};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -163,48 +164,139 @@ pub(crate) async fn acquire_replay_input(
 }
 
 pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
-    match error {
-        SourceError::Timeout(_) => ErrorKind::Timeout,
-        SourceError::Transport(_) => ErrorKind::Remote,
-        SourceError::Deserialization(_) => ErrorKind::Deserialization,
-        SourceError::Validation(_) => ErrorKind::Validation,
-        SourceError::Other(_) => ErrorKind::Unknown,
-    }
+    error.kind().processing_error_kind()
 }
 
-/// Normalise a source-owned poll failure into the existing routable lifecycle
-/// event after source policies have observed the typed handler error. This keeps
-/// dependency-health classification on the error value while preserving the
-/// established error-journal representation.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Normalise a source-owned poll failure into the routable error event after
+/// source policies have observed the typed handler error.
 pub(crate) fn normalise_source_poll_error(
     writer_id: WriterId,
     source_type: SourcePollKind,
     error: &SourceError,
 ) -> ChainEvent {
     use obzenflow_core::event::payloads::execution_payload::{
-        ExecutionPayload, SourcePollErrorFact, SourcePollErrorKind,
+        ExecutionPayload, SourcePollErrorFact,
     };
-    let error_type = match error {
-        SourceError::Timeout(_) => SourcePollErrorKind::Timeout,
-        SourceError::Transport(_) => SourcePollErrorKind::Transport,
-        SourceError::Deserialization(_) => SourcePollErrorKind::Deserialization,
-        SourceError::Validation(_) => SourcePollErrorKind::Validation,
-        SourceError::Other(_) => SourcePollErrorKind::Other,
-    };
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let error_type = error.kind();
     ChainEventFactory::execution_event(
         writer_id,
         ExecutionPayload::SourcePollError(SourcePollErrorFact {
             source_type,
             error_type,
-            message: error.safe_summary().to_string(),
-            timestamp_ms,
+            continuation: error.continuation(),
+            diagnostic: error.diagnostic().clone(),
+            timestamp_ms: now_ms(),
         }),
     )
     .mark_as_error(error.safe_summary(), error_type.processing_error_kind())
+}
+
+/// A failure selected during a turn. Its staged events drain first; the
+/// lifecycle failure links to `causal_event_id` only after that commit.
+pub(crate) struct PendingFailure {
+    pub(crate) message: String,
+    pub(crate) causal_event_id: Option<EventId>,
+}
+
+impl PendingFailure {
+    /// Hands the committed cause to the lifecycle failure and returns its message.
+    pub(crate) fn select(self, failure_causal_event_id: &mut Option<EventId>) -> String {
+        *failure_causal_event_id = self.causal_event_id;
+        self.message
+    }
+}
+
+/// A terminal report stops polling; its staged diagnostic becomes the cause.
+pub(crate) fn terminal_poll_failure(
+    stage_name: &str,
+    error: &SourceError,
+    diagnostic_event: &ChainEvent,
+) -> Option<PendingFailure> {
+    error.is_terminal().then(|| PendingFailure {
+        message: format!("Source '{stage_name}' cannot continue: {error}"),
+        causal_event_id: Some(diagnostic_event.id),
+    })
+}
+
+/// Record-local rejections advanced the reader and terminal reports end it, so
+/// neither earns an idle backoff.
+pub(crate) fn poll_error_backoff(
+    error: &SourceError,
+    backoff: &mut IdleBackoff,
+) -> Option<Duration> {
+    if error.is_terminal() || error.kind() == SourcePollErrorKind::Validation {
+        backoff.reset();
+        None
+    } else {
+        Some(backoff.next_delay())
+    }
+}
+
+/// Where a failed acquisition commits its opening evidence.
+pub(crate) struct SourceOpenFailureCommit<'a> {
+    pub(crate) stage_flow_context: &'a FlowContext,
+    pub(crate) source_type: SourcePollKind,
+    pub(crate) resuming: bool,
+    pub(crate) error_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    pub(crate) instrumentation: &'a Arc<StageInstrumentation>,
+    pub(crate) scope: MiddlewareExecutionScope,
+}
+
+/// Commit opening evidence before the stage fails, so the lifecycle failure can
+/// link to it. An unsuccessful append returns an error and claims no link.
+pub(crate) async fn commit_source_open_failure(
+    commit: SourceOpenFailureCommit<'_>,
+    error: &SourceError,
+) -> Result<PendingFailure, BoxError> {
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, SourceOpenFailedFact, SourceOpenIntent,
+    };
+    let error_type = error.kind();
+    let event = ChainEventFactory::execution_event(
+        WriterId::from(commit.stage_flow_context.stage_id),
+        ExecutionPayload::SourceOpenFailed(SourceOpenFailedFact {
+            source_type: commit.source_type,
+            error_type,
+            intent: if commit.resuming {
+                SourceOpenIntent::Resume
+            } else {
+                SourceOpenIntent::Start
+            },
+            diagnostic: error.diagnostic().clone(),
+            timestamp_ms: now_ms(),
+        }),
+    )
+    .with_flow_context(commit.stage_flow_context.clone())
+    .mark_as_error(error.safe_summary(), error_type.processing_error_kind());
+    commit
+        .instrumentation
+        .record_error(error_type.processing_error_kind());
+    let event = commit.instrumentation.capture_accounting().attach_to(event);
+    let recorded = crate::supervised_base::publication::append(
+        commit.error_journal,
+        event,
+        AppendOptions::default().with_capture(
+            commit
+                .instrumentation
+                .journal_capture(Some(commit.scope), vec![(0, false)]),
+        ),
+    )
+    .await?;
+    Ok(PendingFailure {
+        message: source_open_failure(
+            &commit.stage_flow_context.stage_name,
+            commit.resuming,
+            error,
+        ),
+        causal_event_id: Some(recorded.envelope.provenance.event.id),
+    })
 }
 
 /// Record a source adapter/runtime invariant through the common fatal lane.
@@ -600,16 +692,10 @@ where
     Ok(None)
 }
 
-/// Attribute acquisition failure without persisting connector error text, which
-/// can contain credentials, connection strings or untrusted response bodies.
+/// Attribute acquisition failure from typed diagnostic fields only; connector
+/// text can contain credentials, connection strings or untrusted bodies.
 pub(crate) fn source_open_failure(stage_name: &str, resuming: bool, error: &SourceError) -> String {
-    let reason = match error {
-        SourceError::Timeout(_) => "opening the original input timed out",
-        SourceError::Transport(_) => "the original input is unavailable",
-        SourceError::Deserialization(_) => "the input could not be decoded during acquisition",
-        SourceError::Validation(_) => "the input failed acquisition validation",
-        SourceError::Other(_) => "the original input could not be acquired",
-    };
+    let reason = error.diagnostic();
     if resuming {
         format!("Cannot resume source '{stage_name}': {reason}. Restore the original input and check its configuration and access before resuming.")
     } else {
@@ -811,40 +897,58 @@ mod tests {
     }
 
     #[test]
-    fn source_poll_errors_normalise_to_existing_error_marked_lifecycle_rows() {
+    fn source_poll_errors_normalise_to_typed_error_marked_rows() {
+        use obzenflow_core::event::payloads::execution_payload::SourcePollContinuation;
+        use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
+
         let writer_id = WriterId::from(StageId::new());
-        let secret = "credential=SECRET_SENTINEL";
+        let diagnostic = SourceDiagnostic::new(SourceDiagnosticReason::InvalidValue)
+            .within_field("amount_cents")
+            .record(4);
         let cases = [
             (
-                SourceError::Timeout(secret.into()),
+                SourceError::Timeout(diagnostic.clone()),
                 ErrorKind::Timeout,
                 "source timeout",
+                SourcePollContinuation::Recoverable,
             ),
             (
-                SourceError::Transport(secret.into()),
+                SourceError::Transport(diagnostic.clone()),
                 ErrorKind::Remote,
                 "source transport error",
+                SourcePollContinuation::Recoverable,
             ),
             (
-                SourceError::Deserialization(secret.into()),
+                SourceError::Deserialization(diagnostic.clone()),
                 ErrorKind::Deserialization,
                 "source deserialization error",
+                SourcePollContinuation::Recoverable,
             ),
             (
-                SourceError::Validation(secret.into()),
+                SourceError::Validation(diagnostic.clone()),
                 ErrorKind::Validation,
                 "source validation error",
+                SourcePollContinuation::Recoverable,
             ),
             (
-                SourceError::Other(secret.into()),
+                SourceError::Other(diagnostic.clone()),
                 ErrorKind::Unknown,
                 "source error",
+                SourcePollContinuation::Recoverable,
+            ),
+            (
+                SourceError::Terminal {
+                    kind: SourcePollErrorKind::Validation,
+                    diagnostic: diagnostic.clone(),
+                },
+                ErrorKind::Validation,
+                "source validation error",
+                SourcePollContinuation::Terminal,
             ),
         ];
 
-        for (error, expected_kind, expected_message) in cases {
+        for (error, expected_kind, expected_message, expected_continuation) in cases {
             let event = normalise_source_poll_error(writer_id, SourcePollKind::AsyncFinite, &error);
-            assert!(!serde_json::to_string(&event).unwrap().contains(secret));
             assert!(matches!(
                 event.processing.status,
                 ProcessingStatus::Error {
@@ -856,11 +960,54 @@ mod tests {
                 ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
                     assert_eq!(failure.source_type, SourcePollKind::AsyncFinite);
                     assert_eq!(failure.error_type.processing_error_kind(), expected_kind);
-                    assert_eq!(failure.message, expected_message);
+                    assert_eq!(failure.continuation, expected_continuation);
+                    assert_eq!(failure.diagnostic, diagnostic);
                 }
                 other => panic!("expected source.poll_error lifecycle row, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn only_terminal_reports_select_a_failure_and_rejections_skip_backoff() {
+        use obzenflow_core::event::SourceDiagnosticReason;
+
+        let rejected = SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into());
+        let transport = SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into());
+        let terminal = SourceError::Terminal {
+            kind: SourcePollErrorKind::Transport,
+            diagnostic: SourceDiagnosticReason::InputUnavailable.into(),
+        };
+        let writer_id = WriterId::from(StageId::new());
+        let mut backoff =
+            IdleBackoff::exponential_with_cap(Duration::from_millis(1), Duration::from_millis(10));
+
+        let event = normalise_source_poll_error(writer_id, SourcePollKind::Finite, &rejected);
+        assert!(terminal_poll_failure("orders", &rejected, &event).is_none());
+        assert_eq!(poll_error_backoff(&rejected, &mut backoff), None);
+        assert!(poll_error_backoff(&transport, &mut backoff).is_some());
+
+        let event = normalise_source_poll_error(writer_id, SourcePollKind::Finite, &terminal);
+        let failure = terminal_poll_failure("orders", &terminal, &event).expect("terminal");
+        assert_eq!(failure.causal_event_id, Some(event.id));
+        assert_eq!(
+            failure.message,
+            "Source 'orders' cannot continue: terminal source transport error: the input is unavailable"
+        );
+        assert_eq!(poll_error_backoff(&terminal, &mut backoff), None);
+    }
+
+    #[test]
+    fn open_failure_messages_render_the_typed_reason() {
+        use obzenflow_core::event::SourceDiagnosticReason;
+
+        let error = SourceError::Validation(SourceDiagnosticReason::SizeLimitExceeded.into());
+        assert_eq!(
+            source_open_failure("web_orders", false, &error),
+            "Cannot start source 'web_orders': the input exceeds its configured size limit. Check the input, configuration and access before starting again."
+        );
+        assert!(source_open_failure("web_orders", true, &error)
+            .starts_with("Cannot resume source 'web_orders': the input exceeds"));
     }
 
     #[test]

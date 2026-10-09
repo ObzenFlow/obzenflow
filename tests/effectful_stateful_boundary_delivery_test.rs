@@ -14,6 +14,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_infinite_source, effectful_stateful, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -263,10 +264,9 @@ impl TypedAsyncInfiniteSourceHandler for ChannelSource {
 
     async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         let mut receiver = self.receiver.lock().await;
-        let first = receiver
-            .recv()
-            .await
-            .ok_or_else(|| SourceError::Transport("boundary-probe input closed".to_string()))?;
+        let first = receiver.recv().await.ok_or(SourceError::Transport(
+            SourceDiagnosticReason::InputClosed.into(),
+        ))?;
         let mut outputs = vec![BoundaryProbeInput { value: first }];
         while let Ok(value) = receiver.try_recv() {
             outputs.push(BoundaryProbeInput { value });

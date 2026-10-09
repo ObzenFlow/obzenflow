@@ -23,6 +23,7 @@
 //! | Owned values | [`ValuesSource::new`] |
 //! | Tokio receiver | [`ChannelSource::new`] |
 //! | CSV or TSV | [`CsvSource::builder`] |
+//! | YAML document (`yaml` feature) | `YamlSource::builder` |
 //! | HTTP pull | [`HttpPullSource::new`] |
 //! | HTTP polling | [`HttpPollSource::new`] |
 //! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
@@ -31,6 +32,22 @@
 //! [`TypedFiniteSourceHandler`], [`TypedAsyncFiniteSourceHandler`],
 //! [`TypedInfiniteSourceHandler`] or [`TypedAsyncInfiniteSourceHandler`].
 //! Resource-owning integrations use the corresponding connector and reader.
+//!
+//! ## Source errors
+//!
+//! A [`SourceError`] names a category and carries a typed [`SourceDiagnostic`]:
+//! a closed [`SourceDiagnosticReason`], safe coordinates and an optional
+//! namespaced [`SourceErrorCode`]. A record-local rejection is
+//! [`SourceError::Validation`] and reading continues. [`SourceError::Terminal`]
+//! reports that the reader cannot safely continue; the supervisor fails the
+//! stage without EOF.
+//!
+//! ```rust
+//! use obzenflow::stages::sources::{SourceDiagnosticReason, SourceError};
+//!
+//! let timeout = SourceError::Timeout(SourceDiagnosticReason::TimedOut.into());
+//! assert_eq!(timeout.to_string(), "source timeout error: the input timed out");
+//! ```
 //!
 //! ## CSV sources
 //!
@@ -41,6 +58,15 @@
 //! A user-owned [`CsvDecoder`] value declares the emitted [`CsvDecoder::Output`].
 //! Its default method uses serde when the CSV and domain shapes match;
 //! [`CsvRowDecoder`] provides string-preserving [`CsvRow`] output.
+//!
+//! ## YAML sources
+//!
+//! With the `yaml` feature, `YamlSource` reads one bounded YAML document. A
+//! `YamlSelection` names the records: the whole document, a root sequence, or
+//! a sequence at an RFC 6901 pointer. An application-owned `YamlDecoder`
+//! declares the output and decodes each `YamlRecord`; a `YamlDecodeError`
+//! rejects only that record, and reading continues. Aliases, anchors, tags,
+//! merge keys and duplicate keys fail opening.
 //!
 //! ## Hosted ingress sources
 //!
@@ -76,6 +102,13 @@ pub use obzenflow_adapters::sources::{
 /// In-process sources owning values or a channel receiver.
 pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
+/// Finite YAML source and its application decoder contract (`yaml` feature).
+#[cfg(feature = "yaml")]
+pub use obzenflow_adapters::sources::{
+    YamlDecodeError, YamlDecoder, YamlReader, YamlRecord, YamlSelection, YamlSource,
+    YamlSourceBuilder,
+};
+
 pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
 /// Hosted-ingress source and its application-owned decoder contract.
 pub use obzenflow_adapters::sources::{HostedIngressSource, IngressDecodeError, IngressDecoder};
@@ -101,6 +134,14 @@ pub use obzenflow_infra::http_client::{
 pub use obzenflow_runtime::stages::common::handlers::{
     SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+};
+
+/// Typed source-failure diagnostics. Every [`SourceError`] carries one; field
+/// names are compile-time strings, so diagnostics never echo input.
+pub use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
+pub use obzenflow_core::event::{
+    FieldName, FieldSegment, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode,
+    SourceErrorCodeError, SourceLocation, TextPosition, MAX_FIELD_PATH_DEPTH,
 };
 pub use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,

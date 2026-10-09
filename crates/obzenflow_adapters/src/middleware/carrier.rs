@@ -1452,7 +1452,7 @@ mod tests {
     }
 
     /// A source-owned ingress surface plus its matching protected unit
-    /// (FLOWIP-115d), for the canonical piggy-bank `accounts` shape.
+    /// (FLOWIP-115d), for a hosted `accounts` ingress.
     fn ingress_fixture(stage_id: StageId) -> (MiddlewareSurface, ProtectedUnitId) {
         let stage_key = StageKey("accounts".to_string());
         let target = HostedIngressTargetKey {

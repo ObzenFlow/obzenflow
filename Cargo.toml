@@ -33,6 +33,11 @@ name = "obzenflow_cli_test"
 path = "tests/obzenflow_cli_test.rs"
 required-features = ["cli"]
 
+[[test]]
+name = "source_diagnostic_reasons_test"
+path = "tests/source_diagnostic_reasons_test.rs"
+required-features = ["yaml"]
+
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask"]
@@ -117,6 +122,8 @@ sysinfo = "0.29"
 
 # I/O and formats
 csv = "1"
+# Event-level YAML 1.2 parser; reports aliases, anchors, tags and spans (FLOWIP-084n B6).
+saphyr-parser = "0.1"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres"] }
 
 # Security / hashing
@@ -196,6 +203,7 @@ tokio-console = ["obzenflow_infra/tokio-console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
 postgres = ["obzenflow_adapters/postgres"]
+yaml = ["obzenflow_adapters/yaml"]
 # Selection gate for tests that require repository-managed external services.
 # It carries no product code and is enabled only by the matching conformance job.
 e2e = []
@@ -228,6 +236,7 @@ path = "examples/flight_delays_simple/main.rs"
 [[example]]
 name = "http_ingestion_piggy_bank_demo"
 path = "examples/http_ingestion_piggy_bank_demo/main.rs"
+required-features = ["yaml"]
 
 [[example]]
 name = "char_transform"

@@ -2,61 +2,73 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! HTTP Ingestion Piggy Bank Demo (FLOWIP-084d)
+//! HTTP Ingestion Piggy Bank Demo (FLOWIP-084d, FLOWIP-084n)
 //!
 //! A curl-friendly end-to-end demo that uses:
-//! - HTTP ingestion (push-based source)
+//! - A finite YAML source (accounts, read once from `accounts.yaml`)
+//! - HTTP ingestion (push-based transactions)
 //! - Join stage (accounts as reference catalog; ledger entries as stream)
 //! - Stateful stage (materializes a checkbook snapshot per posted entry)
 //! - Console sink (prints balances + a transaction table)
 //!
 //! Run with localhost-only defaults:
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host`
+//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host,yaml`
 //!
 //! Recommended control-plane auth example:
 //! Provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete
 //! expected `Authorization` header value before starting the process. The repository
 //! guide at `crates/obzenflow_infra/src/web/README.md` explains the authentication scopes.
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
+//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host,yaml -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
 //!
-//! 1) Open accounts (reference side; required before ledger entries):
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-2","owner":"Bob","initial_balance_cents":0}}'`
-//!
-//! 2) Post credits and debits (stream side):
+//! Accounts `acct-1` (Alice, $10.00) and `acct-2` (Bob, $0.00) open from
+//! `accounts.yaml` before any transaction joins. Post credits and debits:
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Credit","amount_cents":250,"note":"paycheck"}}'`
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'`
 //!
 //! Notes:
-//! - Entries for unknown accounts are dropped until the account exists.
-//! - Accounts can be submitted at any time; the join catalog updates continuously.
-//! - Account and transaction ingress each have an independent rate limiter.
+//! - Accounts are fixed at startup. `joins::inner` hydrates every account before
+//!   any transaction joins, so there is no startup race for unknown accounts.
+//! - Entries for accounts missing from `accounts.yaml` are dropped by the join.
+//! - Strict replay (`-- --replay-from <run-dir>`) reuses the archived accounts and
+//!   never reopens `accounts.yaml`.
+//! - Transaction ingress has its own rate limiter.
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
 //! - Ingress POSTs above stay unauthenticated in this example. Control-plane auth protects built-ins such as `/metrics`, `/api/topology`, and `/api/flow/*`.
 //! - With control-plane auth enabled, configure the client's `Authorization` header
 //!   through its protected credential configuration before querying `/metrics` or
 //!   `/api/topology`. Keep credential values out of command arguments and shell history.
-//! - In this example, `runner.rs` owns the HTTP ingress bundles and hosting shell,
-//!   while `build_flow(...)` stays pipeline-only and accepts the extracted typed
-//!   sources. That split is intentional: hosting concerns stay outside `flow!`.
+//! - In this example, `runner.rs` owns the HTTP ingress bundle, hosting shell and
+//!   accounts file, while `build_flow(...)` stays pipeline-only and accepts the
+//!   typed sources. That split is intentional: hosting concerns stay outside `flow!`.
 
 use super::domain::*;
 use super::handlers::Checkbook;
-use obzenflow::flow::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
+use obzenflow::flow::{async_infinite_source, flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
-use obzenflow::stages::sources::{HostedIngressSource, IngressDecoder};
+use obzenflow::stages::sources::{
+    HostedIngressSource, IngressDecoder, YamlDecodeError, YamlDecoder, YamlRecord, YamlSource,
+};
 use obzenflow::stages::{joins, sinks};
 use std::path::PathBuf;
 
-/// The ingress decoder owns the domain output emitted by this source.
+/// Decodes one entry of `accounts.yaml`; a negative opening balance rejects
+/// only that account.
 #[derive(Clone, Debug)]
-pub(crate) struct AccountIngress;
+pub(crate) struct AccountYaml;
 
-impl IngressDecoder for AccountIngress {
+impl YamlDecoder for AccountYaml {
     type Output = AccountOpened;
+
+    fn decode(&self, record: YamlRecord<'_>) -> Result<AccountOpened, YamlDecodeError> {
+        let account: AccountOpened = record.deserialize()?;
+        if account.initial_balance_cents < 0 {
+            return Err(YamlDecodeError::invalid_value("initial_balance_cents"));
+        }
+        Ok(account)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -67,13 +79,13 @@ impl IngressDecoder for LedgerIngress {
 }
 
 pub fn build_flow(
-    accounts_source: HostedIngressSource<AccountIngress>,
+    accounts_source: YamlSource<AccountYaml>,
     tx_source: HostedIngressSource<LedgerIngress>,
 ) -> FlowDefinition {
     // This function takes only typed sources, not `HttpIngress<D>` bundles.
     // The runner owns HTTP hosting; the flow owns pipeline topology.
     FlowDefinition::materialize(move |_runtime_config| {
-        let post_entry = joins::inner_live::<AccountOpened, LedgerEntry, PostedEntry, _, _, _, _>(
+        let post_entry = joins::inner::<AccountOpened, LedgerEntry, PostedEntry, _, _, _, _>(
             |account| account.account_id.clone(),
             |entry| entry.account_id.clone(),
             |account, entry| PostedEntry {
@@ -146,9 +158,7 @@ pub fn build_flow(
 
             stages: {
                 // Ingestion
-                accounts = async_infinite_source!(
-                    AccountOpened => accounts_source with { rate_limit(10.0) }
-                );
+                accounts = source!(AccountOpened => accounts_source);
                 tx = async_infinite_source!(
                     LedgerEntry => tx_source with { rate_limit(50.0) }
                 );

@@ -11,6 +11,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -91,7 +92,9 @@ impl TypedFiniteSourceHandler for TimedEventSource {
         let sequence = self.index as u64;
         self.index += 1;
         if event_type == "failure" {
-            return Err(SourceError::Other("controlled_failure".to_string()));
+            return Err(SourceError::Other(
+                SourceDiagnosticReason::Unclassified.into(),
+            ));
         }
 
         Ok(Some(vec![CircuitMetricEvent {

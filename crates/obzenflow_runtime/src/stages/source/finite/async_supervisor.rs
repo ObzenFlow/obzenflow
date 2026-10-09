@@ -19,10 +19,11 @@ use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
 use crate::stages::source::supervision::SourceControl;
 use crate::stages::source::supervision::{
-    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
-    normalise_source_poll_error, observe_source_boundary_rejection, record_source_cleanup_failed,
-    record_source_stage_fatal, source_error_kind, source_open_failure,
-    stage_boundary_control_events, stage_source_poll_outputs, SourcePollObservation,
+    around_source_boundary, commit_source_open_failure, drain_pending_outputs_async,
+    emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
+    poll_error_backoff, record_source_cleanup_failed, record_source_stage_fatal, source_error_kind,
+    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
+    PendingFailure, SourceOpenFailureCommit, SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
@@ -97,9 +98,9 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
     /// drain those events before transitioning to completion.
     pub(crate) pending_boundary_eof: bool,
 
-    /// Error was observed by the source boundary after emitting control events;
-    /// drain those events before transitioning to failure.
-    pub(crate) pending_boundary_error: Option<String>,
+    /// A failure was selected after staging this turn's events; drain those
+    /// events before transitioning to failure.
+    pub(crate) pending_failure: Option<PendingFailure>,
 
     /// Rejection was observed by the source boundary after emitting control
     /// events; drain those events before transitioning to completion.
@@ -499,7 +500,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
             replay_driver: self.replay_driver.take(),
             replay_started_at: self.replay_started_at.take(),
             replay_completion: self.replay_completion.clone(),
-            pending_boundary_error: self.pending_boundary_error.take(),
+            pending_failure: self.pending_failure.take(),
             reader_acquired: self.reader_acquired,
             pending_boundary_eof: self.pending_boundary_eof,
             pending_boundary_rejected: self.pending_boundary_rejected,
@@ -518,7 +519,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                 owner.replay_driver = worker.replay_driver;
                 owner.replay_started_at = worker.replay_started_at;
                 owner.replay_completion = worker.replay_completion;
-                owner.pending_boundary_error = worker.pending_boundary_error;
+                owner.pending_failure = worker.pending_failure;
                 owner.reader_acquired = worker.reader_acquired;
                 owner.pending_boundary_eof = worker.pending_boundary_eof;
                 owner.pending_boundary_rejected = worker.pending_boundary_rejected;
@@ -596,12 +597,28 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                         opened = self.handler.as_mut().expect("AcquiringInput owns a source handler").acquire(context) => opened,
                     };
                     if let Err(error) = opened {
+                        let flow_id = ctx.flow_id.to_string();
+                        let stage_flow_context = make_flow_context(
+                            &ctx.flow_name,
+                            &flow_id,
+                            &ctx.stage_name,
+                            self.stage_id,
+                            StageType::FiniteSource,
+                        );
+                        let failure = commit_source_open_failure(
+                            SourceOpenFailureCommit {
+                                stage_flow_context: &stage_flow_context,
+                                source_type: SourcePollKind::AsyncFinite,
+                                resuming: ctx.runtime_execution.resume_control().is_some(),
+                                error_journal: &ctx.error_journal,
+                                instrumentation: &ctx.instrumentation,
+                                scope: ctx.runtime_execution.stage_scope(self.stage_id),
+                            },
+                            &error,
+                        )
+                        .await?;
                         return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                            source_open_failure(
-                                &ctx.stage_name,
-                                ctx.runtime_execution.resume_control().is_some(),
-                                &error,
-                            ),
+                            failure.select(&mut ctx.failure_causal_event_id),
                         )));
                     }
                     self.reader_acquired = true;
@@ -643,17 +660,23 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                 )
                 .await?
                 {
+                    // The diagnostic drains first, so control cannot relabel a failure.
+                    if let Some(failure) = self.pending_failure.take() {
+                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                            failure.select(&mut ctx.failure_causal_event_id),
+                        )));
+                    }
                     return Ok(directive);
                 }
 
+                if let Some(failure) = self.pending_failure.take() {
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                        failure.select(&mut ctx.failure_causal_event_id),
+                    )));
+                }
                 // Graceful stop must publish already-polled output before EOF.
                 // Reuse the running path's bounded, control-aware credit drain.
                 if matches!(state, FiniteSourceState::Draining) {
-                    if let Some(error) = self.pending_boundary_error.take() {
-                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                            error,
-                        )));
-                    }
                     self.idle_backoff.reset();
                     self.pending_idle_delay = None;
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
@@ -662,11 +685,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                 if self.pending_boundary_eof {
                     self.pending_boundary_eof = false;
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
-                }
-                if let Some(error) = self.pending_boundary_error.take() {
-                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                        error,
-                    )));
                 }
                 if self.pending_boundary_rejected {
                     self.pending_boundary_rejected = false;
@@ -828,10 +846,10 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                         ),
                                         Err(_) => {
                                             let poll_duration = poll_started_at.elapsed();
-                                            let timeout_error = SourceError::Timeout(format!(
-                                                "poll timeout exceeded ({}s)",
-                                                timeout.as_secs()
-                                            ));
+                                            let timeout_error = SourceError::Timeout(
+                                                obzenflow_core::event::SourceDiagnosticReason::TimedOut
+                                                    .into(),
+                                            );
                                             SourcePollReport::handler_error(
                                                 timeout_error,
                                                 poll_duration,
@@ -1001,15 +1019,18 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                             SourcePollResult::HandlerError(error) => {
                                 tracing::warn!(
                                     stage_name = %ctx.stage_name,
-                                    error = error.safe_summary(),
+                                    error = %error,
                                     "Async finite source handler.next() returned error"
                                 );
                                 let kind = source_error_kind(&error);
-                                let mut events = vec![normalise_source_poll_error(
+                                let diagnostic = normalise_source_poll_error(
                                     WriterId::from(self.stage_id),
                                     SourcePollKind::AsyncFinite,
                                     &error,
-                                )];
+                                );
+                                self.pending_failure =
+                                    terminal_poll_failure(&ctx.stage_name, &error, &diagnostic);
+                                let mut events = vec![diagnostic];
                                 events.extend(poll.operational_events);
                                 events.extend(report.control_events);
                                 source_poll_observation
@@ -1027,7 +1048,8 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                     observer_scope,
                                     &mut ctx.pending_outputs,
                                 );
-                                self.pending_idle_delay = Some(self.idle_backoff.next_delay());
+                                self.pending_idle_delay =
+                                    poll_error_backoff(&error, &mut self.idle_backoff);
                                 Ok(EventLoopDirective::Continue)
                             }
                             SourcePollResult::Fatal(fatal) => {

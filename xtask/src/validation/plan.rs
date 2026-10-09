@@ -132,6 +132,14 @@ impl Lane {
         if let Some(features) = features {
             args.extend(["--features".into(), features]);
         }
+        // Production features include `tokio-console`, whose instrumentation
+        // compiles only with `tokio_unstable`; no other lane carries the cfg.
+        if self == Self::ProductionFeatures {
+            args.extend([
+                "--config".into(),
+                "build.rustflags=[\"--cfg\", \"tokio_unstable\"]".into(),
+            ]);
+        }
         args
     }
 }

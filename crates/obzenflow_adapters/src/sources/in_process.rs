@@ -107,7 +107,9 @@ impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler fo
             .recv()
             .await
             .map(|item| vec![item])
-            .ok_or_else(|| SourceError::Other("channel closed".into()))
+            .ok_or(SourceError::Other(
+                obzenflow_core::event::SourceDiagnosticReason::InputClosed.into(),
+            ))
     }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
@@ -195,8 +197,10 @@ mod tests {
         source.drain().await.unwrap();
         assert!(tx.send(Item(3)).await.is_err());
         assert_eq!(source.next().await.unwrap(), vec![Item(2)]);
-        assert!(
-            matches!(source.next().await, Err(SourceError::Other(message)) if message == "channel closed")
-        );
+        assert!(matches!(
+            source.next().await,
+            Err(SourceError::Other(diagnostic))
+                if diagnostic.reason() == obzenflow_core::event::SourceDiagnosticReason::InputClosed
+        ));
     }
 }

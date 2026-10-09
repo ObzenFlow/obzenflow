@@ -7,11 +7,14 @@
 //! Design notes (aligned with the FlowIP decisions):
 //! - Sync `TypedFiniteSourceHandler` (blocking file IO inside `next()`)
 //! - The runtime adapter owns writer identity and event construction
-//! - Malformed rows return `SourceError::Deserialization(..)`; middleware converts to error-marked events
+//! - Rejected rows return `SourceError::Validation` and reading continues;
+//!   only an I/O failure is terminal (FLOWIP-084n B8)
 //! - Untyped mode preserves strings (no inference)
 
 use anyhow::{anyhow, bail, Result};
 use csv::{Reader, ReaderBuilder, StringRecord};
+use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
+use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::source::{
     FiniteSourceConnector, SourceError, SourceReaderInitContext, TypedFiniteSourceHandler,
@@ -20,6 +23,7 @@ use obzenflow_runtime::typing::SourceTyping;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 /// Untyped CSV row payload (`csv.row.v1`) with string-only values.
@@ -88,32 +92,99 @@ impl std::fmt::Debug for CsvRecord<'_> {
     }
 }
 
-/// Error returned by an application-owned [`CsvDecoder`].
+/// Error returned by an application-owned [`CsvDecoder`]. It carries a typed
+/// diagnostic only; the reader adds the record index and line.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct CsvDecodeError {
-    message: String,
-}
+#[error("{0}")]
+pub struct CsvDecodeError(SourceDiagnostic);
 
 impl CsvDecodeError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+    pub fn missing_field(field: &'static str) -> Self {
+        Self(SourceDiagnostic::new(SourceDiagnosticReason::MissingField).within_field(field))
+    }
+
+    pub fn invalid_value(field: &'static str) -> Self {
+        Self(SourceDiagnostic::new(SourceDiagnosticReason::InvalidValue).within_field(field))
+    }
+
+    pub fn invalid_record() -> Self {
+        Self(SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord))
+    }
+
+    /// Nests the path under a schema-declared parent field.
+    pub fn within_field(self, name: &'static str) -> Self {
+        Self(self.0.within_field(name))
+    }
+
+    pub fn code(self, code: SourceErrorCode) -> Self {
+        Self(self.0.code(code))
+    }
+
+    fn locate(self, record_index: u64, position: Option<&csv::Position>) -> SourceDiagnostic {
+        located(self.0.record(record_index), position)
     }
 }
 
 impl From<csv::Error> for CsvDecodeError {
     fn from(error: csv::Error) -> Self {
-        // Serde messages can echo rejected field values (for example, an unknown
-        // enum variant). Retain only the structural field position.
-        match error.kind() {
-            csv::ErrorKind::Deserialize { err, .. } => match err.field() {
-                Some(field) => Self::new(format!("CSV deserialization failed at field {field}")),
-                None => Self::new("CSV deserialization failed"),
-            },
-            _ => Self::new("CSV record could not be deserialized"),
+        // Serde text can echo rejected values, so only the kind and column survive.
+        // Missing and unknown fields both arrive as message text: `InvalidRecord`.
+        let csv::ErrorKind::Deserialize { err, .. } = error.kind() else {
+            return Self::invalid_record();
+        };
+        let reason = match err.kind() {
+            csv::DeserializeErrorKind::ParseBool(_)
+            | csv::DeserializeErrorKind::ParseInt(_)
+            | csv::DeserializeErrorKind::ParseFloat(_)
+            | csv::DeserializeErrorKind::InvalidUtf8(_) => SourceDiagnosticReason::InvalidValue,
+            csv::DeserializeErrorKind::UnexpectedEndOfRow => SourceDiagnosticReason::MissingField,
+            csv::DeserializeErrorKind::Message(_) | csv::DeserializeErrorKind::Unsupported(_) => {
+                SourceDiagnosticReason::InvalidRecord
+            }
+        };
+        let diagnostic = SourceDiagnostic::new(reason);
+        match err.field().and_then(|column| u32::try_from(column).ok()) {
+            Some(column) => Self(diagnostic.within_index(column)),
+            None => Self(diagnostic),
         }
+    }
+}
+
+fn located(diagnostic: SourceDiagnostic, position: Option<&csv::Position>) -> SourceDiagnostic {
+    match position
+        .and_then(|position| u32::try_from(position.line()).ok())
+        .and_then(NonZeroU32::new)
+    {
+        Some(line) => diagnostic.position(line, None),
+        None => diagnostic,
+    }
+}
+
+/// csv 1.4 raises `Utf8` and `UnequalLengths` after passing the record, so the
+/// reader stays synchronised. An I/O failure makes the crate report end of
+/// input, so continuing would certify an unread suffix (B8).
+fn read_failure(error: &csv::Error, record_index: u64) -> SourceError {
+    let diagnostic = |reason| {
+        located(
+            SourceDiagnostic::new(reason).record(record_index),
+            error.position(),
+        )
+    };
+    match error.kind() {
+        csv::ErrorKind::Utf8 { .. } => {
+            SourceError::Validation(diagnostic(SourceDiagnosticReason::MalformedInput))
+        }
+        csv::ErrorKind::UnequalLengths { .. } => {
+            SourceError::Validation(diagnostic(SourceDiagnosticReason::UnexpectedShape))
+        }
+        csv::ErrorKind::Io(_) => SourceError::Terminal {
+            kind: SourcePollErrorKind::Transport,
+            diagnostic: diagnostic(SourceDiagnosticReason::InputUnavailable),
+        },
+        _ => SourceError::Terminal {
+            kind: SourcePollErrorKind::Other,
+            diagnostic: diagnostic(SourceDiagnosticReason::Unclassified),
+        },
     }
 }
 
@@ -302,10 +373,8 @@ impl<D: CsvDecoder> FiniteSourceConnector for CsvSource<D> {
 
 impl<D: CsvDecoder> CsvSource<D> {
     fn open_reader(&self) -> Result<CsvReader<D>, SourceError> {
-        let path = &self.path;
-        let file = File::open(path).map_err(|error| {
-            SourceError::Transport(format!("Failed to open CSV input: {error}"))
-        })?;
+        let file = File::open(&self.path)
+            .map_err(|_| SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into()))?;
         let mut reader = ReaderBuilder::new()
             .has_headers(false)
             .delimiter(self.delimiter)
@@ -313,12 +382,21 @@ impl<D: CsvDecoder> CsvSource<D> {
 
         let file_headers = if self.has_headers {
             let mut header_record = StringRecord::new();
-            let ok = reader.read_record(&mut header_record).map_err(|error| {
-                SourceError::Deserialization(format!("Failed to read CSV header: {error}"))
-            })?;
+            let ok =
+                reader
+                    .read_record(&mut header_record)
+                    .map_err(|error| match error.kind() {
+                        csv::ErrorKind::Io(_) => {
+                            SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into())
+                        }
+                        _ => SourceError::Deserialization(located(
+                            SourceDiagnosticReason::MalformedInput.into(),
+                            error.position(),
+                        )),
+                    })?;
             if !ok {
                 return Err(SourceError::Validation(
-                    "CSV input has no header row".into(),
+                    SourceDiagnosticReason::UnexpectedShape.into(),
                 ));
             }
             header_record
@@ -336,11 +414,9 @@ impl<D: CsvDecoder> CsvSource<D> {
                 let mut indices = Vec::with_capacity(columns.len());
                 let mut selected_headers = StringRecord::new();
                 for col in columns {
-                    let idx = file_headers.iter().position(|h| h == col).ok_or_else(|| {
-                        SourceError::Validation(format!(
-                            "select_columns references unknown header '{col}'"
-                        ))
-                    })?;
+                    let idx = file_headers.iter().position(|h| h == col).ok_or(
+                        SourceError::Validation(SourceDiagnosticReason::SelectionNotFound.into()),
+                    )?;
                     indices.push(idx);
                     selected_headers.push_field(col);
                 }
@@ -349,7 +425,6 @@ impl<D: CsvDecoder> CsvSource<D> {
         };
 
         let state = CsvReaderState {
-            path: path.clone(),
             reader,
             file_headers,
             decode_headers,
@@ -406,7 +481,6 @@ impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvReader<D> {
 }
 
 struct CsvReaderState {
-    path: PathBuf,
     reader: Reader<File>,
     file_headers: StringRecord,
     decode_headers: StringRecord,
@@ -422,7 +496,6 @@ struct CsvReaderState {
 impl std::fmt::Debug for CsvReaderState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CsvReaderState")
-            .field("path", &self.path)
             .field("file_headers_len", &self.file_headers.len())
             .field("decode_headers_len", &self.decode_headers.len())
             .field("selected_indices", &self.selected_indices)
@@ -449,26 +522,26 @@ impl CsvReaderState {
             return Ok(None);
         }
 
-        // Apply skip_rows after header consumption (if any).
+        // Apply skip_rows after header consumption (if any). A skipped row needs
+        // no decoding, so only a terminal read failure surfaces here.
         while self.skip_rows_remaining > 0 {
             let mut record = StringRecord::new();
             match self.reader.read_record(&mut record) {
-                Ok(true) => {
-                    self.skip_rows_remaining = self.skip_rows_remaining.saturating_sub(1);
-                    self.row_index = self.row_index.saturating_add(1);
-                }
+                Ok(true) => {}
                 Ok(false) => {
                     self.done = true;
                     return Ok(None);
                 }
-                Err(e) => {
-                    self.done = true;
-                    return Err(SourceError::Deserialization(format!(
-                        "CSV parse error while skipping rows (file={}): {e}",
-                        self.path.display()
-                    )));
+                Err(error) => {
+                    let failure = read_failure(&error, self.record_index());
+                    if failure.is_terminal() {
+                        self.done = true;
+                        return Err(failure);
+                    }
                 }
             }
+            self.skip_rows_remaining = self.skip_rows_remaining.saturating_sub(1);
+            self.row_index = self.row_index.saturating_add(1);
         }
 
         let mut batch: Vec<D::Output> = Vec::with_capacity(self.chunk_size);
@@ -476,18 +549,18 @@ impl CsvReaderState {
             let mut record = StringRecord::new();
             let read = match self.reader.read_record(&mut record) {
                 Ok(read) => read,
-                Err(e) => {
-                    // Structural CSV errors are not reliably recoverable; emit once and stop.
-                    self.done = true;
-                    let err = SourceError::Deserialization(format!(
-                        "CSV parse error at row {} (file={}): {e}",
-                        self.row_index.saturating_add(1),
-                        self.path.display()
-                    ));
-                    if batch.is_empty() {
-                        return Err(err);
+                Err(error) => {
+                    let failure = read_failure(&error, self.record_index());
+                    if failure.is_terminal() {
+                        self.done = true;
+                    } else {
+                        self.row_index = self.row_index.saturating_add(1);
                     }
-                    self.pending_error = Some(err);
+                    if batch.is_empty() {
+                        return Err(failure);
+                    }
+                    // Preserve already-collected items; surface the error next poll.
+                    self.pending_error = Some(failure);
                     break;
                 }
             };
@@ -497,12 +570,12 @@ impl CsvReaderState {
                 break;
             }
 
+            let record_index = self.record_index();
             self.row_index = self.row_index.saturating_add(1);
 
             if !self.warned_schema_drift && record.len() != self.file_headers.len() {
                 self.warned_schema_drift = true;
                 tracing::warn!(
-                    file = %self.path.display(),
                     expected_columns = self.file_headers.len(),
                     actual_columns = record.len(),
                     "CSV row column count differs from headers"
@@ -522,19 +595,15 @@ impl CsvReaderState {
 
             match decode_result {
                 Ok(item) => batch.push(item),
-                Err(e) => {
-                    let err = SourceError::Deserialization(format!(
-                        "CSV deserialization error at row {} (file={}): {e}",
-                        self.row_index,
-                        self.path.display()
-                    ));
-
+                Err(error) => {
+                    let rejection =
+                        SourceError::Validation(error.locate(record_index, record.position()));
                     if batch.is_empty() {
-                        return Err(err);
+                        return Err(rejection);
                     }
 
                     // Preserve already-collected items; surface the error next poll.
-                    self.pending_error = Some(err);
+                    self.pending_error = Some(rejection);
                     break;
                 }
             }
@@ -545,6 +614,11 @@ impl CsvReaderState {
         } else {
             Ok(Some(batch))
         }
+    }
+
+    /// Zero-based index of the next record after the header, counting skipped rows.
+    fn record_index(&self) -> u64 {
+        u64::try_from(self.row_index).unwrap_or(u64::MAX)
     }
 }
 
@@ -583,7 +657,7 @@ mod tests {
         fn decode(&self, record: CsvRecord<'_>) -> Result<Self::Output, CsvDecodeError> {
             let name = record
                 .get("name")
-                .ok_or_else(|| CsvDecodeError::new("name column is required"))?;
+                .ok_or_else(|| CsvDecodeError::missing_field("name"))?;
             Ok(CustomerName {
                 display_name: format!("{}{}", self.prefix, name.to_uppercase()),
             })
@@ -726,10 +800,186 @@ mod tests {
             .open(context())
             .unwrap();
         let error = reader.next().unwrap_err();
-        assert!(matches!(error, SourceError::Deserialization(_)));
-        assert!(error.to_string().contains("row 1"));
-        assert!(error.to_string().contains("CSV deserialization failed"));
+        assert!(matches!(error, SourceError::Validation(_)));
+        let location = error.diagnostic().location();
+        assert_eq!(location.record_index(), Some(0));
+        assert_eq!(location.position().map(|p| p.line.get()), Some(2));
+        assert_eq!(
+            error.diagnostic().reason(),
+            SourceDiagnosticReason::InvalidRecord
+        );
         assert!(!format!("{error} {error:?}").contains("SECRET_SENTINEL"));
         assert!(reader.next().unwrap().is_none());
+    }
+
+    fn drain_reader<D: CsvDecoder>(
+        reader: &mut CsvReader<D>,
+    ) -> (Vec<D::Output>, Vec<SourceError>) {
+        let mut items = Vec::new();
+        let mut errors = Vec::new();
+        loop {
+            match reader.next() {
+                Ok(Some(batch)) => items.extend(batch),
+                Ok(None) => return (items, errors),
+                Err(error) => {
+                    assert!(!error.is_terminal(), "unexpected terminal error: {error}");
+                    errors.push(error);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn record_local_read_errors_are_rejected_and_later_rows_survive() {
+        let mut input = NamedTempFile::new().unwrap();
+        input.write_all(b"name,age\n").unwrap();
+        input.write_all(b"alice,1\n").unwrap();
+        input.write_all(b"short\n").unwrap();
+        input.write_all(b"bad\xff,2\n").unwrap();
+        input.write_all(b"carol,3\n").unwrap();
+
+        for chunk_size in [1, 25] {
+            let mut reader = CsvSource::builder(CsvRowDecoder)
+                .path(input.path())
+                .chunk_size(chunk_size)
+                .build()
+                .unwrap()
+                .open(context())
+                .unwrap();
+            let (items, errors) = drain_reader(&mut reader);
+            let names: Vec<_> = items.iter().map(|row| row.0["name"].clone()).collect();
+            assert_eq!(names, ["alice", "carol"], "chunk size {chunk_size}");
+
+            let rejections: Vec<_> = errors
+                .iter()
+                .map(|error| {
+                    let diagnostic = error.diagnostic();
+                    (
+                        error.kind(),
+                        diagnostic.reason(),
+                        diagnostic.location().record_index(),
+                        diagnostic.location().position().map(|p| p.line.get()),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                rejections,
+                [
+                    (
+                        SourcePollErrorKind::Validation,
+                        SourceDiagnosticReason::UnexpectedShape,
+                        Some(1),
+                        Some(3)
+                    ),
+                    (
+                        SourcePollErrorKind::Validation,
+                        SourceDiagnosticReason::MalformedInput,
+                        Some(2),
+                        Some(4)
+                    ),
+                ],
+                "chunk size {chunk_size}"
+            );
+        }
+    }
+
+    #[test]
+    fn io_failure_mid_read_is_terminal_input_unavailable() {
+        let error = csv::Error::from(std::io::Error::other("disk"));
+        let failure = read_failure(&error, 7);
+        assert!(failure.is_terminal());
+        assert_eq!(failure.kind(), SourcePollErrorKind::Transport);
+        assert_eq!(
+            failure.diagnostic().reason(),
+            SourceDiagnosticReason::InputUnavailable
+        );
+        assert_eq!(failure.diagnostic().location().record_index(), Some(7));
+        assert!(!failure.to_string().contains("disk"));
+    }
+
+    #[test]
+    fn opening_failures_carry_typed_reasons_without_paths() {
+        let missing = CsvSource::builder(CsvRowDecoder)
+            .path("/nonexistent/obzenflow/secret-dir/input.csv")
+            .build()
+            .unwrap()
+            .open(context())
+            .unwrap_err();
+        assert_eq!(missing.kind(), SourcePollErrorKind::Transport);
+        assert_eq!(
+            missing.diagnostic().reason(),
+            SourceDiagnosticReason::InputUnavailable
+        );
+        assert!(!format!("{missing} {missing:?}").contains("secret-dir"));
+
+        let mut bad_header = NamedTempFile::new().unwrap();
+        bad_header.write_all(b"na\xffme,age\n").unwrap();
+        let header = CsvSource::builder(CsvRowDecoder)
+            .path(bad_header.path())
+            .build()
+            .unwrap()
+            .open(context())
+            .unwrap_err();
+        assert_eq!(header.kind(), SourcePollErrorKind::Deserialization);
+        assert_eq!(
+            header.diagnostic().reason(),
+            SourceDiagnosticReason::MalformedInput
+        );
+
+        let mut good = NamedTempFile::new().unwrap();
+        writeln!(good, "name,age").unwrap();
+        let unknown_column = CsvSource::builder(CsvRowDecoder)
+            .path(good.path())
+            .select_columns(["secret_column"])
+            .build()
+            .unwrap()
+            .open(context())
+            .unwrap_err();
+        assert_eq!(
+            unknown_column.diagnostic().reason(),
+            SourceDiagnosticReason::SelectionNotFound
+        );
+        assert!(!format!("{unknown_column} {unknown_column:?}").contains("secret_column"));
+    }
+
+    #[test]
+    fn typed_parse_failures_name_the_column_and_line() {
+        #[derive(Debug, Serialize, Deserialize)]
+        struct AgeRow {
+            name: String,
+            age: u32,
+        }
+
+        impl TypedPayload for AgeRow {
+            const EVENT_TYPE: &'static str = "csv.age";
+        }
+
+        #[derive(Clone)]
+        struct AgeCsv;
+
+        impl CsvDecoder for AgeCsv {
+            type Output = AgeRow;
+        }
+
+        let mut input = NamedTempFile::new().unwrap();
+        writeln!(input, "name,age\nalice,not-a-number").unwrap();
+        let mut reader = CsvSource::builder(AgeCsv)
+            .path(input.path())
+            .build()
+            .unwrap()
+            .open(context())
+            .unwrap();
+        let error = reader.next().unwrap_err();
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.reason(), SourceDiagnosticReason::InvalidValue);
+        assert_eq!(
+            diagnostic.location().field_path(),
+            [obzenflow_core::event::FieldSegment::Index(1)]
+        );
+        assert_eq!(
+            diagnostic.location().position().map(|p| p.line.get()),
+            Some(2)
+        );
+        assert!(!format!("{error} {error:?}").contains("not-a-number"));
     }
 }

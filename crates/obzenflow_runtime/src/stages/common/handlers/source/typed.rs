@@ -24,7 +24,9 @@ use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 
-use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{
+    ChainEventFactory, SourceDiagnosticReason, StageFatalCode, StageFatalReason,
+};
 use obzenflow_core::ingress::{
     EventSubmission, HostedIngressBindingSlot, IngressContext, SubmissionIngressContext,
     SubmissionPayloadKind,
@@ -454,9 +456,9 @@ where
 {
     async fn receive_batch(&mut self) -> Result<Vec<(D::Output, IngressContext)>, SourceError> {
         let rx = &mut self.rx;
-        let first = rx.recv().await.ok_or_else(|| {
-            SourceError::Transport("hosted ingress source channel closed".to_string())
-        })?;
+        let first = rx.recv().await.ok_or(SourceError::Transport(
+            SourceDiagnosticReason::InputClosed.into(),
+        ))?;
         let mut submissions = vec![first];
         while submissions.len() < self.max_batch_size {
             match rx.try_recv() {
@@ -468,12 +470,10 @@ where
         let expected_key = self.slot.ingress_key();
         let mut decoded = Vec::with_capacity(submissions.len());
         for submission in submissions {
+            // Ingress invariants carry no input text; 084l makes them fatal.
+            let invariant = || SourceError::Validation(SourceDiagnosticReason::Unclassified.into());
             if !D::Output::matches_event_type(submission.event_type.as_str()) {
-                return Err(SourceError::Validation(format!(
-                    "hosted ingress event type `{}` is outside configured output `{}`",
-                    submission.event_type,
-                    D::Output::event_type_name(),
-                )));
+                return Err(invariant());
             }
             let SubmissionIngressContext {
                 accepted_at_ns,
@@ -481,15 +481,9 @@ where
                 batch_index,
                 attempt_seq,
                 payload_kind,
-            } = submission.ingress_handoff.ok_or_else(|| {
-                SourceError::Validation(
-                    "hosted ingress submission is missing framework ingress context".to_string(),
-                )
-            })?;
+            } = submission.ingress_handoff.ok_or_else(invariant)?;
             if &ingress_key != expected_key {
-                return Err(SourceError::Validation(format!(
-                    "hosted ingress context key `{ingress_key}` does not match configured key `{expected_key}`"
-                )));
+                return Err(invariant());
             }
             let value = match payload_kind {
                 SubmissionPayloadKind::External => self.decoder.decode(submission.data),
@@ -497,12 +491,7 @@ where
                     serde_json::from_value(submission.data).map_err(IngressDecodeError::from)
                 }
             }
-            .map_err(|error| {
-                SourceError::Deserialization(format!(
-                    "hosted ingress `{}` decode failed: {error}",
-                    D::Output::event_type_name()
-                ))
-            })?;
+            .map_err(|_| SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into()))?;
             decoded.push((
                 value,
                 IngressContext {
@@ -1228,7 +1217,9 @@ mod tests {
                 .as_ref()
                 .expect("runtime installs observation sink")
                 .report_http_pull(snapshot);
-            Err(SourceError::Validation("bad decoded row".to_string()))
+            Err(SourceError::Validation(
+                SourceDiagnosticReason::InvalidRecord.into(),
+            ))
         }
 
         fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
@@ -1254,8 +1245,8 @@ mod tests {
                 .into_parts();
         assert!(matches!(
             outcome,
-            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref message))
-                if message == "bad decoded row"
+            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref diagnostic))
+                if diagnostic.reason() == SourceDiagnosticReason::InvalidRecord
         ));
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].writer_id, writer_id);
@@ -1452,8 +1443,8 @@ mod tests {
                 .into_parts();
         assert!(matches!(
             outcome,
-            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref message))
-                if message.contains("outside configured output")
+            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref diagnostic))
+                if diagnostic.reason() == SourceDiagnosticReason::Unclassified
         ));
         assert!(observations.is_empty(), "no partial batch may escape");
     }

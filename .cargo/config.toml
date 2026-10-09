@@ -1,6 +1,9 @@
 [alias]
-tokio-console-run = "run --package obzenflow --features tokio-console"
+# Only Tokio Console builds carry `--cfg tokio_unstable`, in their own target
+# directory so ordinary builds keep their cache (FLOWIP-084n B5).
+tokio-console-run = [
+    "run", "--package", "obzenflow", "--features", "tokio-console",
+    "--config", "build.rustflags=[\"--cfg\", \"tokio_unstable\"]",
+    "--target-dir", "target/tokio-console",
+]
 xtask = "run --locked --package xtask --"
-
-[build]
-rustflags = ["--cfg", "tokio_unstable"]

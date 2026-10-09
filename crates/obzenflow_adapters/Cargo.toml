@@ -36,12 +36,14 @@ anyhow = { workspace = true }
 csv = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
+saphyr-parser = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
 [features]
 default = []
 postgres = ["dep:sqlx", "dep:url"]
+yaml = ["dep:saphyr-parser"]
 test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]

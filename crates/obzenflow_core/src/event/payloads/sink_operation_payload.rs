@@ -33,6 +33,24 @@ pub enum SinkOperationPhase {
     Drain,
 }
 
+/// The connector error-code namespace grammar shared by sinks and sources.
+pub(crate) fn is_error_code_namespace(namespace: &str) -> bool {
+    !namespace.is_empty()
+        && namespace.len() <= MAX_SINK_DESTINATION_ERROR_NAMESPACE_BYTES
+        && namespace.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+}
+
+/// The connector error-code value grammar shared by sinks and sources.
+pub(crate) fn is_error_code_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SINK_DESTINATION_ERROR_VALUE_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
 /// A bounded destination-native diagnostic code.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SinkDestinationErrorCode {
@@ -69,20 +87,10 @@ impl SinkDestinationErrorCode {
         let namespace = namespace.into();
         let value = value.into();
 
-        if namespace.is_empty()
-            || namespace.len() > MAX_SINK_DESTINATION_ERROR_NAMESPACE_BYTES
-            || !namespace.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
-            })
-        {
+        if !is_error_code_namespace(&namespace) {
             return Err(SinkDestinationErrorCodeError::InvalidNamespace);
         }
-        if value.is_empty()
-            || value.len() > MAX_SINK_DESTINATION_ERROR_VALUE_BYTES
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
-        {
+        if !is_error_code_value(&value) {
             return Err(SinkDestinationErrorCodeError::InvalidValue);
         }
 

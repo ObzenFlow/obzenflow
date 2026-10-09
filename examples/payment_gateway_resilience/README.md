@@ -42,7 +42,7 @@ gateway did nothing. The handler can separately author
 Console success means the process stream accepted and flushed the output.
 `sink.flush_succeeded` and `sink.drain_succeeded` describe lifecycle operations
 and do not settle inputs. Replay suppresses gateway calls; sinks can emit their
-output again. Journal schema 16 requires newly recorded archives.
+output again. Journal schema 17 requires newly recorded archives.
 
 Framework occurrences identify their author and what that author observed:
 

@@ -31,17 +31,17 @@ To replay, repeat the run command with `--replay-from <archive> --verify` append
 using the archive path printed by the live run. Replay also waits for Play;
 send the same control request again. Verification compares durable output.
 
-For Tokio Console diagnostics, build with `tokio-console` and opt in explicitly:
+For Tokio Console diagnostics, use the `tokio-console-run` alias and opt in
+explicitly. The alias enables the `tokio-console` feature and supplies
+`--cfg tokio_unstable`, which diagnostics require, in its own target directory:
 
 ```sh
-cargo run -p obzenflow --example prometheus_demo \
-  --features prometheus,web-host,tokio-console -- \
+cargo tokio-console-run --example prometheus_demo --features prometheus,web-host -- \
   --config examples/prometheus_demo/obzenflow.prometheus.toml --startup-mode auto --tokio-console
 ```
 
 This starts the flow automatically. Connect the Tokio Console client to
-`http://127.0.0.1:6669`. The repository's
-Cargo configuration already enables `tokio_unstable`, which diagnostics require.
+`http://127.0.0.1:6669`. Ordinary builds do not carry `tokio_unstable`.
 Console is disabled by default. `--tokio-console=false` disables it in the same
 binary, including when the config file enables it. These are shared framework
 options; the demo does not initialise Console. The equivalent startup config is:

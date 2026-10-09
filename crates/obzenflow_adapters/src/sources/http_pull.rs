@@ -4,6 +4,8 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullState, HttpPullTelemetry, WaitReason};
+use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
+use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handlers::{
@@ -1046,8 +1048,6 @@ struct HttpPullSourceInner<D: PullDecoder> {
     telemetry: HttpPullTelemetry,
     scheduled_wait: Option<ScheduledWait>,
     transient_attempts: usize,
-
-    poisoned: bool,
 }
 
 #[derive(Debug)]
@@ -1169,7 +1169,6 @@ impl<D: PullDecoder> HttpPullReader<D> {
                 telemetry: HttpPullTelemetry::default(),
                 scheduled_wait: None,
                 transient_attempts: 0,
-                poisoned: false,
             }),
             decoder,
             observation_sink: None,
@@ -1216,49 +1215,55 @@ impl<D: PullDecoder> HttpPollReader<D> {
     }
 }
 
+/// Fetch outcomes carry no response or transport text; diagnostics are typed.
 #[derive(Debug)]
 enum FetchError {
-    Timeout(String),
-    Transport(String),
+    Timeout,
+    Transport,
     Decode { status: u16, error: DecodeError },
-    Validation { status: u16, message: String },
+    Validation { status: u16 },
 }
 
 impl FetchError {
     fn into_source_error(self) -> SourceError {
         match self {
-            FetchError::Timeout(msg) => SourceError::Timeout(msg),
-            FetchError::Transport(msg) => SourceError::Transport(msg),
-            FetchError::Decode {
-                error: DecodeError::Parse(msg),
-                ..
-            } => SourceError::Deserialization(msg),
-            FetchError::Decode {
-                error: DecodeError::Transient(msg),
-                ..
-            } => SourceError::Transport(msg),
-            FetchError::Decode {
-                error:
-                    DecodeError::RateLimited {
-                        message,
-                        retry_after,
-                    },
-                ..
-            } => {
-                let retry_hint = retry_after
-                    .map(|d| format!(" (retry_after_ms={})", d.as_millis()))
-                    .unwrap_or_default();
-                SourceError::Transport(format!("rate_limited{retry_hint}: {message}"))
+            FetchError::Timeout => SourceError::Timeout(SourceDiagnosticReason::TimedOut.into()),
+            FetchError::Transport => {
+                SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into())
             }
-            FetchError::Decode {
-                error: DecodeError::Fatal(msg),
-                ..
-            } => SourceError::Other(msg),
-            FetchError::Validation { status, message } => {
-                SourceError::Validation(format!("HTTP {status}: {message}"))
-            }
+            FetchError::Decode { status, error } => match error {
+                DecodeError::Parse(_) => SourceError::Deserialization(http_diagnostic(
+                    SourceDiagnosticReason::MalformedInput,
+                    status,
+                )),
+                DecodeError::Transient(_) => SourceError::Transport(http_diagnostic(
+                    SourceDiagnosticReason::RemoteFailed,
+                    status,
+                )),
+                DecodeError::RateLimited { .. } => SourceError::Transport(http_diagnostic(
+                    SourceDiagnosticReason::RateLimited,
+                    status,
+                )),
+                DecodeError::Fatal(_) => remote_rejected(status),
+            },
+            FetchError::Validation { status } => remote_rejected(status),
         }
     }
+}
+
+fn http_diagnostic(reason: SourceDiagnosticReason, status: u16) -> SourceDiagnostic {
+    let diagnostic = SourceDiagnostic::new(reason);
+    match SourceErrorCode::try_new("http.status", status.to_string()) {
+        Ok(code) => diagnostic.code(code),
+        Err(_) => diagnostic,
+    }
+}
+
+fn remote_rejected(status: u16) -> SourceError {
+    SourceError::Validation(http_diagnostic(
+        SourceDiagnosticReason::RemoteRejected,
+        status,
+    ))
 }
 
 fn apply_default_headers(request: &mut RequestSpec, default_headers: &HeaderMap) {
@@ -1271,11 +1276,10 @@ fn apply_default_headers(request: &mut RequestSpec, default_headers: &HeaderMap)
 
 fn map_http_client_error(err: HttpClientError) -> FetchError {
     match err {
-        HttpClientError::Timeout(message) => FetchError::Timeout(message),
-        HttpClientError::Connection(message) | HttpClientError::Transport(message) => {
-            FetchError::Transport(message)
-        }
-        HttpClientError::Cancelled => FetchError::Transport("cancelled".to_string()),
+        HttpClientError::Timeout(_) => FetchError::Timeout,
+        HttpClientError::Connection(_)
+        | HttpClientError::Transport(_)
+        | HttpClientError::Cancelled => FetchError::Transport,
     }
 }
 
@@ -1296,7 +1300,7 @@ async fn fetch_decode_once<D: PullDecoder>(
 
     match decoder.decode(cursor, &http_response) {
         Ok(result) => Ok((status, result)),
-        Err(DecodeError::Fatal(message)) => Err(FetchError::Validation { status, message }),
+        Err(DecodeError::Fatal(_)) => Err(FetchError::Validation { status }),
         Err(err) => Err(FetchError::Decode { status, error: err }),
     }
 }
@@ -1323,7 +1327,7 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
             return Ok(Some(batch));
         }
 
-        if inner.poisoned || inner.exhausted {
+        if inner.exhausted {
             report_http_pull_snapshot(&observation_sink, &inner.telemetry);
             return Ok(None);
         }
@@ -1339,7 +1343,7 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
             return Ok(Some(Vec::new()));
         }
 
-        while inner.buffer.is_empty() && !inner.poisoned && !inner.exhausted {
+        while inner.buffer.is_empty() && !inner.exhausted {
             let cursor = inner.cursor.clone();
 
             inner.telemetry.requests_total = inner.telemetry.requests_total.saturating_add(1);
@@ -1368,22 +1372,28 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
                     }
                 }
 
-                Err(FetchError::Validation { status, message }) => {
+                Err(FetchError::Validation { status }) => {
+                    // A fatal decode abandons the scan: report it as terminal rather
+                    // than letting EOF certify the unread pages (084n B7).
                     observe_http_status(&mut inner.telemetry, status);
-
-                    inner.poisoned = true;
                     set_terminal(&mut inner.telemetry);
                     report_http_pull_snapshot(&observation_sink, &inner.telemetry);
-                    return Err(SourceError::Validation(format!("HTTP {status}: {message}")));
+                    return Err(SourceError::Terminal {
+                        kind: SourcePollErrorKind::Validation,
+                        diagnostic: http_diagnostic(SourceDiagnosticReason::RemoteRejected, status),
+                    });
                 }
 
                 Err(FetchError::Decode {
                     status,
-                    error: DecodeError::Parse(msg),
+                    error: DecodeError::Parse(_),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
                     report_http_pull_snapshot(&observation_sink, &inner.telemetry);
-                    return Err(SourceError::Deserialization(msg));
+                    return Err(SourceError::Deserialization(http_diagnostic(
+                        SourceDiagnosticReason::MalformedInput,
+                        status,
+                    )));
                 }
 
                 Err(FetchError::Decode {
@@ -1401,12 +1411,16 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
                     let delay = retry_after.unwrap_or(Duration::from_secs(5));
 
                     if delay > self.config.retry.rate_limit_max_wait {
-                        let msg = format!(
-                            "rate_limited (retry_after_ms={} exceeds max_wait_ms={}): {message}",
-                            delay.as_millis(),
-                            self.config.retry.rate_limit_max_wait.as_millis()
-                        );
-                        self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
+                        self.handle_transient_error(
+                            &mut inner,
+                            FetchError::Decode {
+                                status,
+                                error: DecodeError::RateLimited {
+                                    message,
+                                    retry_after,
+                                },
+                            },
+                        )?;
                         break;
                     }
 
@@ -1420,14 +1434,20 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
 
                 Err(FetchError::Decode {
                     status,
-                    error: DecodeError::Transient(msg),
+                    error: DecodeError::Transient(detail),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
-                    self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
+                    self.handle_transient_error(
+                        &mut inner,
+                        FetchError::Decode {
+                            status,
+                            error: DecodeError::Transient(detail),
+                        },
+                    )?;
                     break;
                 }
 
-                Err(err @ FetchError::Transport(_)) | Err(err @ FetchError::Timeout(_)) => {
+                Err(err @ FetchError::Transport) | Err(err @ FetchError::Timeout) => {
                     self.handle_transient_error(&mut inner, err)?;
                     break;
                 }
@@ -1445,7 +1465,7 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
             return Ok(Some(batch));
         }
 
-        if inner.poisoned || inner.exhausted {
+        if inner.exhausted {
             report_http_pull_snapshot(&observation_sink, &inner.telemetry);
             return Ok(None);
         }
@@ -1534,7 +1554,7 @@ impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollReader<D> {
                     inner.apply_decode_result(result);
                 }
 
-                Err(FetchError::Validation { status, message }) => {
+                Err(FetchError::Validation { status }) => {
                     observe_http_status(&mut inner.telemetry, status);
 
                     inner.cursor = None;
@@ -1546,16 +1566,19 @@ impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollReader<D> {
                         self.config.poll_interval,
                     ));
                     report_http_pull_snapshot(&observation_sink, &inner.telemetry);
-                    return Err(SourceError::Validation(format!("HTTP {status}: {message}")));
+                    return Err(remote_rejected(status));
                 }
 
                 Err(FetchError::Decode {
                     status,
-                    error: DecodeError::Parse(msg),
+                    error: DecodeError::Parse(_),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
                     report_http_pull_snapshot(&observation_sink, &inner.telemetry);
-                    return Err(SourceError::Deserialization(msg));
+                    return Err(SourceError::Deserialization(http_diagnostic(
+                        SourceDiagnosticReason::MalformedInput,
+                        status,
+                    )));
                 }
 
                 Err(FetchError::Decode {
@@ -1573,12 +1596,16 @@ impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollReader<D> {
                     let delay = retry_after.unwrap_or(Duration::from_secs(5));
 
                     if delay > self.config.retry.rate_limit_max_wait {
-                        let msg = format!(
-                            "rate_limited (retry_after_ms={} exceeds max_wait_ms={}): {message}",
-                            delay.as_millis(),
-                            self.config.retry.rate_limit_max_wait.as_millis()
-                        );
-                        self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
+                        self.handle_transient_error(
+                            &mut inner,
+                            FetchError::Decode {
+                                status,
+                                error: DecodeError::RateLimited {
+                                    message,
+                                    retry_after,
+                                },
+                            },
+                        )?;
                         report_http_pull_snapshot(&observation_sink, &inner.telemetry);
                         return Ok(Vec::new());
                     }
@@ -1594,15 +1621,21 @@ impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollReader<D> {
 
                 Err(FetchError::Decode {
                     status,
-                    error: DecodeError::Transient(msg),
+                    error: DecodeError::Transient(detail),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
-                    self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
+                    self.handle_transient_error(
+                        &mut inner,
+                        FetchError::Decode {
+                            status,
+                            error: DecodeError::Transient(detail),
+                        },
+                    )?;
                     report_http_pull_snapshot(&observation_sink, &inner.telemetry);
                     return Ok(Vec::new());
                 }
 
-                Err(err @ FetchError::Transport(_)) | Err(err @ FetchError::Timeout(_)) => {
+                Err(err @ FetchError::Transport) | Err(err @ FetchError::Timeout) => {
                     self.handle_transient_error(&mut inner, err)?;
                     report_http_pull_snapshot(&observation_sink, &inner.telemetry);
                     return Ok(Vec::new());
@@ -1971,10 +2004,19 @@ mod tests {
         );
     }
 
+    fn is_rejected_401(error: &SourceError) -> bool {
+        let diagnostic = error.diagnostic();
+        error.kind() == SourcePollErrorKind::Validation
+            && diagnostic.reason() == SourceDiagnosticReason::RemoteRejected
+            && diagnostic
+                .error_code()
+                .is_some_and(|code| code.namespace() == "http.status" && code.value() == "401")
+    }
+
     #[tokio::test]
-    async fn http_pull_validation_error_is_out_of_band_then_eof() {
+    async fn http_pull_fatal_decode_is_terminal_without_response_text() {
         let (mock, client) = mock_client();
-        mock.enqueue(HttpResponse::new(401, HeaderMap::new(), "unauthorized"));
+        mock.enqueue(HttpResponse::new(401, HeaderMap::new(), "SECRET_BODY"));
         let decoder = TestDecoder::new("http://example.invalid/items".parse().unwrap());
         let config = HttpPullConfig {
             client,
@@ -1985,11 +2027,14 @@ mod tests {
         };
         let mut source = HttpPullReader::new(decoder, config);
 
-        let error = source.next().await.expect_err("401 must be validation");
-        assert!(matches!(error, SourceError::Validation(message) if message.contains("401")));
-
-        let done = source.next().await.unwrap();
-        assert!(done.is_none());
+        let error = source.next().await.expect_err("401 abandons the scan");
+        assert!(error.is_terminal(), "{error}");
+        assert!(is_rejected_401(&error), "{error:?}");
+        assert!(!format!("{error} {error:?}").contains("SECRET_BODY"));
+        assert!(matches!(
+            source.inner.lock().await.telemetry.state,
+            HttpPullState::Terminal
+        ));
     }
 
     #[tokio::test]
@@ -2022,7 +2067,7 @@ mod tests {
             .next()
             .await
             .expect_err("first invalid window is reported out of band");
-        assert!(matches!(first, SourceError::Validation(message) if message.contains("401")));
+        assert!(!first.is_terminal() && is_rejected_401(&first), "{first:?}");
         {
             let inner = source.inner.lock().await;
             assert_eq!(inner.telemetry.requests_total, 1);
@@ -2056,7 +2101,10 @@ mod tests {
             .next()
             .await
             .expect_err("the next window is retried and reported once");
-        assert!(matches!(second, SourceError::Validation(message) if message.contains("401")));
+        assert!(
+            !second.is_terminal() && is_rejected_401(&second),
+            "{second:?}"
+        );
         let inner = source.inner.lock().await;
         assert_eq!(inner.telemetry.requests_total, 2);
         assert_eq!(inner.telemetry.responses_4xx, 2);

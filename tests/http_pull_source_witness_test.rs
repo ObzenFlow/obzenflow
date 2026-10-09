@@ -2,23 +2,25 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-134g HTTP-pull validation and observation journal witness.
+//! FLOWIP-134g HTTP-pull observation witness, amended by FLOWIP-084n B7: a
+//! fatal decode abandons the scan, so the source fails without EOF and its
+//! committed diagnostic is the lifecycle failure's cause.
 
 mod replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_adapters::sources::{
-    CursorlessPullDecoder, DecodeError, HttpPullConfig, HttpPullSource, HttpResponse,
+    DecodeError, DecodeResult, HttpPullConfig, HttpPullSource, HttpResponse, PullDecoder,
 };
-use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, HttpPullStateFact};
-use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourcePollContinuation, SourcePollErrorKind, StageLifecycleFact,
+};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord, SourceDiagnosticReason};
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, RequestSpec};
-use obzenflow_core::{TypedPayload, WriterId};
+use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -34,41 +36,60 @@ impl TypedPayload for PullItem {
     const EVENT_TYPE: &'static str = "flowip_134g.http_pull_item";
 }
 
+/// Paginates until the server refuses a page; the default `decode_error`
+/// maps that 401 to `DecodeError::Fatal`.
 #[derive(Clone, Debug)]
-struct ValidationDecoder;
+struct PagedDecoder;
 
-impl CursorlessPullDecoder for ValidationDecoder {
+impl PullDecoder for PagedDecoder {
+    type Cursor = u32;
     type Output = PullItem;
 
-    fn request_spec(&self) -> RequestSpec {
-        RequestSpec::get("http://example.invalid/items".parse().expect("test URL"))
+    fn request_spec(&self, cursor: Option<&u32>) -> RequestSpec {
+        let page = cursor.copied().unwrap_or(1);
+        RequestSpec::get(
+            format!("http://example.invalid/items?page={page}")
+                .parse()
+                .expect("test URL"),
+        )
     }
 
-    fn decode_success(&self, _response: &HttpResponse) -> Result<Vec<Self::Output>, DecodeError> {
-        Ok(Vec::new())
+    fn decode_success(
+        &self,
+        cursor: Option<&u32>,
+        response: &HttpResponse,
+    ) -> Result<DecodeResult<u32, PullItem>, DecodeError> {
+        Ok(DecodeResult {
+            items: response.json()?,
+            next_cursor: Some(cursor.copied().unwrap_or(1) + 1),
+        })
     }
 }
 
 #[derive(Debug)]
-struct CountingValidationClient {
+struct PageThenUnauthorized {
     calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl HttpClient for CountingValidationClient {
+impl HttpClient for PageThenUnauthorized {
     async fn execute(&self, _request: RequestSpec) -> Result<HttpResponse, HttpClientError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(HttpResponse::new(401, HeaderMap::new(), "unauthorized"))
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(if call == 0 {
+            HttpResponse::new(200, HeaderMap::new(), r#"[{"id":1},{"id":2}]"#)
+        } else {
+            HttpResponse::new(401, HeaderMap::new(), "SECRET_RESPONSE_BODY")
+        })
     }
 }
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let client: Arc<dyn HttpClient> = Arc::new(CountingValidationClient {
+        let client: Arc<dyn HttpClient> = Arc::new(PageThenUnauthorized {
             calls: calls.clone(),
         });
         let source = HttpPullSource::new(
-            ValidationDecoder,
+            PagedDecoder,
             HttpPullConfig::builder()
                 .client(client)
                 .build()
@@ -87,35 +108,21 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
     })
 }
 
-async fn run(journal_base: &Path, calls: Arc<AtomicUsize>, replay_from: Option<&Path>) {
+async fn run(
+    journal_base: &Path,
+    calls: Arc<AtomicUsize>,
+    replay_from: Option<&Path>,
+) -> Result<(), ApplicationError> {
     let mut args = vec![OsString::from("obzenflow")];
     if let Some(archive) = replay_from {
         args.push(OsString::from("--replay-from"));
         args.push(archive.as_os_str().to_os_string());
+        args.push(OsString::from("--allow-incomplete-archive"));
     }
     FlowApplication::builder()
         .with_cli_args(args)
         .run_async(build_flow(journal_base.to_path_buf(), calls))
         .await
-        .expect("HTTP pull witness flow completes");
-}
-
-async fn read_error_journal(run_dir: &Path) -> Vec<JournalRecord<ChainPayload>> {
-    let manifest = archive_manifest(run_dir);
-    let journal_file = manifest["stages"]["pull"]["error_journal_file"]
-        .as_str()
-        .expect("pull error journal in manifest");
-    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(journal_file)).await
-}
-
-fn latest_run_dir(base: &Path) -> PathBuf {
-    let mut runs = std::fs::read_dir(base.join("flows"))
-        .expect("flows directory")
-        .map(|entry| entry.expect("flow directory entry").path())
-        .filter(|path| path.join("run_manifest.json").exists())
-        .collect::<Vec<_>>();
-    runs.sort();
-    runs.pop().expect("flow produced a replay archive")
 }
 
 fn archive_manifest(run_dir: &Path) -> serde_json::Value {
@@ -125,116 +132,92 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     .expect("manifest parses")
 }
 
-async fn read_data_journal(run_dir: &Path) -> Vec<JournalRecord<ChainPayload>> {
+async fn read_pull_journal(run_dir: &Path, journal: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
-    let journal_file = manifest["stages"]["pull"]["data_journal_file"]
+    let journal_file = manifest["stages"]["pull"][journal]
         .as_str()
-        .expect("pull data journal in manifest");
+        .expect("pull journal in manifest");
     replay_testkit::read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(journal_file)).await
 }
 
-fn typed_snapshots(events: &[JournalRecord<ChainPayload>]) -> Vec<(WriterId, HttpPullStateFact)> {
-    events
-        .iter()
-        .filter_map(|envelope| match &envelope.payload {
-            ChainPayload::Execution(ExecutionPayload::HttpPullState(snapshot)) => Some((
-                envelope.envelope.provenance.event.writer_id,
-                snapshot.clone(),
-            )),
-            _ => None,
-        })
-        .collect()
+fn items(rows: &[JournalRecord<ChainPayload>]) -> usize {
+    rows.iter().filter(|row| row.consumes_data_credit()).count()
 }
 
-fn assert_validation_journals(
-    data: &[JournalRecord<ChainPayload>],
-    errors: &[JournalRecord<ChainPayload>],
-    expect_live_snapshots: bool,
-) {
-    assert!(data.iter().all(|envelope| !envelope.consumes_data_credit()));
-    assert!(data
-        .iter()
-        .chain(errors)
-        .all(|envelope| !envelope.event_type().ends_with(".error")));
-
-    let eof_position = data
-        .iter()
-        .position(|envelope| envelope.is_eof())
-        .expect("finite validation is followed by EOF");
-    let eof_writer = data[eof_position].envelope.provenance.event.writer_id;
-    let snapshots = typed_snapshots(data);
-    if expect_live_snapshots {
-        assert!(
-            !snapshots.is_empty(),
-            "live validation reports typed telemetry"
-        );
-        assert!(snapshots.iter().all(|(writer, _)| *writer == eof_writer));
-        assert!(
-            data[..eof_position].iter().any(|envelope| matches!(
-                envelope.payload,
-                ChainPayload::Execution(ExecutionPayload::HttpPullState(_))
-            )),
-            "the live validation-poll snapshot is committed before EOF"
-        );
-    } else {
-        assert!(
-            snapshots.is_empty(),
-            "strict replay must not report fresh HTTP pull telemetry"
-        );
-    }
-
-    let validation_rows = errors
-        .iter()
-        .filter(|envelope| {
-            matches!(
-                envelope.envelope.provenance.event.processing.status,
-                ProcessingStatus::Error {
-                    kind: Some(ErrorKind::Validation),
-                    ..
-                }
-            )
-        })
-        .collect::<Vec<_>>();
-    if expect_live_snapshots {
-        assert_eq!(validation_rows.len(), 1);
-        assert!(validation_rows
-            .iter()
-            .all(|row| !row.consumes_data_credit()));
-    } else {
-        assert!(
-            validation_rows.is_empty(),
-            "strict replay must not re-run source validation"
-        );
-    }
+fn failed_cause(rows: &[JournalRecord<ChainPayload>]) -> Option<Option<EventId>> {
+    rows.iter().find_map(|row| match &row.payload {
+        ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Failed {
+            causal_event_id,
+            ..
+        })) => Some(*causal_event_id),
+        _ => None,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn validation_and_typed_snapshots_replay_without_live_http_or_error_data() {
+async fn fatal_decode_after_a_valid_page_fails_without_eof_and_replays_cold() {
     let temp = tempfile::tempdir().expect("HTTP witness tempdir");
     let journal_base = temp.path().join("journals");
 
     let live_calls = Arc::new(AtomicUsize::new(0));
-    run(&journal_base, live_calls.clone(), None).await;
-    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
-    let live = latest_run_dir(&journal_base);
-    let live_data = read_data_journal(&live).await;
-    let live_errors = read_error_journal(&live).await;
-    assert_validation_journals(&live_data, &live_errors, true);
-
-    let replay_calls = Arc::new(AtomicUsize::new(0));
-    run(&journal_base, replay_calls.clone(), Some(&live)).await;
-    assert_eq!(
-        replay_calls.load(Ordering::SeqCst),
-        0,
-        "strict replay must neither fetch nor report a fresh source snapshot"
+    let outcome = run(&journal_base, live_calls.clone(), None).await;
+    assert!(
+        matches!(outcome, Err(ApplicationError::FlowExecutionFailed(_))),
+        "a terminal source fails the pipeline: {outcome:?}"
     );
-    let replay = latest_run_dir(&journal_base);
-    let replay_data = read_data_journal(&replay).await;
-    let replay_errors = read_error_journal(&replay).await;
-    assert_validation_journals(&replay_data, &replay_errors, false);
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        2,
+        "no request after the terminal report"
+    );
 
-    let verification = verify_run_dirs(&live, &replay, &VerifyOptions::default())
-        .expect("HTTP pull verification runs");
-    assert!(matches!(verification, VerifyOutcome::Completed { .. }));
-    assert_eq!(verification.exit_code(), 0);
+    let live = replay_testkit::latest_run_dir(&journal_base);
+    let data = read_pull_journal(&live, "data_journal_file").await;
+    let errors = read_pull_journal(&live, "error_journal_file").await;
+    assert_eq!(items(&data), 2, "the valid page stays committed");
+    assert!(
+        !data.iter().any(|row| row.is_eof()),
+        "an abandoned scan writes no EOF"
+    );
+
+    let failures: Vec<_> = errors
+        .iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
+                Some((row.envelope.provenance.event.id, failure))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let (diagnostic_id, failure) = failures[0];
+    assert_eq!(failure.continuation, SourcePollContinuation::Terminal);
+    assert_eq!(failure.error_type, SourcePollErrorKind::Validation);
+    assert_eq!(
+        failure.diagnostic.reason(),
+        SourceDiagnosticReason::RemoteRejected
+    );
+    let code = failure.diagnostic.error_code().expect("HTTP status code");
+    assert_eq!((code.namespace(), code.value()), ("http.status", "401"));
+    assert_eq!(failed_cause(&data), Some(Some(diagnostic_id)));
+    assert!(!serde_json::to_string(&errors)
+        .expect("error journal serialises")
+        .contains("SECRET_RESPONSE_BODY"));
+
+    // Strict replay substitutes the accepted facts and contacts nothing; it
+    // does not rerun the decoder to recreate the diagnostic.
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    run(&journal_base, replay_calls.clone(), Some(&live))
+        .await
+        .expect("replay of the failed archive completes");
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    let replay = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(replay, live);
+    let replay_data = read_pull_journal(&replay, "data_journal_file").await;
+    let replay_errors = read_pull_journal(&replay, "error_journal_file").await;
+    assert_eq!(items(&replay_data), 2);
+    assert!(!replay_errors.iter().any(|row| matches!(
+        row.payload,
+        ChainPayload::Execution(ExecutionPayload::SourcePollError(_))
+    )));
 }

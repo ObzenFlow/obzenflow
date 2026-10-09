@@ -18,11 +18,16 @@ use crate::stages::resources_builder::{StageResources, StageResourcesBuilder};
 use crate::supervised_base::{SupervisorBuilder, SupervisorHandle};
 use async_trait::async_trait;
 use futures::FutureExt;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourceOpenIntent, SourcePollContinuation, SourcePollErrorKind,
+    StageLifecycleFact,
+};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::archive::{
     ArchiveStatus, ReplayArchive, ReplayError, StatusDerivation,
 };
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal, JournalReader};
-use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, TypedPayload};
+use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, SystemId, TypedPayload};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -71,6 +76,8 @@ enum Reading {
     Pending,
     FailJournal,
     RowThenPending,
+    RowThenTerminal,
+    RejectThenPending,
 }
 
 #[derive(Clone)]
@@ -98,7 +105,9 @@ impl Fixture {
         let resource = Resource(self.counts.clone());
         self.counts.opening.notify_one();
         match self.opening {
-            Opening::Fail => Err(SourceError::Transport("credential=DO_NOT_PERSIST".into())),
+            Opening::Fail => Err(SourceError::Transport(
+                obzenflow_core::event::SourceDiagnosticReason::InputUnavailable.into(),
+            )),
             Opening::Pending => std::future::pending().await,
             Opening::Ready => Ok(Reader {
                 resource,
@@ -126,8 +135,19 @@ impl Reader {
             Reading::Pending => std::future::pending().await,
             Reading::FailJournal => {
                 counts.journal_failure.store(true, Ordering::SeqCst);
-                Err(SourceError::Validation("primary read failure".into()))
+                Err(SourceError::Validation(
+                    obzenflow_core::event::SourceDiagnosticReason::InvalidRecord.into(),
+                ))
             }
+            Reading::RowThenTerminal if poll == 0 => Ok(Some(vec![Row])),
+            Reading::RowThenTerminal => Err(SourceError::Terminal {
+                kind: SourcePollErrorKind::Transport,
+                diagnostic: obzenflow_core::event::SourceDiagnosticReason::InputUnavailable.into(),
+            }),
+            Reading::RejectThenPending if poll == 0 => Err(SourceError::Validation(
+                obzenflow_core::event::SourceDiagnosticReason::InvalidValue.into(),
+            )),
+            Reading::RejectThenPending => std::future::pending().await,
         }
     }
 
@@ -139,7 +159,7 @@ impl Reader {
         }
         if self.drain_fails {
             Err(SourceError::Other(
-                "secondary cleanup failure credential=DO_NOT_PERSIST".into(),
+                obzenflow_core::event::SourceDiagnosticReason::Unclassified.into(),
             ))
         } else {
             Ok(())
@@ -193,7 +213,12 @@ impl TypedAsyncInfiniteSourceHandler for Reader {
     }
 }
 
-async fn resources(counts: &Counts) -> (StageId, StageResources, Arc<dyn Journal<ChainEvent>>) {
+struct Journals {
+    data: Arc<dyn Journal<ChainEvent>>,
+    error: Arc<dyn Journal<ChainEvent>>,
+}
+
+async fn resources(counts: &Counts) -> (StageId, StageResources, Journals) {
     let mut topology = obzenflow_topology::TopologyBuilder::new();
     let source = topology.add_stage(Some("input".into()));
     let sink = topology.add_stage(Some("output".into()));
@@ -221,8 +246,40 @@ async fn resources(counts: &Counts) -> (StageId, StageResources, Arc<dyn Journal
     .await
     .unwrap();
     let stage_resources = resources.take_stage_resources(stage).unwrap();
-    let reports = stage_resources.data_journal.clone();
-    (stage, stage_resources, reports)
+    let journals = Journals {
+        data: stage_resources.data_journal.clone(),
+        error: stage_resources.error_journal.clone(),
+    };
+    (stage, stage_resources, journals)
+}
+
+type Rows = [JournalRecord<ChainPayload>];
+
+/// The lifecycle failure's causal link, if the stage recorded one.
+fn failed_cause(rows: &Rows) -> Option<Option<EventId>> {
+    rows.iter().find_map(|row| match &row.payload {
+        ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Failed {
+            causal_event_id,
+            ..
+        })) => Some(*causal_event_id),
+        _ => None,
+    })
+}
+
+fn has_eof(rows: &Rows) -> bool {
+    rows.iter().any(|row| row.is_eof())
+}
+
+fn source_failures(rows: &Rows) -> Vec<(EventId, &ExecutionPayload)> {
+    rows.iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(
+                payload @ (ExecutionPayload::SourcePollError(_)
+                | ExecutionPayload::SourceOpenFailed(_)),
+            ) => Some((row.envelope.provenance.event.id, payload)),
+            _ => None,
+        })
+        .collect()
 }
 
 struct ParkBeforePoll(Arc<Notify>);
@@ -256,8 +313,8 @@ macro_rules! lifecycle_family {
                 fixture: Fixture,
                 boundary: Option<Arc<dyn SourceBoundary>>,
                 resume: bool,
-            ) -> (Handle, Arc<dyn Journal<ChainEvent>>) {
-                let (stage, mut resources, journal) = resources(&fixture.counts).await;
+            ) -> (Handle, Journals) {
+                let (stage, mut resources, journals) = resources(&fixture.counts).await;
                 if resume {
                     resources.runtime_execution = crate::execution::RuntimeExecution::new(
                         crate::execution::RuntimeMode::Resume,
@@ -279,7 +336,7 @@ macro_rules! lifecycle_family {
                     .build()
                     .await
                     .unwrap(),
-                    journal,
+                    journals,
                 )
             }
 
@@ -494,7 +551,7 @@ macro_rules! lifecycle_family {
                 for resume in [false, true] {
                     let fixture = Fixture::new(Opening::Fail, Reading::Pending);
                     let counts = fixture.counts.clone();
-                    let (handle, journal) = build(fixture, None, resume).await;
+                    let (handle, journals) = build(fixture, None, resume).await;
                     start(&handle).await;
                     assert!(finish(&handle).await.is_err(), "failed FSM must fail its handle");
                     assert!(matches!(handle.current_state(), State::Failed(_)));
@@ -502,17 +559,91 @@ macro_rules! lifecycle_family {
                     assert_eq!(counts.polls.load(Ordering::SeqCst), 0);
                     assert_eq!(counts.drains.load(Ordering::SeqCst), 0);
                     assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
-                    let evidence = format!("{:?}", journal.read_all_unordered().await.unwrap());
+                    let data = journals.data.read_all_unordered().await.unwrap();
+                    let evidence = format!("{data:?}");
                     assert!(
                         evidence.contains(if resume {
-                            "Cannot resume source 'input'"
+                            "Cannot resume source 'input': the input is unavailable."
                         } else {
-                            "Cannot start source 'input'"
+                            "Cannot start source 'input': the input is unavailable."
                         }),
                         "{evidence}"
                     );
-                    assert!(!evidence.contains("DO_NOT_PERSIST"));
+
+                    // Opening evidence is committed once, distinct from any poll, and
+                    // the lifecycle failure links to it without an EOF.
+                    let errors = journals.error.read_all_unordered().await.unwrap();
+                    let failures = source_failures(&errors);
+                    assert_eq!(failures.len(), 1, "{failures:?}");
+                    let (opened_id, ExecutionPayload::SourceOpenFailed(opened)) = failures[0] else {
+                        panic!("expected source.open_failed, got {failures:?}");
+                    };
+                    assert_eq!(opened.error_type, SourcePollErrorKind::Transport);
+                    assert_eq!(
+                        opened.intent,
+                        if resume { SourceOpenIntent::Resume } else { SourceOpenIntent::Start }
+                    );
+                    assert_eq!(failed_cause(&data), Some(Some(opened_id)));
+                    assert!(!has_eof(&data));
                 }
+            }
+
+            #[tokio::test]
+            async fn terminal_poll_failure_commits_its_diagnostic_and_fails_without_eof() {
+                let fixture = Fixture::new(Opening::Ready, Reading::RowThenTerminal);
+                let counts = fixture.counts.clone();
+                let (handle, journals) = build(fixture, None, false).await;
+                start(&handle).await;
+                assert!(finish(&handle).await.is_err(), "terminal report fails the stage");
+                assert!(matches!(
+                    handle.current_state(),
+                    State::Failed(reason)
+                        if reason == "Source 'input' cannot continue: terminal source transport error: the input is unavailable"
+                ));
+                assert_eq!(counts.polls.load(Ordering::SeqCst), 2, "no poll after a terminal report");
+                assert_eq!(counts.drains.load(Ordering::SeqCst), 1, "cleanup runs once");
+
+                let data = journals.data.read_all_unordered().await.unwrap();
+                let errors = journals.error.read_all_unordered().await.unwrap();
+                let failures = source_failures(&errors);
+                assert_eq!(failures.len(), 1, "{failures:?}");
+                let (diagnostic_id, ExecutionPayload::SourcePollError(poll)) = failures[0] else {
+                    panic!("expected source.poll_error, got {failures:?}");
+                };
+                assert_eq!(poll.continuation, SourcePollContinuation::Terminal);
+                assert_eq!(failed_cause(&data), Some(Some(diagnostic_id)));
+                assert!(!has_eof(&data), "a terminal source writes no EOF");
+                assert_eq!(
+                    data.iter().filter(|row| row.payload.consumes_data_credit()).count(),
+                    1,
+                    "the row accepted before the failure stays committed"
+                );
+            }
+
+            #[tokio::test]
+            async fn record_rejection_is_journalled_and_reading_continues() {
+                let fixture = Fixture::new(Opening::Ready, Reading::RejectThenPending);
+                let counts = fixture.counts.clone();
+                let (handle, journals) = build(fixture, None, false).await;
+                start(&handle).await;
+                // A second poll starts only after the first poll's rejection committed.
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while counts.polls.load(Ordering::SeqCst) < 2 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("reading continues after a rejection");
+                let errors = journals.error.read_all_unordered().await.unwrap();
+                let failures = source_failures(&errors);
+                assert_eq!(failures.len(), 1, "{failures:?}");
+                let (_, ExecutionPayload::SourcePollError(poll)) = failures[0] else {
+                    panic!("expected source.poll_error, got {failures:?}");
+                };
+                assert_eq!(poll.continuation, SourcePollContinuation::Recoverable);
+                assert_eq!(poll.error_type, SourcePollErrorKind::Validation);
+                handle.send_event(Event::BeginDrain).await.unwrap();
+                finish(&handle).await.unwrap();
             }
 
             #[tokio::test]
@@ -545,7 +676,7 @@ macro_rules! lifecycle_family {
                     fixture.drain_fails = fail;
                     let counts = fixture.counts.clone();
                     let entered = Arc::new(Notify::new());
-                    let (handle, journal) = build(
+                    let (handle, journals) = build(
                         fixture,
                         Some(Arc::new(ParkBeforePoll(entered.clone()))),
                         false,
@@ -573,8 +704,7 @@ macro_rules! lifecycle_family {
                             State::Failed(reason) if reason == "primary failure before first poll"
                         ));
                     }
-                    let evidence = journal.read_all_unordered().await.unwrap();
-                    assert!(!serde_json::to_string(&evidence).unwrap().contains("DO_NOT_PERSIST"));
+                    let evidence = journals.data.read_all_unordered().await.unwrap();
                     assert_eq!(
                         evidence.iter().filter(|row| matches!(
                             row.payload,
@@ -638,7 +768,7 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     let mut fixture = Fixture::new(Opening::Ready, Reading::Eof);
     fixture.drain_fails = true;
     let counts = fixture.counts.clone();
-    let (stage, resources, journal) = resources(&counts).await;
+    let (stage, resources, journals) = resources(&counts).await;
     let data = resources.data_journal.clone();
     let handle = finite::AsyncFiniteSourceBuilder::new(
         <Fixture as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource>>::prepare(
@@ -667,10 +797,7 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     ));
     assert_eq!(counts.polls.load(Ordering::SeqCst), 1);
     assert_eq!(counts.drains.load(Ordering::SeqCst), 1);
-    let evidence = journal.read_all_unordered().await.unwrap();
-    assert!(!serde_json::to_string(&evidence)
-        .unwrap()
-        .contains("DO_NOT_PERSIST"));
+    let evidence = journals.data.read_all_unordered().await.unwrap();
     assert_eq!(
         evidence
             .iter()

@@ -4,16 +4,21 @@
 
 //! Example entrypoint and application hosting for the piggy bank demo.
 //!
-//! The application builder hosts HTTP ingress and returns the typed sources for
-//! `flow!`. Readiness, telemetry and shutdown wiring stay with the builder.
+//! The application builder hosts HTTP ingress and returns the typed source for
+//! `flow!`. Readiness, telemetry and shutdown wiring stay with the builder. The
+//! accounts source is cold configuration; the file opens only for a live run.
 
-use super::flow::{self, AccountIngress, LedgerIngress};
+use super::flow::{self, AccountYaml, LedgerIngress};
 use anyhow::Result;
 use obzenflow::application::ingress::IngestionConfig;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
+use obzenflow::stages::sources::{YamlSelection, YamlSource};
 
-const ACCOUNTS_BASE_PATH: &str = "/api/bank/accounts";
 const TX_BASE_PATH: &str = "/api/bank/tx";
+const ACCOUNTS_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/http_ingestion_piggy_bank_demo/accounts.yaml"
+);
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/http_ingestion_piggy_bank_demo/obzenflow.toml"
@@ -30,18 +35,22 @@ pub fn run_example() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("Piggy Bank")
             .description(
-                "Stream-table join over HTTP ingestion: accounts open a catalog, \
-                 transactions post against it, balances fold into a live checkbook.",
+                "Stream-table join: accounts load from YAML, transactions post over \
+                 HTTP against them, balances fold into a live checkbook.",
             )
-            .config("accounts", format!("POST {ACCOUNTS_BASE_PATH}/events"))
+            .config("accounts", "accounts.yaml, fixed at startup")
             .config("transactions", format!("POST {TX_BASE_PATH}/events")),
     );
+
+    let accounts_source = YamlSource::builder(AccountYaml)
+        .path(ACCOUNTS_FILE)
+        .selection(YamlSelection::SequenceAt("/accounts".into()))
+        .build()?;
 
     let mut app = FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation);
-    let accounts_source = app.http_ingress(AccountIngress, ingress_config(ACCOUNTS_BASE_PATH));
     let tx_source = app.http_ingress(LedgerIngress, ingress_config(TX_BASE_PATH));
 
     app.run_blocking(flow::build_flow(accounts_source, tx_source))?;

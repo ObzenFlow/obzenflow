@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, transform};
@@ -383,7 +384,9 @@ impl TypedFiniteSourceHandler for ScriptedSyncSource {
                 Ok(Some(vec![RateLimiterTestEvent { index: id as u64 }]))
             }
             SourceStep::Empty => Ok(Some(Vec::new())),
-            SourceStep::Err => Err(SourceError::Other("scripted error".to_string())),
+            SourceStep::Err => Err(SourceError::Other(
+                SourceDiagnosticReason::Unclassified.into(),
+            )),
             SourceStep::Done => Ok(None),
         }
     }
@@ -426,7 +429,9 @@ impl TypedAsyncFiniteSourceHandler for ScriptedAsyncSource {
                 Ok(Some(vec![RateLimiterTestEvent { index: id as u64 }]))
             }
             SourceStep::Empty => Ok(Some(Vec::new())),
-            SourceStep::Err => Err(SourceError::Other("scripted error".to_string())),
+            SourceStep::Err => Err(SourceError::Other(
+                SourceDiagnosticReason::Unclassified.into(),
+            )),
             SourceStep::Done => Ok(None),
         }
     }

@@ -78,7 +78,7 @@ impl<H, F> SourceReader<H, F> {
         match std::mem::replace(&mut self.state, ReaderState::Consumed) {
             ReaderState::Cold(open) => Ok(Some(open)),
             ReaderState::Consumed => Err(SourceError::Other(
-                "source acquisition already consumed".into(),
+                obzenflow_core::event::SourceDiagnosticReason::Unclassified.into(),
             )),
             ReaderState::Acquired(_) => unreachable!("acquired readers were handled above"),
         }

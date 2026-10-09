@@ -18,12 +18,13 @@ use crate::middleware::{
     SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::execution_payload::CircuitBreakerRejectionReason;
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerRejectionReason, SourcePollErrorKind,
+};
 use obzenflow_runtime::control_plane::CircuitBreakerStateView;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
-use obzenflow_runtime::stages::SourceError;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -133,10 +134,13 @@ impl SourcePolicy for CircuitBreakerSourcePolicy {
             | SourcePollOutcome::Eof { poll_duration } => SourceOutcome::Success {
                 poll_duration: *poll_duration,
             },
-            SourcePollOutcome::Failed {
-                error: SourceError::Validation(_),
-                ..
-            } => SourceOutcome::Inconclusive,
+            // Classify through the category accessor so a terminal report keeps
+            // its category's health meaning (084n B4).
+            SourcePollOutcome::Failed { error, .. }
+                if error.kind() == SourcePollErrorKind::Validation =>
+            {
+                SourceOutcome::Inconclusive
+            }
             SourcePollOutcome::Failed { poll_duration, .. } => SourceOutcome::Failure {
                 poll_duration: *poll_duration,
             },
@@ -525,30 +529,64 @@ impl CircuitBreakerMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
     use obzenflow_core::{StageId, WriterId};
+    use obzenflow_runtime::stages::SourceError;
 
     #[test]
     fn validation_source_failure_is_breaker_inconclusive() {
+        let rejected = SourceDiagnostic::new(SourceDiagnosticReason::InvalidValue);
+        // A terminal report keeps its category's health meaning.
+        for error in [
+            SourceError::Validation(rejected.clone()),
+            SourceError::Terminal {
+                kind: SourcePollErrorKind::Validation,
+                diagnostic: rejected,
+            },
+        ] {
+            let breaker = Arc::new(CircuitBreakerMiddleware::new(1));
+            let policy = CircuitBreakerSourcePolicy {
+                breaker: breaker.clone(),
+            };
+            let mut ctx = SourcePolicyCtx::new(WriterId::from(StageId::new()));
+
+            policy.observe(
+                &SourcePollOutcome::Failed {
+                    error: &error,
+                    poll_duration: Duration::from_secs(30),
+                },
+                &mut ctx,
+            );
+
+            assert_eq!(breaker.current_state(), CircuitState::Closed);
+            assert_eq!(breaker.failure_count.load(Ordering::SeqCst), 0);
+            assert_eq!(breaker.requests_total.load(Ordering::Relaxed), 0);
+            assert_eq!(breaker.failures_total.load(Ordering::Relaxed), 0);
+            assert_eq!(breaker.slow_total.load(Ordering::Relaxed), 0);
+            assert!(ctx.take_control_events().is_empty());
+        }
+    }
+
+    #[test]
+    fn terminal_transport_failure_counts_as_dependency_failure() {
         let breaker = Arc::new(CircuitBreakerMiddleware::new(1));
         let policy = CircuitBreakerSourcePolicy {
             breaker: breaker.clone(),
         };
         let mut ctx = SourcePolicyCtx::new(WriterId::from(StageId::new()));
-        let error = SourceError::Validation("domain row rejected".to_string());
+        let error = SourceError::Terminal {
+            kind: SourcePollErrorKind::Transport,
+            diagnostic: SourceDiagnosticReason::InputUnavailable.into(),
+        };
 
         policy.observe(
             &SourcePollOutcome::Failed {
                 error: &error,
-                poll_duration: Duration::from_secs(30),
+                poll_duration: Duration::from_millis(5),
             },
             &mut ctx,
         );
 
-        assert_eq!(breaker.current_state(), CircuitState::Closed);
-        assert_eq!(breaker.failure_count.load(Ordering::SeqCst), 0);
-        assert_eq!(breaker.requests_total.load(Ordering::Relaxed), 0);
-        assert_eq!(breaker.failures_total.load(Ordering::Relaxed), 0);
-        assert_eq!(breaker.slow_total.load(Ordering::Relaxed), 0);
-        assert!(ctx.take_control_events().is_empty());
+        assert_eq!(breaker.failures_total.load(Ordering::Relaxed), 1);
     }
 }
