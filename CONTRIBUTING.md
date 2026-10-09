@@ -43,9 +43,9 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Tests
-cargo xtask test                              # all six correctness lanes, native
+cargo xtask test                              # all seven correctness lanes, native
 cargo xtask test --lane production-features    # explicitly partial coverage
-cargo xtask test --lane performance            # complete performance comparison
+cargo xtask test --lane performance            # complete performance comparison, serially
 
 # Dependency policy checks (CI runs these)
 cargo deny --all-features check
@@ -67,9 +67,10 @@ and repository policy checks remain separate requirements.
 | `journal-fixtures` | The intentionally ignored current-schema codec fixtures |
 | `doctest` | Whole-workspace documentation tests |
 | `postgres` | `cargo xtask postgres test`, including its isolated service lifecycle |
+| `benchmarks` | Every benchmark case once in Criterion's test mode, with its declaration checked; nothing is timed |
 | `performance` | Selected Criterion workloads and required comparison/validity gates |
 
-Omitting `--lane` requests all six correctness lanes. Repeat `--lane` to select
+Omitting `--lane` requests all seven correctness lanes. Repeat `--lane` to select
 exactly those lanes; the result certifies only that declared scope. Report version
 4 records unrequested lanes and dependency preparation separately. Default
 success supplies no performance qualification. Independent lanes continue
@@ -83,31 +84,45 @@ This release includes the macOS concurrent capture-pipe inheritance fix: an
 unrelated test could otherwise keep a finished test's output pipe open and cause
 a false leak failure. The 200 ms leak deadline and failure policy remain unchanged.
 
-Every PR update requires the six correctness lanes and the existing formatting,
-Clippy and policy checks. Performance is optional everywhere: PRs, main pushes,
+Every PR update requires the seven correctness lanes and the existing formatting,
+Clippy and policy checks. The `benchmarks` lane runs every benchmark case once, so a
+broken benchmark fails where it was broken; it makes no performance claim. Performance is optional everywhere: PRs, main pushes,
 ordinary CI dispatches, publication and release dry runs do not request or require it.
-To measure performance, open **Actions → Performance → Run workflow**. The optional
-`revision` input accepts a version (`0.2.6` or `v0.2.6`) or a commit SHA (7–40 hex
-characters). Leave it blank for the latest commit on `main`. Versions select the
-corresponding `vX.Y.Z` tag; unresolved revisions fail without falling back to main.
-Checkout, build caching and measurement evidence use the resolved full commit SHA.
-Alternatively, run `cargo xtask test --lane performance` on the local checkout.
-The manual workflow executes the existing comparison/validity gate and
-retains all 148 observations across 16 benchmark targets.
-Compilation finishes before timing. The gate runs alone; full-suite observations use
-two CPU-partitioned queues on the standard four-CPU Linux runner, with existing
-sampling settings. Shared memory and disk bandwidth still affect those observations;
-compare only runs with the same recorded execution mode. Other platforms run serially.
+To measure performance, open **Actions → Performance → Run workflow** and choose the
+branch or tag to run from (`main` by default). The optional `revision` input accepts a
+version (`0.2.6` or `v0.2.6`) or a commit SHA (7–40 hex characters) that the chosen
+branch or tag contains. Leave it blank for that branch or tag's latest commit. Versions
+select the corresponding `vX.Y.Z` tag. Unknown revisions, and commits the chosen ref
+does not contain (such as a fork's pull request head), fail without a fallback: a run
+can write caches for its ref, so it only executes code that ref already contains.
+To measure a branch before merging, run the workflow from that branch. Checkout,
+build caching and measurement evidence use the resolved full commit SHA. A revision
+without the native performance stages and report formatter is reported as unsupported
+and runs nothing. The manual workflow executes the existing comparison/validity gate and
+retains all 138 observations across 8 benchmark targets.
+
+A requested run fans out across GitHub-hosted runners. One job plans it, build jobs
+compile each group once, and qualification and suite shards each run one measurement at
+a time on their own runner with the hash-verified executables. A final job assembles
+the evidence and writes the report. Alternatively, run `cargo xtask test --lane
+performance` to execute the same plan serially on the local checkout, or reproduce
+one stage with `cargo xtask performance <stage> --run-id <id>`. The gate compares the
+candidate with where its change started, which is its merge base with `main`, or its
+first parent when `main` contains it. Compare full-suite observations only across runs
+on matching runner hardware.
 
 The Performance run's **Summary** page shows a rendered **Performance report** and
 a copyable Markdown block, grouped by operation. The direct `.md` download contains the same
-report. It includes identified reference/current decisions, full-suite medians and
-confidence intervals, target outcomes, CPU assignments and separate phase durations.
-Download `test-results-performance` for raw evidence. Available evidence and the report
+report. It includes identified reference/candidate decisions, the reference and how it
+was chosen, full-suite medians and confidence intervals, per-shard target outcomes, each
+stage's runner and duration, and the end-to-end wall time. Download
+`test-results-performance` for raw evidence. Available evidence and the report
 are preserved after failure; missing work cannot qualify as success. See the
 [benchmark report categories](crates/obzenflow_benchmarks/README.md#copyable-ci-reports)
-for measurement boundaries and maintenance. A complete performance run can take
-more than 30 minutes; it has no PR turnaround target.
+for measurement boundaries and maintenance, and its
+[benchmark levels](crates/obzenflow_benchmarks/README.md#benchmark-levels) for the
+difference between component, end-to-end flow and profiling work. A requested run
+targets 15 minutes of wall time with warm caches; it has no PR turnaround target.
 
 Performance claims should cite an explicit comparison and identify the measured
 revision; absent measurements establish no performance result. Publication and

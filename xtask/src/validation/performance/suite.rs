@@ -2,211 +2,26 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Full Criterion inventory, sharing compilation with the native comparison.
-//! CPU assignments bound concurrency; memory, filesystem and caches remain shared.
+//! Full-suite observations, one shard per machine and one measurement at a
+//! time (080v B7), and the per-PR benchmark smoke that executes every case
+//! once without timing it (080v B9).
 
 use super::*;
+use schedule::{Selector, SuiteShard};
 use std::process::Command;
 
-#[derive(Debug, Deserialize, Serialize)]
-pub(super) struct Target {
-    name: String,
-    #[serde(default, rename = "required-features")]
-    features: Vec<String>,
-}
+/// Benchmarks write case declarations here while listing; see
+/// `obzenflow_benchmarks::case`.
+pub(super) const DECLARATIONS: &str = "OBZENFLOW_CASE_DECLARATIONS";
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Schedule {
-    version: u32,
-    groups: Vec<Vec<String>>,
-}
-
-pub(super) fn inventory(root: &Path) -> Result<Vec<Target>> {
-    #[derive(Deserialize)]
-    struct Manifest {
-        bench: Vec<Target>,
-    }
-    let manifest: Manifest = toml::from_str(&fs::read_to_string(
-        root.join("crates/obzenflow_benchmarks/Cargo.toml"),
-    )?)?;
-    schedule(root, &manifest.bench)?;
-    Ok(manifest.bench)
-}
-
-fn schedule(root: &Path, targets: &[Target]) -> Result<Vec<Vec<String>>> {
-    let plan: Schedule = toml::from_str(&fs::read_to_string(
-        root.join(".config/performance-suite.toml"),
-    )?)?;
-    let selected: Vec<_> = plan.groups.iter().flatten().cloned().collect();
-    let unique: BTreeSet<_> = selected.iter().cloned().collect();
-    if plan.version != 1
-        || plan.groups.len() != 2
-        || plan.groups.iter().any(Vec::is_empty)
-        || unique.len() != selected.len()
-        || unique != targets.iter().map(|t| t.name.clone()).collect()
-    {
-        return Err(error(
-            "performance suite queues must cover every Cargo benchmark exactly once",
-        ));
-    }
-    Ok(plan.groups)
-}
-
-pub(super) fn build_reference(
-    root: &Path,
-    source: &Path,
-    target: &Path,
-    tools: &Policy,
-    directory: &Path,
-) -> Result<BTreeMap<String, Executable>> {
-    build_targets(
-        root,
-        source,
-        target,
-        tools,
-        directory,
-        "reference",
-        &[
-            Target {
-                name: "journal_hot_path".into(),
-                features: vec!["journal-benchmarks".into()],
-            },
-            Target {
-                name: "validation_boundaries".into(),
-                features: vec!["validation-benchmarks".into()],
-            },
-        ],
-    )
-}
-
-pub(super) fn build_candidate(
-    root: &Path,
-    tools: &Policy,
-    directory: &Path,
-    targets: &[Target],
-) -> Result<BTreeMap<String, Executable>> {
-    build_targets(
-        root,
-        root,
-        &root.join("target/validation-candidate"),
-        tools,
-        directory,
-        "candidate",
-        targets,
-    )
-}
-
-fn build_targets(
-    root: &Path,
-    source: &Path,
-    target: &Path,
-    tools: &Policy,
-    directory: &Path,
-    label: &str,
-    targets: &[Target],
-) -> Result<BTreeMap<String, Executable>> {
-    // Batch targets with identical features. Do not unify allocation-census into
-    // timed binaries, or silently alter a target's declared feature identity.
-    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for spec in targets {
-        groups
-            .entry(spec.features.join(","))
-            .or_default()
-            .push(spec.name.clone());
-    }
-    let mut binaries = BTreeMap::new();
-    for (index, (features, targets)) in groups.iter().enumerate() {
-        binaries.extend(build(
-            root,
-            source,
-            target,
-            tools,
-            directory,
-            &format!("{label}-build-{index}"),
-            (targets, features),
-        )?);
-    }
-    let mut census = build(
-        root,
-        source,
-        target,
-        tools,
-        directory,
-        &format!("{label}-census-build"),
-        (
-            &["journal_hot_path".into()],
-            "journal-benchmarks,allocation-census",
-        ),
-    )?;
-    binaries
-        .get_mut("journal_hot_path")
-        .ok_or_else(|| error("missing hot-path timing binary"))?
-        .census = Some(Box::new(census.remove("journal_hot_path").unwrap()));
-    Ok(binaries)
-}
-
-// No unpinned concurrent fallback: platforms without Linux affinity execute one
-// measurement at a time, and record that distinct environment in the report.
-fn cpu_groups() -> Result<Vec<Vec<usize>>> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut mask: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&mask), &mut mask) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let cpus: Vec<_> = (0..libc::CPU_SETSIZE as usize)
-            .filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &mask) })
-            .collect();
-        if cpus.len() >= 4 {
-            // Four CPUs even on larger hosts: stable per-target capacity.
-            return Ok(vec![cpus[..2].to_vec(), cpus[2..4].to_vec()]);
-        }
-    }
-    Ok(vec![vec![]])
-}
-
-fn pin(command: &mut Command, cpus: &[usize]) {
-    #[cfg(target_os = "linux")]
-    if !cpus.is_empty() {
-        use std::os::unix::process::CommandExt;
-        let mut mask: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        for &cpu in cpus {
-            unsafe {
-                libc::CPU_SET(cpu, &mut mask);
-            }
-        }
-        // Runs in the child before exec. Only the affinity syscall is made;
-        // descendants inherit the mask, including benchmark-owned subprocesses.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::sched_setaffinity(0, std::mem::size_of_val(&mask), &mask) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (command, cpus);
-}
-
-fn measurement_command(
-    root: &Path,
-    tools: &Policy,
-    binary: &Executable,
-    home: &Path,
-    cpus: &[usize],
-) -> Command {
-    let mut command = process::command(root, tools, &binary.path);
+fn benchmark_command(root: &Path, tools: &Policy, binary: &Path, home: &Path) -> Command {
+    let mut command = process::command(root, tools, binary);
     command
         .env("CRITERION_HOME", home)
         .env_remove("OBZENFLOW_WORK_CENSUS")
         .env_remove("OBZENFLOW_BENCH_CONTROL")
-        .env("RAYON_NUM_THREADS", "2")
+        .env_remove(DECLARATIONS)
         .env("RUST_LOG", "warn");
-    pin(&mut command, cpus);
     command
 }
 
@@ -223,121 +38,384 @@ fn listed_cases(output: &str) -> Result<BTreeSet<String>> {
     Ok(unique)
 }
 
-fn measure_target(
+/// Each case declares its category and timed boundary exactly once.
+fn declared_cases(text: &str) -> Result<BTreeMap<String, Value>> {
+    let mut declared = BTreeMap::new();
+    for line in text.lines() {
+        let declaration: Value = serde_json::from_str(line)?;
+        let case = declaration["case"]
+            .as_str()
+            .filter(|case| !case.is_empty())
+            .ok_or_else(|| failed("case declaration has no case ID"))?
+            .to_owned();
+        for field in ["category", "timed"] {
+            if declaration[field].as_str().is_none_or(str::is_empty) {
+                return Err(failed(format!("{case}: declaration has no {field}")));
+            }
+        }
+        if declared.insert(case.clone(), declaration).is_some() {
+            return Err(failed(format!("{case}: declared more than once")));
+        }
+    }
+    Ok(declared)
+}
+
+/// Lists cases and collects their declarations before any measurement.
+fn declarations(
+    name: &str,
+    listed: &BTreeSet<String>,
+    text: &str,
+) -> Result<BTreeMap<String, Value>> {
+    let declared = declared_cases(text)?;
+    let keys: BTreeSet<_> = declared.keys().cloned().collect();
+    if &keys != listed {
+        let undeclared: Vec<_> = listed.difference(&keys).cloned().collect();
+        let unlisted: Vec<_> = keys.difference(listed).cloned().collect();
+        return Err(failed(format!(
+            "{name}: case declarations differ from listed cases; undeclared {undeclared:?}, unlisted {unlisted:?}"
+        )));
+    }
+    Ok(declared)
+}
+
+/// The executable's complete inventory, checked against its declarations.
+fn inventory(
     root: &Path,
     tools: &Policy,
     directory: &Path,
-    spec: &Target,
-    binary: &Executable,
-    cpus: &[usize],
-) -> Result<()> {
-    let home = directory.join("criterion");
+    name: &str,
+    binary: &Path,
+) -> Result<BTreeSet<String>> {
+    let declared = directory.join("declarations.jsonl");
     let listed = process::execute(
-        measurement_command(root, tools, binary, &home, cpus).arg("--list"),
+        benchmark_command(root, tools, binary, &directory.join("criterion"))
+            .env(DECLARATIONS, &declared)
+            .arg("--list"),
         directory,
         "inventory",
         Duration::from_secs(tools.command_watchdog_seconds),
     )?;
     if !listed.success() {
-        return Err(failed("Criterion inventory failed"));
+        return Err(failed(format!("{name}: Criterion inventory failed")));
     }
-    let expected = listed_cases(&fs::read_to_string(directory.join("inventory.stdout.log"))?)?;
+    let cases = listed_cases(&fs::read_to_string(directory.join("inventory.stdout.log"))?)?;
     fs::write(
         directory.join("cases.json"),
-        serde_json::to_vec_pretty(&expected)?,
+        serde_json::to_vec_pretty(&cases)?,
     )?;
-    // Criterion retains each target's authored sample sizes and measurement
-    // budgets. No shortened CI profile and no retries.
+    let text = match fs::read_to_string(&declared) {
+        Ok(text) => text,
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(failure) => return Err(failure.into()),
+    };
+    let declared = declarations(name, &cases, &text)?;
+    fs::write(
+        directory.join("declarations.json"),
+        serde_json::to_vec_pretty(&declared.into_values().collect::<Vec<_>>())?,
+    )?;
+    Ok(cases)
+}
+
+/// Lists, then measures, one selection with the target's authored sample sizes
+/// and measurement budgets. No shortened CI profile and no retries.
+fn measure_selection(
+    root: &Path,
+    tools: &Policy,
+    directory: &Path,
+    selector: &Selector,
+    binary: &Executable,
+) -> Result<()> {
+    let name = &selector.target;
+    let home = directory.join("criterion");
+    let inventory = inventory(root, tools, directory, name, &binary.path)?;
+    let selected = match &selector.cases {
+        None => inventory,
+        Some(filter) => {
+            let listed = process::execute(
+                benchmark_command(root, tools, &binary.path, &home).args(["--list", filter]),
+                directory,
+                "selection",
+                Duration::from_secs(tools.command_watchdog_seconds),
+            )?;
+            if !listed.success() {
+                return Err(failed(format!("{name}: Criterion selection failed")));
+            }
+            let selected =
+                listed_cases(&fs::read_to_string(directory.join("selection.stdout.log"))?)?;
+            if !selected.is_subset(&inventory) {
+                return Err(error(format!("{name}: selection lists unknown cases")));
+            }
+            selected
+        }
+    };
+    fs::write(
+        directory.join("selected.json"),
+        serde_json::to_vec_pretty(&selected)?,
+    )?;
+    let mut command = benchmark_command(root, tools, &binary.path, &home);
+    command.arg("--bench");
+    if let Some(filter) = &selector.cases {
+        command.arg(filter);
+    }
     let status = process::execute(
-        measurement_command(root, tools, binary, &home, cpus).arg("--bench"),
+        &mut command,
         directory,
         "measurement",
         Duration::from_secs(tools.command_watchdog_seconds),
     )?;
     if !status.success() {
-        return Err(failed(format!("{}: Criterion failed", spec.name)));
+        return Err(failed(format!("{name}: Criterion failed")));
     }
     let mut found = BTreeMap::new();
     collect_samples(&home, "new", &mut found)?;
-    if found.keys().cloned().collect::<BTreeSet<_>>() != expected {
+    if found.keys().cloned().collect::<BTreeSet<_>>() != selected {
         return Err(error(format!(
-            "{}: measurements differ from executable's case inventory",
-            spec.name
+            "{name}: measurements differ from the selected cases"
         )));
     }
     Ok(())
 }
 
-pub(super) fn run(
+/// Measures every selection in the shard serially; a selection without a
+/// verified executable records why and no samples. Missing coverage cannot pass.
+pub(super) fn run_shard(
     root: &Path,
     tools: &Policy,
     directory: &Path,
-    targets: &[Target],
-    binaries: &BTreeMap<String, Executable>,
+    output: &Path,
+    plan: &RunPlan,
+    shard: &SuiteShard,
+    verified: &mut BTreeMap<String, String>,
 ) -> Result<()> {
-    let cpus = cpu_groups()?;
-    let mut groups = schedule(root, targets)?;
-    if cpus.len() == 1 {
-        groups = vec![groups.into_iter().flatten().collect()];
+    let mut obligations = Vec::new();
+    for selector in &shard.select {
+        let phase = output.join(&selector.target);
+        let started = Instant::now();
+        let mut sha256 = None;
+        let result = (|| {
+            fs::create_dir_all(&phase)?;
+            if process::was_interrupted() {
+                return Err(error("interrupted before benchmark execution"));
+            }
+            plan.target(&selector.target)?;
+            let binary = load(directory, Side::Candidate, &selector.target, verified)?;
+            sha256 = Some(binary.sha256.clone());
+            measure_selection(root, tools, &phase, selector, &binary)
+        })();
+        let outcome = Outcome::of(&result);
+        let record = json!({
+            "target": selector.target, "cases": selector.cases,
+            "features": plan.target(&selector.target).ok().map(|target| &target.features),
+            "outcome": outcome, "elapsed_seconds": started.elapsed().as_secs_f64(),
+            "executable_sha256": sha256,
+        });
+        let written: Result<()> = fs::create_dir_all(&phase)
+            .map_err(Into::into)
+            .and_then(|()| {
+                Ok(fs::write(
+                    phase.join("outcome.json"),
+                    serde_json::to_vec_pretty(&record)?,
+                )?)
+            });
+        let outcome = match written {
+            Ok(()) => outcome,
+            Err(failure) => Outcome::Incomplete(format!("could not record outcome: {failure}")),
+        };
+        obligations.push((selector.target.clone(), outcome));
+    }
+    settle(&obligations)
+}
+
+/// Builds every benchmark target in the test profile, checks its declarations
+/// against its listed cases and runs every case once. Nothing is timed.
+pub(in crate::validation) fn smoke(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
+    let targets = schedule::inventory(root)?;
+    let mut groups: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
+    for target in &targets {
+        groups
+            .entry(target.features.clone())
+            .or_default()
+            .push(target.name.clone());
+    }
+    let mut obligations = Vec::new();
+    for (index, (features, names)) in groups.into_iter().enumerate() {
+        let label = format!("build-{index}");
+        let compiled = if process::was_interrupted() {
+            Compiled {
+                executables: BTreeMap::new(),
+                outcome: Outcome::Incomplete("interrupted before compilation".into()),
+            }
+        } else {
+            compile_tests(
+                root,
+                tools,
+                directory,
+                &label,
+                (&names, &features.join(",")),
+            )
+        };
+        obligations.push((label, compiled.outcome.clone()));
+        for name in names {
+            let phase = directory.join(&name);
+            let result = match compiled.executables.get(&name) {
+                Some(binary) => exercise(root, tools, &phase, &name, &binary.path),
+                None => Err(error(format!("{name}: no test-profile executable"))),
+            };
+            if let Err(failure) = &result {
+                eprintln!("validation: benchmark smoke {name} did not pass: {failure}");
+            }
+            obligations.push((name, Outcome::of(&result)));
+        }
     }
     fs::write(
-        directory.join("suite-execution.json"),
-        serde_json::to_vec_pretty(&json!({
-            "mode": if cpus.len() == 2 { "two-cpu-partitions-v1" } else { "serial-unpinned-v1" },
-            "cpu_groups": cpus, "target_groups": groups,
-            "tokio_default_workers": tools.tokio_workers, "rayon_threads": 2,
-            "shared_resources": "memory, caches and filesystem; full-suite observations are not the comparison gate",
-        }))?,
+        directory.join("smoke.json"),
+        serde_json::to_vec_pretty(&json!({"targets": targets, "obligations": obligations}))?,
     )?;
-    let outcomes = std::thread::scope(|scope| {
-        let workers: Vec<_> = groups.iter().zip(&cpus).map(|(group, cpus)| scope.spawn(move || {
-            group.iter().map(|name| {
-                let spec = targets.iter().find(|t| &t.name == name).unwrap();
-                let phase = directory.join("suite").join(name);
-                let started = Instant::now();
-                let result = (|| {
-                    fs::create_dir_all(&phase)?;
-                    if process::was_interrupted() { return Err(error("interrupted before benchmark execution")); }
-                    measure_target(root, tools, &phase, spec, &binaries[name], cpus)
-                })();
-                let record = json!({"target": name, "features": spec.features, "cpus": cpus,
-                    "passed": result.is_ok(), "error": result.as_ref().err().map(ToString::to_string),
-                    "elapsed_seconds": started.elapsed().as_secs_f64(), "executable_sha256": binaries[name].sha256});
-                fs::write(phase.join("outcome.json"), serde_json::to_vec_pretty(&record).unwrap())
-                    .map_err(|e| e.to_string())?;
-                result.map_err(|e| e.to_string())
-            }).collect::<Vec<std::result::Result<(), String>>>()
-        })).collect();
-        workers
+    settle(&obligations)
+}
+
+fn compile_tests(
+    root: &Path,
+    tools: &Policy,
+    directory: &Path,
+    label: &str,
+    (targets, features): (&[String], &str),
+) -> Compiled {
+    let mut command = process::command(root, tools, "cargo");
+    command.args([
+        "test",
+        "--no-run",
+        "--locked",
+        "--message-format=json",
+        "--package",
+        "obzenflow_benchmarks",
+        "--features",
+        features,
+    ]);
+    for target in targets {
+        command.args(["--bench", target]);
+    }
+    let outcome = match process::execute(
+        &mut command,
+        directory,
+        label,
+        Duration::from_secs(tools.command_watchdog_seconds),
+    ) {
+        Ok(status) if status.success() => Outcome::Passed,
+        Ok(status) => Outcome::Failed(format!("{label}: compilation rejected ({status})")),
+        Err(failure) => Outcome::Incomplete(failure.to_string()),
+    };
+    let found = fs::read_to_string(directory.join(format!("{label}.stdout.log")))
+        .map_err(Into::into)
+        .and_then(|stdout| identified(&stdout, targets, outcome == Outcome::Passed));
+    let executables = match found {
+        Ok(found) => found
             .into_iter()
-            .flat_map(|worker| worker.join().expect("benchmark thread panicked"))
-            .collect::<Vec<_>>()
-    });
-    let failures: Vec<_> = outcomes
-        .into_iter()
-        .filter_map(std::result::Result::err)
-        .collect();
-    if !failures.is_empty() {
-        return Err(failed(format!(
-            "full Criterion suite: {}",
-            failures.join("; ")
+            .map(|(target, path)| {
+                let executable = Executable {
+                    path,
+                    compiled_manifest_dir: root.join("crates/obzenflow_benchmarks"),
+                    sha256: String::new(),
+                    census: None,
+                };
+                (target, executable)
+            })
+            .collect(),
+        Err(failure) => {
+            return Compiled {
+                executables: BTreeMap::new(),
+                outcome: Outcome::Incomplete(format!(
+                    "{label}: unreadable Cargo output: {failure}"
+                )),
+            }
+        }
+    };
+    Compiled {
+        executables,
+        outcome,
+    }
+}
+
+fn exercise(
+    root: &Path,
+    tools: &Policy,
+    directory: &Path,
+    name: &str,
+    binary: &Path,
+) -> Result<()> {
+    fs::create_dir_all(directory)?;
+    let cases = inventory(root, tools, directory, name, binary)?;
+    let status = process::execute(
+        benchmark_command(root, tools, binary, &directory.join("criterion")).arg("--test"),
+        directory,
+        "test",
+        Duration::from_secs(tools.command_watchdog_seconds),
+    )?;
+    if !status.success() {
+        return Err(failed(format!("{name}: a case failed when run once")));
+    }
+    let passed = tested(&fs::read_to_string(directory.join("test.stdout.log"))?);
+    if passed != cases {
+        let missing: Vec<_> = cases.difference(&passed).collect();
+        return Err(error(format!(
+            "{name}: listed cases did not report success: {missing:?}"
         )));
     }
     Ok(())
+}
+
+/// Cases Criterion's test mode reported as run to completion.
+fn tested(output: &str) -> BTreeSet<String> {
+    let mut passed = BTreeSet::new();
+    let mut current = None;
+    for line in output.lines() {
+        if let Some(case) = line.strip_prefix("Testing ") {
+            current = Some(case.to_owned());
+        } else if line == "Success" {
+            passed.extend(current.take());
+        }
+    }
+    passed
+}
+
+/// Selections must name each of a target's listed cases exactly once across
+/// every shard; a target selected whole is complete by construction.
+pub(super) fn exact_cover(
+    inventory: &BTreeSet<String>,
+    selections: &[(&str, BTreeSet<String>)],
+) -> std::result::Result<(), String> {
+    let mut seen: BTreeMap<&String, &str> = BTreeMap::new();
+    for (shard, cases) in selections {
+        for case in cases {
+            if !inventory.contains(case) {
+                return Err(format!("{shard} selected unknown case {case}"));
+            }
+            if let Some(other) = seen.insert(case, shard) {
+                return Err(format!("{case} selected by {other} and {shard}"));
+            }
+        }
+    }
+    let missing: Vec<_> = inventory
+        .iter()
+        .filter(|case| !seen.contains_key(case))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("no shard selected {missing:?}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::CheckFailed;
+    use schedule::Target;
 
     #[test]
-    fn repository_schedule_covers_manifest_without_allocation_instrumentation() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let targets = inventory(root).unwrap();
-        assert_eq!(targets.len(), 16);
-        assert!(targets
-            .iter()
-            .all(|t| !t.features.iter().any(|f| f == "allocation-census")));
+    fn test_mode_success_requires_each_case_to_finish() {
+        let output = "Testing a/1\nSuccess\nTesting a/2\npanicked\nTesting b/1\nnoise\nSuccess\n";
+        assert_eq!(tested(output), BTreeSet::from(["a/1".into(), "b/1".into()]));
     }
 
     #[test]
@@ -350,35 +428,133 @@ mod tests {
         assert!(listed_cases("reader/8: benchmark\nreader/8: benchmark").is_err());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn child_affinity_matches_its_partition() {
-        let groups = cpu_groups().unwrap();
-        if groups.len() < 2 {
-            return;
+    fn declarations_must_match_listed_cases_exactly() {
+        let line = |case: &str| {
+            format!(r#"{{"case":"{case}","category":"read","timed":"Read 64 records"}}"#)
+        };
+        let listed = BTreeSet::from(["reader/8".to_owned(), "reader/32".to_owned()]);
+        let both = format!("{}\n{}\n", line("reader/8"), line("reader/32"));
+        assert_eq!(declarations("t", &listed, &both).unwrap().len(), 2);
+        for (text, expected) in [
+            (line("reader/8"), "undeclared [\"reader/32\"]"),
+            (
+                format!("{both}{}", line("reader/1")),
+                "unlisted [\"reader/1\"]",
+            ),
+            (
+                format!("{both}{}", line("reader/8")),
+                "declared more than once",
+            ),
+            (String::new(), "undeclared"),
+            (
+                r#"{"case":"reader/8","category":"","timed":"x"}"#.into(),
+                "no category",
+            ),
+        ] {
+            let failure = declarations("t", &listed, &text).unwrap_err();
+            assert!(failure.is::<CheckFailed>(), "{failure}");
+            assert!(failure.to_string().contains(expected), "{failure}");
         }
-        assert!(groups[0].iter().all(|cpu| !groups[1].contains(cpu)));
-        for cpus in groups {
-            let mut command = Command::new("sh");
-            command.args([
-                "-c",
-                "awk '/Cpus_allowed_list/ {print $2}' /proc/self/status",
-            ]);
-            pin(&mut command, &cpus);
-            let output = command.output().unwrap();
-            assert!(output.status.success());
-            let text = String::from_utf8(output.stdout).unwrap();
-            assert!(!text.trim().is_empty());
-            let observed: BTreeSet<usize> = text
-                .trim()
-                .split(',')
-                .flat_map(|part| {
-                    let mut ends = part.split('-').map(|v| v.parse::<usize>().unwrap());
-                    let first = ends.next().unwrap();
-                    first..=ends.next().unwrap_or(first)
+    }
+
+    #[test]
+    fn shard_selections_cover_each_listed_case_exactly_once() {
+        let inventory: BTreeSet<String> = ["a/1", "a/2", "b/1"].map(String::from).into();
+        let set = |cases: &[&str]| cases.iter().map(|case| (*case).to_owned()).collect();
+        assert!(exact_cover(
+            &inventory,
+            &[("x", set(&["a/1", "b/1"])), ("y", set(&["a/2"]))]
+        )
+        .is_ok());
+        for (selections, expected) in [
+            (
+                vec![("x", set(&["a/1", "b/1"]))],
+                "no shard selected [\"a/2\"]",
+            ),
+            (
+                vec![("x", set(&["a/1", "a/2", "b/1"])), ("y", set(&["a/2"]))],
+                "a/2 selected by x and y",
+            ),
+            (
+                vec![("x", set(&["a/1", "a/2", "b/1", "c/1"]))],
+                "x selected unknown case c/1",
+            ),
+        ] {
+            assert_eq!(exact_cover(&inventory, &selections).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn unavailable_targets_record_their_build_outcome_without_samples() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let tools = Policy::read(repository).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let build = directory.path().join("build/candidate-default");
+        fs::create_dir_all(&build).unwrap();
+        fs::write(
+            build.join("executables.json"),
+            serde_json::to_vec(&json!({
+                "group": "candidate-default", "side": "candidate", "rust": "rustc",
+                "reference": "a".repeat(40), "executables": [],
+                "unavailable": {
+                    "rejected": {"status": "failed", "detail": "candidate-default-build: compilation rejected"},
+                    "interrupted": {"status": "incomplete", "detail": "interrupted before compilation"},
+                },
+                "invocations": [],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let target = |name: &str| Target {
+            name: name.into(),
+            features: Vec::new(),
+        };
+        let shard = SuiteShard {
+            name: "s".into(),
+            select: ["rejected", "interrupted"]
+                .map(|name| Selector {
+                    target: name.into(),
+                    cases: None,
                 })
-                .collect();
-            assert_eq!(observed, cpus.into_iter().collect());
+                .into(),
+        };
+        let plan = RunPlan {
+            run_id: "fixture".into(),
+            created_at_unix_ms: 0,
+            source: source::identity(repository).unwrap(),
+            reference: schedule::Reference {
+                commit: "a".repeat(40),
+                rule: schedule::Rule::Pin,
+                main: None,
+            },
+            targets: vec![target("rejected"), target("interrupted")],
+            builds: Vec::new(),
+            qualification: Vec::new(),
+            suite: vec![shard.clone()],
+        };
+        let output = directory.path().join("suite/s");
+        let failure = run_shard(
+            repository,
+            &tools,
+            directory.path(),
+            &output,
+            &plan,
+            &shard,
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            !failure.is::<CheckFailed>(),
+            "incomplete dominates: {failure}"
+        );
+        for (name, status) in [("rejected", "failed"), ("interrupted", "incomplete")] {
+            let record: Value =
+                serde_json::from_slice(&fs::read(output.join(name).join("outcome.json")).unwrap())
+                    .unwrap();
+            assert_eq!(record["outcome"]["status"], status, "{record}");
+            assert!(record["executable_sha256"].is_null());
+            assert!(!output.join(name).join("criterion").exists());
         }
     }
 }

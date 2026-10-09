@@ -1,11 +1,64 @@
-# Stable measurement queues; grouping here does not change report categories.
-# Start from authored sampling budgets, then balance measured target wall times
-# from native run ec79682e-5623-4397-a5ae-1cde01385fdd: about 883s per queue.
-# That serial macOS evidence does not predict concurrent Linux/CI duration.
-# The manifest remains authoritative: omissions/duplicates fail before execution.
-# No sampling settings or workloads are overridden.
-version = 1
-groups = [
-  ["idle_cpu_usage", "per_event_latency_100_stage_memory", "per_event_latency_20_stage", "journal_components", "validation_boundaries", "per_event_latency_1_stage", "per_event_latency_2_stage", "per_event_latency_3_stage", "per_event_latency_5_stage"],
-  ["tokio_worker_3_stage_experiment", "pipeline_execution", "journal_hot_path", "waiting_for_gun_cpu_usage", "pipeline_throughput", "per_event_latency_4_stage", "per_event_latency_100_stage"],
+# FLOWIP-080v B7: requested runs fan out across runners. Each shard runs on its own
+# machine, one measurement at a time; local runs execute the same shards serially.
+# Packed longest first from native run 4dbd299a-dcb5-44fa-a435-682356a869f6's
+# serial macOS times; rebalance from recorded CI stage times.
+version = 2
+
+# Every gated case in .config/performance.toml belongs to exactly one shard. A case's
+# reference-before, candidate and reference-after trials, and the controls that
+# reuse them, stay together on one runner.
+[[qualification]]
+name = "replay" # about 232 s
+cases = ["replay_validation/streaming_comparison/inputs_10000"]
+
+[[qualification]]
+name = "gate" # about 156 s, including validity and rejection controls
+cases = [
+  "reader_dispatch/full/actual_reader/readers_8",
+  "reader_dispatch/full/actual_reader/readers_32",
+  "journal_append_cost/complete_append/ordinary_business_64",
+  "journal_append_cost/complete_append/large_business_64",
+  "archive_validation/export/inputs_1000",
+  "archive_validation/admit_and_read/inputs_1000",
+  "metrics_validation/tail_refresh/data_and_error_64",
+  "studio_validation/project_and_snapshot/inputs_64",
+]
+
+# Selectors name a Cargo benchmark target and optionally an anchored Criterion case
+# filter. Assembly requires every listed case of every target exactly once.
+[[suite]]
+name = "pipeline" # about 260 s
+select = [
+  { target = "pipeline_execution" },
+  { target = "journal_components" },
+]
+
+[[suite]]
+name = "journal" # about 283 s
+select = [
+  { target = "journal_hot_path" },
+  { target = "validation_boundaries" },
+  { target = "per_event_latency", cases = "^1_stage_latency/" },
+]
+
+[[suite]]
+name = "latency-memory" # about 293 s
+select = [
+  { target = "per_event_latency", cases = "^(100_stage_latency_memory|3_stage_latency|4_stage_latency)/" },
+]
+
+[[suite]]
+name = "latency-idle" # about 287 s
+select = [
+  { target = "per_event_latency", cases = "^(5_stage_latency|20_stage_latency)/" },
+  { target = "idle_cpu_usage", cases = "^idle_process_cpu/window_2s/stages_(1|10)$" },
+  { target = "pipeline_throughput" },
+]
+
+[[suite]]
+name = "latency-waiting" # about 284 s
+select = [
+  { target = "per_event_latency", cases = "^(2_stage_latency|100_stage_latency)/" },
+  { target = "idle_cpu_usage", cases = "^idle_process_cpu/window_2s/stages_(20|100)$" },
+  { target = "waiting_for_gun_cpu_usage" },
 ]

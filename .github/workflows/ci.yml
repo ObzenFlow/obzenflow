@@ -137,6 +137,9 @@ jobs:
             lanes: --lane default --lane journal-fixtures
           - name: production-features
             lanes: --lane production-features
+          # FLOWIP-080v B9: every benchmark case once in test mode; nothing timed.
+          - name: benchmarks
+            lanes: --lane benchmarks
     steps:
       - uses: actions/checkout@v4
         with:
@@ -267,8 +270,8 @@ jobs:
         run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify Criterion report formatting
-        run: python3 -m unittest discover -s .github/scripts -p 'test_criterion_report.py'
+      - name: Verify performance report formatting and workflow helpers
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
       - name: Verify validation cadence and release evidence
         uses: actions/github-script@v7
@@ -278,32 +281,76 @@ jobs:
             const fs = require("node:fs");
             const workflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
             const performance = fs.readFileSync(".github/workflows/performance.yml", "utf8");
+            const expression = name => "$" + "{{ " + name + " }}";
+            // Top-level jobs of a workflow, by name.
+            function jobsOf(text) {
+              const jobs = {};
+              for (const part of (text.split("\njobs:\n")[1] || "").split(/\n(?=  [a-zA-Z0-9_-]+:\n)/)) {
+                const name = part.match(/^  ([a-zA-Z0-9_-]+):\n/)?.[1];
+                if (name) jobs[name] = part;
+              }
+              return jobs;
+            }
+            // FLOWIP-080v B7: plan, build groups, qualification and suite shards,
+            // then an always-run report. Only planning and builds compile or cache.
             function verifyManualPerformance(ci, manual) {
               assert(!/\n  (performance|benchmarks):\n/.test(ci), "no performance job in ordinary CI");
-              assert(!/^\s+run: cargo xtask test --lane performance\s*$/m.test(ci), "CI must not execute performance");
+              assert(!/^\s+(run: )?cargo xtask (test --lane performance|performance)\b/m.test(ci), "CI must not execute performance");
               const triggers = manual.split("\non:\n")[1]?.split(/\n\S/)[0] || "";
               assert.deepEqual([...triggers.matchAll(/^  ([a-z_]+):/gm)].map(match => match[1]),
                 ["workflow_dispatch"], "performance requires an explicit manual dispatch");
-              assert.equal((manual.match(/\n  performance:\n/g) || []).length, 1, "one manual performance job");
-              assert(manual.includes("run: cargo xtask test --lane performance"), "manual action retains the native suite");
+              const jobs = jobsOf(manual);
+              assert.deepEqual(Object.keys(jobs), ["plan", "build", "qualify", "measure", "report"], "planned job graph");
+              const needs = job => (jobs[job].match(/^    needs: (.*)$/m)?.[1] || "").replace(/[[\]\s]/g, "").split(",");
+              assert.deepEqual(needs("build"), ["plan"]);
+              assert.deepEqual(needs("qualify"), ["plan", "build"]);
+              assert.deepEqual(needs("measure"), ["plan", "build"]);
+              assert.deepEqual(needs("report"), ["plan", "build", "qualify", "measure"]);
+              for (const [name, stage] of [["build", "build"], ["qualify", "qualify"], ["measure", "measure"]]) {
+                assert(/^      fail-fast: false$/m.test(jobs[name]), name + " shards never cancel each other");
+                assert(jobs[name].includes(" performance " + stage + " --run-id "), name + " runs its native stage");
+              }
+              assert(jobs.plan.includes("run: cargo xtask performance plan --run-id "), "the native validator plans the run");
+              assert(jobs.report.includes(" performance assemble --run-id "), "native assembly settles the run");
+              assert(/^    if: \$\{\{ always\(\) && /m.test(jobs.report), "the report runs after any stage outcome");
+              assert(!manual.includes("Swatinem/rust-cache"), "generic cleanup must not prune preserved reference source");
+              for (const [name, job] of Object.entries(jobs)) {
+                assert.equal(job.includes("actions/cache/save@"), ["plan", "build"].includes(name),
+                  "only planning and build jobs save caches: " + name);
+                if (["qualify", "measure", "report"].includes(name)) {
+                  assert(!/dtolnay\/rust-toolchain|\bcargo\b|actions\/cache/.test(job), name + " installs no toolchain and compiles nothing");
+                }
+                if (name !== "plan") {
+                  const checkout = job.split("\n      - ").find(step => step.startsWith("uses: actions/checkout@"));
+                  assert(checkout?.includes("ref: " + expression("needs.plan.outputs.sha")), name + " checks out the planned commit");
+                  assert(checkout?.includes("persist-credentials: false"), name + " receives no persisted token");
+                }
+              }
             }
             verifyManualPerformance(workflow, performance);
             for (const event of ["push", "pull_request", "schedule", "workflow_run", "workflow_call"]) {
               assert.throws(() => verifyManualPerformance(workflow,
                 performance.replace("  workflow_dispatch:", "  workflow_dispatch:\n  " + event + ":")));
             }
-            assert.throws(() => verifyManualPerformance(workflow + "\n  performance:\n", performance));
-            assert(!performance.includes("strategy:"), "no performance matrix");
-            assert(!performance.includes("Swatinem/rust-cache"), "generic cleanup must not prune preserved reference source");
-            assert(performance.includes("actions/cache/restore@") && performance.includes("actions/cache/save@"),
-              "performance retains intact compilation output with explicit restore/save");
+            const measureJob = jobsOf(performance).measure;
+            for (const broken of [
+              [workflow + "\n  performance:\n", performance],
+              [workflow, performance.replace("      fail-fast: false\n", "")],
+              [workflow, performance.replace(measureJob, measureJob.replace("    steps:\n",
+                "    steps:\n      - uses: dtolnay/rust-toolchain@stable\n"))],
+              [workflow, performance.replace(measureJob, measureJob + "\n      - uses: actions/cache/save@v4\n")],
+              [workflow, performance.replace(measureJob, measureJob.replace("          ref: " + expression("needs.plan.outputs.sha") + "\n", ""))],
+              [workflow, performance.replace("    if: " + expression("always() && needs.plan.outputs.supported == 'supported'"),
+                "    if: " + expression("needs.plan.outputs.supported == 'supported'"))],
+            ]) {
+              assert.throws(() => verifyManualPerformance(...broken));
+            }
 
             // Keep the existing required test-support job cold on both PR and
             // main. Tool installation and restored build output precede the
             // step-local Cargo home; no workflow preparation can warm it first.
             const coldJob = workflow.split("\n  test-test-support:\n")[1]
               .split(/\n  [a-zA-Z0-9_-]+:\n/)[0];
-            const expression = name => "$" + "{{ " + name + " }}";
             const coldHome = expression("runner.temp") + "/obzenflow-cargo-"
               + expression("github.run_id") + "-" + expression("github.run_attempt")
               + "-" + expression("github.job");
@@ -362,52 +409,63 @@ jobs:
             const publish = workflowScript(".github/workflows/publish.yml", releaseStep);
             assert.equal(publish, workflowScript(".github/workflows/dry-run.yml", releaseStep));
             const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-            const resolveRevision = new AsyncFunction("github", "context", "core", "process",
-              workflowScript(".github/workflows/performance.yml", "Resolve measurement revision"));
-            const resolvedSha = "b".repeat(40);
-            for (const [requested, expectedRef] of [
-              ["", "refs/heads/main"],
-              ["   ", "refs/heads/main"],
-              ["0.2.6", "refs/tags/v0.2.6"],
-              [" v0.2.6 ", "refs/tags/v0.2.6"],
-              ["0.2.6-rc.1", "refs/tags/v0.2.6-rc.1"],
-              ["74125ce", "74125ce"],
-              ["a".repeat(40), "a".repeat(40)],
+
+            // FLOWIP-080v B4/B3: nothing from the requested revision runs before
+            // the containment gate, and support is detected before compilation.
+            // Resolution and detection behaviour have their own Python tests.
+            function verifyTrustedSequence(manual) {
+              const jobs = jobsOf(manual);
+              const steps = jobs.plan.split("\n      - ");
+              const position = pattern => steps.findIndex(step => pattern.test(step));
+              const trusted = position(/^uses: actions\/checkout@/);
+              const retained = position(/^name: Retain trusted workflow helpers\n/);
+              const published = position(/^name: Publish trusted workflow helpers\n/);
+              const gate = position(/^name: Resolve measurement revision\n/);
+              const select = position(/^name: Switch to the measured revision\n/);
+              const detect = position(/^name: Detect performance support\n/);
+              const measured = position(/cargo xtask|criterion_report|cargo build|cargo bench/);
+              assert(trusted > 0 && trusted < retained && retained < published && published < gate && gate < select
+                && select < detect && detect < measured,
+                "trusted checkout, helper copy and publication, containment gate, switch and detection precede measured code");
+              assert(!/^\s+ref:/m.test(steps[trusted]), "the trusted checkout is the dispatched ref");
+              assert(/persist-credentials: false/.test(steps[trusted]), "measured code receives no persisted token");
+              assert(steps[retained].includes('cp .github/scripts/performance_support.py "$RUNNER_TEMP/performance_support.py"'),
+                "copy the helper before the switch");
+              assert(steps[published].includes("path: " + expression("runner.temp") + "/performance_support.py"),
+                "later jobs receive the retained helper, published before the switch");
+              assert(steps[gate].includes("DISPATCH_REF: " + expression("github.ref")), "containment uses the dispatched ref");
+              const runsRetained = step => !step.includes("performance_support.py")
+                || step.includes('python3 "$RUNNER_TEMP/performance_support.py"');
+              assert(steps.slice(published + 1).every(runsRetained), "after the switch, only the retained helper runs");
+              for (const [name, job] of Object.entries(jobs)) {
+                if (name !== "plan") {
+                  assert(job.split("\n      - ").every(runsRetained), name + " runs only the retained helper");
+                }
+              }
+              assert(!manual.includes("/commits/{ref}"), "no network-wide commit lookup");
+              assert(jobs.report.includes("needs.plan.outputs.supported == 'supported'"), "the report runs only for supported checkouts");
+              assert(steps.find(step => step.startsWith("name: Upload the unsupported report\n"))
+                ?.includes("steps.support.outputs.outcome != 'supported'"), "planning reports unsupported checkouts itself");
+              const key = job => jobs[job].split("          key: ")[1].split("\n")[0];
+              assert(key("plan").endsWith(expression("steps.revision.outputs.sha"))
+                && key("build").endsWith(expression("needs.plan.outputs.sha")),
+                "cache identity uses the measurement SHA, not the dispatch SHA");
+            }
+            verifyTrustedSequence(performance);
+            const switchStep = "      - name: Switch to the measured revision\n";
+            const detectStep = performance.split("      - name: Detect performance support\n")[1].split("\n      - ")[0];
+            for (const broken of [
+              performance.replace("          persist-credentials: false\n", ""),
+              performance.replace("          fetch-depth: 0\n", "          ref: " + expression("steps.revision.outputs.sha") + "\n          fetch-depth: 0\n"),
+              performance.replace('python3 "$RUNNER_TEMP/performance_support.py" detect', "python3 .github/scripts/performance_support.py detect"),
+              performance.replace('python3 "$RUNNER_TEMP/performance_support.py" prune --performance-dir',
+                "python3 .github/scripts/performance_support.py prune --performance-dir"),
+              performance.replace(switchStep, "      - name: Detect performance support\n" + detectStep + "\n" + switchStep),
+              performance.replace("DISPATCH_REF: " + expression("github.ref"), "DISPATCH_REF: refs/heads/main"),
+              performance.replace("-" + expression("needs.plan.outputs.sha") + "\n", "-" + expression("github.sha") + "\n"),
             ]) {
-              const outputs = {};
-              let requests = 0;
-              await resolveRevision({request: async (route, query) => {
-                assert.equal(route, "GET /repos/{owner}/{repo}/commits/{ref}");
-                assert.equal(query.ref, expectedRef);
-                requests += 1;
-                return {data: {sha: resolvedSha}};
-              }}, {repo: {owner: "fixture", repo: "fixture"}},
-              {info: () => {}, setOutput: (key, value) => outputs[key] = value},
-              {env: {REQUESTED_REVISION: requested}});
-              assert.equal(requests, 1, "resolve once before checkout");
-              assert.deepEqual(outputs, {sha: resolvedSha});
+              assert.throws(() => verifyTrustedSequence(broken));
             }
-            for (const requested of ["main", "0.2", "refs/tags/v0.2.6", "x".repeat(40), "a".repeat(41)]) {
-              await assert.rejects(resolveRevision({request: async () => assert.fail("invalid input reached GitHub")},
-                {repo: {owner: "fixture", repo: "fixture"}},
-                {info: () => {}, setOutput: () => assert.fail("invalid input produced a commit")},
-                {env: {REQUESTED_REVISION: requested}}), /revision must be/);
-            }
-            for (const [request, expectedError] of [
-              [async () => { throw new Error("revision not found"); }, /revision not found/],
-              [async () => ({data: {sha: "not-a-commit"}}), /GitHub did not resolve/],
-            ]) {
-              const outputs = {};
-              await assert.rejects(resolveRevision({request},
-                {repo: {owner: "fixture", repo: "fixture"}},
-                {info: () => {}, setOutput: (key, value) => outputs[key] = value},
-                {env: {REQUESTED_REVISION: "0.2.6"}}), expectedError);
-              assert.deepEqual(outputs, {});
-            }
-            assert(performance.includes("ref: " + expression("steps.revision.outputs.sha")),
-              "checkout uses the resolved measurement SHA");
-            assert(performance.split("          key: ")[1].split("\n")[0].endsWith(expression("steps.revision.outputs.sha")),
-              "cache identity uses the measurement SHA, not the dispatch SHA");
             const qualify = new AsyncFunction("github", "context", "core", "process", publish);
             const sha = "qualified-revision";
             const run = {id: 1, head_sha: sha, head_branch: "main", event: "push",

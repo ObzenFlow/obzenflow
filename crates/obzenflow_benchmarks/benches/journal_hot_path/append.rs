@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{fixtures, measure, timed, Census, Sample};
+use super::{declare, fixtures, measure, timed, Category, Census, Sample};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::{ChainEvent, Journal, JournalOwner};
 use obzenflow_infra::journal::DiskJournal;
@@ -83,17 +83,18 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
             runtime.block_on(fixtures::History::build(64, payload, group_size, every))
         });
         let case = format!("complete_append/{name}");
+        let full = format!("journal_append_cost/{case}");
+        declare(
+            &full,
+            Category::Append,
+            "Append/group-append 64 records; destination setup and readback excluded",
+        );
         let mut taken = false;
         let input = serde_json::json!({"records":64,"business_payload_bytes":payload,"group_size":group_size,"execution_fact_every":every});
         group.bench_function(&case, |b| {
-            measure(
-                b,
-                censuses,
-                &mut taken,
-                &format!("journal_append_cost/{case}"),
-                &input,
-                || run(runtime, &history),
-            )
+            measure(b, censuses, &mut taken, &full, &input, || {
+                run(runtime, &history)
+            })
         });
     }
     group.finish();

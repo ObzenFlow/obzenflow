@@ -5,7 +5,7 @@
 //! First-use archive reconstruction through ordinary journal APIs. Every operation
 //! executes this same benchmark binary anew; process launch is outside timing.
 use super::{fixtures, Fixture, READ_RECORDS};
-use crate::{control, measure, timed, Census, Sample};
+use crate::{control, declare, measure, timed, Category, Census, Sample};
 use criterion::{measurement::WallTime, BenchmarkGroup, Throughput};
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::DiskJournal;
@@ -133,6 +133,11 @@ pub(super) fn bench(
     });
     let mut taken = false;
     group.throughput(Throughput::Elements(READ_RECORDS as u64));
+    declare(
+        &format!("hotspots/{CASE}"),
+        Category::Read,
+        "Fresh-process open, reconstruction and scan of 1,024 records; launch excluded, filesystem cache uncontrolled",
+    );
     group.bench_function(CASE, |b| {
         measure(
             b,

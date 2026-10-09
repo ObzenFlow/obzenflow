@@ -11,103 +11,28 @@ import json
 import math
 import os
 from pathlib import Path
-import platform
 import re
-import shlex
-import subprocess
 
 
-# Order describes operations, independently of which Cargo target owns them.
-READ, APPEND, MIXED, CAUSAL, OBSERVE, RUNTIME, FLOW, ARCHIVE, UNKNOWN = range(9)
-CATEGORIES = (
-    ("Reading and upstream consumption", "Journal reads underpin upstream consumption. These cases do not isolate subscription selection, merging, receipts or contract checks."),
-    ("Journal appends", "Complete append operations include storage encoding. There is no separate private codec measurement."),
-    ("Journal write/read interaction", "These cases time writing and reading together; their duration cannot be attributed to either operation alone."),
-    ("Causal and record bookkeeping", "Clock, frontier and record accounting work. Canonical JSON byte accounting is not the production disk codec."),
-    ("Observations, metrics and reporting", "Observation handling, metrics refresh, projection and rendering have separate timing boundaries."),
-    ("Supervision and runtime scheduling", "Composite lifecycle and worker experiments, not isolated supervisor dispatch. CPU-labelled cases report elapsed sampling-routine time, not CPU percentage."),
-    ("Complete pipeline processing", "Completed flows, execution wrappers and per-run event-latency medians are different measurements; see each row's timed work."),
-    ("Archive and replay operations", "Export, admission and comparison of existing archives; replay comparison excludes the original executions."),
-    ("Uncategorised", "These results remain visible. Add an operation mapping after checking their timing boundary."),
-)
-
-# Match full Criterion IDs, never filesystem-sanitised directory names. Parameter
-# suffixes are deliberately retained in the report. New operations fall through.
-RULES = {
-    "journal_components": [
-        (r"disk_components/reader_next/.+", READ, "Read 64 records; reader opening excluded"),
-        (r"causal_components/journal_clock_restore/.+", CAUSAL, "Restore one journal clock"),
-        (r"causal_components/byte_accounting/.+", CAUSAL, "Canonical JSON byte accounting for one record"),
-        (r"causal_components/frontier_from_record/.+", CAUSAL, "Extract one record's causal frontier"),
-        (r"causal_components/merge_overlapping/.+", CAUSAL, "Merge two overlapping frontiers; target cloning excluded"),
-        (r"causal_components/prepare_append/.+", CAUSAL, "Prepare one append clock; no physical append"),
-    ],
-    "journal_hot_path": [
-        (r"journal_record_read/open_and_read/.+", READ, "Open a reader and read/admit two records"),
-        (r"reader_dispatch/full/actual_reader/readers_(1|8|32)", READ, "Concurrent readers: {0}; spawn tasks and read 64 records each; opening excluded"),
-        (r"hotspots/sequential_read/.+", READ, "Read 1,024 records; reader creation excluded"),
-        (r"hotspots/reopened_scan/.+", READ, "Reopen journal, create reader and scan 1,024 records; warmed process"),
-        (r"hotspots/reader_creation/.+", READ, "Create one reader over a prefilled 1,024-record journal"),
-        (r"hotspots/first_process_open_and_scan/wide_observed", READ, "Fresh-process open, reconstruction and scan of 1,024 records; launch excluded, filesystem cache uncontrolled"),
-        (r"cross_journal_reads/eight_journals_1024_records", READ, "Create readers and scan eight journals, 128 records each"),
-        (r"mixed_journal/two_concurrent_scans", READ, "Create two readers and concurrently scan 64 records each"),
-        (r"journal_append_cost/complete_append/.+", APPEND, "Append/group-append 64 records; destination setup and readback excluded"),
-        (r"hotspots/append/.+", APPEND, "Append 64 records including authored cloning and causal preparation"),
-        (r"journal_refresh/append_after_eof", MIXED, "64 append, read and EOF-check pairs"),
-        (r"mixed_journal/distinct_12mib_then_reuse", MIXED, "192 interleaved appends and reads; 96 distinct 128 KiB provenance entries, then reuse"),
-        (r"record_accounting/canonical_bytes/.+", CAUSAL, "Canonical JSON byte accounting for one record"),
-        (r"causal_record_work/journal_clock_restore/.+", CAUSAL, "Restore one journal clock"),
-        (r"causal_record_work/clock_clone/.+", CAUSAL, "Clone one vector clock"),
-        (r"causal_record_work/clock_json_bytes/.+", CAUSAL, "Canonical JSON byte accounting for one clock"),
-        (r"observation_handling/capture_for_record", OBSERVE, "64 observation captures and live offers"),
-        (r"observation_handling/validation/clock_.+", OBSERVE, "Validate 64 observation packets"),
-        (r"observation_handling/live_submission/clock_.+", OBSERVE, "Submit 64 observation packets"),
-        (r"journal_refresh/metrics/(1|4)_journals/(advancing|unchanged)", OBSERVE, "Refresh metrics tails (journal count: {0}, {1}); append setup excluded"),
-    ],
-    "validation_boundaries": [
-        (r"archive_validation/export/inputs_1000", ARCHIVE, "JSONL export of an existing 1,000-input archive"),
-        (r"archive_validation/admit_and_read/inputs_1000", ARCHIVE, "Open, admit and fully read a 1,000-input archive"),
-        (r"replay_validation/streaming_comparison/inputs_10000", ARCHIVE, "Compare existing live/replay 10,000-input archives; execution and report writing excluded"),
-        (r"metrics_validation/tail_refresh/data_and_error_64", OBSERVE, "One stage metrics snapshot from 66 data and one error record"),
-        (r"studio_validation/project_and_snapshot/inputs_64", OBSERVE, "Project 69 preloaded records to frames, measurements and snapshots; journal reads excluded"),
-    ],
-    "pipeline_execution": [
-        (r"total_execution_time/.+", FLOW, "Whole flow wrapper including construction, execution and teardown"),
-        (r"execution_time_per_event/.+", FLOW, "Build/run duration divided by 100 (110 emitted inputs)"),
-        (r"metrics_reporting/render_100_stages", OBSERVE, "Render Prometheus metrics for 100 stages"),
-        (r"metrics_reporting/publish_pair_100_stages/(0|4)", OBSERVE, "Publish application/infrastructure snapshots for 100 stages, {0} concurrent renderers"),
-        (r"causal_record_costs/journal_clock_restore/.+", CAUSAL, "Restore one journal clock"),
-        (r"causal_record_costs/byte_budget/.+", CAUSAL, "Canonical JSON byte accounting for one record"),
-        (r"causal_record_costs/authored/.+", CAUSAL, "Reconstruct one authored event from a record"),
-    ],
-    "pipeline_throughput": [
-        (r"completed_flow/.+", FLOW, "128-input completed flow through drain; build excluded"),
-    ],
-    "idle_cpu_usage": [
-        (r"idle_cpu_usage/cpu_percentage|idle_cpu_by_depth/(1|10|20|100)_stages", RUNTIME, "Elapsed CPU-sampling routine including setup, waits and stop (not CPU %)"),
-    ],
-    "waiting_for_gun_cpu_usage": [
-        (r"waiting_for_gun_cpu_usage/cpu_percentage", RUNTIME, "Elapsed CPU-sampling routine including setup, waits and stop (not CPU %)"),
-    ],
-    "tokio_worker_3_stage_experiment": [
-        (r"3_stage_worker_experiments/.+|5_stage_control/default_runtime", RUNTIME, "Reported per-run median event latency under this worker configuration"),
-    ],
+# Keys are the benchmark crate's declared categories; order describes operations,
+# independently of which Cargo target owns them.
+CATEGORIES = {
+    "read": ("Reading and upstream consumption", "Journal reads underpin upstream consumption. These cases do not isolate subscription selection, merging, receipts or contract checks."),
+    "append": ("Journal appends", "Complete append operations include storage encoding. There is no separate private codec measurement."),
+    "read_write": ("Journal write/read interaction", "These cases time writing and reading together; their duration cannot be attributed to either operation alone."),
+    "causal": ("Causal and record bookkeeping", "Clock, frontier and record accounting work. Canonical JSON byte accounting is not the production disk codec."),
+    "observe": ("Observations, metrics and reporting", "Observation handling, metrics refresh, projection and rendering have separate timing boundaries."),
+    "runtime": ("Supervision and runtime scheduling", "Process CPU time used by idle or waiting pipelines in a declared window, not elapsed time or CPU percentage. These cases do not isolate supervisor dispatch."),
+    "flow": ("Complete pipeline processing", "Completed flows, execution wrappers and per-run event-latency medians are different measurements; see each row's timed work."),
+    "archive": ("Archive and replay operations", "Export, admission and comparison of existing archives; replay comparison excludes the original executions."),
 }
-for depth in (1, 2, 3, 4, 5, 20, 100):
-    RULES[f"per_event_latency_{depth}_stage"] = [
-        (rf"{depth}_stage_latency/median_latency", FLOW, "Reported per-run median event latency"),
-    ]
-RULES["per_event_latency_100_stage_memory"] = [
-    (r"100_stage_latency_memory/median_latency", FLOW, "Reported per-run median event latency"),
-]
-
-
-def classify(target, case_id):
-    for pattern, category, work in RULES.get(target, []):
-        match = re.fullmatch(pattern, case_id)
-        if match:
-            return category, work.format(*match.groups())
-    return UNKNOWN, "Criterion-reported duration; timing boundary not classified"
+UNCATEGORISED = ("Uncategorised", "These results have no valid case declaration. Declare the case next to its benchmark registration.")
+# How the plan chose the gate's reference (FLOWIP-080v B10).
+RULES = {
+    "merge_base": "merge base with main (where this change started)",
+    "first_parent": "first parent on main (the commit before this one)",
+    "pin": "pinned for re-qualification",
+}
 
 
 @dataclass(frozen=True)
@@ -173,36 +98,7 @@ def micros(ns):
     return f"{ns / 1000:.6f}".rstrip("0").rstrip(".")
 
 
-def render_report(target, rows, errors, context, outcome, preview=False):
-    status = "PREVIEW (existing local measurements)" if preview else (
-        "COMPLETE" if outcome == "success" and not errors else "INCOMPLETE"
-    )
-    command_status = "not verified (local preview)" if preview else outcome
-    lines = [f"# Criterion report: {cell(target)}", "", f"Status: **{status}**. Measurement command: **{cell(command_status)}**.", "",
-             "| Context | Value |", "| --- | --- |"]
-    lines.extend(f"| {cell(key)} | {cell(value)} |" for key, value in context.items())
-    lines += ["", f"Reported cases: **{len(rows)}**. All durations are **µs**. Confidence intervals describe the median estimate; samples are Criterion sample counts.",
-              "", "Compare the same case ID, timed work, profile and environment across runs. Durations are not summed across categories. No timing regression threshold is applied."]
-    if outcome != "success" and not preview:
-        lines += ["", "The measurement command did not succeed. Available rows are partial evidence, not a successful target run."]
-    if errors:
-        lines += ["", "## Missing or unreadable measurements", ""]
-        lines.extend(f"- {cell(error)}" for error in errors)
-    for category, (title, note) in enumerate(CATEGORIES):
-        selected = [(row, classify(target, row.case_id)[1]) for row in rows
-                    if classify(target, row.case_id)[0] == category]
-        if not selected:
-            continue
-        lines += ["", f"## {title}", "", note, "",
-                  "| Case ID | Timed work | Median (µs) | Median confidence interval (µs) | Samples |",
-                  "| --- | --- | ---: | --- | ---: |"]
-        for row, work in selected:
-            interval = f"{micros(row.lower_ns)}–{micros(row.upper_ns)} ({row.confidence * 100:g}%)"
-            lines.append(f"| {cell(row.case_id)} | {cell(work)} | {micros(row.median_ns)} | {interval} | {row.samples} |")
-    return "\n".join(lines) + "\n"
-
-
-def copyable_summary(report, title="Criterion"):
+def copyable_summary(report, title="performance"):
     fence = "`" * max(3, 1 + max((len(m[0]) for m in re.finditer(r"`+", report)), default=0))
     summary = (f"## Copyable {title} report\n\nCopy the Markdown below, or download this job's `.md` report artefact.\n\n"
                f"{fence}markdown\n{report}{fence}\n")
@@ -211,12 +107,38 @@ def copyable_summary(report, title="Criterion"):
     return summary
 
 
-def read_json(path, errors):
+def read_json(path, errors, root=None):
     try:
         return json.loads(path.read_text())
     except (OSError, ValueError) as error:
-        errors.append(f"{path.name}: {error}")
+        errors.append(f"{path.relative_to(root) if root else path.name}: {error}")
         return None
+
+
+def read_declarations(path, errors, target):
+    """Map each declared case to its (category, timed work); invalid entries are evidence errors."""
+    declared = {}
+    for entry in read_json(path, errors) or []:
+        try:
+            case, category, timed = entry["case"], entry["category"], entry["timed"]
+            if category not in CATEGORIES:
+                raise ValueError(f"unknown category {category!r}")
+            if not isinstance(case, str) or not isinstance(timed, str) or not case or not timed:
+                raise ValueError("missing case ID or timed work")
+            declared[case] = (category, timed)
+        except (KeyError, TypeError, ValueError) as error:
+            errors.append(f"{target}: invalid case declaration: {error}")
+    return declared
+
+
+def outcome_text(record):
+    """Render a native outcome (`status` plus optional `detail`)."""
+    outcome = record.get("outcome") if isinstance(record, dict) else None
+    if not isinstance(outcome, dict) or "status" not in outcome:
+        return "not completed"
+    if outcome["status"] == "passed":
+        return "passed"
+    return f"{outcome['status']}: {outcome.get('detail') or 'no detail'}"
 
 
 def comparison_measurement(value):
@@ -229,50 +151,69 @@ def comparison_measurement(value):
     return f"{micros(point)} [{micros(low)}–{micros(high)}; {confidence * 100:g}%]"
 
 
+def seconds(value):
+    return f"{value:.2f}" if isinstance(value, (int, float)) and not isinstance(value, bool) else "unavailable"
+
+
 def render_performance(directory, outcome):
-    errors, rows, comparisons, target_rows = [], [], [], []
-    context = context_for("all declared targets", "per target below", False)
-    context.update({"Report format": "performance-operations-v2", "Command": "cargo xtask test --lane performance"})
-    native, phases, execution, qualification, controls = {}, {}, {}, {}, {}
+    """Render a run's assembled evidence. `directory` is its performance directory."""
+    errors, rows, comparisons, target_rows, stage_rows, declared = [], [], [], [], [], {}
+    context = context_for()
+    assembly, qualification, controls = {}, {}, {}
     if directory is None:
-        errors.append("The native validator did not identify a run directory; no previous run is substituted.")
+        errors.append("The run did not identify a performance directory; no previous run is substituted.")
     else:
-        native = read_json(directory / "report.json", errors) or {}
-        performance = directory / "performance"
-        phases = read_json(performance / "phases.json", errors) or {}
-        execution = read_json(performance / "suite-execution.json", errors) or {}
-        qualification = read_json(performance / "qualification.json", errors) or {}
-        controls = read_json(performance / "negative-controls.json", errors) or {}
-        comparison = read_json(performance / "comparison.json", errors) or {}
-        plan = read_json(performance / "suite-plan.json", errors) or []
-        context["Measured checkout SHA"] = native.get("source", {}).get("commit", "unavailable")
-        context["Source content SHA256"] = native.get("source", {}).get("content_sha256", "unavailable")
-        context["Native run ID"] = native.get("run_id", "unavailable")
-        policy = read_json(performance / "comparison-policy.json", errors) or {}
-        driver = read_json(performance / "measurement-driver.json", errors) or {}
-        context["Reference SHA"] = policy.get("baseline_revision", "unavailable")
-        context["Reference public API adapter"] = driver.get("reference_public_api_adapter") or "none"
+        def load(path):
+            return read_json(path, errors, directory)
+
+        assembly = load(directory / "assembly.json") or {}
+        plan = load(directory / "plan.json") or {}
+        qualification = load(directory / "qualification.json") or {}
+        controls = load(directory / "negative-controls.json") or {}
+        comparison = load(directory / "comparison.json") or {}
+        policy = load(directory / "comparison-policy.json") or {}
+        source, reference = plan.get("source") or {}, plan.get("reference") or {}
+        context["Measured checkout SHA"] = source.get("commit", "unavailable")
+        context["Source content SHA256"] = source.get("content_sha256", "unavailable")
+        context["Native run ID"] = plan.get("run_id", "unavailable")
+        context["Reference SHA"] = reference.get("commit", "unavailable")
+        context["Reference selection"] = RULES.get(reference.get("rule"), "unavailable")
+        adapters = sorted({str(value) for value in (assembly.get("reference_public_api_adapters") or {}).values() if value})
+        context["Reference public API adapter"] = ", ".join(adapters) or "none"
+        context["Rust"] = "; ".join(str(version).splitlines()[0] for version in assembly.get("rust") or [] if str(version).strip()) or "unavailable"
         context["Qualification sampling"] = f"{policy.get('sample_size', '?')} samples; {policy.get('warm_up_ms', '?')} ms warm-up; {policy.get('measurement_ms', '?')} ms measurement"
-        context["Full-suite execution mode"] = execution.get("mode", "not executed")
-        context["CPU assignments"] = json.dumps(execution.get("cpu_groups", []))
-        context["Runtime workers / analysis threads"] = f"{execution.get('tokio_default_workers', '?')} / {execution.get('rayon_threads', '?')} (authored runtime overrides retained)"
-        if not plan:
-            errors.append("No declared full-suite inventory is available.")
-        for target in plan:
-            name = target["name"]
-            phase = performance / "suite" / name
-            record = read_json(phase / "outcome.json", errors) or {}
-            expected = read_json(phase / "cases.json", errors)
-            measured, problems = read_measurements(phase / "criterion")
-            errors.extend(f"{name}: {problem}" for problem in problems)
-            if expected is None or {row.case_id for row in measured} != set(expected):
-                errors.append(f"{name}: measured case IDs differ from the executable inventory.")
-            rows.extend((name, row) for row in measured)
-            elapsed = record.get("elapsed_seconds")
-            target_rows.append([name, ",".join(target.get("required-features", [])) or "default",
-                                record.get("cpus", []), f"{elapsed:.2f}" if isinstance(elapsed, (int, float)) else "unavailable",
-                                f"{len(measured)}/{len(expected) if expected is not None else '?'}",
-                                "passed" if record.get("passed") else record.get("error") or "not completed"])
+        wall = seconds(assembly.get("end_to_end_seconds"))
+        context["End-to-end wall time"] = wall if wall == "unavailable" else f"{wall} s from planning to the last stage"
+        for row in assembly.get("stages") or []:
+            host = row.get("host") or {}
+            stage_rows.append([row.get("stage"), row.get("name"), host.get("cpu", "unknown"), host.get("logical_cpus", "?"),
+                               host.get("image", "unknown"), seconds(row.get("elapsed_seconds")), outcome_text(row)])
+        features = {target["name"]: ",".join(target.get("required-features", [])) or "default" for target in plan.get("targets", [])}
+        if not plan.get("suite"):
+            errors.append("No planned suite shards are available.")
+        for shard in plan.get("suite", []):
+            for selector in shard["select"]:
+                name = selector["target"]
+                phase = directory / "suite" / shard["name"] / name
+                label = f"{shard['name']}/{name}"
+                record = load(phase / "outcome.json") or {}
+                measured, problems = read_measurements(phase / "criterion")
+                errors.extend(f"{label}: {problem}" for problem in problems)
+                selected = None
+                if (phase / "selected.json").exists():
+                    selected = load(phase / "selected.json")
+                    declared.setdefault(name, {}).update(read_declarations(phase / "declarations.json", errors, name))
+                else:
+                    errors.append(f"{label}: no case selection; {outcome_text(record)}")
+                if selected is not None and {row.case_id for row in measured} != set(selected):
+                    errors.append(f"{label}: measured case IDs differ from the shard's selection.")
+                for row in measured:
+                    if row.case_id not in declared.get(name, {}):
+                        errors.append(f"{name}: {row.case_id}: no case declaration.")
+                rows.extend((name, row) for row in measured)
+                target_rows.append([shard["name"], name, features.get(name, "unplanned"), selector.get("cases") or "all",
+                                    seconds(record.get("elapsed_seconds")),
+                                    f"{len(measured)}/{len(selected) if selected is not None else '?'}", outcome_text(record)])
         for target, suite in comparison.get("suites", {}).items():
             for case in suite["cases"]:
                 try:
@@ -284,96 +225,79 @@ def render_performance(directory, outcome):
                     errors.append(f"comparison {case}: {error}")
         if not comparisons:
             errors.append("No completed native comparisons are available.")
-    status = native.get("outcome", {}).get("status", "incomplete")
+    status = assembly.get("outcome", {}).get("status", "incomplete")
     if outcome != "success" or errors:
         status = status if status in ("failed", "incomplete") else "incomplete"
-    lines = ["# Performance report", "", f"Native outcome: **{cell(status.upper())}**. CI measurement step: **{cell(outcome)}**.", "",
+    qualified = qualification.get("outcome", {}) if isinstance(qualification, dict) else {}
+    lines = ["# Performance report", "", f"Native outcome: **{cell(status.upper())}**. CI assembly step: **{cell(outcome)}**.", "",
              "| Context | Value |", "| --- | --- |"]
     lines.extend(f"| {cell(key)} | {cell(value)} |" for key, value in context.items())
     lines += ["", f"Full-suite observations: **{len(rows)} cases**. Native comparison results: **{len(comparisons)} cases**.",
-              "", "The comparison gate runs alone, with adjacent reference-before, candidate and reference-after trials. Its thresholds and controls are unchanged.",
-              "", "Full-suite observations retain authored sampling settings. On Linux, the two CPU partitions share memory, caches and disk bandwidth; compare only runs with the same execution mode, CPU capacity, case, features and profile. These observations do not apply regression thresholds and are not directly comparable to the former isolated-runner matrix.",
+              "", "Each comparison runs alone on its runner, with adjacent reference-before, candidate and reference-after trials. Its thresholds and controls are unchanged.",
+              "", "Full-suite observations retain authored sampling settings and run one measurement at a time on their shard's runner. Compare them only across runs on matching runner hardware, with the same case, features and profile. They apply no regression thresholds.",
               "", "All estimates are in **µs**. Category durations are not summed.", "", "## Qualification", "",
-              f"Result: **{'passed' if qualification.get('passed') else 'not passed'}**. {cell(qualification.get('error') or '')}",
+              f"Result: **{'passed' if qualified.get('status') == 'passed' else 'not passed'}**. {cell(qualified.get('detail') or '')}",
               f"Slowdown control: **{cell(controls.get('slowdown', {}).get('outcome', 'unavailable'))}**; missing-reader output rejected: **{cell(controls.get('missing_work_rejected_by_completion_oracle', 'unavailable'))}**; missing-Studio output rejected: **{cell(controls.get('missing_studio_projection_output_rejected', 'unavailable'))}**.",
-              "", "## Phase durations", "", "Elapsed wall time, including preparation and analysis. Concurrent target durations must not be summed to estimate job duration.", "",
-              "| Phase | Seconds |", "| --- | ---: |"]
-    lines.extend(f"| {cell(phase)} | {number(phases[phase]):.2f} |" for phase in ("prepare_reference", "build", "qualification", "full_suite") if phase in phases)
-    lines += ["", "## Target completion", "", "| Target | Features | CPUs | Seconds | Cases | Outcome |", "| --- | --- | --- | ---: | ---: | --- |"]
+              "", "## Stages", "", "In CI each stage runs on its own runner, so stage durations overlap and must not be summed; a local run executes them serially. The end-to-end wall time is in the context table.", "",
+              "| Stage | Name | CPU | Logical CPUs | Image | Seconds | Outcome |", "| --- | --- | --- | ---: | --- | ---: | --- |"]
+    lines.extend("| " + " | ".join(cell(value) for value in row) + " |" for row in stage_rows)
+    lines += ["", "## Target completion by shard", "", "| Shard | Target | Features | Cases selected | Seconds | Measured | Outcome |",
+              "| --- | --- | --- | --- | ---: | ---: | --- |"]
     lines.extend("| " + " | ".join(cell(value) for value in row) + " |" for row in target_rows)
     if errors:
         lines += ["", "## Missing or unreadable evidence", ""]
         lines.extend(f"- {cell(error)}" for error in errors)
-    for category, (title, note) in enumerate(CATEGORIES):
-        selected = [(target, row) for target, row in rows if classify(target, row.case_id)[0] == category]
-        qualified = [(target, case, estimates, verdict) for target, case, estimates, verdict in comparisons
-                     if classify(target, case)[0] == category]
-        if not selected and not qualified:
+
+    def classify(target, case):
+        return declared.get(target, {}).get(case, (None, "No case declaration"))
+
+    for key, (title, note) in [*CATEGORIES.items(), (None, UNCATEGORISED)]:
+        selected = [(target, row, classify(target, row.case_id)[1]) for target, row in rows
+                    if classify(target, row.case_id)[0] == key]
+        gated = [(case, estimates, verdict) for target, case, estimates, verdict in comparisons
+                 if classify(target, case)[0] == key]
+        if not selected and not gated:
             continue
         lines += ["", f"## {title}", "", note]
-        if qualified:
+        if gated:
             lines += ["", "### Isolated comparison gate", "", "Estimates show median [confidence interval; level]. Decisions come from the native validator.", "",
                       "| Case ID | Reference before (µs) | Candidate (µs) | Reference after (µs) | Decision |",
                       "| --- | --- | --- | --- | --- |"]
-            for _, case, estimates, verdict in qualified:
+            for case, estimates, verdict in gated:
                 lines.append("| " + " | ".join(cell(value) for value in [case, *estimates, verdict]) + " |")
         if selected:
             lines += ["", "### Full-suite observations", "", "| Target | Case ID | Timed work | Median (µs) | Median confidence interval (µs) | Samples |",
                       "| --- | --- | --- | ---: | --- | ---: |"]
-            for target, row in sorted(selected, key=lambda pair: (pair[0], pair[1].case_id)):
+            for target, row, timed in sorted(selected, key=lambda item: (item[0], item[1].case_id)):
                 interval = f"{micros(row.lower_ns)}–{micros(row.upper_ns)} ({row.confidence * 100:g}%)"
-                lines.append("| " + " | ".join(cell(value) for value in [target, row.case_id, classify(target, row.case_id)[1],
+                lines.append("| " + " | ".join(cell(value) for value in [target, row.case_id, timed,
                                                                           micros(row.median_ns), interval, row.samples]) + " |")
     return "\n".join(lines) + "\n", errors
 
 
 def performance_summary(report):
-    copyable = copyable_summary(report, "performance")
+    copyable = copyable_summary(report)
     # Show rendered tables as well as a single copyable Markdown block.
     summary = report + "\n<details><summary>Copy the complete report as Markdown</summary>\n\n" + copyable + "\n</details>\n"
     return summary if len(summary.encode("utf-8")) <= 1_000_000 else copyable
 
 
-def command_output(*command):
-    try:
-        return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unavailable"
-
-
-def context_for(target, features, preview):
-    cpu = "unavailable"
-    if Path("/proc/cpuinfo").exists():
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
-            if line.startswith("model name"):
-                cpu = line.partition(":")[2].strip()
-                break
-    elif platform.system() == "Darwin":
-        cpu = command_output("sysctl", "-n", "machdep.cpu.brand_string")
-    command = shlex.join(["cargo", "bench", "--locked", "-p", "obzenflow_benchmarks",
-                          "--bench", target, "--features", features])
+def context_for():
+    # Hardware and compiler come from each stage's record and build manifests;
+    # the machine formatting this report measured nothing.
+    run_url = "unavailable (local run)"
+    if os.getenv("GITHUB_RUN_ID") and os.getenv("GITHUB_REPOSITORY"):
+        run_url = f"{os.getenv('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/attempts/{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
     context = {
-        "Report format": "criterion-operations-v1",
-        "Measured checkout SHA": "unavailable (local preview)" if preview else command_output("git", "rev-parse", "HEAD"),
-        "Target": target,
-        "Configured features": features or "default",
-        "Profile": "unavailable (local preview)" if preview else "bench (optimised)",
-        "Expected CI command" if preview else "Command": command,
+        "Report format": "performance-operations-v4",
+        "Measured checkout SHA": "unavailable",
+        "Target": "all declared targets",
+        "Configured features": "per target below",
+        "Profile": "bench (optimised)",
+        "Command": "cargo xtask performance <stage>, or cargo xtask test --lane performance serially",
+        "Run / attempt": f"{os.getenv('GITHUB_RUN_ID', 'local')} / {os.getenv('GITHUB_RUN_ATTEMPT', '1')}",
+        "Run URL": run_url,
     }
-    if preview:
-        context["Environment"] = "unavailable for existing measurements; current host is not asserted as their origin"
-    else:
-        run_url = "unavailable (local run)"
-        if os.getenv("GITHUB_RUN_ID") and os.getenv("GITHUB_REPOSITORY"):
-            run_url = f"{os.getenv('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}/attempts/{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
-        context.update({
-            "Run / attempt": f"{os.getenv('GITHUB_RUN_ID', 'local')} / {os.getenv('GITHUB_RUN_ATTEMPT', '1')}",
-            "Run URL": run_url,
-            "Rust": command_output("rustc", "-Vv"),
-            "Runner": f"{os.getenv('RUNNER_ENVIRONMENT', 'unknown')} / {os.getenv('ImageOS', 'unknown')} {os.getenv('ImageVersion', '')}",
-            "OS / architecture": f"{platform.platform()} / {platform.machine()}",
-            "CPU / logical CPUs": f"{cpu} / {os.cpu_count()}",
-        })
     if os.getenv("CRITERION_ARTIFACT_URL"):
         context["Raw Criterion artefact"] = os.environ["CRITERION_ARTIFACT_URL"]
     return context
@@ -381,46 +305,23 @@ def context_for(target, features, preview):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target")
-    parser.add_argument("--features", default="")
-    parser.add_argument("--criterion-dir", type=Path)
-    parser.add_argument("--performance-dir", help="Exact native run directory; empty means the validator did not start")
+    parser.add_argument("--performance-dir", required=True, help="The run's performance evidence directory; empty means planning did not start")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--outcome", choices=("success", "failure", "cancelled", "skipped"), required=True)
-    parser.add_argument("--preview", action="store_true", help="Do not attribute existing local results to this checkout or host")
     args = parser.parse_args()
-    if args.performance_dir is not None:
-        try:
-            report, errors = render_performance(Path(args.performance_dir) if args.performance_dir else None, args.outcome)
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            errors = [str(error)]
-            report = f"# Performance report\n\n**INCOMPLETE**: could not read native evidence: {cell(error)}\n"
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        identity = f"{os.getenv('GITHUB_RUN_ID', 'local')}-attempt-{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
-        path = args.output_dir / f"performance-{identity}.md"
-        path.write_text(report, encoding="utf-8")
-        if os.getenv("GITHUB_STEP_SUMMARY"):
-            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-                summary.write(performance_summary(report))
-        print(f"Wrote {path}: {len(errors)} evidence errors")
-        return 1 if errors else 0
-    if not args.target or args.criterion_dir is None:
-        parser.error("use --performance-dir or both --target and --criterion-dir")
-    rows, errors = read_measurements(args.criterion_dir)
-    context = context_for(args.target, args.features, args.preview)
-    report = render_report(args.target, rows, errors, context, args.outcome, args.preview)
+    try:
+        report, errors = render_performance(Path(args.performance_dir) if args.performance_dir else None, args.outcome)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        errors = [str(error)]
+        report = f"# Performance report\n\n**INCOMPLETE**: could not read native evidence: {cell(error)}\n"
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    target = re.sub(r"[^a-zA-Z0-9_-]", "_", args.target)
-    identity = "preview" if args.preview else (
-        f"{context['Measured checkout SHA'][:12]}-{os.getenv('GITHUB_RUN_ID', 'local')}-attempt-{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
-    )
-    path = args.output_dir / f"criterion-{target}-{identity}.md"
+    identity = f"{os.getenv('GITHUB_RUN_ID', 'local')}-attempt-{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
+    path = args.output_dir / f"performance-{identity}.md"
     path.write_text(report, encoding="utf-8")
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-            summary.write(copyable_summary(report))
-    print(f"Wrote {path}: {len(rows)} cases, {len(errors)} measurement errors")
-    # Always leave the report available, even when the measurement set is broken.
+            summary.write(performance_summary(report))
+    print(f"Wrote {path}: {len(errors)} evidence errors")
     return 1 if errors else 0
 
 

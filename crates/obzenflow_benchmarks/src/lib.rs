@@ -8,9 +8,9 @@
 //!
 //! ## Benchmark Categories
 //!
-//! - **Latency benchmarks**: Measure per-event processing time through pipelines of various depths
-//! - **Throughput benchmarks**: Measure sustained event processing rates
-//! - **Runtime benchmarks**: Test runtime characteristics like idle CPU usage and threading behavior
+//! - **Latency benchmarks**: Per-run median event latency through pipelines of various depths
+//! - **Throughput benchmarks**: Completed flows and sustained event processing
+//! - **Runtime benchmarks**: Process CPU time used by idle and waiting pipelines
 //! - **Integration benchmarks**: End-to-end pipeline execution tests
 //!
 //! ## Running Benchmarks
@@ -20,19 +20,15 @@
 //! cargo bench -p obzenflow_benchmarks
 //! ```
 //!
-//! Run specific benchmark category:
-//! ```bash
-//! cargo bench -p obzenflow_benchmarks latency
-//! ```
-//!
 //! Run individual benchmark:
 //! ```bash
-//! cargo bench -p obzenflow_benchmarks per_event_latency_3_stage
+//! cargo bench -p obzenflow_benchmarks --bench per_event_latency
 //! ```
 
 // This is primarily a benchmark crate, but we can expose some common utilities
 // that benchmarks might share
 
+pub mod case;
 #[cfg(feature = "components")]
 pub mod support;
 
@@ -87,6 +83,19 @@ fn bump_nofile_limit() {
             let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &updated);
         }
     }
+}
+
+/// CPU time consumed by every thread in this process.
+#[cfg(unix)]
+pub fn process_cpu_time() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid out-pointer for this process-wide clock.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut now) };
+    assert_eq!(status, 0, "process CPU clock unavailable");
+    std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
 /// Initialize tracing for benchmark binaries.

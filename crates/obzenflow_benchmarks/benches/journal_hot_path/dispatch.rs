@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{fixtures, measure, Census, Meter, Sample};
+use super::{declare, fixtures, measure, Category, Census, Meter, Sample};
 use criterion::{Criterion, Throughput};
 use std::cell::LazyCell;
 use std::time::{Duration, Instant};
@@ -80,17 +80,20 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
     for readers in [1, 8, 32] {
         group.throughput(Throughput::Elements((64 * readers) as u64));
         let case = format!("full/actual_reader/readers_{readers}");
+        let full = format!("reader_dispatch/{case}");
+        declare(
+            &full,
+            Category::Read,
+            &format!(
+                "Concurrent readers: {readers}; spawn tasks and read 64 records each; opening excluded"
+            ),
+        );
         let input = serde_json::json!({"readers":readers,"records_per_reader":64,"physical_group_size":1,"encoded_corpus_in_memory":false});
         let mut taken = false;
         group.bench_function(&case, |b| {
-            measure(
-                b,
-                censuses,
-                &mut taken,
-                &format!("reader_dispatch/{case}"),
-                &input,
-                || actual(runtime, &history, readers),
-            )
+            measure(b, censuses, &mut taken, &full, &input, || {
+                actual(runtime, &history, readers)
+            })
         });
     }
     group.finish();

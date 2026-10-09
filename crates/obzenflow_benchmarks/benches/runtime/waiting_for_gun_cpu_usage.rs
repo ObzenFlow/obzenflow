@@ -4,12 +4,14 @@
 
 //! WaitingForGun CPU Usage Benchmark
 //!
-//! Measures CPU usage while the pipeline is materialized but not started.
-//! This specifically targets “pure wait” busy-spin scenarios
+//! Measures process CPU time used while the pipeline is materialized but not
+//! started. This specifically targets “pure wait” busy-spin scenarios
 //! (notably sources in `WaitingForGun`).
 
 use async_trait::async_trait;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use obzenflow_benchmarks::case::{declare, Category};
+use obzenflow_benchmarks::process_cpu_time;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
@@ -24,7 +26,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::{Pid, ProcessExt, System, SystemExt};
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
 
@@ -86,7 +87,12 @@ fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::Path
     Ok((journal_path, temp_dir))
 }
 
-async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
+const SETTLE: Duration = Duration::from_millis(500);
+const WINDOW: Duration = Duration::from_secs(2);
+
+/// Untimed: build, settle and stop. Measured: process CPU time used in the
+/// window. A flow that leaves `ReadyForRun` fails the sample.
+async fn waiting_window() -> anyhow::Result<Duration> {
     let _bootstrap_guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
@@ -132,56 +138,55 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
     .await
     .map_err(|_| anyhow::anyhow!("Timed out waiting for pipeline to reach ReadyForRun"))?;
 
-    // Let it stabilize in the waiting state.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Measure CPU over 2 seconds (20 samples).
-    let mut system = System::new_all();
-    let pid = Pid::from(std::process::id() as usize);
-
-    system.refresh_process(pid);
-    let mut cpu_samples = Vec::new();
-
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        system.refresh_process(pid);
-
-        if let Some(process) = system.process(pid) {
-            cpu_samples.push(process.cpu_usage());
-        }
-    }
-
-    let avg_cpu = if !cpu_samples.is_empty() {
-        cpu_samples.iter().sum::<f32>() / cpu_samples.len() as f32
-    } else {
-        0.0
-    };
+    tokio::time::sleep(SETTLE).await;
+    let before = process_cpu_time();
+    tokio::time::sleep(WINDOW).await;
+    let used = process_cpu_time().saturating_sub(before);
+    let state = handle.current_state();
 
     // Stop the pipeline so benchmark iterations don't leak background tasks.
-    let _ = handle.stop_cancel().await;
+    handle
+        .stop_cancel()
+        .await
+        .map_err(|e| anyhow::anyhow!("Pipeline stop failed: {e}"))?;
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow::anyhow!("Timed out waiting for pipeline to stop"))?
         .map_err(|e| anyhow::anyhow!("Pipeline stop failed: {e}"))?;
-
-    Ok(avg_cpu as f64)
+    anyhow::ensure!(
+        matches!(state, PipelineState::ReadyForRun),
+        "flow left ReadyForRun during the window: {state:?}"
+    );
+    Ok(used)
 }
 
-fn bench_waiting_for_gun_cpu_usage(c: &mut Criterion) {
+fn bench_waiting_for_gun_process_cpu(c: &mut Criterion) {
     obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("waiting_for_gun_cpu_usage");
+    let mut group = c.benchmark_group("waiting_for_gun_process_cpu");
 
+    // Every iteration includes untimed setup and the fixed window.
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(45));
 
-    group.bench_function("cpu_percentage", |b| {
-        b.to_async(&rt)
-            .iter(|| async { measure_waiting_for_gun_cpu().await.unwrap() });
+    declare(
+        "waiting_for_gun_process_cpu/window_2s",
+        Category::Runtime,
+        "Process CPU time in a 2 s window while a built flow waits for its start command, after a 500 ms settle; 2,000,000 µs is one logical CPU fully busy",
+    );
+    group.bench_function("window_2s", |b| {
+        b.to_async(&rt).iter_custom(|iterations| async move {
+            let mut used = Duration::ZERO;
+            for _ in 0..iterations {
+                used += waiting_window().await.unwrap();
+            }
+            used
+        });
     });
 
     group.finish();
 }
 
-criterion_group!(benches, bench_waiting_for_gun_cpu_usage);
+criterion_group!(benches, bench_waiting_for_gun_process_cpu);
 criterion_main!(benches);

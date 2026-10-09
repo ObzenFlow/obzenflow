@@ -14,7 +14,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const LEGACY_REFERENCE: &str = "854c04bab261477ad4bec813369244e84f2ffb20";
+/// The candidate's adapters for one reference commit, by its first six digits.
+fn adapter(revision: &str) -> Result<String> {
+    let prefix = revision
+        .get(..6)
+        .filter(|prefix| prefix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| error(format!("{revision}: not a commit identity")))?;
+    Ok(format!("src/support/reference_{prefix}"))
+}
 
 pub(super) fn install(
     root: &Path,
@@ -48,15 +55,18 @@ pub(super) fn install(
             &mut applied,
         )?;
     }
-    // A versioned outer adapter bridges this known public constructor change.
-    // Payloads and workloads stay the same; the preserved framework is untouched.
-    let adapter = (revision == LEGACY_REFERENCE).then_some("src/support/reference_854c04");
-    if let Some(adapter) = adapter {
-        for name in ["data_event.rs", "validation_sink.rs"] {
+    // A versioned outer adapter bridges a public API change between this
+    // reference and the candidate (080v B10). Its files replace their support
+    // namesakes; payloads, workloads and the preserved framework are untouched.
+    let versioned = adapter(revision)?;
+    let directory = root.join(crate_path).join(&versioned);
+    let adapter = directory.is_dir().then_some(versioned);
+    if adapter.is_some() {
+        for name in tree(&directory)?.into_keys() {
             write(
                 baseline,
                 &format!("crates/obzenflow_benchmarks/src/support/{name}"),
-                &fs::read(root.join(crate_path).join(adapter).join(name))?,
+                &fs::read(directory.join(&name))?,
                 &mut applied,
             )?;
         }
@@ -278,19 +288,30 @@ mod tests {
         let before = tree(reference.path()).unwrap();
         let adapter = candidate
             .path()
-            .join("crates/obzenflow_benchmarks/src/support/reference_854c04/data_event.rs");
+            .join("crates/obzenflow_benchmarks/src/support/reference_abc123/data_event.rs");
         fs::create_dir_all(adapter.parent().unwrap()).unwrap();
         fs::write(&adapter, "versioned public constructor adapter").unwrap();
-        fs::write(
-            adapter.with_file_name("validation_sink.rs"),
-            "versioned public sink adapter",
+        let unadapted = tempfile::tempdir().unwrap();
+        install(
+            candidate.path(),
+            reference.path(),
+            unadapted.path(),
+            "def4560000000000000000000000000000000000",
         )
         .unwrap();
+        let record: serde_json::Value = serde_json::from_slice(
+            &fs::read(unadapted.path().join("measurement-driver.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            record["reference_public_api_adapter"].is_null(),
+            "another reference's adapter never applies"
+        );
         install(
             candidate.path(),
             reference.path(),
             artifacts.path(),
-            LEGACY_REFERENCE,
+            "abc1230000000000000000000000000000000000",
         )
         .unwrap();
         let after = tree(reference.path()).unwrap();
@@ -319,7 +340,7 @@ mod tests {
         assert_eq!(record["framework_files_modified"], json!([]));
         assert_eq!(
             record["reference_public_api_adapter"],
-            "src/support/reference_854c04"
+            "src/support/reference_abc123"
         );
         assert_eq!(
             fs::read_to_string(

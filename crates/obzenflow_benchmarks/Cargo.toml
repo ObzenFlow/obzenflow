@@ -39,9 +39,6 @@ anyhow = { workspace = true }
 tracing-subscriber = { workspace = true }
 libc = { workspace = true }
 
-# System information for CPU usage benchmarks
-sysinfo = { workspace = true }
-
 [dev-dependencies]
 # Additional test utilities
 fastrand = { workspace = true }
@@ -50,43 +47,8 @@ tracing = { workspace = true }
 
 # Latency benchmarks
 [[bench]]
-name = "per_event_latency_1_stage"
-path = "benches/latency/per_event_latency_1_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_2_stage"
-path = "benches/latency/per_event_latency_2_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_3_stage"
-path = "benches/latency/per_event_latency_3_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_4_stage"
-path = "benches/latency/per_event_latency_4_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_5_stage"
-path = "benches/latency/per_event_latency_5_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_20_stage"
-path = "benches/latency/per_event_latency_20_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_100_stage"
-path = "benches/latency/per_event_latency_100_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_100_stage_memory"
-path = "benches/latency/per_event_latency_100_stage_memory.rs"
+name = "per_event_latency"
+path = "benches/per_event_latency/main.rs"
 harness = false
 
 # Throughput benchmarks
@@ -104,11 +66,6 @@ harness = false
 [[bench]]
 name = "waiting_for_gun_cpu_usage"
 path = "benches/runtime/waiting_for_gun_cpu_usage.rs"
-harness = false
-
-[[bench]]
-name = "tokio_worker_3_stage_experiment"
-path = "benches/runtime/tokio_worker_3_stage_experiment.rs"
 harness = false
 
 # Integration benchmarks

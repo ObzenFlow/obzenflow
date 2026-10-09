@@ -17,7 +17,7 @@ mod tests;
 
 use crate::{error, Result};
 use plan::{Lane, Options, Policy};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "detail", rename_all = "snake_case")]
 enum Outcome {
     Pending,
@@ -35,6 +35,149 @@ enum Outcome {
     Passed,
     Failed(String),
     Incomplete(String),
+}
+
+impl Outcome {
+    /// A completed check that found a defect fails; anything else that did not
+    /// pass is incomplete.
+    fn of(result: &Result<()>) -> Self {
+        match result {
+            Ok(()) => Self::Passed,
+            Err(failure) if failure.is::<CheckFailed>() => Self::Failed(failure.to_string()),
+            Err(failure) => Self::Incomplete(failure.to_string()),
+        }
+    }
+
+    fn into_result(self) -> Result<()> {
+        match self {
+            Self::Passed => Ok(()),
+            Self::Failed(detail) => Err(failed(detail)),
+            Self::Incomplete(detail) => Err(error(detail)),
+            Self::Pending | Self::Running => Err(error("not finished")),
+        }
+    }
+}
+
+/// Settles named obligations: incomplete work dominates failures, matching
+/// the run report, so neither can be mistaken for acceptance.
+fn settle(obligations: &[(String, Outcome)]) -> Result<()> {
+    let summary = |select: fn(&Outcome) -> bool| {
+        obligations
+            .iter()
+            .filter(|(_, outcome)| select(outcome))
+            .map(|(name, outcome)| match outcome {
+                Outcome::Failed(detail) | Outcome::Incomplete(detail) => {
+                    format!("{name}: {detail}")
+                }
+                Outcome::Pending | Outcome::Running => format!("{name}: not finished"),
+                Outcome::Passed => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let incomplete = summary(|outcome| {
+        matches!(
+            outcome,
+            Outcome::Pending | Outcome::Running | Outcome::Incomplete(_)
+        )
+    });
+    if !incomplete.is_empty() {
+        return Err(error(incomplete));
+    }
+    let failures = summary(|outcome| matches!(outcome, Outcome::Failed(_)));
+    if !failures.is_empty() {
+        return Err(failed(failures));
+    }
+    Ok(())
+}
+
+fn help() -> String {
+    let lanes: Vec<_> = Lane::ALL.iter().map(|lane| lane.name()).collect();
+    format!("cargo xtask test [--lane <lane>]\n\nLanes: {}\nOmitting --lane requests all correctness lanes. Use --lane performance for complete performance qualification, executed serially; `cargo xtask performance` runs its stages separately. Repeated --lane selects exactly the declared scope.\nReports: target/test-runs/<run-id>/report.json. Failed attempts and incomplete required coverage return nonzero. Unrequested lanes supply no acceptance evidence.", lanes.join(", "))
+}
+
+const STAGES: [&str; 5] = ["plan", "build", "qualify", "measure", "assemble"];
+
+fn performance_help() -> String {
+    format!("cargo xtask performance <stage> --run-id <id> [--group <group> | --shard <shard>]\n\nStages: {}\nplan writes target/test-runs/<id>/performance/plan.json; build takes --group, qualify and measure take --shard; assemble settles the run from every stage record. Each stage returns nonzero unless it passed.", STAGES.join(", "))
+}
+
+/// One performance stage, so CI can run each on its own machine (080v B7).
+pub(crate) fn run_performance(root: &Path, args: &[String]) -> Result<()> {
+    if args.len() == 1 && crate::is_help(&args[0]) {
+        println!("{}", performance_help());
+        return Ok(());
+    }
+    let (stage, rest) = args
+        .split_first()
+        .filter(|(stage, _)| STAGES.contains(&stage.as_str()))
+        .ok_or_else(|| error(format!("expected a stage: {}", STAGES.join(", "))))?;
+    let mut options = std::collections::BTreeMap::new();
+    let mut rest = rest.iter();
+    while let Some(flag) = rest.next() {
+        let value = rest
+            .next()
+            .filter(|_| matches!(flag.as_str(), "--run-id" | "--group" | "--shard"))
+            .ok_or_else(|| error(format!("unsupported performance option: {flag}")))?;
+        if options.insert(flag.as_str(), value.as_str()).is_some() {
+            return Err(error(format!("duplicate option: {flag}")));
+        }
+    }
+    let run_id = options
+        .remove("--run-id")
+        .filter(|id| {
+            (1..=64).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .ok_or_else(|| error("--run-id requires 1 to 64 letters, digits or dashes"))?;
+    let expected = match stage.as_str() {
+        "build" => Some("--group"),
+        "qualify" | "measure" => Some("--shard"),
+        _ => None,
+    };
+    let name = match expected {
+        Some(flag) => Some(
+            options
+                .remove(flag)
+                .ok_or_else(|| error(format!("{stage} requires {flag}")))?,
+        ),
+        None => None,
+    };
+    if let Some(flag) = options.keys().next() {
+        return Err(error(format!("{stage} does not accept {flag}")));
+    }
+    let tools = Policy::read(root)?;
+    let _lock = process::lock(root)?;
+    let _signals = process::SignalGuard::install()?;
+    let directory = root
+        .join("target/test-runs")
+        .join(run_id)
+        .join(Lane::Performance.name());
+    match (stage.as_str(), name) {
+        ("plan", None) => {
+            let names = performance::plan_stage(root, run_id, &directory)?;
+            println!("{names}");
+            if let Some(path) = std::env::var_os("GITHUB_OUTPUT") {
+                let mut output = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
+                for (key, value) in names.as_object().into_iter().flatten() {
+                    writeln!(output, "{key}={value}")?;
+                }
+            }
+            Ok(())
+        }
+        ("build", Some(group)) => {
+            performance::build_stage(root, &tools, &directory, group, tools.build_jobs)
+        }
+        ("qualify", Some(shard)) => performance::qualify_stage(root, &tools, &directory, shard),
+        ("measure", Some(shard)) => performance::measure_stage(root, &tools, &directory, shard),
+        ("assemble", None) => performance::assemble_stage(&directory),
+        _ => Err(error(format!("{stage}: invalid stage options"))),
+    }
 }
 
 /// A completed check found a defect. Missing tools, reports and unfinished
@@ -80,7 +223,7 @@ struct RunReport {
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     if args.len() == 1 && crate::is_help(&args[0]) {
-        println!("cargo xtask test [--lane <lane>]\n\nLanes: default, production-features, test-support, journal-fixtures, doctest, postgres, performance\nOmitting --lane requests all correctness lanes. Use --lane performance for complete performance qualification. Repeated --lane selects exactly the declared scope.\nReports: target/test-runs/<run-id>/report.json. Failed attempts and incomplete required coverage return nonzero. Unrequested lanes supply no acceptance evidence.");
+        println!("{}", help());
         return Ok(());
     }
     let options = Options::parse(args)?;
@@ -156,7 +299,7 @@ fn run_native_with_preparation(
             .any(|lane| {
                 matches!(
                     lane,
-                    Lane::Default | Lane::ProductionFeatures | Lane::TestSupport
+                    Lane::Default | Lane::ProductionFeatures | Lane::TestSupport | Lane::Benchmarks
                 )
             })
             .then_some(Outcome::Pending),
@@ -244,17 +387,10 @@ fn run_native_with_preparation(
         let started = Instant::now();
         let result = execute_lane(root, &policy, lane, &production, &phase, &launcher);
         report.lanes[index].elapsed_seconds = started.elapsed().as_secs_f64();
-        report.lanes[index].outcome = match result {
-            Ok(()) => Outcome::Passed,
-            Err(failure) => {
-                eprintln!("validation: {} did not pass: {failure}", lane.name());
-                if failure.is::<CheckFailed>() {
-                    Outcome::Failed(failure.to_string())
-                } else {
-                    Outcome::Incomplete(failure.to_string())
-                }
-            }
-        };
+        if let Err(failure) = &result {
+            eprintln!("validation: {} did not pass: {failure}", lane.name());
+        }
+        report.lanes[index].outcome = Outcome::of(&result);
         save(&directory, &report)?;
     }
     let source_check = source::identity(root).and_then(|final_source| {
@@ -413,6 +549,7 @@ fn run_lane(
             );
             postgres_acceptance(execution, evidence)
         }
+        Lane::Benchmarks => performance::smoke(root, policy, directory),
         Lane::Performance => performance::run(root, policy, directory),
     }
 }

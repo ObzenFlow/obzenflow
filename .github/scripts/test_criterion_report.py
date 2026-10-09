@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 # https://obzenflow.dev
 
-from collections import Counter
+import contextlib
+import io
 import json
 from pathlib import Path
-import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,95 +13,33 @@ from unittest.mock import patch
 import criterion_report as report
 
 
-def current_inventory():
-    """Case IDs audited against the 16 existing Cargo targets, not report rules."""
-    cases = {}
-    cases["journal_components"] = [
-        f"causal_components/{operation}/w{width}_p{payload}"
-        for operation in ("journal_clock_restore", "byte_accounting", "frontier_from_record", "merge_overlapping", "prepare_append")
-        for width, payload in ((1, 256), (32, 256), (1024, 256), (32, 8192))
-    ] + [f"disk_components/reader_next/{dimension}" for dimension in ("p256_g1", "p8192_g1", "p256_g64")]
-    cases["journal_hot_path"] = [
-        f"{operation}/clock_{clock}/advanced_inputs_{advanced}/payload_{payload}"
-        for operation in ("record_accounting/canonical_bytes", "causal_record_work/journal_clock_restore", "causal_record_work/clock_clone", "causal_record_work/clock_json_bytes", "journal_record_read/open_and_read")
-        for clock, advanced, payload in ((1, 0, 256), (33, 0, 256), (33, 4, 256), (33, 32, 256), (1025, 1024, 256), (33, 32, 8192))
-    ] + [f"journal_append_cost/complete_append/{variant}" for variant in (
-        "ordinary_business_64", "ordinary_business_group_64", "large_business_64", "mixed_group_64", "execution_fact_group_64",
-    )] + [f"reader_dispatch/full/actual_reader/readers_{count}" for count in (1, 8, 32)] + [
-        f"hotspots/{operation}/{variant}"
-        for operation in ("append", "sequential_read", "reopened_scan", "reader_creation")
-        for variant in ("narrow_observed", "wide_observed", "wide_distinct", "wide_absent_control", "large_observed")
-    ] + [
-        "hotspots/append/clock_1025_absent_control", "hotspots/first_process_open_and_scan/wide_observed",
-        "cross_journal_reads/eight_journals_1024_records", "observation_handling/capture_for_record",
-        "journal_refresh/append_after_eof", "mixed_journal/distinct_12mib_then_reuse", "mixed_journal/two_concurrent_scans",
-    ] + [f"observation_handling/{operation}/clock_{clock}" for operation in ("validation", "live_submission") for clock in (1, 33, 128)] + [
-        f"journal_refresh/metrics/{count}_journals/{state}" for count in (1, 4) for state in ("advancing", "unchanged")
-    ]
-    cases["validation_boundaries"] = [
-        "archive_validation/export/inputs_1000", "archive_validation/admit_and_read/inputs_1000",
-        "replay_validation/streaming_comparison/inputs_10000", "metrics_validation/tail_refresh/data_and_error_64",
-        "studio_validation/project_and_snapshot/inputs_64",
-    ]
-    cases["pipeline_execution"] = [
-        f"{operation}/{depth}_stages" for operation in ("total_execution_time", "execution_time_per_event") for depth in (1, 3, 5, 10)
-    ] + ["metrics_reporting/render_100_stages", "metrics_reporting/publish_pair_100_stages/0", "metrics_reporting/publish_pair_100_stages/4"] + [
-        f"causal_record_costs/{operation}/{count}" for operation in ("journal_clock_restore", "byte_budget", "authored") for count in (1, 32, 1024)
-    ]
-    cases["pipeline_throughput"] = [f"completed_flow/{variant}" for variant in (
-        "disk_shallow_steady", "disk_deep_steady", "memory_shallow_control", "memory_deep_control", "disk_constrained_capacity_2", "disk_sparse_arrivals",
-    )]
-    for depth in (1, 2, 3, 4, 5, 20, 100):
-        cases[f"per_event_latency_{depth}_stage"] = [f"{depth}_stage_latency/median_latency"]
-    cases["per_event_latency_100_stage_memory"] = ["100_stage_latency_memory/median_latency"]
-    cases["idle_cpu_usage"] = ["idle_cpu_usage/cpu_percentage"] + [f"idle_cpu_by_depth/{depth}_stages" for depth in (1, 10, 20, 100)]
-    cases["waiting_for_gun_cpu_usage"] = ["waiting_for_gun_cpu_usage/cpu_percentage"]
-    cases["tokio_worker_3_stage_experiment"] = [f"3_stage_worker_experiments/{variant}" for variant in (
-        "4_workers_1to1_ratio", "3_workers_avoid_ratio", "6_workers_excess", "single_threaded",
-    )] + ["5_stage_control/default_runtime"]
-    return cases
-
-
-class ClassificationTests(unittest.TestCase):
-    def test_current_inventory_is_covered_once(self):
-        inventory = current_inventory()
-        self.assertEqual(set(inventory), set(report.RULES))
-        self.assertEqual(len(inventory), 16)
-        categories = Counter()
-        for target, ids in inventory.items():
-            self.assertEqual(len(ids), len(set(ids)))
-            for case_id in ids:
-                with self.subTest(target=target, case_id=case_id):
-                    category, work = report.classify(target, case_id)
-                    self.assertNotEqual(category, report.UNKNOWN)
-                    self.assertNotIn("{", work)
-                    self.assertEqual(sum(re.fullmatch(pattern, case_id) is not None
-                                         for pattern, _, _ in report.RULES[target]), 1)
-                    categories[category] += 1
-        self.assertEqual(categories, {report.READ: 30, report.APPEND: 11, report.MIXED: 2, report.CAUSAL: 53,
-                                     report.OBSERVE: 16, report.RUNTIME: 11, report.FLOW: 22, report.ARCHIVE: 3})
-
-    def test_semantic_boundaries(self):
-        for target, case_id, category, description in (
-            ("journal_components", "causal_components/prepare_append/w32_p256", report.CAUSAL, "no physical append"),
-            ("journal_hot_path", "mixed_journal/two_concurrent_scans", report.READ, "two readers"),
-            ("journal_hot_path", "journal_refresh/append_after_eof", report.MIXED, "append, read and EOF"),
-            ("journal_hot_path", "reader_dispatch/full/actual_reader/readers_8", report.READ, "Concurrent readers: 8"),
-            ("idle_cpu_usage", "idle_cpu_usage/cpu_percentage", report.RUNTIME, "not CPU %"),
-            ("pipeline_execution", "execution_time_per_event/3_stages", report.FLOW, "divided by 100 (110 emitted inputs)"),
-        ):
-            with self.subTest(case_id=case_id):
-                actual, work = report.classify(target, case_id)
-                self.assertEqual(actual, category)
-                self.assertIn(description, work)
-        self.assertEqual(report.classify("journal_hot_path", "new/operation")[0], report.UNKNOWN)
-        self.assertEqual(report.classify("new_target", "completed_flow/disk_shallow_steady")[0], report.UNKNOWN)
+# One declared case per category; the real inventory is declared by the
+# benchmark crate and proven by native runs, not repeated here.
+INVENTORY = {
+    "journal_hot_path": [
+        ("reader_dispatch/full/actual_reader/readers_8", "read", "Concurrent readers: 8; spawn tasks and read 64 records each"),
+        ("journal_append_cost/complete_append/ordinary_business_64", "append", "Append/group-append 64 records"),
+        ("journal_refresh/append_after_eof", "read_write", "64 append, read and EOF-check pairs"),
+    ],
+    "journal_components": [("causal_components/journal_clock_restore/w1_p256", "causal", "Restore one journal clock")],
+    "validation_boundaries": [
+        ("metrics_validation/tail_refresh/data_and_error_64", "observe", "One stage metrics snapshot"),
+        ("archive_validation/export/inputs_1000", "archive", "JSONL export of an existing 1,000-input archive"),
+    ],
+    "idle_cpu_usage": [("idle_process_cpu/window_2s/stages_1", "runtime", "Process CPU time in a 2 s idle window")],
+    "per_event_latency": [("3_stage_latency/median_latency", "flow", "Per-run median latency of 100 post-warm-up inputs")],
+}
+CASES = sum(len(cases) for cases in INVENTORY.values())
+# Two suite shards; one selection narrows its target to a case filter.
+SHARDS = {"one": ["journal_hot_path", "journal_components", "validation_boundaries"],
+          "two": ["idle_cpu_usage", "per_event_latency"]}
+FILTERS = {"per_event_latency": "^3_stage_latency/"}
+HOST = {"cpu": "AMD EPYC 7763 64-Core Processor", "logical_cpus": 4, "os": "x86_64-linux", "image": "ubuntu24 20261001.1"}
 
 
 class MeasurementTests(unittest.TestCase):
     def setUp(self):
-        Path("target").mkdir(exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(prefix="criterion-report-test-", dir="target")
+        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / "target", prefix="criterion-report-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
@@ -125,11 +63,8 @@ class MeasurementTests(unittest.TestCase):
         self.fixture("case/reference", "old/reference")
         rows, errors = report.read_measurements(self.root)
         self.assertFalse(errors)
-        self.assertEqual(len(rows), 1)
-        markdown = report.render_report("pipeline_throughput", rows, errors, {}, "success")
-        self.assertIn("**COMPLETE**", markdown)
-        self.assertIn("| 12.345 | 11–13 (90%) | 2 |", markdown)
-        self.assertNotIn("old/", markdown)
+        self.assertEqual(rows, [report.Measurement("completed_flow/disk_shallow_steady", 12345, 11000, 13000, 0.9, 2)])
+        self.assertEqual(report.micros(rows[0].median_ns), "12.345")
 
     def test_malformed_partial_and_duplicate_results_remain_visible(self):
         self.fixture("good/new")
@@ -141,13 +76,7 @@ class MeasurementTests(unittest.TestCase):
         rows, errors = report.read_measurements(self.root)
         self.assertEqual(len(rows), 1)
         self.assertEqual(len(errors), 3)
-        markdown = report.render_report("pipeline_throughput", rows, errors, {}, "failure")
-        self.assertIn("**INCOMPLETE**", markdown)
-        self.assertIn("partial evidence", markdown)
-        self.assertIn("completed_flow/disk_shallow_steady", markdown)
-        self.assertIn("duplicate Criterion ID", markdown)
-        self.assertIn("Missing or unreadable measurements", markdown)
-        self.assertIn("**INCOMPLETE**", report.render_report("pipeline_throughput", rows, errors, {}, "success"))
+        self.assertTrue(any("duplicate Criterion ID" in error for error in errors))
 
     def test_empty_or_invalid_measurements_are_not_zeroes(self):
         rows, errors = report.read_measurements(self.root)
@@ -175,61 +104,23 @@ class MeasurementTests(unittest.TestCase):
                 self.assertFalse(rows)
                 self.assertTrue(errors)
 
-    def test_unknown_ids_and_markdown_characters_are_preserved_safely(self):
-        self.fixture(case_id="new/operation|<script>`\nend")
-        rows, errors = report.read_measurements(self.root)
-        markdown = report.render_report("pipeline_throughput", rows, errors, {"Rust": "one\ntwo"}, "success")
-        self.assertIn("## Uncategorised", markdown)
-        self.assertIn("new/operation&#124;&lt;script&gt;&#96; end", markdown)
-        self.assertIn("| Rust | one two |", markdown)
-        self.assertNotIn("## Journal appends", markdown)
-
-    def test_failed_or_skipped_command_is_incomplete_even_with_valid_rows(self):
-        self.fixture()
-        rows, errors = report.read_measurements(self.root)
-        for outcome in ("failure", "cancelled", "skipped"):
-            self.assertIn("**INCOMPLETE**", report.render_report("pipeline_throughput", rows, errors, {}, outcome))
-
-    def test_main_writes_report_and_copyable_summary_on_failure(self):
-        summary = self.root / "summary.md"
-        output = self.root / "reports"
-        args = ["criterion_report.py", "--target", "pipeline_throughput", "--criterion-dir", str(self.root),
-                "--output-dir", str(output), "--outcome", "failure", "--preview"]
-        with patch("sys.argv", args), patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}, clear=True):
-            self.assertEqual(report.main(), 1)
-        markdown = next(output.glob("*.md")).read_text()
-        self.assertIn("No current measurements found", markdown)
-        self.assertIn("PREVIEW", markdown)
-        self.assertIn("unavailable (local preview)", markdown)
-        self.assertIn(f"```markdown\n{markdown}```", summary.read_text())
-
-    def test_main_uses_only_requested_attempt_and_records_ci_identity(self):
-        self.fixture("attempt-1/old/new", "old/result")
-        self.fixture("attempt-2/current/new")
-        summary = self.root / "summary.md"
-        output = self.root / "reports"
-        args = ["criterion_report.py", "--target", "pipeline_throughput", "--criterion-dir", str(self.root / "attempt-2"),
-                "--output-dir", str(output), "--outcome", "success"]
-        environment = {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
-                       "GITHUB_REPOSITORY": "example/project", "CRITERION_ARTIFACT_URL": "https://github.com/example/project/actions/runs/123/artifacts/456"}
-        def command(*args):
-            return "a" * 40 if args[0] == "git" else "test toolchain"
-        with patch("sys.argv", args), patch.dict("os.environ", environment, clear=True), patch.object(report, "command_output", command):
-            self.assertEqual(report.main(), 0)
-        path = output / "criterion-pipeline_throughput-aaaaaaaaaaaa-123-attempt-2.md"
-        markdown = path.read_text()
-        self.assertIn("**COMPLETE**", markdown)
-        self.assertIn("| Measured checkout SHA | " + "a" * 40, markdown)
-        self.assertIn("https://github.com/example/project/actions/runs/123/attempts/2", markdown)
-        self.assertIn("/artifacts/456", markdown)
-        self.assertNotIn("old/result", markdown)
-        self.assertIn(f"```markdown\n{markdown}```", summary.read_text())
+    def test_markdown_characters_are_escaped(self):
+        self.assertEqual(report.cell("new/operation|<script>`\nend"), "new/operation&#124;&lt;script&gt;&#96; end")
 
     def test_summary_fence_and_size_limit(self):
         self.assertIn("````markdown\ntext ``` text\n````", report.copyable_summary("text ``` text\n"))
         self.assertIn("exceeds the Actions summary limit", report.copyable_summary("µ" * 600_000))
         markdown = "Criterion observations and artefact links\n"
         self.assertIn(f"```markdown\n{markdown}```", report.performance_summary(markdown))
+
+    def test_help_advertises_the_interfaces_capability_detection_probes(self):
+        output = io.StringIO()
+        with patch("sys.argv", ["criterion_report.py", "--help"]), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exit:
+                report.main()
+        self.assertEqual(exit.exception.code, 0)
+        for flag in ("--performance-dir", "--output-dir", "--outcome"):
+            self.assertIn(flag, output.getvalue())
 
 
 class PerformanceReportTests(unittest.TestCase):
@@ -244,70 +135,131 @@ class PerformanceReportTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value))
 
+    def phase(self, target):
+        shard = next(name for name, targets in SHARDS.items() if target in targets)
+        return self.performance / "suite" / shard / target
+
+    def assembly(self, status):
+        self.write(self.performance / "assembly.json", {
+            "outcome": {"status": status}, "end_to_end_seconds": 840.5,
+            "rust": ["rustc 1.93.0 (254b59607 2026-01-19)\nbinary: rustc\nhost: x86_64-unknown-linux-gnu"],
+            "reference_public_api_adapters": {"reference-journal-benchmarks": None},
+            "stages": [{"stage": "build", "name": "candidate-default", "host": HOST, "elapsed_seconds": 300,
+                        "outcome": {"status": "passed"}},
+                       {"stage": "suite", "name": "two", "host": HOST, "elapsed_seconds": 280,
+                        "outcome": {"status": status}}]})
+
     def fixture(self):
-        inventory = current_inventory()
-        self.write(self.root / "report.json", {"source": {"commit": "measured-commit", "content_sha256": "measured-content"},
-                                              "run_id": "this-attempt", "outcome": {"status": "passed"}})
-        self.write(self.performance / "suite-plan.json", [{"name": target, "required-features": []} for target in inventory])
-        self.write(self.performance / "phases.json", {"build": 60, "qualification": 120, "full_suite": 700})
-        self.write(self.performance / "suite-execution.json", {"mode": "two-cpu-partitions-v1", "cpu_groups": [[0, 1], [2, 3]]})
-        self.write(self.performance / "comparison-policy.json", {"baseline_revision": "reference-commit", "sample_size": 40, "warm_up_ms": 1000, "measurement_ms": 3000})
-        self.write(self.performance / "measurement-driver.json", {"reference_public_api_adapter": "src/support/reference_854c04"})
-        self.write(self.performance / "qualification.json", {"passed": True, "error": None})
+        self.write(self.performance / "plan.json", {
+            "run_id": "this-attempt", "source": {"commit": "measured-commit", "content_sha256": "measured-content"},
+            "reference": {"commit": "reference-commit", "rule": "merge_base", "main": "refs/remotes/origin/main"},
+            "targets": [{"name": target, "required-features": []} for target in INVENTORY],
+            "suite": [{"name": shard, "select": [{"target": target, "cases": FILTERS.get(target)} for target in targets]}
+                      for shard, targets in SHARDS.items()]})
+        self.assembly("passed")
+        self.write(self.performance / "comparison-policy.json", {"sample_size": 40, "warm_up_ms": 1000, "measurement_ms": 3000})
+        self.write(self.performance / "qualification.json", {"outcome": {"status": "passed"}})
         self.write(self.performance / "negative-controls.json", {"slowdown": {"outcome": "regressed"},
                    "missing_work_rejected_by_completion_oracle": True, "missing_studio_projection_output_rejected": True})
-        for target, cases in inventory.items():
-            phase = self.performance / "suite" / target
-            self.write(phase / "outcome.json", {"passed": True, "elapsed_seconds": 20, "cpus": [0, 1]})
-            self.write(phase / "cases.json", cases)
-            for index, case in enumerate(cases):
+        for target, cases in INVENTORY.items():
+            phase = self.phase(target)
+            self.write(phase / "outcome.json", {"outcome": {"status": "passed"}, "elapsed_seconds": 20})
+            self.write(phase / "cases.json", [case for case, _, _ in cases])
+            self.write(phase / "selected.json", [case for case, _, _ in cases])
+            self.write(phase / "declarations.json", [{"case": case, "category": category, "timed": timed}
+                                                      for case, category, timed in cases])
+            for index, (case, _, _) in enumerate(cases):
                 directory = phase / "criterion" / str(index) / "new"
                 self.write(directory / "benchmark.json", {"full_id": case})
                 self.write(directory / "estimates.json", {"median": {"point_estimate": 3000, "confidence_interval": {
                     "lower_bound": 2900, "upper_bound": 3100, "confidence_level": 0.95}}})
                 self.write(directory / "sample.json", {"times": [3000, 6000], "iters": [1, 2]})
         case = "reader_dispatch/full/actual_reader/readers_8"
-        comparison = {"baseline_revision": "reference-commit", "suites": {"journal_hot_path": {"cases": [case]}},
-                      "decisions": {case: {"outcome": "passed"}}}
+        comparison = {"suites": {"journal_hot_path": {"cases": [case]}}, "decisions": {case: {"outcome": "passed"}}}
         for phase, point in (("before", 1000), ("candidate", 1100), ("after", 1050)):
             comparison[phase] = {case: {"estimate": {"point_estimate": point, "confidence_interval": {
                 "lower_bound": point - 10, "upper_bound": point + 10, "confidence_level": 0.95}}}}
         self.write(self.performance / "comparison.json", comparison)
 
-    def test_full_inventory_is_grouped_and_comparison_uses_identified_candidate(self):
+    def declarations(self, target):
+        return self.phase(target) / "declarations.json"
+
+    def test_declared_categories_group_cases_and_comparison_uses_identified_candidate(self):
         self.fixture()
-        markdown, errors = report.render_performance(self.root, "success")
+        markdown, errors = report.render_performance(self.performance, "success")
         self.assertFalse(errors)
-        self.assertIn("**148 cases**", markdown)
-        for title, _ in report.CATEGORIES[:-1]:
+        self.assertIn(f"**{CASES} cases**", markdown)
+        for title, _ in report.CATEGORIES.values():
             self.assertEqual(markdown.count("## " + title + "\n"), 1)
+        self.assertNotIn("## Uncategorised", markdown)
         self.assertIn("| 1 [0.99–1.01; 95%] | 1.1 [1.09–1.11; 95%] | 1.05 [1.04–1.06; 95%] | passed |", markdown)
+        self.assertIn("Process CPU time in a 2 s idle window", markdown)
         self.assertIn("measured-commit", markdown)
         self.assertIn("measured-content", markdown)
-        self.assertIn("two-cpu-partitions-v1", markdown)
-        self.assertIn("| build | 60.00 |", markdown)
-        self.assertIn("| full_suite | 700.00 |", markdown)
+        self.assertIn("| Reference SHA | reference-commit |", markdown)
+        self.assertIn("| Reference selection | merge base with main (where this change started) |", markdown)
+        self.assertIn("| Reference public API adapter | none |", markdown)
+        self.assertIn("| Rust | rustc 1.93.0 (254b59607 2026-01-19) |", markdown)
+        self.assertIn("| End-to-end wall time | 840.50 s from planning to the last stage |", markdown)
+        self.assertIn("| build | candidate-default | AMD EPYC 7763 64-Core Processor | 4 | ubuntu24 20261001.1 | 300.00 | passed |", markdown)
+        self.assertIn("| two | per_event_latency | default | ^3_stage_latency/ | 20.00 | 1/1 | passed |", markdown)
+        self.assertIn("| one | journal_hot_path | default | all | 20.00 | 3/3 | passed |", markdown)
+        self.assertIn("Result: **passed**.", markdown)
         self.assertLess(len(report.performance_summary(markdown).encode()), 1_000_000)
 
     def test_missing_case_is_incomplete_even_when_measurement_process_succeeded(self):
         self.fixture()
-        path = self.performance / "suite/per_event_latency_20_stage/criterion/0/new/sample.json"
-        path.unlink()
-        markdown, errors = report.render_performance(self.root, "success")
+        (self.phase("per_event_latency") / "criterion/0/new/sample.json").unlink()
+        markdown, errors = report.render_performance(self.performance, "success")
         self.assertTrue(errors)
         self.assertIn("**INCOMPLETE**", markdown)
-        self.assertIn("**147 cases**", markdown)
-        self.assertIn("per_event_latency_20_stage: measured case IDs differ", markdown)
+        self.assertIn(f"**{CASES - 1} cases**", markdown)
+        self.assertIn("two/per_event_latency: measured case IDs differ from the shard's selection", markdown)
+
+    def test_undeclared_or_miscategorised_cases_stay_visible_as_evidence_errors(self):
+        self.fixture()
+        self.write(self.declarations("per_event_latency"), [])
+        self.write(self.declarations("journal_components"), [{"case": "causal_components/journal_clock_restore/w1_p256",
+                                                               "category": "codec", "timed": "Restore one journal clock"}])
+        markdown, errors = report.render_performance(self.performance, "success")
+        self.assertIn("**INCOMPLETE**", markdown)
+        self.assertIn("per_event_latency: 3_stage_latency/median_latency: no case declaration.", errors)
+        self.assertTrue(any("unknown category 'codec'" in error for error in errors))
+        self.assertIn("## Uncategorised", markdown)
+        self.assertIn("| per_event_latency | 3_stage_latency/median_latency | No case declaration |", markdown)
 
     def test_failed_gate_keeps_full_suite_and_native_decision(self):
         self.fixture()
-        self.write(self.performance / "qualification.json", {"passed": False, "error": "regression found"})
-        self.write(self.root / "report.json", {"outcome": {"status": "failed"}})
-        markdown, errors = report.render_performance(self.root, "failure")
+        self.write(self.performance / "qualification.json", {"outcome": {"status": "failed", "detail": "regression found"}})
+        self.assembly("failed")
+        markdown, errors = report.render_performance(self.performance, "failure")
         self.assertFalse(errors)
         self.assertIn("**FAILED**", markdown)
-        self.assertIn("regression found", markdown)
-        self.assertIn("**148 cases**", markdown)
+        self.assertIn("Result: **not passed**. regression found", markdown)
+        self.assertIn(f"**{CASES} cases**", markdown)
+
+    def test_unavailable_target_keeps_its_build_outcome_and_other_rows(self):
+        self.fixture()
+        phase = self.phase("idle_cpu_usage")
+        for name in ("cases.json", "selected.json", "declarations.json", "criterion/0/new/benchmark.json",
+                     "criterion/0/new/estimates.json", "criterion/0/new/sample.json"):
+            (phase / name).unlink()
+        self.write(phase / "outcome.json", {"outcome": {"status": "failed", "detail": "candidate-default-build: compilation rejected"},
+                                            "elapsed_seconds": 0})
+        self.assembly("failed")
+        markdown, errors = report.render_performance(self.performance, "failure")
+        self.assertIn("two/idle_cpu_usage: no case selection; failed: candidate-default-build: compilation rejected", errors)
+        self.assertIn("| two | idle_cpu_usage | default | all | 0.00 | 0/? | failed: candidate-default-build: compilation rejected |", markdown)
+        self.assertIn(f"**{CASES - 1} cases**", markdown)
+        self.assertIn("**FAILED**", markdown)
+
+    def test_missing_stage_evidence_is_incomplete_without_a_previous_run(self):
+        self.fixture()
+        (self.performance / "assembly.json").unlink()
+        markdown, errors = report.render_performance(self.performance, "failure")
+        self.assertIn("**INCOMPLETE**", markdown)
+        self.assertTrue(any(error.startswith("assembly.json:") for error in errors))
+        self.assertIn("| End-to-end wall time | unavailable |", markdown)
 
     def test_early_failure_still_writes_copyable_report_and_does_not_find_previous_run(self):
         self.fixture()  # Valid but unrelated evidence must not be selected.
@@ -323,6 +275,19 @@ class PerformanceReportTests(unittest.TestCase):
         self.assertIn("| Run URL | unavailable (local run) |", markdown)
         self.assertIn("Copy the complete report as Markdown", summary.read_text())
         self.assertIn(f"```markdown\n{markdown}```", summary.read_text())
+
+    def test_main_records_ci_identity_for_the_requested_attempt(self):
+        self.fixture()
+        output = self.root / "markdown"
+        environment = {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_REPOSITORY": "example/project",
+                       "CRITERION_ARTIFACT_URL": "https://github.com/example/project/actions/runs/123/artifacts/456"}
+        with patch("sys.argv", ["criterion_report.py", "--performance-dir", str(self.performance), "--output-dir", str(output),
+                                "--outcome", "success"]), patch.dict("os.environ", environment, clear=True):
+            self.assertEqual(report.main(), 0)
+        markdown = (output / "performance-123-attempt-2.md").read_text()
+        self.assertIn("https://github.com/example/project/actions/runs/123/attempts/2", markdown)
+        self.assertIn("/artifacts/456", markdown)
+        self.assertIn("**PASSED**", markdown)
 
 
 if __name__ == "__main__":

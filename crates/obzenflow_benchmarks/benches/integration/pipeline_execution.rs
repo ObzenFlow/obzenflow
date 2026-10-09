@@ -4,12 +4,13 @@
 
 //! Pipeline Execution Time Benchmarks
 //!
-//! Measures total execution time - how long it takes to process all events
-//! through the entire pipeline. This is different from per-event latency as
-//! it measures overall system performance for batch processing scenarios.
+//! Measures total execution time - how long it takes to build, run and tear
+//! down a flow that delivers every input exactly once. This is different from
+//! per-event latency as it measures overall batch processing.
 
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
@@ -22,13 +23,12 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
 
-const TEST_EVENT_COUNT: u64 = 100;
-const WARMUP_EVENT_COUNT: u64 = 10;
+const INPUTS: u64 = 110;
 
 /// File-local payload type for the pipeline-execution integration bench.
 /// The JSON shape matches what `TimestampedSource` emits; the type itself
@@ -100,31 +100,26 @@ impl TypedTransformHandler for PassthroughStage {
     }
 }
 
-/// Sink that records latencies
+/// Sink that records delivered input IDs for the exactly-once check
 #[derive(Clone, Debug)]
-struct TimestampedSink {
-    received: Arc<AtomicU64>,
-    latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
+struct DeliverySink {
+    delivered: Arc<Mutex<Vec<u64>>>,
 }
 
-impl TimestampedSink {
-    fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
-            expected_count as usize,
-        )));
-        let received = Arc::new(AtomicU64::new(0));
+impl DeliverySink {
+    fn new(expected_count: u64) -> (Self, Arc<Mutex<Vec<u64>>>) {
+        let delivered = Arc::new(Mutex::new(Vec::with_capacity(expected_count as usize)));
         (
             Self {
-                received: received.clone(),
-                latencies: latencies.clone(),
+                delivered: delivered.clone(),
             },
-            latencies,
+            delivered,
         )
     }
 }
 
 #[async_trait]
-impl InlineSink for TimestampedSink {
+impl InlineSink for DeliverySink {
     type Input = BenchEvent;
 
     fn describe(&self) -> SinkDescription {
@@ -132,22 +127,7 @@ impl InlineSink for TimestampedSink {
     }
 
     async fn write(&mut self, event: BenchEvent) -> Result<(), SinkWriteFailure> {
-        self.received.fetch_add(1, Ordering::Relaxed);
-
-        // Skip warmup events for latency calculation.
-        if event.event_id >= WARMUP_EVENT_COUNT {
-            let receive_time_nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-
-            if receive_time_nanos > event.emit_time_nanos {
-                let latency =
-                    Duration::from_nanos((receive_time_nanos - event.emit_time_nanos) as u64);
-                self.latencies.lock().await.push(latency);
-            }
-        }
-
+        self.delivered.lock().unwrap().push(event.event_id);
         Ok(())
     }
 }
@@ -171,7 +151,7 @@ fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::Path
 async fn build_pipeline(
     stage_count: usize,
     source: TimestampedSource,
-    sink: TimestampedSink,
+    sink: DeliverySink,
     journals_base_path: std::path::PathBuf,
 ) -> anyhow::Result<FlowHandle> {
     if !matches!(stage_count, 1 | 3 | 5 | 10) {
@@ -272,31 +252,26 @@ async fn build_pipeline(
     Ok(handle)
 }
 
-/// Run a complete pipeline execution and measure total time
-async fn run_execution_test(stage_count: usize) -> anyhow::Result<Duration> {
+/// Build, run and tear down one flow, returning its delivered input IDs.
+async fn run_execution_test(stage_count: usize) -> anyhow::Result<Vec<u64>> {
     let test_name = format!("execution_{stage_count}_stages");
     let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
 
-    let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-    let (sink, _latencies) = TimestampedSink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+    let source = TimestampedSource::new(INPUTS);
+    let (sink, delivered) = DeliverySink::new(INPUTS);
 
-    // Start timing BEFORE building the pipeline
-    let start = Instant::now();
-
-    // Build and run pipeline
     let handle = build_pipeline(stage_count, source, sink, journals_base_path).await?;
     handle
         .run()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {e:?}"))?;
 
-    let elapsed = start.elapsed();
-
-    Ok(elapsed)
+    let delivered = std::mem::take(&mut *delivered.lock().unwrap());
+    Ok(delivered)
 }
 
-/// Benchmark total execution time for different pipeline depths
-/// Uses iter() to let Criterion measure the full execution timing
+/// Benchmark total execution time for different pipeline depths. Timing spans
+/// journal setup through teardown; the exactly-once check is untimed.
 fn bench_total_execution_time(c: &mut Criterion) {
     obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
@@ -307,45 +282,32 @@ fn bench_total_execution_time(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(20));
 
     for &stage_count in STAGE_COUNTS {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{stage_count}_stages")),
-            &stage_count,
-            |b, &stage_count| {
-                // Use iter() to let Criterion handle the timing
-                b.to_async(&rt)
-                    .iter(|| async { run_execution_test(stage_count).await.unwrap() });
-            },
+        let parameter = format!("{stage_count}_stages");
+        declare(
+            &format!("total_execution_time/{parameter}"),
+            Category::Flow,
+            &format!(
+                "Build, run and tear down a {stage_count}-stage flow of {INPUTS} inputs; exactly-once check untimed"
+            ),
         );
-    }
-
-    group.finish();
-}
-
-/// Additional benchmark that shows execution time per event
-/// This helps understand the amortized cost
-fn bench_execution_time_per_event(c: &mut Criterion) {
-    obzenflow_benchmarks::init_tracing();
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("execution_time_per_event");
-
-    group.sample_size(20); // Consistent sample size across benchmarks
-
-    for &stage_count in STAGE_COUNTS {
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{stage_count}_stages")),
+            BenchmarkId::from_parameter(parameter),
             &stage_count,
             |b, &stage_count| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total_per_event = Duration::ZERO;
-
-                    for _ in 0..iters {
-                        let total_time = run_execution_test(stage_count).await.unwrap();
-                        // Calculate time per event
-                        let per_event = total_time / (TEST_EVENT_COUNT as u32);
-                        total_per_event += per_event;
+                b.to_async(&rt).iter_custom(|iterations| async move {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let started = Instant::now();
+                        let mut delivered = run_execution_test(stage_count).await.unwrap();
+                        elapsed += started.elapsed();
+                        delivered.sort_unstable();
+                        assert!(
+                            delivered.iter().copied().eq(0..INPUTS),
+                            "missing, duplicate or unexpected inputs: {} delivered of {INPUTS}",
+                            delivered.len()
+                        );
                     }
-
-                    total_per_event
+                    elapsed
                 });
             },
         );
@@ -393,6 +355,11 @@ fn bench_metrics_reporting(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("metrics_reporting");
     group.sample_size(20);
+    declare(
+        "metrics_reporting/render_100_stages",
+        Category::Observe,
+        "Render Prometheus metrics for 100 stages",
+    );
     group.bench_function("render_100_stages", |b| {
         b.iter(|| {
             black_box(
@@ -403,6 +370,13 @@ fn bench_metrics_reporting(c: &mut Criterion) {
         });
     });
     for readers in [0, 4] {
+        declare(
+            &format!("metrics_reporting/publish_pair_100_stages/{readers}"),
+            Category::Observe,
+            &format!(
+                "Publish application/infrastructure snapshots for 100 stages, {readers} concurrent renderers"
+            ),
+        );
         group.bench_with_input(
             BenchmarkId::new("publish_pair_100_stages", readers),
             &readers,
@@ -500,6 +474,20 @@ fn bench_causal_record_costs(c: &mut Criterion) {
             record.envelope.provenance.journal.vector_clock.clocks.len(),
             incoming_journals + 1
         );
+        for (operation, timed) in [
+            ("journal_clock_restore", "Restore one journal clock"),
+            (
+                "byte_budget",
+                "Canonical JSON byte accounting for one record",
+            ),
+            ("authored", "Reconstruct one authored event from a record"),
+        ] {
+            declare(
+                &format!("causal_record_costs/{operation}/{incoming_journals}"),
+                Category::Causal,
+                timed,
+            );
+        }
         group.bench_with_input(
             BenchmarkId::new("journal_clock_restore", incoming_journals),
             &record,
@@ -528,7 +516,6 @@ fn bench_causal_record_costs(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_total_execution_time,
-    bench_execution_time_per_event,
     bench_metrics_reporting,
     bench_causal_record_costs
 );

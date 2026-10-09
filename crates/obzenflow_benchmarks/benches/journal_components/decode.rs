@@ -4,6 +4,7 @@
 
 use super::fixtures::{self, History, DEADLINE};
 use criterion::{BenchmarkId, Criterion, Throughput};
+use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_core::StageId;
 use std::cell::LazyCell;
 use std::hint::black_box;
@@ -24,6 +25,11 @@ pub fn bench(c: &mut Criterion) {
             ))
         });
         let case = format!("p{payload}_g{physical_group}");
+        declare(
+            &format!("disk_components/reader_next/{case}"),
+            Category::Read,
+            "Read 64 records; reader opening excluded",
+        );
         group.bench_function(BenchmarkId::new("reader_next", &case), |b| {
             let expected: Vec<_> = history.records[0].iter().map(|row| *row.id()).collect();
             b.iter_custom(|iterations| {
