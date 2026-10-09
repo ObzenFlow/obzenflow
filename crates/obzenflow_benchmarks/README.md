@@ -131,7 +131,7 @@ breaks it. The lane times nothing and makes no performance claim.
 ### Fanned-out requested runs
 
 A requested run fans out across GitHub-hosted runners (FLOWIP-080v B7). One job plans
-the run from `.config/performance-suite.toml`. Build jobs compile each group once and
+the run from `.config/performance-shards.toml`. Build jobs compile each group once and
 publish its executables with a manifest of their hashes. Qualification and suite jobs
 download those executables, verify every hash, and run one measurement at a time on
 their own runner without a toolchain. A final job assembles the evidence and writes
@@ -252,7 +252,7 @@ reads them, so there is no separate rule table or case list to update. Meet B1 b
 keeping fixture construction and checks outside timing, checking completed work
 against an independent oracle, and failing the sample on timeout or incomplete work.
 A new target also needs its `[[bench]]` entry and a place in one suite shard of
-`.config/performance-suite.toml`. Run these before opening a PR.
+`.config/performance-shards.toml`. Run these before opening a PR.
 
 ```sh
 cargo xtask test --lane benchmarks
@@ -352,7 +352,7 @@ OS-cache-warm files, and the fresh-process case leaves filesystem cache uncontro
 
 ## Comparison policy and retained evidence
 
-Within an explicitly requested run, the gate uses `.config/performance.toml`, with four
+Within an explicitly requested run, the gate uses `.config/performance-policy.toml`, with four
 hot-path timings and five validation operations. Before timing, both implementations
 pass all 75 hot-path oracles with identical case identities and input dimensions.
 Single-reader and grouped-append timings remain diagnostic, and their correctness
@@ -360,7 +360,7 @@ cases are required.
 
 The gate's reference is where the measured change started (FLOWIP-080v B10). A commit
 that `main` does not contain is compared with its merge base with `main`, and a commit
-on `main` with its first parent. Set `pin` in `.config/performance.toml` only for a
+on `main` with its first parent. Set `pin` in `.config/performance-policy.toml` only for a
 deliberate re-qualification against a fixed commit. The plan resolves the reference
 once and records the commit and the rule that chose it.
 

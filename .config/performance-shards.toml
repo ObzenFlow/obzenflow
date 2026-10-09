@@ -4,7 +4,7 @@
 # serial macOS times; rebalance from recorded CI stage times.
 version = 2
 
-# Every gated case in .config/performance.toml belongs to exactly one shard. A case's
+# Every gated case in .config/performance-policy.toml belongs to exactly one shard. A case's
 # reference-before, candidate and reference-after trials, and the controls that
 # reuse them, stay together on one runner.
 [[qualification]]

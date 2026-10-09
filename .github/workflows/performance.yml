@@ -166,9 +166,9 @@ jobs:
             target/debug
             target/validation-reference
             target/validation-candidate
-          key: performance-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-${{ needs.plan.outputs.sha }}
+          key: performance-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance-policy.toml') }}-${{ needs.plan.outputs.sha }}
           restore-keys: |
-            performance-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance.toml') }}-
+            performance-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance-policy.toml') }}-
       - name: Build the group
         run: cargo xtask performance build --run-id "$RUN_ID" --group "$GROUP"
       - name: Prune non-reusable compilation output

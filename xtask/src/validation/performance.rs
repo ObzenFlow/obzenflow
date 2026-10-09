@@ -49,7 +49,7 @@ struct ComparisonPolicy {
 
 impl ComparisonPolicy {
     fn read(root: &Path) -> Result<Self> {
-        let path = root.join(".config/performance.toml");
+        let path = root.join(".config/performance-policy.toml");
         let policy: Self = toml::from_str(&fs::read_to_string(&path).map_err(|failure| {
             error(format!(
                 "qualified performance policy unavailable: {failure}"

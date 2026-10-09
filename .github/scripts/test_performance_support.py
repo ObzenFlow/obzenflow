@@ -124,9 +124,9 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(self.calls[-1], ["cargo", "xtask", "performance", "--help"])
 
     def test_absent_interfaces_are_unsupported_before_any_probe(self):
-        (self.root / ".config/performance-suite.toml").unlink()
+        (self.root / ".config/performance-shards.toml").unlink()
         self.assertEqual(support.detect(self.root, self.probe()), support.Detection(
-            "unsupported", ".config/performance-suite.toml is absent"))
+            "unsupported", ".config/performance-shards.toml is absent"))
         self.assertEqual(self.calls, [])
 
     def test_missing_or_older_formatter_is_unsupported(self):
@@ -148,7 +148,7 @@ class DetectTests(unittest.TestCase):
 
     def test_malformed_configuration_and_probe_errors_are_not_relabelled_unsupported(self):
         for prepare, probe, expected in [
-            (lambda: self.write(".config/performance.toml", "version = [\n"), self.probe(), "malformed"),
+            (lambda: self.write(".config/performance-policy.toml", "version = [\n"), self.probe(), "malformed"),
             (lambda: None, self.probe(formatter=(1, "ImportError: no module")), "ImportError"),
             (lambda: None, self.probe(xtask=(101, "error[E0425]: cannot find value")), "E0425"),
             (lambda: None, self.probe(xtask=(127, "No such file or directory: 'cargo'")), "cargo"),
@@ -180,7 +180,7 @@ class DetectTests(unittest.TestCase):
             self.assertIn("**UNSUPPORTED**. No measurements ran.", markdown)
             self.assertIn(f"| Measured checkout SHA | {sha} |", markdown)
             self.assertIn("| Requested revision | 0.2.5 |", markdown)
-            self.assertIn(".config/performance.toml is absent", markdown)
+            self.assertIn(".config/performance-policy.toml is absent", markdown)
             self.assertEqual(summary.read_text(), markdown)
 
     def test_failed_detection_report_is_labelled_distinctly(self):

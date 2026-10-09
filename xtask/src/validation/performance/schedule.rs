@@ -10,6 +10,7 @@ use super::*;
 use std::process::Command;
 
 pub(super) const PLAN: &str = "plan.json";
+const SHARDS: &str = ".config/performance-shards.toml";
 pub(super) const HOT_PATH: &str = "journal_hot_path";
 pub(super) const BOUNDARIES: &str = "validation_boundaries";
 pub(super) const READER_CONTROL: &str = "reader_dispatch/full/actual_reader/readers_8";
@@ -123,9 +124,7 @@ pub(super) fn inventory(root: &Path) -> Result<Vec<Target>> {
 
 pub(super) fn plan(root: &Path, run_id: &str, policy: &ComparisonPolicy) -> Result<RunPlan> {
     let targets = inventory(root)?;
-    let config: Config = toml::from_str(&fs::read_to_string(
-        root.join(".config/performance-suite.toml"),
-    )?)?;
+    let config: Config = toml::from_str(&fs::read_to_string(root.join(SHARDS))?)?;
     validate(&config, &targets, policy)?;
     Ok(RunPlan {
         run_id: run_id.into(),
@@ -157,7 +156,7 @@ fn validate(config: &Config, targets: &[Target], policy: &ComparisonPolicy) -> R
     let mut problems = Vec::new();
     if config.version != 2 {
         problems.push(format!(
-            "unsupported suite configuration version {}",
+            "unsupported shard configuration version {}",
             config.version
         ));
     }
@@ -253,10 +252,7 @@ fn validate(config: &Config, targets: &[Target], policy: &ComparisonPolicy) -> R
     if problems.is_empty() {
         Ok(())
     } else {
-        Err(failed(format!(
-            "invalid performance suite configuration: {}",
-            problems.join("; ")
-        )))
+        Err(failed(format!("invalid {SHARDS}: {}", problems.join("; "))))
     }
 }
 
@@ -397,10 +393,8 @@ mod tests {
         assert!(targets
             .iter()
             .all(|t| !t.features.iter().any(|f| f == "allocation-census")));
-        let config: Config = toml::from_str(
-            &fs::read_to_string(root.join(".config/performance-suite.toml")).unwrap(),
-        )
-        .unwrap();
+        let config: Config =
+            toml::from_str(&fs::read_to_string(root.join(SHARDS)).unwrap()).unwrap();
         validate(&config, &targets, &policy()).unwrap();
         let groups = build_groups(&targets);
         assert_eq!(
@@ -441,7 +435,7 @@ mod tests {
             (format!("version = 2\n[[qualification]]\nname = \"q\"\ncases = {all}\n{suite}[[suite]]\nname = \"s\"\nselect = [{{ target = \"a\", cases = \"^x/\" }}]\n"), "invalid or duplicate name"),
             (format!("version = 2\n[[qualification]]\nname = \"q\"\ncases = {all}\n{suite}[[suite]]\nname = \"t\"\nselect = [{{ target = \"a\", cases = \"^x/\" }}]\n"), "a is selected whole and again"),
             (format!("version = 2\n[[qualification]]\nname = \"q\"\ncases = {all}\n[[suite]]\nname = \"s\"\nselect = [{{ target = \"a\", cases = \"x/\" }}, {{ target = \"b\" }}]\n"), "is not anchored"),
-            (format!("version = 1\n[[qualification]]\nname = \"q\"\ncases = {all}\n{suite}"), "unsupported suite configuration version"),
+            (format!("version = 1\n[[qualification]]\nname = \"q\"\ncases = {all}\n{suite}"), "unsupported shard configuration version"),
         ] {
             let failure = validate(&config(&text), &targets, &policy).unwrap_err();
             assert!(failure.is::<crate::validation::CheckFailed>(), "{failure}");

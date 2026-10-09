@@ -25,7 +25,7 @@ import tomllib
 VERSION = re.compile(r"v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)")
 SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 IDENTITY = re.compile(r"[0-9a-f]{64}")
-CONFIGURATION = (".config/performance.toml", ".config/performance-suite.toml")
+CONFIGURATION = (".config/performance-policy.toml", ".config/performance-shards.toml")
 FORMATTER = ".github/scripts/criterion_report.py"
 FORMATTER_FLAGS = ("--performance-dir", "--output-dir", "--outcome")
 # The workflow runs each of these on its own runner (B7).
