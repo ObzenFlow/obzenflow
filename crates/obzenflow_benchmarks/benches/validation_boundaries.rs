@@ -6,6 +6,7 @@
 //! in integration tests. Every iteration validates completed work after timing.
 
 use criterion::{criterion_group, criterion_main, Criterion};
+use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_benchmarks::support::{
     runtime,
     validation::{Archive, ObserverJournals},
@@ -19,9 +20,11 @@ fn case(
     c: &mut Criterion,
     census: &mut Vec<Value>,
     name: &str,
+    (category, timed): (Category, &str),
     input: Value,
     mut operation: impl FnMut() -> (Duration, Value),
 ) {
+    declare(name, category, timed);
     let mut captured = false;
     c.bench_function(name, |b| {
         b.iter_custom(|iterations| {
@@ -62,6 +65,17 @@ fn bench(c: &mut Criterion) {
             c,
             &mut census,
             &name,
+            if operation == "export" {
+                (
+                    Category::Archive,
+                    "JSONL export of an existing 1,000-input archive",
+                )
+            } else {
+                (
+                    Category::Archive,
+                    "Open, admit and fully read a 1,000-input archive",
+                )
+            },
             json!({"inputs":1000,"payload_bytes":256,"metrics":false,"storage":"disk","filesystem_cache":"warm"}),
             || {
                 let archive = &*archive;
@@ -115,6 +129,10 @@ fn bench(c: &mut Criterion) {
         c,
         &mut census,
         "replay_validation/streaming_comparison/inputs_10000",
+        (
+            Category::Archive,
+            "Compare existing live/replay 10,000-input archives; execution and report writing excluded",
+        ),
         json!({"inputs":10_000,"payload_bytes":256,"stages":2,"write_report":false,"storage":"disk","filesystem_cache":"warm"}),
         || {
             let archive = &*replay;
@@ -157,6 +175,10 @@ fn bench(c: &mut Criterion) {
         c,
         &mut census,
         "metrics_validation/tail_refresh/data_and_error_64",
+        (
+            Category::Observe,
+            "One stage metrics snapshot from 66 data and one error record",
+        ),
         json!({"data_records":66,"error_records":1,"stage_count":1,"readers":{"data":1,"error":1},"storage":"disk"}),
         || {
             let fixture = &*observers;
@@ -184,6 +206,10 @@ fn bench(c: &mut Criterion) {
         c,
         &mut census,
         "studio_validation/project_and_snapshot/inputs_64",
+        (
+            Category::Observe,
+            "Project 69 preloaded records to frames, measurements and snapshots; journal reads excluded",
+        ),
         json!({"inputs":64,"payload_bytes":256,"data_records":66,"error_records":1,"system_records":2,"stages":1,"preloaded_records":true}),
         || studio.measure(),
     );

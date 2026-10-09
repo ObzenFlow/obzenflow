@@ -14,7 +14,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<()> {
+/// The candidate's adapters for one reference commit, by its first six digits.
+fn adapter(revision: &str) -> Result<String> {
+    let prefix = revision
+        .get(..6)
+        .filter(|prefix| prefix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| error(format!("{revision}: not a commit identity")))?;
+    Ok(format!("src/support/reference_{prefix}"))
+}
+
+pub(super) fn install(
+    root: &Path,
+    baseline: &Path,
+    artifacts: &Path,
+    revision: &str,
+) -> Result<()> {
     let mut applied = BTreeMap::new();
     let crate_path = Path::new("crates/obzenflow_benchmarks");
     // Copy an entire, coherent outer crate. Source layout and framework internals
@@ -40,6 +54,22 @@ pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<
             &fs::read(source)?,
             &mut applied,
         )?;
+    }
+    // A versioned outer adapter bridges a public API change between this
+    // reference and the candidate (080v B10). Its files replace their support
+    // namesakes; payloads, workloads and the preserved framework are untouched.
+    let versioned = adapter(revision)?;
+    let directory = root.join(crate_path).join(&versioned);
+    let adapter = directory.is_dir().then_some(versioned);
+    if adapter.is_some() {
+        for name in tree(&directory)?.into_keys() {
+            write(
+                baseline,
+                &format!("crates/obzenflow_benchmarks/src/support/{name}"),
+                &fs::read(directory.join(&name))?,
+                &mut applied,
+            )?;
+        }
     }
     // The driver owns its dependency declaration. Synchronise only its package's
     // lock entry, preserving the reference's resolved production dependencies.
@@ -80,6 +110,7 @@ pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<
             "purpose": "identical public-operation benchmark driver for reference and candidate",
             "production_source_replaced": false,
             "framework_files_modified": [],
+            "reference_public_api_adapter": adapter,
             "applied_files_sha256": applied,
         }))?,
     )?;
@@ -197,6 +228,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn intact_reference_cache_is_reusable_but_pruned_source_is_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let extracted = workspace.path().join("extracted");
+        fs::create_dir(&extracted).unwrap();
+        fs::write(extracted.join("source.rs"), "reference").unwrap();
+        let (source, target) = reference(workspace.path(), &extracted, artifacts.path()).unwrap();
+        fs::create_dir(&extracted).unwrap();
+        fs::write(extracted.join("source.rs"), "reference").unwrap();
+        assert_eq!(
+            reference(workspace.path(), &extracted, artifacts.path()).unwrap(),
+            (source.clone(), target)
+        );
+        fs::remove_file(source.join("source.rs")).unwrap();
+        assert!(reference(workspace.path(), &extracted, artifacts.path())
+            .unwrap_err()
+            .to_string()
+            .contains("preserved reference source changed"));
+    }
+
+    #[test]
     fn public_driver_changes_only_its_outer_crate_and_lock_entry() {
         let candidate = tempfile::tempdir().unwrap();
         let reference = tempfile::tempdir().unwrap();
@@ -234,7 +286,34 @@ mod tests {
         )
         .unwrap();
         let before = tree(reference.path()).unwrap();
-        install(candidate.path(), reference.path(), artifacts.path()).unwrap();
+        let adapter = candidate
+            .path()
+            .join("crates/obzenflow_benchmarks/src/support/reference_abc123/data_event.rs");
+        fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+        fs::write(&adapter, "versioned public constructor adapter").unwrap();
+        let unadapted = tempfile::tempdir().unwrap();
+        install(
+            candidate.path(),
+            reference.path(),
+            unadapted.path(),
+            "def4560000000000000000000000000000000000",
+        )
+        .unwrap();
+        let record: serde_json::Value = serde_json::from_slice(
+            &fs::read(unadapted.path().join("measurement-driver.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            record["reference_public_api_adapter"].is_null(),
+            "another reference's adapter never applies"
+        );
+        install(
+            candidate.path(),
+            reference.path(),
+            artifacts.path(),
+            "abc1230000000000000000000000000000000000",
+        )
+        .unwrap();
         let after = tree(reference.path()).unwrap();
         for (path, identity) in &after {
             if before.get(path) != Some(identity) {
@@ -259,6 +338,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record["framework_files_modified"], json!([]));
+        assert_eq!(
+            record["reference_public_api_adapter"],
+            "src/support/reference_abc123"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                reference
+                    .path()
+                    .join("crates/obzenflow_benchmarks/src/support/data_event.rs")
+            )
+            .unwrap(),
+            "versioned public constructor adapter"
+        );
         assert_eq!(
             record["measurement_contract"],
             super::super::MEASUREMENT_CONTRACT

@@ -36,10 +36,9 @@ pub fn execution_fact(stage: StageId, payload_bytes: usize) -> ChainEvent {
 }
 
 pub fn business(stage: StageId, payload_bytes: usize) -> ChainEvent {
-    ChainEventFactory::data_event(
+    super::data_event(
         stage.into(),
         "bench.business",
-        std::num::NonZeroU32::MIN,
         serde_json::json!({"body":"x".repeat(payload_bytes)}),
     )
 }

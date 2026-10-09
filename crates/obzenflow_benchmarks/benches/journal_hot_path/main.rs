@@ -12,6 +12,7 @@ mod workloads;
 use criterion::{criterion_group, Criterion};
 use std::time::Duration;
 
+pub(crate) use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_benchmarks::support;
 pub(crate) use support::{journal as fixtures, measure, timed, Census, Meter, Sample};
 

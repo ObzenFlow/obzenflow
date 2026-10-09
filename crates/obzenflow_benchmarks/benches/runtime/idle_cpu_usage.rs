@@ -4,15 +4,18 @@
 
 //! Idle CPU Usage Benchmark
 //!
-//! Measures CPU usage when the pipeline is idle (no events flowing).
-//! This validates that the event-driven design doesn't waste resources
-//! with busy-waiting or polling when there's no work to do.
+//! Measures process CPU time used while a started pipeline is idle (no events
+//! flowing). This validates that the event-driven design doesn't waste
+//! resources with busy-waiting or polling when there's no work to do.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_benchmarks::prelude::*;
+use obzenflow_benchmarks::process_cpu_time;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
@@ -25,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::{Pid, ProcessExt, System, SystemExt};
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
 
@@ -325,112 +327,67 @@ async fn build_pipeline(
     Ok(handle)
 }
 
-/// Measure CPU usage of an idle pipeline
-async fn measure_idle_cpu() -> anyhow::Result<f64> {
-    let (journals_base_path, _temp_dir) = create_temp_journals_base("idle_cpu")?;
+const SETTLE: Duration = Duration::from_millis(500);
+const WINDOW: Duration = Duration::from_secs(2);
 
-    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let idle_source = IdleSource::new();
-        let (timestamped_sink, _) = TimestampedSink::new(0);
-
-        Ok(flow! {
-            journals: disk_journals(journals_base_path),
-
-            stages: {
-                src = source!(BenchEvent => idle_source);
-                snk = sink!(BenchEvent => timestamped_sink);
-            },
-
-            topology: {
-                src |> snk;
-            }
-        })
-    });
-
-    let handle = flow_definition
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
-
-    // Start the pipeline (do not await completion; we want to measure idle CPU while running)
+/// Untimed: build, start, settle and stop. Measured: process CPU time used in
+/// the window. A flow that leaves its running state fails the sample.
+async fn idle_window(stage_count: usize) -> anyhow::Result<Duration> {
+    let test_name = format!("idle_cpu_{stage_count}_stages");
+    let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
+    let (sink, _) = TimestampedSink::new(0);
+    let handle = build_pipeline(stage_count, IdleSource::new(), sink, journals_base_path).await?;
     handle
         .start()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {e:?}"))?;
 
-    // Let pipeline stabilize
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Measure CPU over 2 seconds
-    let mut system = System::new_all();
-    let pid = Pid::from(std::process::id() as usize);
-
-    system.refresh_process(pid);
-    let mut cpu_samples = Vec::new();
-
-    // Take 20 samples over 2 seconds
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        system.refresh_process(pid);
-
-        if let Some(process) = system.process(pid) {
-            cpu_samples.push(process.cpu_usage());
-        }
-    }
-
-    // Calculate average CPU usage
-    let avg_cpu = if !cpu_samples.is_empty() {
-        cpu_samples.iter().sum::<f32>() / cpu_samples.len() as f32
-    } else {
-        0.0
-    };
+    tokio::time::sleep(SETTLE).await;
+    let before = process_cpu_time();
+    tokio::time::sleep(WINDOW).await;
+    let used = process_cpu_time().saturating_sub(before);
+    let state = handle.current_state();
 
     // Stop the pipeline so benchmark iterations don't leak background tasks.
-    let _ = handle.stop_cancel().await;
+    handle
+        .stop_cancel()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to stop pipeline: {e:?}"))?;
     handle.wait_for_completion().await?;
-
-    Ok(avg_cpu as f64)
+    anyhow::ensure!(
+        matches!(state, PipelineState::Running),
+        "flow left its idle running state during the window: {state:?}"
+    );
+    Ok(used)
 }
 
-/// Benchmark idle CPU usage
-fn bench_idle_cpu_usage(c: &mut Criterion) {
+/// Benchmark idle process CPU time across pipeline depths
+fn bench_idle_process_cpu(c: &mut Criterion) {
     obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("idle_cpu_usage");
+    let mut group = c.benchmark_group("idle_process_cpu");
 
-    // Configure for CPU measurement
-    group.sample_size(10); // Minimum required by Criterion
-    group.measurement_time(Duration::from_secs(45)); // Increased for CPU measurement stability
+    // Every iteration includes untimed setup and the fixed window.
+    group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(45));
 
-    group.bench_function("cpu_percentage", |b| {
-        b.to_async(&rt).iter(|| async {
-            // Let Criterion measure the actual function execution time
-            let cpu_percentage = measure_idle_cpu().await.unwrap();
-            // Could log the CPU percentage here if needed
-            cpu_percentage
-        });
-    });
-
-    group.finish();
-}
-
-/// Benchmark idle CPU with different pipeline depths
-fn bench_idle_cpu_by_depth(c: &mut Criterion) {
-    obzenflow_benchmarks::init_tracing();
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("idle_cpu_by_depth");
-
-    group.sample_size(10); // Minimum required by Criterion
-    group.measurement_time(Duration::from_secs(45)); // Increased for CPU measurement stability
-
-    let stage_counts = vec![1, 10, 20, 100];
-
-    for stage_count in stage_counts {
-        group.bench_function(format!("{stage_count}_stages"), |b| {
-            b.to_async(&rt).iter(|| async {
-                // Let Criterion measure the actual function execution time
-                let cpu_percentage = measure_idle_cpu_with_stages(stage_count).await.unwrap();
-                cpu_percentage
+    for stage_count in [1, 10, 20, 100] {
+        let function = format!("window_2s/stages_{stage_count}");
+        declare(
+            &format!("idle_process_cpu/{function}"),
+            Category::Runtime,
+            &format!(
+                "Process CPU time in a 2 s idle window after a 500 ms settle; {stage_count}-stage flow; 2,000,000 µs is one logical CPU fully busy"
+            ),
+        );
+        group.bench_function(function, |b| {
+            b.to_async(&rt).iter_custom(|iterations| async move {
+                let mut used = Duration::ZERO;
+                for _ in 0..iterations {
+                    used += idle_window(stage_count).await.unwrap();
+                }
+                used
             });
         });
     }
@@ -438,53 +395,5 @@ fn bench_idle_cpu_by_depth(c: &mut Criterion) {
     group.finish();
 }
 
-/// Measure idle CPU with a specific number of stages
-async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64> {
-    let test_name = format!("idle_cpu_{stage_count}_stages");
-    let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
-
-    let idle_source = IdleSource::new();
-    let (sink, _) = TimestampedSink::new(0);
-
-    // Build pipeline with specified stages
-    let handle = build_pipeline(stage_count, idle_source, sink, journals_base_path).await?;
-
-    handle
-        .start()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {e:?}"))?;
-
-    // Let stabilize
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Measure CPU
-    let mut system = System::new_all();
-    let pid = Pid::from(std::process::id() as usize);
-
-    system.refresh_process(pid);
-    let mut cpu_samples = Vec::new();
-
-    for _ in 0..20 {
-        // 2 seconds of sampling
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        system.refresh_process(pid);
-
-        if let Some(process) = system.process(pid) {
-            cpu_samples.push(process.cpu_usage());
-        }
-    }
-
-    let avg_cpu = if !cpu_samples.is_empty() {
-        cpu_samples.iter().sum::<f32>() / cpu_samples.len() as f32
-    } else {
-        0.0
-    };
-
-    let _ = handle.stop_cancel().await;
-    handle.wait_for_completion().await?;
-
-    Ok(avg_cpu as f64)
-}
-
-criterion_group!(benches, bench_idle_cpu_usage, bench_idle_cpu_by_depth);
+criterion_group!(benches, bench_idle_process_cpu);
 criterion_main!(benches);

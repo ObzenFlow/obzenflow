@@ -5,6 +5,9 @@
 //! Explicit shared fixtures and measurement support for component benchmarks.
 //! Framework dependencies expose only their ordinary consumer contracts.
 
+mod data_event;
+pub use data_event::data_event;
+
 #[cfg(feature = "journal-benchmarks")]
 pub mod allocations;
 #[cfg(feature = "journal-benchmarks")]

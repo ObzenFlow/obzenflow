@@ -1,0 +1,354 @@
+name: Performance
+run-name: Performance ${{ inputs.revision || format('latest {0}', github.ref_name) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Version (0.2.6 or v0.2.6) or commit SHA contained in the selected branch or tag; blank = its latest commit"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+# Explicitly requested measurements; never a PR, main or release prerequisite.
+# FLOWIP-080v B7: plan, build each group once, then qualification and suite shards
+# on separate runners, then one always-run report. Shards never cancel each other.
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
+      RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      REPORT_DIR: ${{ github.workspace }}/target/performance-reports/${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+      supported: ${{ steps.support.outputs.outcome }}
+      # Later jobs keep the planning attempt's identity, including on re-runs.
+      run_id: ${{ github.run_id }}-${{ github.run_attempt }}
+      builds: ${{ steps.plan.outputs.builds }}
+      qualification: ${{ steps.plan.outputs.qualification }}
+      suite: ${{ steps.plan.outputs.suite }}
+    steps:
+      # The dispatched ref's own workflow and history. Nothing from the requested
+      # revision runs before the containment gate (FLOWIP-080v B4).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Retain trusted workflow helpers
+        run: cp .github/scripts/performance_support.py "$RUNNER_TEMP/performance_support.py"
+      - name: Publish trusted workflow helpers
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-helper
+          path: ${{ runner.temp }}/performance_support.py
+          retention-days: 1
+          if-no-files-found: error
+      - name: Resolve measurement revision
+        id: revision
+        env:
+          REQUESTED_REVISION: ${{ inputs.revision }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: python3 "$RUNNER_TEMP/performance_support.py" resolve
+      - name: Switch to the measured revision
+        env:
+          MEASURED_SHA: ${{ steps.revision.outputs.sha }}
+        run: git checkout --force --detach "$MEASURED_SHA"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Restore the validator build
+        id: builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: performance-plan-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ steps.revision.outputs.sha }}
+          restore-keys: |
+            performance-plan-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+      # FLOWIP-080v B3: support comes from the selected checkout's interfaces.
+      # Unsupported or failed detection reports itself and starts no benchmarks.
+      - name: Detect performance support
+        id: support
+        env:
+          REQUESTED_REVISION: ${{ inputs.revision }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: python3 "$RUNNER_TEMP/performance_support.py" detect --report-dir "$REPORT_DIR"
+      - name: Plan the run
+        id: plan
+        run: cargo xtask performance plan --run-id "$RUN_ID"
+      - name: Publish the plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-plan
+          path: |
+            target/test-runs/${{ env.RUN_ID }}/performance/plan.json
+            target/test-runs/${{ env.RUN_ID }}/performance/comparison-policy.json
+          retention-days: 1
+          if-no-files-found: error
+      # Measurement and report jobs run this binary; they install no toolchain.
+      - name: Publish the validator
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-validator
+          path: target/debug/xtask
+          retention-days: 1
+          if-no-files-found: error
+      - name: Prune non-reusable compilation output
+        if: ${{ !cancelled() && steps.builds.outputs.cache-hit != 'true' && steps.support.outputs.outcome == 'supported' }}
+        run: python3 "$RUNNER_TEMP/performance_support.py" prune
+      - name: Save the validator build
+        if: ${{ !cancelled() && steps.builds.outputs.cache-hit != 'true' && steps.support.outputs.outcome == 'supported' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: ${{ steps.builds.outputs.cache-primary-key }}
+      - name: Upload the unsupported report
+        if: ${{ always() && steps.support.outcome != 'skipped' && steps.support.outputs.outcome != 'supported' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.REPORT_DIR }}/*.md
+          archive: false
+          if-no-files-found: error
+
+  build:
+    name: Build (${{ matrix.group }})
+    needs: plan
+    if: ${{ needs.plan.result == 'success' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.plan.outputs.builds) }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
+      RUN_ID: ${{ needs.plan.outputs.run_id }}
+      GROUP: ${{ matrix.group }}
+    steps:
+      # Full history: the reference is archived from it.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Retrieve trusted workflow helpers
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-helper
+          path: ${{ runner.temp }}
+      - name: Retrieve the plan
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-plan
+          path: target/test-runs/${{ env.RUN_ID }}/performance
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Restore intact performance builds
+        id: builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/validation-reference
+            target/validation-candidate
+          key: performance-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance-policy.toml') }}-${{ needs.plan.outputs.sha }}
+          restore-keys: |
+            performance-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml', '.config/performance-policy.toml') }}-
+      - name: Build the group
+        run: cargo xtask performance build --run-id "$RUN_ID" --group "$GROUP"
+      - name: Prune non-reusable compilation output
+        if: ${{ !cancelled() && steps.builds.outputs.cache-hit != 'true' }}
+        run: python3 "$RUNNER_TEMP/performance_support.py" prune --performance-dir "target/test-runs/$RUN_ID/performance"
+      - name: Save intact performance builds
+        if: ${{ !cancelled() && steps.builds.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/validation-reference
+            target/validation-candidate
+          key: ${{ steps.builds.outputs.cache-primary-key }}
+      # plan.json keeps the common root at performance/ for merged downloads.
+      - name: Publish executables and build evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-stage-build-${{ matrix.group }}
+          path: |
+            target/test-runs/${{ env.RUN_ID }}/performance/plan.json
+            target/test-runs/${{ env.RUN_ID }}/performance/build/${{ matrix.group }}/
+            !target/test-runs/**/baseline.tar
+            !target/test-runs/**/baseline-source/**
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  qualify:
+    name: Qualify (${{ matrix.shard }})
+    needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.qualification) }}
+    env:
+      RUN_ID: ${{ needs.plan.outputs.run_id }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Retrieve the validator
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-validator
+          path: ${{ runner.temp }}/validator
+      - name: Retrieve the plan and executables
+        uses: actions/download-artifact@v4
+        with:
+          pattern: performance-stage-build-*
+          merge-multiple: true
+          path: target/test-runs/${{ env.RUN_ID }}/performance
+      - name: Qualify the shard
+        run: |
+          chmod +x "$RUNNER_TEMP/validator/xtask"
+          "$RUNNER_TEMP/validator/xtask" performance qualify --run-id "$RUN_ID" --shard "$SHARD"
+      - name: Publish qualification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-stage-qualification-${{ matrix.shard }}
+          path: |
+            target/test-runs/${{ env.RUN_ID }}/performance/plan.json
+            target/test-runs/${{ env.RUN_ID }}/performance/qualification/${{ matrix.shard }}/
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  measure:
+    name: Measure (${{ matrix.shard }})
+    needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.suite) }}
+    env:
+      RUN_ID: ${{ needs.plan.outputs.run_id }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Retrieve the validator
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-validator
+          path: ${{ runner.temp }}/validator
+      - name: Retrieve the plan and executables
+        uses: actions/download-artifact@v4
+        with:
+          pattern: performance-stage-build-*
+          merge-multiple: true
+          path: target/test-runs/${{ env.RUN_ID }}/performance
+      - name: Measure the shard
+        run: |
+          chmod +x "$RUNNER_TEMP/validator/xtask"
+          "$RUNNER_TEMP/validator/xtask" performance measure --run-id "$RUN_ID" --shard "$SHARD"
+      - name: Publish suite evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-stage-suite-${{ matrix.shard }}
+          path: |
+            target/test-runs/${{ env.RUN_ID }}/performance/plan.json
+            target/test-runs/${{ env.RUN_ID }}/performance/suite/${{ matrix.shard }}/
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  report:
+    needs: [plan, build, qualify, measure]
+    if: ${{ always() && needs.plan.outputs.supported == 'supported' }}
+    runs-on: ubuntu-24.04
+    env:
+      RUN_ID: ${{ needs.plan.outputs.run_id }}
+      REPORT_DIR: ${{ github.workspace }}/target/performance-reports/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Retrieve the validator
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-validator
+          path: ${{ runner.temp }}/validator
+      # Missing stage evidence settles as incomplete in assembly; keep going.
+      - name: Retrieve the plan
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-plan
+          path: target/test-runs/${{ env.RUN_ID }}/performance
+      - name: Retrieve every stage's evidence
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: performance-stage-*
+          merge-multiple: true
+          path: target/test-runs/${{ env.RUN_ID }}/performance
+      - name: Assemble the run
+        id: assemble
+        if: ${{ !cancelled() }}
+        run: |
+          chmod +x "$RUNNER_TEMP/validator/xtask"
+          "$RUNNER_TEMP/validator/xtask" performance assemble --run-id "$RUN_ID"
+      - name: Preserve validation and Criterion evidence
+        id: evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-performance
+          path: |
+            target/test-runs/${{ env.RUN_ID }}/performance/
+            !target/test-runs/**/*.executable
+          if-no-files-found: error
+      - name: Write the performance report
+        if: ${{ always() }}
+        env:
+          PERFORMANCE_OUTCOME: ${{ steps.assemble.outcome }}
+          CRITERION_ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
+        run: >-
+          python3 .github/scripts/criterion_report.py
+          --performance-dir "target/test-runs/$RUN_ID/performance"
+          --output-dir "$REPORT_DIR"
+          --outcome "$PERFORMANCE_OUTCOME"
+      - name: Upload the copyable performance report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.REPORT_DIR }}/*.md
+          archive: false
+          if-no-files-found: error

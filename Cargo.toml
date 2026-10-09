@@ -210,6 +210,14 @@ test-support = [
 lto = true
 codegen-units = 1
 
+# Benchmark executables for profilers (FLOWIP-080v B8). Line tables keep inlined
+# frames in flame graphs; frame pointers come from Cargo `--config` rustflags,
+# as the benchmark README shows.
+[profile.profiling]
+inherits = "bench"
+debug = "line-tables-only"
+strip = false
+
 # Benchmarks have been moved to crates/obzenflow_benchmarks
 # Run benchmarks with: cargo bench -p obzenflow_benchmarks
 

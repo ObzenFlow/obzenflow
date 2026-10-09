@@ -635,3 +635,43 @@ fn default_and_explicit_performance_report_only_their_requested_scope() {
         assert_eq!(report["outcome"]["status"], "passed");
     }
 }
+
+#[test]
+fn help_advertises_every_lane_for_capability_detection() {
+    let text = help();
+    let lanes = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Lanes: "))
+        .unwrap();
+    let advertised: Vec<_> = lanes.split(", ").collect();
+    let declared: Vec<_> = Lane::ALL.iter().map(|lane| lane.name()).collect();
+    assert_eq!(advertised, declared);
+    assert!(advertised.contains(&"performance"));
+}
+
+#[test]
+fn incomplete_obligations_dominate_failures_and_keep_their_class() {
+    let named = |outcome: Outcome| ("check".to_owned(), outcome);
+    assert!(settle(&[named(Outcome::Passed)]).is_ok());
+    let failure = settle(&[
+        named(Outcome::Failed("rejected".into())),
+        named(Outcome::Passed),
+    ])
+    .unwrap_err();
+    assert!(failure.is::<CheckFailed>());
+    assert_eq!(
+        Outcome::of(&Err(failure)),
+        Outcome::Failed("check: rejected".into())
+    );
+    let incomplete = settle(&[
+        named(Outcome::Failed("rejected".into())),
+        named(Outcome::Incomplete("interrupted".into())),
+    ])
+    .unwrap_err();
+    assert!(!incomplete.is::<CheckFailed>());
+    assert!(incomplete.to_string().contains("interrupted"));
+    assert!(Outcome::Failed("x".into())
+        .into_result()
+        .unwrap_err()
+        .is::<CheckFailed>());
+}

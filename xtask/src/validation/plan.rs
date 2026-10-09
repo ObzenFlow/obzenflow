@@ -64,17 +64,19 @@ pub(super) enum Lane {
     JournalFixtures,
     Doctest,
     Postgres,
+    Benchmarks,
     Performance,
 }
 
 impl Lane {
-    pub(super) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 8] = [
         Self::Default,
         Self::ProductionFeatures,
         Self::TestSupport,
         Self::JournalFixtures,
         Self::Doctest,
         Self::Postgres,
+        Self::Benchmarks,
         Self::Performance,
     ];
 
@@ -93,6 +95,7 @@ impl Lane {
             Self::JournalFixtures => "journal-fixtures",
             Self::Doctest => "doctest",
             Self::Postgres => "postgres",
+            Self::Benchmarks => "benchmarks",
             Self::Performance => "performance",
         }
     }

@@ -6,7 +6,7 @@
 mod fresh_process;
 pub(super) use fresh_process::run_child;
 
-use super::{fixtures, measure, timed, Census};
+use super::{declare, fixtures, measure, timed, Category, Census};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::observability::*;
@@ -268,9 +268,29 @@ pub fn bench(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
                 count as u64
             }));
             let name = format!("{operation}/{label}");
+            let full = format!("hotspots/{name}");
+            let (category, boundary) = match operation {
+                "append" => (
+                    Category::Append,
+                    "Append 64 records including authored cloning and causal preparation",
+                ),
+                "sequential_read" => (
+                    Category::Read,
+                    "Read 1,024 records; reader creation excluded",
+                ),
+                "reopened_scan" => (
+                    Category::Read,
+                    "Reopen journal, create reader and scan 1,024 records; warmed process",
+                ),
+                _ => (
+                    Category::Read,
+                    "Create one reader over a prefilled 1,024-record journal",
+                ),
+            };
+            declare(&full, category, boundary);
             let mut taken = false;
             let input = serde_json::json!({"records":count,"inherited_clock_width":width,"observations":observations,"distinct_provenance":distinct,"payload_bytes":payload,"workers":2,"sync_on_write":false,"reopened_scan_includes_open":true});
-            group.bench_function(&name, |b| measure(b, censuses, &mut taken, &format!("hotspots/{name}"), &input, || {
+            group.bench_function(&name, |b| measure(b, censuses, &mut taken, &full, &input, || {
                 let (rows, mut sample) = if operation == "append" {
                     let directory = tempfile::tempdir().unwrap();
                     let path = directory.path().join("write.log");
@@ -323,6 +343,11 @@ pub fn bench(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
     let fixture = LazyCell::new(|| rt.block_on(Fixture::new(1025, false, false, 256)));
     let mut taken = false;
     group.throughput(Throughput::Elements(RECORDS as u64));
+    declare(
+        "hotspots/append/clock_1025_absent_control",
+        Category::Append,
+        "Append 64 records including authored cloning and causal preparation",
+    );
     group.bench_function("append/clock_1025_absent_control", |b| measure(b, censuses, &mut taken,
         "hotspots/append/clock_1025_absent_control", &serde_json::json!({"records":RECORDS,"inherited_clock_width":1025,"advanced_inputs":1024,"observations":false,"payload_bytes":256}), || {
             let fixture = &*fixture;
@@ -367,6 +392,11 @@ fn cross_journal_reads(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Censu
         })
     });
     let mut taken = false;
+    declare(
+        "cross_journal_reads/eight_journals_1024_records",
+        Category::Read,
+        "Create readers and scan eight journals, 128 records each",
+    );
     group.bench_function("eight_journals_1024_records", |b| measure(b, censuses, &mut taken,
         "cross_journal_reads/eight_journals_1024_records", &serde_json::json!({"journals":8,"records_per_journal":READ_RECORDS/8,"total_records":READ_RECORDS,"clock_width":33,"observations":true,"workers":2,"includes_reader_creation":true}), || {
             let journals = &*journals;
@@ -392,6 +422,11 @@ fn observations(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
     let mut group = c.benchmark_group("observation_handling");
     group.throughput(Throughput::Elements(RECORDS as u64));
     let mut capture_taken = false;
+    declare(
+        "observation_handling/capture_for_record",
+        Category::Observe,
+        "64 observation captures and live offers",
+    );
     group.bench_function("capture_for_record", |b| {
             measure(b, censuses, &mut capture_taken, "observation_handling/capture_for_record",
                 &serde_json::json!({"captures":RECORDS,"includes_live_offer":true,"processing_time_ns":125000}), || {
@@ -442,13 +477,23 @@ fn observations(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
                     "validation"
                 }
             );
+            let full = format!("observation_handling/{name}");
+            declare(
+                &full,
+                Category::Observe,
+                if live {
+                    "Submit 64 observation packets"
+                } else {
+                    "Validate 64 observation packets"
+                },
+            );
             let mut taken = false;
             group.bench_function(&name, |b| {
                 measure(
                     b,
                     censuses,
                     &mut taken,
-                    &format!("observation_handling/{name}"),
+                    &full,
                     &serde_json::json!({"packets":RECORDS,"clock_width":width}),
                     || {
                         let packets: Vec<_> = fixture
@@ -537,6 +582,15 @@ fn tails(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
                 "metrics/{stages}_journals/{}",
                 if advancing { "advancing" } else { "unchanged" }
             );
+            let full = format!("journal_refresh/{name}");
+            declare(
+                &full,
+                Category::Observe,
+                &format!(
+                    "Refresh metrics tails (journal count: {stages}, {}); append setup excluded",
+                    if advancing { "advancing" } else { "unchanged" }
+                ),
+            );
             let mut taken = false;
             group.throughput(Throughput::Elements(stages));
             group.bench_function(&name, |b| {
@@ -544,7 +598,7 @@ fn tails(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
                     b,
                     censuses,
                     &mut taken,
-                    &format!("journal_refresh/{name}"),
+                    &full,
                     &serde_json::json!({"journals":stages,"advancing":advancing}),
                     || {
                         let journals = journals.get_or_insert_with(|| {
@@ -612,6 +666,11 @@ fn tails(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) {
     let fixture = LazyCell::new(|| rt.block_on(Fixture::new(33, true, false, 256)));
     let mut taken = false;
     group.throughput(Throughput::Elements(RECORDS as u64));
+    declare(
+        "journal_refresh/append_after_eof",
+        Category::ReadWrite,
+        "64 append, read and EOF-check pairs",
+    );
     group.bench_function("append_after_eof", |b| {
         measure(
             b,
@@ -696,6 +755,11 @@ fn cache_workloads(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) 
     group.sample_size(10);
     let mut taken = false;
     group.throughput(Throughput::Elements(192));
+    declare(
+        "mixed_journal/distinct_12mib_then_reuse",
+        Category::ReadWrite,
+        "192 interleaved appends and reads; 96 distinct 128 KiB provenance entries, then reuse",
+    );
     group.bench_function("distinct_12mib_then_reuse", |b| measure(b, censuses, &mut taken,
         "mixed_journal/distinct_12mib_then_reuse", &serde_json::json!({"records":192,"distinct_provenance_bytes":12*1024*1024,"rounds":2}), || {
             let mut fixture = rt.block_on(Fixture::new(33, true, false, 256));
@@ -732,6 +796,11 @@ fn cache_workloads(c: &mut Criterion, rt: &Runtime, censuses: &mut Vec<Census>) 
     });
     let mut taken = false;
     group.throughput(Throughput::Elements((2 * RECORDS) as u64));
+    declare(
+        "mixed_journal/two_concurrent_scans",
+        Category::Read,
+        "Create two readers and concurrently scan 64 records each",
+    );
     group.bench_function("two_concurrent_scans", |b| {
         measure(
             b,

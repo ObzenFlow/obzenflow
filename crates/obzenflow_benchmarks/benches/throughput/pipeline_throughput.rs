@@ -6,6 +6,7 @@
 //! Fixture/build and output checks are excluded; start, publication and drain are timed.
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
@@ -165,6 +166,11 @@ fn bench(c: &mut Criterion) {
         ("disk_constrained_capacity_2", false, false, false, true),
         ("disk_sparse_arrivals", false, false, true, false),
     ] {
+        declare(
+            &format!("completed_flow/{name}"),
+            Category::Flow,
+            "128-input completed flow through drain; build excluded",
+        );
         let mut reported = false;
         group.bench_function(name, |b| b.iter_custom(|iterations| {
             let mut elapsed = Duration::ZERO;

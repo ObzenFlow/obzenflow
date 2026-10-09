@@ -4,6 +4,7 @@
 
 use super::fixtures;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
+use obzenflow_benchmarks::case::{declare, Category};
 use obzenflow_core::event::{CausalCoordinate, CausalFrontier, JournalClock};
 use obzenflow_core::journal::limits::record_bytes;
 use obzenflow_core::EventId;
@@ -22,6 +23,31 @@ pub fn bench(c: &mut Criterion) {
             (record, input, previous, overlapping)
         });
         let id = format!("w{width}_p{payload}");
+        for (operation, timed) in [
+            ("journal_clock_restore", "Restore one journal clock"),
+            (
+                "byte_accounting",
+                "Canonical JSON byte accounting for one record",
+            ),
+            (
+                "frontier_from_record",
+                "Extract one record's causal frontier",
+            ),
+            (
+                "merge_overlapping",
+                "Merge two overlapping frontiers; target cloning excluded",
+            ),
+            (
+                "prepare_append",
+                "Prepare one append clock; no physical append",
+            ),
+        ] {
+            declare(
+                &format!("causal_components/{operation}/{id}"),
+                Category::Causal,
+                timed,
+            );
+        }
         group.bench_function(BenchmarkId::new("journal_clock_restore", &id), |b| {
             let (record, _, _, _) = &*fixture;
             b.iter(|| black_box(JournalClock::from_record(black_box(record)).unwrap()));

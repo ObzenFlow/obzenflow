@@ -132,6 +132,9 @@ fn run() -> Result<()> {
         [cmd, rest @ ..] if cmd == "studio-jobs" => run_studio_jobs(rest),
         [cmd, rest @ ..] if cmd == "postgres" => postgres::run(rest),
         [cmd, rest @ ..] if cmd == "test" => validation::run(&workspace_root()?, rest),
+        [cmd, rest @ ..] if cmd == "performance" => {
+            validation::run_performance(&workspace_root()?, rest)
+        }
         [cmd, artifacts, invocation, source] if cmd == "__postgres-test" => {
             postgres::run_validation(&workspace_root()?, Path::new(artifacts), invocation, source)
         }
@@ -780,6 +783,7 @@ fn print_help() {
     println!("  cargo xtask studio-jobs <up|down|status>");
     println!("  cargo xtask postgres <up|status|connection|run|test|logs|down|cleanup>");
     println!("  cargo xtask test [--lane <lane>]");
+    println!("  cargo xtask performance <plan|build|qualify|measure|assemble> --run-id <id>");
     println!("  cargo xtask regenerate-journal-fixtures");
 }
 

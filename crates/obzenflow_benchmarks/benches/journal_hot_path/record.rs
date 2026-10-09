@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{fixtures, measure, timed, Census, Sample};
+use super::{declare, fixtures, measure, timed, Category, Census, Sample};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::event::JournalClock;
 use obzenflow_core::journal::limits::record_bytes;
@@ -17,6 +17,24 @@ enum Operation {
     CloneClock,
     ClockBytes,
     ReadRecords,
+}
+
+impl Operation {
+    fn declared(self) -> (Category, &'static str) {
+        match self {
+            Self::CanonicalBytes => (
+                Category::Causal,
+                "Canonical JSON byte accounting for one record",
+            ),
+            Self::RestoreClock => (Category::Causal, "Restore one journal clock"),
+            Self::CloneClock => (Category::Causal, "Clone one vector clock"),
+            Self::ClockBytes => (
+                Category::Causal,
+                "Canonical JSON byte accounting for one clock",
+            ),
+            Self::ReadRecords => (Category::Read, "Open a reader and read/admit two records"),
+        }
+    }
 }
 
 fn operation(f: &fixtures::RecordFixture, op: Operation, runtime: &Runtime) -> Sample {
@@ -116,16 +134,14 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
         for (dimensions, fixture) in &fixtures {
             for (label, op) in operations {
                 let case = format!("{label}/{}", dimensions.name());
+                let full = format!("{name}/{case}");
+                let (category, boundary) = op.declared();
+                declare(&full, category, boundary);
                 let mut taken = false;
                 group.bench_function(&case, |b| {
-                    measure(
-                        b,
-                        censuses,
-                        &mut taken,
-                        &format!("{name}/{case}"),
-                        &dimensions.json(),
-                        || operation(fixture, *op, runtime),
-                    )
+                    measure(b, censuses, &mut taken, &full, &dimensions.json(), || {
+                        operation(fixture, *op, runtime)
+                    })
                 });
             }
         }
