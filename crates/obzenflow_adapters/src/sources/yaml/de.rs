@@ -4,90 +4,23 @@
 
 //! Serde over one snapshot record, with typed and safe errors (FLOWIP-084n B6).
 //!
-//! The error type classifies by which serde hook fired and drops serde's text
-//! and rejected values. Field names come only from serde's static struct and
-//! variant lists, so input-controlled map keys are redacted.
+//! The shared [`RecordDeError`] classifies by serde hook and redacts
+//! input-controlled map keys; this module adds YAML node positions.
 
 use super::document::{Node, NodeKind};
-use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
+use obzenflow_core::event::SourceDiagnosticReason;
+use obzenflow_runtime::stages::source::RecordDeError;
 use serde::de::value::StrDeserializer;
-use serde::de::{self, DeserializeSeed, Expected, Unexpected, VariantAccess, Visitor};
-use std::fmt;
+use serde::de::{self, DeserializeSeed, VariantAccess, Visitor};
 
-#[derive(Debug)]
-pub(super) struct RecordDeError(SourceDiagnostic);
-
-impl RecordDeError {
-    fn new(reason: SourceDiagnosticReason) -> Self {
-        Self(SourceDiagnostic::new(reason))
-    }
-
-    pub(super) fn into_diagnostic(self) -> SourceDiagnostic {
-        self.0
-    }
-
+trait AtNode {
     /// The innermost node that failed supplies the position.
+    fn at(self, node: &Node) -> Self;
+}
+
+impl AtNode for RecordDeError {
     fn at(self, node: &Node) -> Self {
-        if self.0.location().position().is_some() {
-            return self;
-        }
-        Self(self.0.position(node.start.line, node.start.column))
-    }
-
-    fn within_key(self, key: &str, known: Option<&'static [&'static str]>) -> Self {
-        match known.and_then(|names| names.iter().find(|name| **name == key)) {
-            Some(name) => Self(self.0.within_field(name)),
-            None => Self(self.0.within_redacted()),
-        }
-    }
-
-    fn within_index(self, index: usize) -> Self {
-        Self(
-            self.0
-                .within_index(u32::try_from(index).unwrap_or(u32::MAX)),
-        )
-    }
-}
-
-impl fmt::Display for RecordDeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl std::error::Error for RecordDeError {}
-
-impl de::Error for RecordDeError {
-    fn custom<T: fmt::Display>(_message: T) -> Self {
-        Self::new(SourceDiagnosticReason::InvalidRecord)
-    }
-
-    fn missing_field(field: &'static str) -> Self {
-        Self(SourceDiagnostic::new(SourceDiagnosticReason::MissingField).within_field(field))
-    }
-
-    fn unknown_field(_field: &str, _expected: &'static [&'static str]) -> Self {
-        Self(SourceDiagnostic::new(SourceDiagnosticReason::UnknownField).within_redacted())
-    }
-
-    fn duplicate_field(field: &'static str) -> Self {
-        Self(SourceDiagnostic::new(SourceDiagnosticReason::DuplicateKey).within_field(field))
-    }
-
-    fn invalid_type(_unexpected: Unexpected<'_>, _expected: &dyn Expected) -> Self {
-        Self::new(SourceDiagnosticReason::InvalidValue)
-    }
-
-    fn invalid_value(_unexpected: Unexpected<'_>, _expected: &dyn Expected) -> Self {
-        Self::new(SourceDiagnosticReason::InvalidValue)
-    }
-
-    fn invalid_length(_len: usize, _expected: &dyn Expected) -> Self {
-        Self::new(SourceDiagnosticReason::InvalidValue)
-    }
-
-    fn unknown_variant(_variant: &str, _expected: &'static [&'static str]) -> Self {
-        Self::new(SourceDiagnosticReason::InvalidValue)
+        self.at_position(node.start.line, node.start.column)
     }
 }
 
@@ -326,7 +259,7 @@ impl<'de, 'a> VariantAccess<'de> for NodeVariantAccess<'a> {
 mod tests {
     use super::super::document::parse;
     use super::*;
-    use obzenflow_core::event::{FieldName, FieldSegment};
+    use obzenflow_core::event::{FieldName, FieldSegment, SourceDiagnostic};
     use serde::de::DeserializeOwned;
     use serde::Deserialize;
     use std::collections::HashMap;

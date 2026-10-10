@@ -112,12 +112,7 @@ impl HttpEndpoint for SingleEventEndpoint {
             if let Err(e) = validate_submission(&submission, validation) {
                 if let Some(response) = self
                     .state
-                    .record_refusal_or_unavailable(
-                        IngressRefusalReason::Validation,
-                        &attempt,
-                        400,
-                        None,
-                    )
+                    .record_validation_refusal_or_unavailable(&attempt, vec![e.diagnostic()])
                     .await?
                 {
                     return Ok(response);

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::SystemPayload;
+use obzenflow_core::event::{SourceDiagnostic, SystemPayload};
 use obzenflow_core::ingress::{
     EdgeShedReason, EventSubmission, HostedIngressBindingSlot, IngressAdmissionDecision,
     IngressAdmissionOutcome, IngressAttemptContext, IngressAttemptSeq, IngressBoundaryMiddleware,
@@ -216,6 +216,18 @@ impl IngestionState {
         http_status: u16,
         retry_after: Option<Duration>,
     ) -> Result<(), IngressRefusalRecordError> {
+        self.append_refusal(reason, attempt, http_status, retry_after, Vec::new())
+            .await
+    }
+
+    async fn append_refusal(
+        &self,
+        reason: IngressRefusalReason,
+        attempt: &IngressAttemptContext,
+        http_status: u16,
+        retry_after: Option<Duration>,
+        diagnostics: Vec<SourceDiagnostic>,
+    ) -> Result<(), IngressRefusalRecordError> {
         if !self.config.record_ingress_refusals {
             return Ok(());
         }
@@ -245,6 +257,7 @@ impl IngestionState {
             // Coarse bucket matching the second-granularity `Retry-After`
             // the client receives, so audit and response agree.
             retry_after_ms_bucket: retry_after.map(|d| d.as_secs().max(1).saturating_mul(1000)),
+            diagnostics,
         };
         writer
             .record_ingress_refusal(payload)
@@ -267,10 +280,35 @@ impl IngestionState {
         http_status: u16,
         retry_after: Option<Duration>,
     ) -> Result<Option<ManagedResponse>, EndpointError> {
-        match self
+        let recorded = self
             .record_refusal(reason, attempt, http_status, retry_after)
-            .await
-        {
+            .await;
+        Self::evidence_or_unavailable(recorded)
+    }
+
+    /// Record a validation refusal with one diagnostic per refused event, or
+    /// fail closed like [`Self::record_refusal_or_unavailable`].
+    pub(crate) async fn record_validation_refusal_or_unavailable(
+        &self,
+        attempt: &IngressAttemptContext,
+        diagnostics: Vec<SourceDiagnostic>,
+    ) -> Result<Option<ManagedResponse>, EndpointError> {
+        let recorded = self
+            .append_refusal(
+                IngressRefusalReason::Validation,
+                attempt,
+                400,
+                None,
+                diagnostics,
+            )
+            .await;
+        Self::evidence_or_unavailable(recorded)
+    }
+
+    fn evidence_or_unavailable(
+        recorded: Result<(), IngressRefusalRecordError>,
+    ) -> Result<Option<ManagedResponse>, EndpointError> {
+        match recorded {
             Ok(()) => Ok(None),
             Err(e) => {
                 tracing::warn!(

@@ -6,6 +6,7 @@
 
 mod erased;
 pub(crate) mod prepared;
+mod record_de;
 #[doc(hidden)]
 pub mod traits;
 pub(crate) mod typed;
@@ -16,9 +17,10 @@ pub use erased::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
+pub use record_de::RecordDeError;
 pub use traits::SourceError;
 pub use typed::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, SourceObservationSink,
+    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord, SourceObservationSink,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
 };

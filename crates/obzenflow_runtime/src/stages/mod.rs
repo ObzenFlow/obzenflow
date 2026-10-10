@@ -18,9 +18,9 @@ pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig, HostedIngressSource,
-    InferenceHandler, IngressDecodeError, IngressDecoder, InlineSink, ObserverHandler,
-    ProcessingContext, ResourceManaged, SignalDecision, SignalGate, SinkConnector, SinkDescription,
-    SinkWriter, SinkWriterInitContext, SourceObservationSink, StatefulEmission,
+    InferenceHandler, IngressDecodeError, IngressDecoder, IngressRecord, InlineSink,
+    ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate, SinkConnector,
+    SinkDescription, SinkWriter, SinkWriterInitContext, SourceObservationSink, StatefulEmission,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler, TypedStatefulHandler,
 };

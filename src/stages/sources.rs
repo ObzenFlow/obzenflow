@@ -51,31 +51,146 @@
 //!
 //! ## CSV sources
 //!
+//! A CSV source reads the file and asks the application for one thing, a
+//! [`CsvDecoder`] that names the event each row becomes. When the columns match
+//! the event's fields, naming [`CsvDecoder::Output`] is enough, because the
+//! default `decode` uses serde. Override `decode` when the shapes differ.
+//!
+//! ```rust
+//! use obzenflow::schema::TypedPayload;
+//! use obzenflow::stages::sources::{CsvDecoder, CsvSource};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! struct Customer {
+//!     customer_id: String,
+//!     tier: String,
+//! }
+//!
+//! impl TypedPayload for Customer {
+//!     const EVENT_TYPE: &'static str = "support.customer";
+//! }
+//!
+//! #[derive(Clone)]
+//! struct CustomerCsv;
+//!
+//! impl CsvDecoder for CustomerCsv {
+//!     type Output = Customer;
+//! }
+//!
+//! let customers = CsvSource::builder(CustomerCsv)
+//!     .path("customers.csv")
+//!     .build()?;
+//! // Inside flow!'s stages block: customers = source!(Customer => customers);
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+//!
 //! [`CsvSource`] (via [`CsvSourceBuilder`]) is cold, reusable configuration.
 //! The supervisor opens an independent [`CsvReader`] only when live input is
 //! required. Building and cloning it do no file I/O, so strict replay works even
 //! when the original CSV is unavailable. Input/header errors occur at startup.
-//! A user-owned [`CsvDecoder`] value declares the emitted [`CsvDecoder::Output`].
-//! Its default method uses serde when the CSV and domain shapes match;
 //! [`CsvRowDecoder`] provides string-preserving [`CsvRow`] output.
 //!
 //! ## YAML sources
 //!
-//! [`YamlSource`] reads one bounded YAML document. A [`YamlSelection`] names
-//! the records: the whole document, a root sequence, or a sequence at an
-//! RFC 6901 pointer. An application-owned [`YamlDecoder`] declares the output
-//! and decodes each [`YamlRecord`]; a [`YamlDecodeError`] rejects only that
-//! record, and reading continues. Aliases, anchors, tags,
-//! merge keys and duplicate keys fail opening.
+//! A YAML source reads one bounded document and asks the application for one
+//! method, [`YamlDecoder::decode`], which turns each selected [`YamlRecord`]
+//! into an event. A [`YamlSelection`] names the records: the whole document, a
+//! root sequence, or a sequence at an RFC 6901 pointer.
+//!
+//! ```rust
+//! use obzenflow::schema::TypedPayload;
+//! use obzenflow::stages::sources::{
+//!     YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+//! };
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! struct AccountOpened {
+//!     account_id: String,
+//!     initial_balance_cents: i64,
+//! }
+//!
+//! impl TypedPayload for AccountOpened {
+//!     const EVENT_TYPE: &'static str = "bank.account_opened";
+//! }
+//!
+//! #[derive(Clone)]
+//! struct AccountYaml;
+//!
+//! impl YamlDecoder for AccountYaml {
+//!     type Output = AccountOpened;
+//!
+//!     fn decode(&self, record: YamlRecord<'_>) -> Result<AccountOpened, YamlDecodeError> {
+//!         let account: AccountOpened = record.deserialize()?;
+//!         if account.initial_balance_cents < 0 {
+//!             return Err(YamlDecodeError::invalid_value("initial_balance_cents"));
+//!         }
+//!         Ok(account)
+//!     }
+//! }
+//!
+//! let accounts = YamlSource::builder(AccountYaml)
+//!     .path("accounts.yaml")
+//!     .selection(YamlSelection::SequenceAt("/accounts".into()))
+//!     .build()?;
+//! // Inside flow!'s stages block: accounts = source!(AccountOpened => accounts);
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+//!
+//! A [`YamlDecodeError`] rejects only that record, and reading continues.
+//! `decode` has no default, because a YAML output may be a sum of several fact
+//! types. Building does no file I/O. Aliases, anchors, tags, merge keys and
+//! duplicate keys fail opening.
 //!
 //! ## Hosted ingress sources
 //!
-//! [`HostedIngressSource`] receives admitted push submissions. A user-owned
-//! [`IngressDecoder`] value declares the emitted [`IngressDecoder::Output`],
-//! matching the output ownership used by CSV and HTTP pull decoders. Register
-//! it through `FlowApplication::builder().http_ingress(decoder, config)` (or
-//! `.ingress` for another transport). Custom hosting can explicitly compose
-//! bundles with [`crate::application::ingress::ingress_source`] or
+//! A hosted ingress source receives admitted push submissions and asks the
+//! application for an [`IngressDecoder`] that names the event each body
+//! becomes. The default `decode` deserializes the [`IngressRecord`] with serde.
+//! Override it for a record-local rule; an [`IngressDecodeError`] refuses that
+//! submission, and the journalled refusal names the field.
+//!
+//! ```rust
+//! use obzenflow::schema::TypedPayload;
+//! use obzenflow::stages::sources::{IngressDecodeError, IngressDecoder, IngressRecord};
+//! use serde::{Deserialize, Serialize};
+//! use serde_json::json;
+//!
+//! #[derive(Debug, Clone, Serialize, Deserialize)]
+//! struct LedgerEntry {
+//!     account_id: String,
+//!     amount_cents: u64,
+//! }
+//!
+//! impl TypedPayload for LedgerEntry {
+//!     const EVENT_TYPE: &'static str = "bank.ledger_entry";
+//! }
+//!
+//! #[derive(Clone)]
+//! struct LedgerIngress;
+//!
+//! impl IngressDecoder for LedgerIngress {
+//!     type Output = LedgerEntry;
+//!
+//!     fn decode(&self, record: IngressRecord<'_>) -> Result<LedgerEntry, IngressDecodeError> {
+//!         let entry: LedgerEntry = record.deserialize()?;
+//!         if entry.amount_cents == 0 {
+//!             return Err(IngressDecodeError::invalid_value("amount_cents"));
+//!         }
+//!         Ok(entry)
+//!     }
+//! }
+//!
+//! let zero = json!({"account_id": "acct-1", "amount_cents": 0});
+//! let refused = LedgerIngress.decode(IngressRecord::new(&zero)).unwrap_err();
+//! assert_eq!(refused.to_string(), "invalid value in field amount_cents");
+//! ```
+//!
+//! Register the decoder through `FlowApplication::builder().http_ingress(decoder,
+//! config)` (or `.ingress` for another transport), which returns the
+//! [`HostedIngressSource`]. Custom hosting can explicitly compose bundles with
+//! [`crate::application::ingress::ingress_source`] or
 //! [`crate::application::ingress::http_ingress`].
 //!
 //! ## HTTP pull sources
@@ -110,7 +225,9 @@ pub use obzenflow_adapters::sources::{
 
 pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
 /// Hosted-ingress source and its application-owned decoder contract.
-pub use obzenflow_adapters::sources::{HostedIngressSource, IngressDecodeError, IngressDecoder};
+pub use obzenflow_adapters::sources::{
+    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
+};
 
 /// HTTP pull and poll sources, decoders, and configuration types.
 pub use obzenflow_adapters::sources::{

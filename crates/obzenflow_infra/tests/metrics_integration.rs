@@ -249,6 +249,7 @@ async fn ingress_refusal_facts_do_not_invent_latest_value_totals() {
                 batch_count: 0,
                 http_status: 429,
                 retry_after_ms_bucket: Some(1000),
+                diagnostics: Vec::new(),
             },
         )
     };

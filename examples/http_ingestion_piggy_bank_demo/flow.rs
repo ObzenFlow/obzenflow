@@ -29,6 +29,8 @@
 //! - Accounts are fixed at startup. `joins::inner` hydrates every account before
 //!   any transaction joins, so there is no startup race for unknown accounts.
 //! - Entries for accounts missing from `accounts.yaml` are dropped by the join.
+//! - A zero-amount or malformed entry is refused with `400`, and the system journal
+//!   records the refusal with the field it names.
 //! - Strict replay (`-- --replay-from <run-dir>`) reuses the archived accounts and
 //!   never reopens `accounts.yaml`.
 //! - Transaction ingress has its own rate limiter.
@@ -49,7 +51,8 @@ use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{
-    HostedIngressSource, IngressDecoder, YamlDecodeError, YamlDecoder, YamlRecord, YamlSource,
+    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord, YamlDecodeError,
+    YamlDecoder, YamlRecord, YamlSource,
 };
 use obzenflow::stages::{joins, sinks};
 use std::path::PathBuf;
@@ -71,11 +74,20 @@ impl YamlDecoder for AccountYaml {
     }
 }
 
+/// Decodes one posted ledger entry; a zero amount rejects only that entry.
 #[derive(Clone, Debug)]
 pub(crate) struct LedgerIngress;
 
 impl IngressDecoder for LedgerIngress {
     type Output = LedgerEntry;
+
+    fn decode(&self, record: IngressRecord<'_>) -> Result<LedgerEntry, IngressDecodeError> {
+        let entry: LedgerEntry = record.deserialize()?;
+        if entry.amount_cents == 0 {
+            return Err(IngressDecodeError::invalid_value("amount_cents"));
+        }
+        Ok(entry)
+    }
 }
 
 pub fn build_flow(
