@@ -1007,6 +1007,17 @@ impl FlowApplication {
                 Ok(())
             }
             (Err(err), flow_name, run_state, _) => {
+                let err = match (&run_mode, run_state.as_ref().and_then(|s| s.locator())) {
+                    (super::run_mode::RunMode::Replay(ctx), Some(locator)) => {
+                        super::replay_stop::refine_replay_failure(
+                            err,
+                            &ctx.archive_path,
+                            locator.path(),
+                        )
+                        .await
+                    }
+                    _ => err,
+                };
                 if let Some(presentation) = &presentation {
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(RunPresentationOutcome::Failed {

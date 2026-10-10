@@ -24,6 +24,8 @@ pub const MAX_FIELD_PATH_DEPTH: usize = 16;
 pub enum SourceDiagnosticReason {
     InputUnavailable,
     InputClosed,
+    /// The pinned input's version changed (FLOWIP-134i B10).
+    InputChanged,
     TimedOut,
     RateLimited,
     RemoteRejected,
@@ -48,6 +50,7 @@ impl SourceDiagnosticReason {
         match self {
             Self::InputUnavailable => "the input is unavailable",
             Self::InputClosed => "the input closed",
+            Self::InputChanged => "the input changed while it was being read",
             Self::TimedOut => "the input timed out",
             Self::RateLimited => "the input rate-limited the request",
             Self::RemoteRejected => "the remote service rejected the request",

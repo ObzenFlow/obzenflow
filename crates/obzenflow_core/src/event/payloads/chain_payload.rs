@@ -74,9 +74,12 @@ impl ChainPayload {
                     EventKind::CompositeData,
                     "ai.map_reduce.reduce_input" | "ai.map_reduce.chunk_failed",
                 )
-                | (EventKind::Execution, "obzenflow.sink_operation_failed" | "source.poll_error") => {
-                    2
-                }
+                | (
+                    EventKind::Execution,
+                    "obzenflow.sink_operation_failed"
+                    | "source.poll_error"
+                    | "runtime.source.cleanup_failed",
+                ) => 2,
                 _ => 1,
             };
             if payload_schema_version.get() != expected {
@@ -224,12 +227,19 @@ impl ChainPayload {
                 | ExecutionPayload::SinkOperationFailed(_)
                 | ExecutionPayload::EffectAttemptStarted(_)
                 | ExecutionPayload::EffectRecoveryAbandoned(_) => ReplayDisposition::ReAdmit,
-                ExecutionPayload::SinkAudit(_)
+                ExecutionPayload::SourceInputPinned(_) => ReplayDisposition::Preserve,
+                ExecutionPayload::SourcePositioned(_)
+                | ExecutionPayload::SourceStartedOnResume(_)
+                | ExecutionPayload::SourceContinuationRefused(_)
+                | ExecutionPayload::SourceSeekFailed(_)
+                | ExecutionPayload::SinkAudit(_)
                 | ExecutionPayload::EffectRecord(_)
                 | ExecutionPayload::ReplayLifecycle(_)
                 | ExecutionPayload::SupervisorRegistered { .. }
                 | ExecutionPayload::SupervisorCommandDiscarded { .. }
-                | ExecutionPayload::SourceCleanupFailed { .. }
+                | ExecutionPayload::SourceReaderAcquired(_)
+                | ExecutionPayload::SourceCleanupSucceeded(_)
+                | ExecutionPayload::SourceCleanupFailed(_)
                 | ExecutionPayload::ContractStatus { .. }
                 | ExecutionPayload::ContractResult { .. }
                 | ExecutionPayload::StageLifecycle(_)

@@ -11,8 +11,8 @@ mod replay_testkit;
 use async_trait::async_trait;
 use obzenflow::middleware::circuit_breaker;
 use obzenflow::stages::sources::{
-    AsyncFiniteSourceConnector, FiniteSourceConnector, SourceReaderInitContext,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    AsyncFiniteSourceConnector, FiniteSourceConnector, PositionedFiniteReader,
+    SourceReaderInitContext, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow::stages::sources::{
     ChannelSource, CsvDecoder, CsvSource, CursorlessPullDecoder, DecodeError, HttpPullConfig,
@@ -138,6 +138,20 @@ fn csv_unknown_variant() -> SourceError {
     reader.next().expect_err("unknown variant is rejected")
 }
 
+fn csv_appended_between_polls() -> SourceError {
+    let mut file = input(b"tier\nGold\nGold\n");
+    let mut reader = CsvSource::builder(TierCsv)
+        .path(file.path())
+        .chunk_size(1)
+        .build()
+        .unwrap()
+        .open(context())
+        .unwrap();
+    reader.next().expect("the first row reads");
+    file.write_all(b"Gold\n").unwrap();
+    reader.next().expect_err("the input changed")
+}
+
 #[derive(Clone, Debug)]
 struct Items;
 
@@ -213,6 +227,7 @@ async fn produce(reason: SourceDiagnosticReason) -> Option<SourceError> {
     Some(match reason {
         InputUnavailable => csv_missing(),
         InputClosed => closed_channel().await,
+        InputChanged => csv_appended_between_polls(),
         TimedOut => http(Reply::TimedOut).await,
         RateLimited => http(Reply::Status(429, Some("3600"))).await,
         RemoteRejected => http(Reply::Status(401, None)).await,
@@ -237,6 +252,7 @@ async fn every_reason_has_a_real_producer() {
     let reasons = [
         InputUnavailable,
         InputClosed,
+        InputChanged,
         TimedOut,
         RateLimited,
         RemoteRejected,

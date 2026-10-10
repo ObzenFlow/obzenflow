@@ -14,6 +14,7 @@ use super::reader::DiskJournalReader;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::archive::manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
@@ -22,6 +23,7 @@ use obzenflow_core::journal::archive::manifest::{
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -37,11 +39,14 @@ pub struct DiskReplayArchive {
     allow_incomplete_archive: bool,
     read_write_lock: Arc<RwLock<()>>,
     /// Max generation with a recorded catch-up boundary in any source journal
-    /// (FLOWIP-120n), scanned once at open. See [`scan_recorded_maxima`].
+    /// (FLOWIP-120n), scanned once at open. See [`scan_source_journals`].
     max_recorded_generation: obzenflow_core::ReaderGeneration,
     /// Max recorded admission sequence in any source journal (FLOWIP-120n
     /// F18), from the same scan. Seeds the resuming run's flow sequencer.
     max_recorded_admission_seq: obzenflow_core::AdmissionSeq,
+    /// Each source journal's committed EOF kind (FLOWIP-134i B8), from the
+    /// same scan.
+    recorded_source_eof: HashMap<String, EofKind>,
 }
 
 impl DiskReplayArchive {
@@ -161,7 +166,7 @@ impl DiskReplayArchive {
             return Err(ReplayError::IncompleteArchive { status });
         }
 
-        let (max_recorded_generation, max_recorded_admission_seq) = scan_recorded_maxima(
+        let scan = scan_source_journals(
             &archive_path,
             &manifest,
             ReadPolicy::SealedScan {
@@ -173,11 +178,11 @@ impl DiskReplayArchive {
             .as_ref()
             .map(|resume| resume.resume_generation)
             .unwrap_or(0);
-        if entered_generation > max_recorded_generation.0 {
+        if entered_generation > scan.max_generation.0 {
             tracing::debug!(
                 archive_path = %archive_path.display(),
                 manifest_generation = entered_generation,
-                scanned_generation = max_recorded_generation.0,
+                scanned_generation = scan.max_generation.0,
                 "torn catch-up: the manifest's entered generation has no recorded \
                  boundary in any source journal; the journal scan is authoritative"
             );
@@ -190,8 +195,9 @@ impl DiskReplayArchive {
             status_derivation,
             allow_incomplete_archive,
             read_write_lock: Arc::new(RwLock::new(())),
-            max_recorded_generation,
-            max_recorded_admission_seq,
+            max_recorded_generation: scan.max_generation,
+            max_recorded_admission_seq: scan.max_admission_seq,
+            recorded_source_eof: scan.eof_by_source,
         })
     }
 
@@ -381,6 +387,10 @@ impl ReplayArchive for DiskReplayArchive {
         keys
     }
 
+    fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind> {
+        self.recorded_source_eof.get(stage_key).copied()
+    }
+
     fn archive_path(&self) -> &Path {
         &self.archive_path
     }
@@ -410,8 +420,17 @@ impl ReplayArchive for DiskReplayArchive {
     }
 }
 
-/// Scan the archive's source journals once and return the max recorded
-/// generation and admission sequence, `0` each when none exists (FLOWIP-120n).
+/// What one open-time scan of the archive's source journals recorded.
+struct SourceJournalScan {
+    max_generation: obzenflow_core::ReaderGeneration,
+    max_admission_seq: obzenflow_core::AdmissionSeq,
+    /// Each source's committed EOF kind, by stage key (FLOWIP-134i B8).
+    eof_by_source: HashMap<String, EofKind>,
+}
+
+/// Scan the archive's source journals once for the max recorded generation
+/// and admission sequence, `0` each when none exists (FLOWIP-120n), and each
+/// source's committed EOF kind (FLOWIP-134i B8).
 /// The scan is the authority for the resume generation: a torn catch-up
 /// (interrupted before a source authored its watermark) leaves the manifest's
 /// entered generation with no recorded boundary, and entering past it would
@@ -419,23 +438,18 @@ impl ReplayArchive for DiskReplayArchive {
 /// maximum (F18) seeds the resuming run's flow sequencer above every
 /// re-admitted sequence. Cost: one sequential read per source journal at
 /// bootstrap, journals resume re-reads anyway.
-fn scan_recorded_maxima(
+fn scan_source_journals(
     archive_path: &Path,
     manifest: &RunManifest,
     policy: ReadPolicy,
-) -> Result<
-    (
-        obzenflow_core::ReaderGeneration,
-        obzenflow_core::AdmissionSeq,
-    ),
-    ReplayError,
-> {
+) -> Result<SourceJournalScan, ReplayError> {
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
     use obzenflow_core::event::ChainPayload;
 
     let mut max_generation = 0u64;
     let mut max_admission_seq = 0u64;
-    for stage_info in manifest.stages.values() {
+    let mut eof_by_source = HashMap::new();
+    for (stage_key, stage_info) in &manifest.stages {
         if !stage_info.stage_type.is_source() {
             continue;
         }
@@ -476,12 +490,14 @@ fn scan_recorded_maxima(
                 Disposition::Yield(frame) => {
                     for record in frame.into_records() {
                         admission.admit(&record).map_err(causal_admission_error)?;
-                        if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
-                            generation,
-                            ..
-                        }) = &record.payload
-                        {
-                            max_generation = max_generation.max(generation.0);
+                        if let ChainPayload::FlowControl(control) = &record.payload {
+                            if let FlowControlPayload::CatchUpComplete { generation, .. } = control
+                            {
+                                max_generation = max_generation.max(generation.0);
+                            }
+                            if let Some(kind) = control.eof_kind() {
+                                eof_by_source.insert(stage_key.clone(), kind);
+                            }
                         }
                         if let Some(seq) = record.envelope.provenance.event.admission_seq {
                             max_admission_seq = max_admission_seq.max(seq.0);
@@ -511,10 +527,11 @@ fn scan_recorded_maxima(
             }
         }
     }
-    Ok((
-        obzenflow_core::ReaderGeneration(max_generation),
-        obzenflow_core::AdmissionSeq(max_admission_seq),
-    ))
+    Ok(SourceJournalScan {
+        max_generation: obzenflow_core::ReaderGeneration(max_generation),
+        max_admission_seq: obzenflow_core::AdmissionSeq(max_admission_seq),
+        eof_by_source,
+    })
 }
 
 pub(crate) fn derive_status_derivation_from_system_log(

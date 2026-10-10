@@ -13,14 +13,17 @@
 mod de;
 mod document;
 
+use super::file_version::FileVersion;
 use document::Node;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::OneFactStageOutput;
 use obzenflow_runtime::stages::source::{
-    FiniteSourceConnector, SourceError, SourceReaderInitContext, TypedFiniteSourceHandler,
+    FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
+    SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -219,48 +222,97 @@ impl<D: YamlDecoder> SourceTyping for YamlSource<D> {
 impl<D: YamlDecoder> FiniteSourceConnector for YamlSource<D> {
     type Output = D::Output;
     type Reader = YamlReader<D>;
+    type Continuation = Seek<YamlPosition>;
 
     fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
-        let bytes = read_bounded(&self.path, self.max_bytes)?;
+        let (bytes, version) = read_bounded(&self.path, self.max_bytes)?;
+        let identity = SourceInputIdentity::new(
+            "yaml",
+            &YamlIdentityParts {
+                file: version,
+                selection: YamlSelectionPart::from(&self.selection),
+            },
+        )
+        .map_err(|_| SourceError::Other(SourceDiagnosticReason::Unclassified.into()))?;
         let root = document::parse(&bytes)?;
         let records = document::select(root, &self.selection)?;
         Ok(YamlReader {
-            records: records.into_iter(),
+            records,
             next_index: 0,
             batch_size: self.batch_size,
             pending: None,
             decoder: self.decoder.clone(),
+            identity,
         })
     }
 }
 
+/// The next selected-record index within the pinned selection
+/// (FLOWIP-134i B1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YamlPosition {
+    index: u64,
+}
+
+impl SourcePosition for YamlPosition {}
+
+/// What decides a YAML source's records and their order (FLOWIP-134i B9).
+#[derive(Serialize)]
+struct YamlIdentityParts<'a> {
+    file: FileVersion,
+    selection: YamlSelectionPart<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum YamlSelectionPart<'a> {
+    Document,
+    Sequence,
+    SequenceAt(&'a str),
+}
+
+impl<'a> From<&'a YamlSelection> for YamlSelectionPart<'a> {
+    fn from(selection: &'a YamlSelection) -> Self {
+        match selection {
+            YamlSelection::Document => Self::Document,
+            YamlSelection::Sequence => Self::Sequence,
+            YamlSelection::SequenceAt(pointer) => Self::SequenceAt(pointer),
+        }
+    }
+}
+
 /// Reads at most `max_bytes + 1`, so oversize input never reaches the parser.
-fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, SourceError> {
+/// The file version is taken before the read and verified after it
+/// (FLOWIP-134i B10).
+fn read_bounded(path: &Path, max_bytes: usize) -> Result<(Vec<u8>, FileVersion), SourceError> {
     let unavailable = || SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into());
     let limit = u64::try_from(max_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
+    let mut file = File::open(path).map_err(|_| unavailable())?;
+    let version = FileVersion::of(&file)?;
     let mut bytes = Vec::new();
-    File::open(path)
-        .map_err(|_| unavailable())?
+    (&mut file)
         .take(limit)
         .read_to_end(&mut bytes)
         .map_err(|_| unavailable())?;
+    version.verify(&file)?;
     if bytes.len() > max_bytes {
         return Err(SourceError::Validation(
             SourceDiagnosticReason::SizeLimitExceeded.into(),
         ));
     }
-    Ok(bytes)
+    Ok((bytes, version))
 }
 
 /// One independently owned cursor over an immutable snapshot.
 pub struct YamlReader<D> {
-    records: std::vec::IntoIter<Node>,
-    next_index: u64,
+    records: Vec<Node>,
+    next_index: usize,
     batch_size: usize,
     pending: Option<SourceError>,
     decoder: D,
+    identity: SourceInputIdentity,
 }
 
 impl<D: YamlDecoder> std::fmt::Debug for YamlReader<D> {
@@ -268,31 +320,66 @@ impl<D: YamlDecoder> std::fmt::Debug for YamlReader<D> {
         f.debug_struct("YamlReader")
             .field("decoder", &std::any::type_name::<D>())
             .field("next_index", &self.next_index)
-            .field("remaining", &self.records.len())
+            .field(
+                "remaining",
+                &self.records.len().saturating_sub(self.next_index),
+            )
             .finish_non_exhaustive()
     }
 }
 
-impl<D: YamlDecoder> TypedFiniteSourceHandler for YamlReader<D> {
+impl<D: YamlDecoder> SeekableSource for YamlReader<D> {
+    type Position = YamlPosition;
+
+    fn input_identity(&self) -> &SourceInputIdentity {
+        &self.identity
+    }
+
+    fn beginning(&self) -> YamlPosition {
+        YamlPosition { index: 0 }
+    }
+
+    /// A position past the pinned selection is corrupt evidence, not a record.
+    fn seek(&mut self, position: YamlPosition) -> Result<(), SourceError> {
+        let index = usize::try_from(position.index)
+            .ok()
+            .filter(|index| *index <= self.records.len())
+            .ok_or_else(|| SourceError::Other(SourceDiagnosticReason::UnexpectedShape.into()))?;
+        self.next_index = index;
+        self.pending = None;
+        Ok(())
+    }
+}
+
+/// One poll's records, each with the selected-record index after it.
+type YamlPoll<T> = Result<Option<Vec<SourceRecord<T, YamlPosition>>>, SourceError>;
+
+impl<D: YamlDecoder> PositionedFiniteReader for YamlReader<D> {
     type Output = D::Output;
 
     /// A rejection behind a valid prefix is reported on the next poll, so batch
     /// size never changes which records are admitted.
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+    fn next(&mut self) -> YamlPoll<Self::Output> {
         if let Some(rejection) = self.pending.take() {
             return Err(rejection);
         }
-        let mut batch = Vec::with_capacity(self.batch_size.min(self.records.len()));
+        let remaining = self.records.len().saturating_sub(self.next_index);
+        let mut batch = Vec::with_capacity(self.batch_size.min(remaining));
         while batch.len() < self.batch_size {
-            let Some(node) = self.records.next() else {
+            let Some(node) = self.records.get(self.next_index) else {
                 break;
             };
-            let index = self.next_index;
+            let index = u64::try_from(self.next_index).unwrap_or(u64::MAX);
             self.next_index = self.next_index.saturating_add(1);
-            match self.decoder.decode(YamlRecord { node: &node, index }) {
-                Ok(item) => batch.push(item),
+            match self.decoder.decode(YamlRecord { node, index }) {
+                Ok(value) => batch.push(SourceRecord {
+                    value,
+                    after: YamlPosition {
+                        index: index.saturating_add(1),
+                    },
+                }),
                 Err(error) => {
-                    let rejection = SourceError::Validation(error.locate(index, &node));
+                    let rejection = SourceError::Validation(error.locate(index, node));
                     if batch.is_empty() {
                         return Err(rejection);
                     }
@@ -372,7 +459,9 @@ mod tests {
         let mut errors = Vec::new();
         loop {
             match reader.next() {
-                Ok(Some(batch)) => ids.extend(batch.into_iter().map(|order| order.order_id)),
+                Ok(Some(batch)) => {
+                    ids.extend(batch.into_iter().map(|record| record.value.order_id));
+                }
                 Ok(None) => return (ids, errors),
                 Err(error) => errors.push(error),
             }
@@ -415,9 +504,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             whole.next().unwrap(),
-            Some(vec![Companies {
-                companies: vec!["a".into(), "b".into()],
-                aggregators: vec!["c".into()],
+            Some(vec![SourceRecord {
+                value: Companies {
+                    companies: vec!["a".into(), "b".into()],
+                    aggregators: vec!["c".into()],
+                },
+                after: YamlPosition { index: 1 },
             }])
         );
         assert_eq!(whole.next().unwrap(), None);
@@ -482,9 +574,9 @@ mod tests {
         let configured = source(&input, YamlSelection::Sequence, 1);
         let mut first = configured.open(context()).unwrap();
         let mut second = configured.open(context()).unwrap();
-        assert_eq!(first.next().unwrap().unwrap()[0].order_id, "a");
-        assert_eq!(first.next().unwrap().unwrap()[0].order_id, "b");
-        assert_eq!(second.next().unwrap().unwrap()[0].order_id, "a");
+        assert_eq!(first.next().unwrap().unwrap()[0].value.order_id, "a");
+        assert_eq!(first.next().unwrap().unwrap()[0].value.order_id, "b");
+        assert_eq!(second.next().unwrap().unwrap()[0].value.order_id, "a");
 
         assert!(YamlSource::builder(OrderYaml).build().is_err());
         assert!(YamlSource::builder(OrderYaml)
@@ -607,6 +699,76 @@ mod tests {
                 "invalid value in field amount_cents (line 3, column {})",
                 at.column.unwrap()
             )
+        );
+    }
+
+    #[test]
+    fn seeking_continues_at_the_next_selected_record() {
+        let input = file(&format!(
+            "orders:\n{}{}{}",
+            order("a", 1),
+            order("b", 0),
+            order("c", 1)
+        ));
+        let configured = source(&input, YamlSelection::SequenceAt("/orders".into()), 64);
+        let accepted = configured.open(context()).unwrap().next().unwrap().unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].after, YamlPosition { index: 1 });
+
+        // A rejection beyond the last accepted record is reported again.
+        let mut resumed = configured.open(context()).unwrap();
+        resumed.seek(accepted[0].after.clone()).unwrap();
+        let (ids, errors) = drain(&mut resumed);
+        assert_eq!(ids, ["c"]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].diagnostic().location().record_index(), Some(1));
+
+        let mut whole = configured.open(context()).unwrap();
+        let beginning = whole.beginning();
+        assert_eq!(drain(&mut whole).0, ["a", "c"]);
+        whole.seek(beginning).unwrap();
+        assert_eq!(drain(&mut whole).0, ["a", "c"]);
+
+        let mut exhausted = configured.open(context()).unwrap();
+        exhausted.seek(YamlPosition { index: 3 }).unwrap();
+        assert_eq!(exhausted.next().unwrap(), None);
+        let beyond = configured
+            .open(context())
+            .unwrap()
+            .seek(YamlPosition { index: 4 })
+            .unwrap_err();
+        // A seek failure is never record-local.
+        assert_eq!(beyond.kind(), SourcePollErrorKind::Other);
+    }
+
+    #[test]
+    fn identity_covers_the_file_and_selection_but_not_batch_size() {
+        let mut input = file(&format!("orders:\n{}", order("a", 1)));
+        let at = || YamlSelection::SequenceAt("/orders".into());
+        let pinned = source(&input, at(), 64).open(context()).unwrap();
+        let changed = |reader: YamlReader<OrderYaml>| {
+            reader
+                .input_identity()
+                .changed_part(pinned.input_identity())
+        };
+
+        assert_eq!(
+            changed(source(&input, at(), 1).open(context()).unwrap()),
+            None
+        );
+        assert_eq!(
+            changed(
+                source(&input, YamlSelection::Document, 64)
+                    .open(context())
+                    .unwrap()
+            )
+            .as_deref(),
+            Some("selection")
+        );
+        input.write_all(order("b", 1).as_bytes()).unwrap();
+        assert_eq!(
+            changed(source(&input, at(), 64).open(context()).unwrap()).as_deref(),
+            Some("file")
         );
     }
 }

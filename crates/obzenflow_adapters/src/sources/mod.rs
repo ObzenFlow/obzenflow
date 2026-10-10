@@ -5,21 +5,22 @@
 //! Adapter sources
 
 pub mod csv;
+mod file_version;
 pub mod http;
 pub mod http_pull;
 mod in_process;
 pub mod yaml;
 
 pub use csv::{
-    CsvDecodeError, CsvDecoder, CsvReader, CsvRecord, CsvRow, CsvRowDecoder, CsvSource,
-    CsvSourceBuilder,
+    CsvDecodeError, CsvDecoder, CsvPosition, CsvReader, CsvRecord, CsvRow, CsvRowDecoder,
+    CsvSource, CsvSourceBuilder,
 };
 pub use http::{
     HostedIngressSource, HttpSourceConfig, IngressDecodeError, IngressDecoder, IngressRecord,
 };
 pub use in_process::{ChannelSource, ValuesSource};
 pub use yaml::{
-    YamlDecodeError, YamlDecoder, YamlReader, YamlRecord, YamlSelection, YamlSource,
+    YamlDecodeError, YamlDecoder, YamlPosition, YamlReader, YamlRecord, YamlSelection, YamlSource,
     YamlSourceBuilder,
 };
 

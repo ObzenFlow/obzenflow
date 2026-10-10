@@ -5,8 +5,7 @@
 //! Async infinite source supervisor implementation using HandlerSupervised pattern
 
 use super::fsm::{
-    InfiniteSourceAction, InfiniteSourceCompletionReason, InfiniteSourceContext,
-    InfiniteSourceEvent, InfiniteSourceState,
+    InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceEvent, InfiniteSourceState,
 };
 use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
 use crate::metrics::instrumentation::snapshot_stage_accounting;
@@ -17,25 +16,26 @@ use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
+use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::SourceControl;
 use crate::stages::source::supervision::{
-    around_source_boundary, commit_source_open_failure, drain_pending_outputs_async,
-    emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
-    poll_error_backoff, poll_error_summary, record_source_cleanup_failed,
-    record_source_stage_fatal, source_error_kind, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceOpenFailureCommit,
-    SourcePollObservation,
+    announce_resumed_live, around_source_boundary, commit_catch_up_marker, commit_reader_acquired,
+    commit_source_open_failure, drain_pending_outputs_async, emit_batch_to_pending_outputs,
+    normalise_source_poll_error, observe_source_boundary_rejection, poll_error_backoff,
+    poll_error_summary, record_source_release, record_source_stage_fatal, source_error_kind,
+    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
+    PendingFailure, SourceExit, SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
-    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
-    SourcePollResult, SourceReaderInitContext,
+    SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
+    SourcePollReport, SourcePollResult, SourceReaderInitContext,
 };
 use crate::supervised_base::base::{self, Registration, Supervisor};
 use crate::supervised_base::handler_supervised::{
     ActionCompletion, ActionExecution, DispatchCompletion, OwnedDispatch, SupervisorAction,
 };
 use crate::supervised_base::idle_backoff::IdleBackoff;
-use crate::supervised_base::{publication, EventLoopDirective, HandlerSupervised, StateWatcher};
+use crate::supervised_base::{EventLoopDirective, HandlerSupervised, StateWatcher};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
@@ -43,9 +43,7 @@ use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
 };
 use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
-use obzenflow_core::event::types::Count;
-use obzenflow_core::event::{ChainEventFactory, ReplayLifecycleEvent};
-use obzenflow_core::{ChainEvent, Journal, MiddlewareExecutionScope, StageId, StageKey, WriterId};
+use obzenflow_core::{ChainEvent, Journal, MiddlewareExecutionScope, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::sync::atomic::Ordering;
@@ -69,6 +67,9 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// The continuation admitted with the source (FLOWIP-134i B8).
+    pub(crate) continuation: SourceContinuation,
 
     /// Adaptive backoff for async polls that deliver no data.
     pub(crate) idle_backoff: IdleBackoff,
@@ -105,8 +106,11 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     /// events before transitioning to failure.
     pub(crate) pending_failure: Option<PendingFailure>,
 
-    /// Cleanup is live-only and attempted at most once.
+    /// Cleanup releases an acquired reader exactly once (FLOWIP-134i B2).
     pub(crate) reader_acquired: bool,
+
+    /// The exit whose transition scheduled cleanup.
+    pub(crate) exit: Option<SourceExit>,
 }
 
 impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
@@ -380,6 +384,9 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
         context
             .instrumentation
             .transition_to_state(state.variant_name());
+        if let Some(exit) = state.exit() {
+            self.exit = Some(exit);
+        }
         if self.last_state.as_ref() != Some(state) {
             let _ = self.state_watcher.update(state.clone());
             self.last_state = Some(state.clone());
@@ -419,20 +426,33 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 
     async fn execute_cleanup(
         &mut self,
-        _context: &Self::Context,
+        context: &Self::Context,
     ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
         self.replay_driver.take();
         let Some(mut handler) = self.handler.take() else {
             return Ok(ActionExecution::Completed);
         };
         let acquired = self.reader_acquired;
+        let release = context.resources.as_ref().map(|resources| {
+            SourceRelease::new(
+                SourcePollKind::AsyncInfinite,
+                self.exit,
+                resources.completion.cause(),
+                matches!(
+                    resources.runtime_execution.source_phase_for(self.stage_id),
+                    SourceExecutionPhase::Live
+                ),
+                resources.failure_causal_event_id,
+            )
+        });
         let flow_context = self.flow_context.clone();
         let journal = self.data_journal.clone();
         Ok(ActionExecution::Pending(Box::pin(async move {
             let result = async {
                 if acquired {
-                    if let Err(error) = handler.drain().await {
-                        record_source_cleanup_failed(&flow_context, &error, &journal).await?;
+                    let drained = handler.drain().await;
+                    if let Some(release) = release {
+                        record_source_release(&journal, &flow_context, release, drained).await?;
                     }
                 }
                 Ok::<_, Box<dyn Error + Send + Sync>>(())
@@ -490,6 +510,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             data_journal: self.data_journal.clone(),
             flow_context: self.flow_context.clone(),
             stage_id: self.stage_id,
+            continuation: self.continuation,
             external_events: self.external_events.begin_turn(),
             state_watcher: self.state_watcher.clone(),
             last_state: Some(state.clone()),
@@ -501,6 +522,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             replay_completion: self.replay_completion.clone(),
             pending_failure: self.pending_failure.take(),
             reader_acquired: self.reader_acquired,
+            exit: self.exit,
             pending_boundary_begin_drain: self.pending_boundary_begin_drain,
         };
         Some(Box::pin(async move {
@@ -573,6 +595,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                             &ctx.runtime_execution,
                             &self.flow_context,
                             StageType::InfiniteSource,
+                            self.continuation,
                             &self.data_journal,
                         )
                         .await?,
@@ -619,6 +642,20 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                         )));
                     }
                     self.reader_acquired = true;
+                    let flow_id = ctx.flow_id.to_string();
+                    commit_reader_acquired(
+                        &self.data_journal,
+                        &make_flow_context(
+                            &ctx.flow_name,
+                            &flow_id,
+                            &ctx.stage_name,
+                            self.stage_id,
+                            StageType::InfiniteSource,
+                        ),
+                        SourcePollKind::AsyncInfinite,
+                        ctx.runtime_execution.resume_control().is_some(),
+                    )
+                    .await?;
                     // Return to control dispatch before admitting the first poll.
                 }
                 Ok(EventLoopDirective::Transition(
@@ -676,6 +713,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                 if matches!(state, InfiniteSourceState::Draining) {
                     self.idle_backoff.reset();
                     self.pending_idle_delay = None;
+                    ctx.completion.record(SourceCompletionCause::Stopped);
                     return Ok(EventLoopDirective::Transition(
                         InfiniteSourceEvent::Completed,
                     ));
@@ -795,16 +833,17 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                         )
                                         .await;
 
-                                    ctx.completion_reason =
-                                        InfiniteSourceCompletionReason::ReplayExhausted {
+                                    ctx.completion
+                                        .record(SourceCompletionCause::ReplayExhausted {
                                             recorded_kind,
-                                        };
+                                        });
                                     Ok(EventLoopDirective::Transition(
                                         InfiniteSourceEvent::BeginDrain,
                                     ))
                                 }
-                                // FLOWIP-120n handoff: author the catch-up watermark
-                                // behind the recorded outputs (F9), record the recorded
+                                // FLOWIP-120n handoff: commit the catch-up watermark
+                                // behind the committed recorded outputs (F9) before the
+                                // generation advances (FLOWIP-134i), record the recorded
                                 // count and the boundary, then continue from the live
                                 // handler.
                                 SourceReplayExhaustion::ContinueLive => {
@@ -818,19 +857,13 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     control
                                         .record_delivered_high_water(self.stage_id, replayed_count);
                                     let generation = control.resume_generation();
-                                    let marker = ChainEventFactory::catch_up_complete_event(
-                                        WriterId::from(self.stage_id),
-                                        generation,
-                                        StageKey::from(ctx.stage_name.clone()),
-                                    );
-                                    emit_batch_to_pending_outputs(
-                                        vec![marker],
-                                        &stage_flow_context,
+                                    commit_catch_up_marker(
+                                        &self.data_journal,
                                         &ctx.instrumentation,
-                                        Duration::from_nanos(0),
-                                        observer_scope,
-                                        &mut ctx.pending_outputs,
-                                    );
+                                        &stage_flow_context,
+                                        generation,
+                                    )
+                                    .await?;
                                     self.replay_completion
                                         .maybe_emit_completed(
                                             &self.flow_context,
@@ -845,33 +878,14 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                             },
                                         )
                                         .await;
-                                    let resumed_live = obzenflow_core::event::ChainEventFactory::execution_event(
-                                        WriterId::from(self.stage_id),
-                                        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::ReplayLifecycle(
-                                            ReplayLifecycleEvent::ResumedLive {
-                                                archive_flow_id: ctx
-                                                    .runtime_execution
-                                                    .archive_for_io()
-                                                    .map(|a| a.archive_flow_id().to_string())
-                                                    .unwrap_or_default(),
-                                                replayed_count: Count(replayed_count),
-                                                generation: generation.0,
-                                            },
-                                        ),
-                                    ).with_flow_context(self.flow_context.clone());
-                                    if let Err(e) = publication::append(
+                                    announce_resumed_live(
                                         &self.data_journal,
-                                        resumed_live,
-                                        Default::default(),
+                                        &self.flow_context,
+                                        &ctx.runtime_execution,
+                                        replayed_count,
+                                        generation,
                                     )
-                                    .await
-                                    {
-                                        tracing::error!(
-                                            stage_name = %ctx.stage_name,
-                                            journal_error = %e,
-                                            "Failed to append ReplayLifecycle::ResumedLive system event"
-                                        );
-                                    }
+                                    .await;
                                     // The boundary flips source phase, stage scope, and
                                     // heartbeat to live; late prefix events stay
                                     // reconstruction-scoped by their in-band generation.
@@ -993,7 +1007,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                 reason = %reason,
                                 "Async infinite source boundary rejected; beginning completion"
                             );
-                            ctx.completion_reason = InfiniteSourceCompletionReason::LiveEof;
+                            ctx.completion.record(SourceCompletionCause::Stopped);
                             let control_events = report.control_events;
                             observe_source_boundary_rejection(
                                 &source_poll_observation,
@@ -1078,7 +1092,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                 Ok(EventLoopDirective::Continue)
                             }
                             SourcePollResult::Completed(SourcePollCompletion::Eof) => {
-                                ctx.completion_reason = InfiniteSourceCompletionReason::LiveEof;
+                                ctx.completion.record(SourceCompletionCause::Exhausted);
                                 if poll.operational_events.is_empty()
                                     && report.control_events.is_empty()
                                 {

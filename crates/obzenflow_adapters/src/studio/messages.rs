@@ -9,7 +9,7 @@ use obzenflow_core::event::observability::{
     CaptureStamp, CircuitBreakerMeasurements, EdgeLivenessState, RateLimiterMeasurements,
 };
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerOpenTrigger, StageLifecycleFact,
+    CircuitBreakerOpenTrigger, SourceCleanupFailedFact, StageLifecycleFact,
 };
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::system_payload::{
@@ -90,7 +90,8 @@ pub(super) enum StudioMessage<'a> {
         #[serde(serialize_with = "display")]
         stage_id: StageId,
         stage_name: &'a str,
-        error: &'a str,
+        #[serde(flatten)]
+        failure: &'a SourceCleanupFailedFact,
         #[serde(flatten)]
         at: Observation<'a>,
     },
@@ -327,6 +328,8 @@ enum FlowUpdate {
         #[serde(skip_serializing_if = "Option::is_none")]
         stage_count: Option<usize>,
     },
+    #[serde(rename = "flow_reconstruction_completed")]
+    ReconstructionCompleted { generation: u64 },
     #[serde(rename = "flow_stop_admitted")]
     StopAdmitted { admission: PipelineStopAdmission },
     #[serde(rename = "flow_not_started")]

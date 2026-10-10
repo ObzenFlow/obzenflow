@@ -182,10 +182,6 @@ impl CompletionGate for CircuitBreakerCompletionGate {
             CompletionDecision::DefaultEof
         }
     }
-
-    fn on_begin_drain(&self, ctx: &mut CompletionContext) -> CompletionDecision {
-        self.on_natural_completion(ctx)
-    }
 }
 
 /// FLOWIP-115b: sink-delivery boundary policy for the circuit breaker.

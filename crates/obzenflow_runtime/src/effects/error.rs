@@ -19,13 +19,15 @@ pub enum EffectError {
     #[error("missing recorded effect for cursor {cursor:?}")]
     MissingRecordedEffect { cursor: EffectCursor },
 
+    /// A replay reached a cursor its recording holds no outcome for, or an
+    /// attempt it left in doubt; a replay never executes an effect, so only a
+    /// resume finishes this work (FLOWIP-134i B13).
     #[error(
-        "effect cursor {cursor:?} is in doubt after durable attempt {highest_started_attempt}"
+        "replay reached the end of its recording at stage '{}', input {}; a replay never executes an effect",
+        cursor.stage_key,
+        cursor.input_seq
     )]
-    EffectInDoubt {
-        cursor: EffectCursor,
-        highest_started_attempt: EffectAttemptOrdinal,
-    },
+    RecordingEnded { cursor: EffectCursor },
 
     #[error("duplicate recorded effect for cursor {cursor:?}")]
     DuplicateRecordedEffect { cursor: EffectCursor },
@@ -181,7 +183,7 @@ impl EffectError {
             EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::IncompleteOutcomeGroup { .. } => false,
             EffectError::MissingRecordedEffect { .. }
-            | EffectError::EffectInDoubt { .. }
+            | EffectError::RecordingEnded { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
             | EffectError::MissingIdempotencyKey { .. }
@@ -214,7 +216,7 @@ impl EffectError {
             EffectError::Serialization(_) => "serialization",
             EffectError::Journal(_) => "journal",
             EffectError::MissingRecordedEffect { .. } => "missing_recorded_effect",
-            EffectError::EffectInDoubt { .. } => "effect_in_doubt",
+            EffectError::RecordingEnded { .. } => "recording_ended",
             EffectError::DuplicateRecordedEffect { .. } => "duplicate_recorded_effect",
             EffectError::DescriptorMismatch { .. } => "descriptor_mismatch",
             EffectError::RecordedFailure { error_type, .. } => return error_type.clone(),
@@ -273,7 +275,7 @@ impl EffectError {
             | EffectError::RecoveryAbandoned { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::BindingAuthority { .. }
             | EffectError::MissingRecordedEffect { .. }
-            | EffectError::EffectInDoubt { .. }
+            | EffectError::RecordingEnded { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
             | EffectError::IncompleteOutcomeGroup { .. }

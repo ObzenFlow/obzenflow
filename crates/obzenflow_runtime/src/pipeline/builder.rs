@@ -369,6 +369,18 @@ impl PipelineBuilder {
             .chain(source_map.values())
             .cloned()
             .collect();
+        let reconstruction = self
+            .runtime_execution
+            .as_ref()
+            .and_then(|execution| execution.resume_control())
+            .map(|control| {
+                let (observer, crossings) = tokio::sync::mpsc::unbounded_channel();
+                control.observe_crossings(observer);
+                super::fsm::ReconstructionProgress {
+                    pending: stage_map.keys().chain(source_map.keys()).copied().collect(),
+                    crossings,
+                }
+            });
         let mut pipeline_context = PipelineContext {
             system_id,
             topology: self.topology.clone(),
@@ -378,6 +390,7 @@ impl PipelineBuilder {
             stage_supervisors: stage_map,
             source_supervisors: source_map,
             completed_stages: Default::default(),
+            reconstruction,
             outstanding_milestones: Default::default(),
             outstanding_children: Default::default(),
             cleanup_deadline: None,

@@ -7,6 +7,7 @@
 use crate::stages::observer::StageObserverBindings;
 use crate::stages::source::boundary::SourceBoundary;
 use crate::stages::source::strategies::CompletionGate;
+use crate::stages::source::SourceContinuation;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
@@ -21,6 +22,9 @@ pub struct FiniteSourceConfig {
 
     /// Flow name this source belongs to
     pub flow_name: String,
+
+    /// The continuation admitted with the source (FLOWIP-134i B8).
+    pub continuation: SourceContinuation,
 
     /// Optional source control strategy for shutdown / FlowControl decisions.
     /// When not provided, the builder will default to JonestownSourceStrategy.
@@ -38,11 +42,13 @@ impl FiniteSourceConfig {
         stage_id: StageId,
         stage_name: impl Into<String>,
         flow_name: impl Into<String>,
+        continuation: SourceContinuation,
     ) -> Self {
         Self {
             stage_id,
             stage_name: stage_name.into(),
             flow_name: flow_name.into(),
+            continuation,
             control_strategy: None,
             source_boundary: None,
             observer_bindings: StageObserverBindings::default(),
@@ -61,6 +67,7 @@ impl std::fmt::Debug for FiniteSourceConfig {
             .field("stage_id", &self.stage_id)
             .field("stage_name", &self.stage_name)
             .field("flow_name", &self.flow_name)
+            .field("continuation", &self.continuation)
             .field("control_strategy", &self.control_strategy)
             .field("has_source_boundary", &self.source_boundary.is_some())
             .field("has_observers", &!self.observer_bindings.is_empty())

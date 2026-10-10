@@ -485,6 +485,25 @@ where
                         cycle_members.join(", ")
                     )));
                 }
+
+                // FLOWIP-134i B8: a source whose connector cannot continue its
+                // interrupted input refuses the resume before any run exists.
+                if let Some(archive) = obzenflow_runtime::bootstrap::replay_archive() {
+                    let refused = obzenflow_runtime::stages::source::sources_refusing_resume(
+                        archive.as_ref(),
+                        descriptors.iter().filter_map(|(name, descriptor)| {
+                            descriptor
+                                .source_continuation()
+                                .map(|continuation| (name.as_str(), continuation))
+                        }),
+                    );
+                    if !refused.is_empty() {
+                        return Err(FlowBuildError::ResumeRefusedUnfinishedSources {
+                            archive: replay.archive_path.clone(),
+                            sources: refused,
+                        });
+                    }
+                }
             }
 
             // FLOWIP-120n F16, FLOWIP-120v: both archive verbs re-execute

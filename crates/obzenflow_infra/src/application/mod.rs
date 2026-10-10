@@ -14,6 +14,7 @@ pub(crate) mod lifecycle_observation;
 mod managed_lifecycle;
 mod observability;
 mod presentation;
+mod replay_stop;
 mod run_mode;
 pub(crate) mod runtime_config_sources;
 mod web_surface;

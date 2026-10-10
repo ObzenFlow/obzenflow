@@ -5,19 +5,22 @@
 //! CSV file source
 //!
 //! Design notes (aligned with the FlowIP decisions):
-//! - Sync `TypedFiniteSourceHandler` (blocking file IO inside `next()`)
+//! - Sync `PositionedFiniteReader` (blocking file IO inside `next()`); each
+//!   record carries the parser position after it (FLOWIP-134i)
 //! - The runtime adapter owns writer identity and event construction
 //! - Rejected rows return `SourceError::Validation` and reading continues;
 //!   only an I/O failure is terminal (FLOWIP-084n B8)
 //! - Untyped mode preserves strings (no inference)
 
+use super::file_version::FileVersion;
 use anyhow::{anyhow, bail, Result};
 use csv::{Reader, ReaderBuilder, StringRecord};
 use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::source::{
-    FiniteSourceConnector, SourceError, SourceReaderInitContext, TypedFiniteSourceHandler,
+    FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
+    SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -188,6 +191,61 @@ fn read_failure(error: &csv::Error, record_index: u64) -> SourceError {
     }
 }
 
+/// The parser position before a CSV reader's next record, with the reader
+/// state a seek restores (FLOWIP-134i B1). Seeking reparses no prefix.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CsvPosition {
+    byte: u64,
+    line: u64,
+    record: u64,
+    row_index: u64,
+    skip_remaining: u64,
+}
+
+impl SourcePosition for CsvPosition {}
+
+impl CsvPosition {
+    fn at(parser: &csv::Position, row_index: usize, skip_remaining: usize) -> Self {
+        Self {
+            byte: parser.byte(),
+            line: parser.line(),
+            record: parser.record(),
+            row_index: u64::try_from(row_index).unwrap_or(u64::MAX),
+            skip_remaining: u64::try_from(skip_remaining).unwrap_or(u64::MAX),
+        }
+    }
+
+    fn parser(&self) -> csv::Position {
+        let mut parser = csv::Position::new();
+        parser
+            .set_byte(self.byte)
+            .set_line(self.line)
+            .set_record(self.record);
+        parser
+    }
+}
+
+/// What decides a CSV source's record boundaries and order (FLOWIP-134i B9).
+#[derive(Serialize)]
+struct CsvIdentityParts<'a> {
+    file: FileVersion,
+    format: CsvFormat<'a>,
+    selection: CsvSelection<'a>,
+}
+
+#[derive(Serialize)]
+struct CsvFormat<'a> {
+    has_headers: bool,
+    headers: Option<&'a [String]>,
+    delimiter: u8,
+}
+
+#[derive(Serialize)]
+struct CsvSelection<'a> {
+    skip_rows: usize,
+    columns: Option<&'a [String]>,
+}
+
 /// User-owned mapping from one external CSV record to one domain output.
 ///
 /// Like typed source handlers, the decoder value owns its output contract
@@ -349,6 +407,9 @@ pub struct CsvSource<D> {
 pub struct CsvReader<D> {
     state: CsvReaderState,
     decoder: D,
+    identity: SourceInputIdentity,
+    beginning: CsvPosition,
+    version: FileVersion,
 }
 
 impl<D: CsvDecoder> std::fmt::Debug for CsvReader<D> {
@@ -365,6 +426,7 @@ impl<D: CsvDecoder> std::fmt::Debug for CsvReader<D> {
 impl<D: CsvDecoder> FiniteSourceConnector for CsvSource<D> {
     type Output = D::Output;
     type Reader = CsvReader<D>;
+    type Continuation = Seek<CsvPosition>;
 
     fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         self.open_reader()
@@ -375,6 +437,23 @@ impl<D: CsvDecoder> CsvSource<D> {
     fn open_reader(&self) -> Result<CsvReader<D>, SourceError> {
         let file = File::open(&self.path)
             .map_err(|_| SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into()))?;
+        let version = FileVersion::of(&file)?;
+        let identity = SourceInputIdentity::new(
+            "csv",
+            &CsvIdentityParts {
+                file: version,
+                format: CsvFormat {
+                    has_headers: self.has_headers,
+                    headers: self.headers.as_deref(),
+                    delimiter: self.delimiter,
+                },
+                selection: CsvSelection {
+                    skip_rows: self.skip_rows,
+                    columns: self.select_columns.as_deref(),
+                },
+            },
+        )
+        .map_err(|_| SourceError::Other(SourceDiagnosticReason::Unclassified.into()))?;
         let mut reader = ReaderBuilder::new()
             .has_headers(false)
             .delimiter(self.delimiter)
@@ -424,6 +503,7 @@ impl<D: CsvDecoder> CsvSource<D> {
             }
         };
 
+        let beginning = CsvPosition::at(reader.position(), 0, self.skip_rows);
         let state = CsvReaderState {
             reader,
             file_headers,
@@ -440,6 +520,9 @@ impl<D: CsvDecoder> CsvSource<D> {
         Ok(CsvReader {
             state,
             decoder: self.decoder.clone(),
+            identity,
+            beginning,
+            version,
         })
     }
 }
@@ -472,11 +555,33 @@ where
     }
 }
 
-impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvReader<D> {
+impl<D: CsvDecoder> SeekableSource for CsvReader<D> {
+    type Position = CsvPosition;
+
+    fn input_identity(&self) -> &SourceInputIdentity {
+        &self.identity
+    }
+
+    fn beginning(&self) -> CsvPosition {
+        self.beginning.clone()
+    }
+
+    fn seek(&mut self, position: CsvPosition) -> Result<(), SourceError> {
+        self.state.seek(&position)
+    }
+}
+
+/// One poll's records, each with the parser position after it.
+type CsvPoll<T> = Result<Option<Vec<SourceRecord<T, CsvPosition>>>, SourceError>;
+
+impl<D: CsvDecoder> PositionedFiniteReader for CsvReader<D> {
     type Output = D::Output;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        self.state.next_items(&self.decoder)
+    /// Nothing read from a changed file is published (FLOWIP-134i B10).
+    fn next(&mut self) -> CsvPoll<Self::Output> {
+        let batch = self.state.next_records(&self.decoder);
+        self.version.verify(self.state.reader.get_ref())?;
+        batch
     }
 }
 
@@ -510,10 +615,22 @@ impl std::fmt::Debug for CsvReaderState {
 }
 
 impl CsvReaderState {
-    fn next_items<D: CsvDecoder>(
-        &mut self,
-        decoder: &D,
-    ) -> Result<Option<Vec<D::Output>>, SourceError> {
+    /// Continue strictly after `position`, restoring the row count and any
+    /// rows still to skip.
+    fn seek(&mut self, position: &CsvPosition) -> Result<(), SourceError> {
+        self.reader
+            .seek(position.parser())
+            .map_err(|_| SourceError::Transport(SourceDiagnosticReason::InputUnavailable.into()))?;
+        self.row_index = usize::try_from(position.row_index).unwrap_or(usize::MAX);
+        self.skip_rows_remaining = usize::try_from(position.skip_remaining).unwrap_or(usize::MAX);
+        self.pending_error = None;
+        self.done = false;
+        Ok(())
+    }
+
+    /// Each valid record's position is captured before the next read, so a
+    /// deferred rejection never advances it.
+    fn next_records<D: CsvDecoder>(&mut self, decoder: &D) -> CsvPoll<D::Output> {
         if let Some(err) = self.pending_error.take() {
             return Err(err);
         }
@@ -544,7 +661,7 @@ impl CsvReaderState {
             self.row_index = self.row_index.saturating_add(1);
         }
 
-        let mut batch: Vec<D::Output> = Vec::with_capacity(self.chunk_size);
+        let mut batch = Vec::with_capacity(self.chunk_size);
         while batch.len() < self.chunk_size {
             let mut record = StringRecord::new();
             let read = match self.reader.read_record(&mut record) {
@@ -572,6 +689,7 @@ impl CsvReaderState {
 
             let record_index = self.record_index();
             self.row_index = self.row_index.saturating_add(1);
+            let after = CsvPosition::at(self.reader.position(), self.row_index, 0);
 
             if !self.warned_schema_drift && record.len() != self.file_headers.len() {
                 self.warned_schema_drift = true;
@@ -594,7 +712,7 @@ impl CsvReaderState {
             };
 
             match decode_result {
-                Ok(item) => batch.push(item),
+                Ok(value) => batch.push(SourceRecord { value, after }),
                 Err(error) => {
                     let rejection =
                         SourceError::Validation(error.locate(record_index, record.position()));
@@ -632,7 +750,6 @@ mod tests {
         }
     }
     use super::*;
-    use obzenflow_runtime::stages::TypedFiniteSourceHandler;
     use obzenflow_runtime::typing::SourceTyping;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -685,8 +802,8 @@ mod tests {
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
-        assert_eq!(batch[0].0["name"], "alice");
-        assert_eq!(batch[0].0["age"], "007");
+        assert_eq!(batch[0].value.0["name"], "alice");
+        assert_eq!(batch[0].value.0["age"], "007");
     }
 
     #[test]
@@ -705,8 +822,8 @@ mod tests {
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
-        assert_eq!(batch[0].0["name"], "alice");
-        assert_eq!(batch[0].0["age"], "007");
+        assert_eq!(batch[0].value.0["name"], "alice");
+        assert_eq!(batch[0].value.0["age"], "007");
     }
 
     #[test]
@@ -725,8 +842,8 @@ mod tests {
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
-        assert_eq!(batch[0].0["name"], "alice");
-        assert_eq!(batch[0].0["age"], "007");
+        assert_eq!(batch[0].value.0["name"], "alice");
+        assert_eq!(batch[0].value.0["age"], "007");
     }
 
     #[test]
@@ -745,8 +862,9 @@ mod tests {
         let mut source = source.open(context()).expect("source open");
 
         let batch = source.next().expect("next").expect("one batch");
+        let names: Vec<_> = batch.into_iter().map(|record| record.value).collect();
         assert_eq!(
-            batch,
+            names,
             vec![CustomerName {
                 display_name: "customer:ALICE".to_string(),
             }]
@@ -819,7 +937,7 @@ mod tests {
         let mut errors = Vec::new();
         loop {
             match reader.next() {
-                Ok(Some(batch)) => items.extend(batch),
+                Ok(Some(batch)) => items.extend(batch.into_iter().map(|record| record.value)),
                 Ok(None) => return (items, errors),
                 Err(error) => {
                     assert!(!error.is_terminal(), "unexpected terminal error: {error}");
@@ -981,5 +1099,159 @@ mod tests {
             Some(2)
         );
         assert!(!format!("{error} {error:?}").contains("not-a-number"));
+    }
+
+    fn people() -> NamedTempFile {
+        let mut input = NamedTempFile::new().unwrap();
+        writeln!(input, "name,age\nalice,1\nbob,2\ncarol,3\ndave,4").unwrap();
+        input
+    }
+
+    fn read_all(reader: &mut CsvReader<CsvRowDecoder>) -> Vec<SourceRecord<CsvRow, CsvPosition>> {
+        let mut records = Vec::new();
+        while let Some(batch) = reader.next().expect("valid input") {
+            records.extend(batch);
+        }
+        records
+    }
+
+    fn names(records: &[SourceRecord<CsvRow, CsvPosition>]) -> Vec<&str> {
+        records
+            .iter()
+            .map(|record| record.value.0["name"].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn seeking_after_any_record_continues_strictly_after_it() {
+        let input = people();
+        let source = CsvSource::builder(CsvRowDecoder)
+            .path(input.path())
+            .chunk_size(3)
+            .build()
+            .unwrap();
+        let first = read_all(&mut source.open(context()).unwrap());
+        assert_eq!(names(&first), ["alice", "bob", "carol", "dave"]);
+
+        // Positions do not depend on which batch carried the record.
+        for (index, record) in first.iter().enumerate() {
+            let mut resumed = source.open(context()).unwrap();
+            resumed.seek(record.after.clone()).unwrap();
+            assert_eq!(names(&read_all(&mut resumed)), names(&first[index + 1..]));
+        }
+    }
+
+    #[test]
+    fn the_beginning_reapplies_skipped_rows_and_record_indices() {
+        let mut input = NamedTempFile::new().unwrap();
+        writeln!(input, "name,age\npreamble,0\nalice,1\nshort\nbob,2").unwrap();
+        let source = CsvSource::builder(CsvRowDecoder)
+            .path(input.path())
+            .skip_rows(1)
+            .build()
+            .unwrap();
+        let mut reader = source.open(context()).unwrap();
+        let beginning = reader.beginning();
+        let (fresh, fresh_errors) = drain_reader(&mut reader);
+
+        let mut resumed = source.open(context()).unwrap();
+        resumed.seek(beginning).unwrap();
+        let (again, again_errors) = drain_reader(&mut resumed);
+        assert_eq!(again, fresh);
+        let indices = |errors: &[SourceError]| -> Vec<Option<u64>> {
+            errors
+                .iter()
+                .map(|error| error.diagnostic().location().record_index())
+                .collect()
+        };
+        assert_eq!(indices(&fresh_errors), [Some(2)]);
+        assert_eq!(indices(&again_errors), indices(&fresh_errors));
+    }
+
+    #[test]
+    fn a_rejection_after_the_last_accepted_record_is_reported_again() {
+        let mut input = NamedTempFile::new().unwrap();
+        writeln!(input, "name,age\nalice,1\nbob,2\nshort\ndave,4").unwrap();
+        let source = CsvSource::builder(CsvRowDecoder)
+            .path(input.path())
+            .build()
+            .unwrap();
+        let mut reader = source.open(context()).unwrap();
+        let accepted = reader.next().unwrap().unwrap();
+        assert_eq!(names(&accepted), ["alice", "bob"]);
+
+        let mut resumed = source.open(context()).unwrap();
+        resumed.seek(accepted[1].after.clone()).unwrap();
+        let rejection = resumed.next().unwrap_err();
+        assert_eq!(rejection.diagnostic().location().record_index(), Some(2));
+        assert_eq!(names(&resumed.next().unwrap().unwrap()), ["dave"]);
+    }
+
+    #[test]
+    fn identity_names_the_part_that_changed() {
+        let input = people();
+        let open = |builder: CsvSourceBuilder<CsvRowDecoder>| {
+            builder
+                .path(input.path())
+                .build()
+                .unwrap()
+                .open(context())
+                .unwrap()
+        };
+        let pinned = open(CsvSource::builder(CsvRowDecoder));
+        let changed = |reader: CsvReader<CsvRowDecoder>| {
+            reader
+                .input_identity()
+                .changed_part(pinned.input_identity())
+        };
+
+        // Batch size never changes which records are admitted.
+        assert_eq!(
+            changed(open(CsvSource::builder(CsvRowDecoder).chunk_size(1))),
+            None
+        );
+        assert_eq!(
+            changed(open(CsvSource::builder(CsvRowDecoder).skip_rows(1))).as_deref(),
+            Some("selection")
+        );
+        assert_eq!(
+            changed(open(CsvSource::builder(CsvRowDecoder).delimiter(b';'))).as_deref(),
+            Some("format")
+        );
+
+        let mut appended = std::fs::OpenOptions::new()
+            .append(true)
+            .open(input.path())
+            .unwrap();
+        writeln!(appended, "eve,5").unwrap();
+        assert_eq!(
+            changed(open(CsvSource::builder(CsvRowDecoder))).as_deref(),
+            Some("file")
+        );
+    }
+
+    #[test]
+    fn a_file_changed_mid_read_fails_closed_without_its_batch() {
+        let input = people();
+        let mut reader = CsvSource::builder(CsvRowDecoder)
+            .path(input.path())
+            .chunk_size(1)
+            .build()
+            .unwrap()
+            .open(context())
+            .unwrap();
+        assert_eq!(names(&reader.next().unwrap().unwrap()), ["alice"]);
+
+        let mut appended = std::fs::OpenOptions::new()
+            .append(true)
+            .open(input.path())
+            .unwrap();
+        writeln!(appended, "eve,5").unwrap();
+        let error = reader.next().unwrap_err();
+        assert!(error.is_terminal());
+        assert_eq!(
+            error.diagnostic().reason(),
+            SourceDiagnosticReason::InputChanged
+        );
     }
 }

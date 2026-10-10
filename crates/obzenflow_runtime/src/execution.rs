@@ -15,9 +15,11 @@
 //! handle, without changing the read-only query trait below.
 
 use crate::metrics::observations::ObservationRegistry;
+use crate::stages::source::SourceContinuation;
 use obzenflow_core::event::observability::ObservationRecorder;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::{FlowId, WriterId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::journal::ArchiveStatus;
@@ -109,9 +111,21 @@ pub enum HeartbeatExecutionPolicy {
     DormantUntilLive,
 }
 
+/// What a cursor without any recorded attempt means at a position
+/// (FLOWIP-134i B13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnrecordedEffect {
+    /// Live work: perform the effect.
+    Execute,
+    /// The recording claims this position, so the gap is corruption.
+    Corrupt,
+    /// The recording ends here; a replay stops and only a resume continues.
+    RecordingEnded,
+}
+
 /// Whether descriptor materialisation requires every declared effect port to
-/// be registered. A sealed strict replay can reconstruct a hit without any
-/// live dependency, so it deliberately permits an empty registry.
+/// be registered. A replay never executes an effect, so it deliberately
+/// permits an empty registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectPortRegistrationPolicy {
     Required,
@@ -142,12 +156,11 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
     ) -> MiddlewareExecutionScope {
         self.stage_scope(stage)
     }
-    /// Whether a missing recorded effect outcome at this position is corruption
-    /// (fail loud) rather than a live gap (run the effect).
-    fn missing_outcome_is_corruption(&self, at: ExecutionPosition) -> bool;
-    /// Whether a durable Start without a terminal must fail instead of
-    /// authorising a new at-least-once attempt.
-    fn in_doubt_effect_is_fatal(&self) -> bool;
+    /// What a cursor without any recorded attempt means at this position.
+    fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect;
+    /// Whether a durable Start without a terminal authorizes a new
+    /// at-least-once attempt; otherwise the recording ends there.
+    fn in_doubt_authorizes_attempt(&self) -> bool;
     /// Whether effect-port recipes must exist at materialisation.
     fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy;
     /// Whether a source is reconstructing or polling live.
@@ -169,11 +182,11 @@ impl ExecutionStrategy for Live {
     fn stage_scope(&self, _stage: StageId) -> MiddlewareExecutionScope {
         MiddlewareExecutionScope::LiveHandler
     }
-    fn missing_outcome_is_corruption(&self, _at: ExecutionPosition) -> bool {
-        false
+    fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
+        UnrecordedEffect::Execute
     }
-    fn in_doubt_effect_is_fatal(&self) -> bool {
-        false
+    fn in_doubt_authorizes_attempt(&self) -> bool {
+        true
     }
     fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
         EffectPortRegistrationPolicy::Required
@@ -191,46 +204,34 @@ impl ExecutionStrategy for Live {
     }
 }
 
-/// Bounded reconstruction of a recording that drains at its end.
-///
-/// `incomplete` is set from archive status at construction: a sealed archive is
-/// strict (a missing outcome is corruption, scope `StrictReplayHandler`), an
-/// incomplete one is lenient (a missing outcome runs live, scope
-/// `ResumeHandler`, matching today's `allow_incomplete_archive`). Both drain.
+/// Bounded reconstruction of a recording that drains at its end. A replay
+/// never executes an effect (FLOWIP-134i B13): its scope is strict replay
+/// throughout, and `incomplete`, set from archive status at construction, only
+/// decides whether a miss is corruption or the end of the recording.
 #[derive(Debug)]
 struct Replay {
     incomplete: bool,
 }
 
-impl Replay {
-    fn reconstruction_scope(&self) -> MiddlewareExecutionScope {
-        if self.incomplete {
-            MiddlewareExecutionScope::ResumeHandler
-        } else {
-            MiddlewareExecutionScope::StrictReplayHandler
-        }
-    }
-}
-
 impl ExecutionStrategy for Replay {
     fn scope_at(&self, _at: ExecutionPosition) -> MiddlewareExecutionScope {
-        self.reconstruction_scope()
+        MiddlewareExecutionScope::StrictReplayHandler
     }
     fn stage_scope(&self, _stage: StageId) -> MiddlewareExecutionScope {
-        self.reconstruction_scope()
+        MiddlewareExecutionScope::StrictReplayHandler
     }
-    fn missing_outcome_is_corruption(&self, _at: ExecutionPosition) -> bool {
-        !self.incomplete
+    fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
+        if self.incomplete {
+            UnrecordedEffect::RecordingEnded
+        } else {
+            UnrecordedEffect::Corrupt
+        }
     }
-    fn in_doubt_effect_is_fatal(&self) -> bool {
-        !self.incomplete
+    fn in_doubt_authorizes_attempt(&self) -> bool {
+        false
     }
     fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
-        if self.incomplete {
-            EffectPortRegistrationPolicy::Required
-        } else {
-            EffectPortRegistrationPolicy::OptionalStrictReplay
-        }
+        EffectPortRegistrationPolicy::OptionalStrictReplay
     }
     fn source_phase_for(&self, _stage: StageId) -> SourceExecutionPhase {
         SourceExecutionPhase::Replaying
@@ -254,9 +255,9 @@ impl ExecutionStrategy for Replay {
 pub struct ResumeState {
     resume_generation: ReaderGeneration,
     frontier_by_stage: Mutex<HashMap<StageId, ReaderGeneration>>,
-    /// Sources registered as infinite at build; only these continue live at
-    /// archive exhaustion. A finite source under resume behaves as replay.
-    infinite_sources: Mutex<HashSet<StageId>>,
+    /// Each replaying source's answer at the end of its recorded input, from
+    /// its admitted continuation and recorded completion (FLOWIP-134i B8).
+    source_exhaustion: Mutex<HashMap<StageId, SourceReplayExhaustion>>,
     /// Per-stage maximum recorded effect `input_seq`, registered at
     /// `EffectHistory` load (FLOWIP-120n F7). A cursor miss at or below the
     /// mark is a torn prefix; beyond it, a live call.
@@ -264,6 +265,9 @@ pub struct ResumeState {
     /// Per-stage recorded delivered-data maxima, the F15 fail-closed
     /// validation input. Sources register theirs at driver exhaustion.
     recorded_delivered_high_water: Mutex<HashMap<StageId, u64>>,
+    /// Told whenever a stage crosses into the resume generation, so the
+    /// pipeline supervisor can record reconstruction completion (FLOWIP-134i B6).
+    crossings: Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
 }
 
 impl ResumeState {
@@ -271,9 +275,10 @@ impl ResumeState {
         Self {
             resume_generation,
             frontier_by_stage: Mutex::new(HashMap::new()),
-            infinite_sources: Mutex::new(HashSet::new()),
+            source_exhaustion: Mutex::new(HashMap::new()),
             recorded_effect_seq_max: Mutex::new(HashMap::new()),
             recorded_delivered_high_water: Mutex::new(HashMap::new()),
+            crossings: Mutex::new(None),
         }
     }
 
@@ -298,17 +303,18 @@ impl ResumeState {
         self.frontier(stage) >= self.resume_generation
     }
 
-    fn is_infinite_source(&self, stage: StageId) -> bool {
-        self.infinite_sources
+    fn source_exhaustion(&self, stage: StageId) -> Option<SourceReplayExhaustion> {
+        self.source_exhaustion
             .lock()
             .expect("resume source registry lock poisoned")
-            .contains(&stage)
+            .get(&stage)
+            .copied()
     }
 }
 
 /// Write handle for resume state. Supervisors record a stage's generation
 /// boundary through this when the merge delivers its catch-up watermark, and
-/// source builders register infinite sources at build.
+/// replaying sources register their admitted continuation.
 #[derive(Debug, Clone)]
 pub struct ResumeControl(Arc<ResumeState>);
 
@@ -321,25 +327,73 @@ impl ResumeControl {
     /// Advance a stage's frontier to `generation`. Monotonic: a stale write
     /// never regresses the frontier.
     pub fn record_generation_boundary(&self, stage: StageId, generation: ReaderGeneration) {
-        let mut frontier = self
-            .0
-            .frontier_by_stage
-            .lock()
-            .expect("resume frontier lock poisoned");
-        let entry = frontier.entry(stage).or_default();
-        if generation > *entry {
-            *entry = generation;
+        let crossed = {
+            let mut frontier = self
+                .0
+                .frontier_by_stage
+                .lock()
+                .expect("resume frontier lock poisoned");
+            let entry = frontier.entry(stage).or_default();
+            let crossed = *entry < self.0.resume_generation && generation >= self.0.resume_generation;
+            if generation > *entry {
+                *entry = generation;
+            }
+            crossed
+        };
+        if crossed {
+            let mut observer = self
+                .0
+                .crossings
+                .lock()
+                .expect("resume crossings lock poisoned");
+            // A closed receiver means the run's pipeline has finished.
+            if observer
+                .as_ref()
+                .is_some_and(|sender| sender.send(()).is_err())
+            {
+                *observer = None;
+            }
         }
     }
 
-    /// Register a source as infinite, making `ContinueLive` its exhaustion
-    /// answer.
-    pub fn register_infinite_source(&self, stage: StageId) {
+    /// Whether a stage crossed into the resume generation.
+    pub fn stage_is_live(&self, stage: StageId) -> bool {
+        self.0.stage_is_live(stage)
+    }
+
+    /// Tell `observer` whenever a stage crosses into the resume generation.
+    pub fn observe_crossings(&self, observer: tokio::sync::mpsc::UnboundedSender<()>) {
+        *self
+            .0
+            .crossings
+            .lock()
+            .expect("resume crossings lock poisoned") = Some(observer);
+    }
+
+    /// Register a source's admitted continuation and recorded completion, which
+    /// decide its exhaustion answer (FLOWIP-134i B8). A naturally completed
+    /// source reproduces its completion; admission refused every other
+    /// unfinished `Refuse` source.
+    pub fn register_source_continuation(
+        &self,
+        stage: StageId,
+        continuation: SourceContinuation,
+        recorded_eof: Option<EofKind>,
+    ) {
+        let exhaustion = match continuation {
+            SourceContinuation::Reattach => SourceReplayExhaustion::ContinueLive,
+            SourceContinuation::Seek if recorded_eof != Some(EofKind::Natural) => {
+                SourceReplayExhaustion::ContinueLive
+            }
+            SourceContinuation::Seek | SourceContinuation::Refuse => {
+                SourceReplayExhaustion::Terminate
+            }
+        };
         self.0
-            .infinite_sources
+            .source_exhaustion
             .lock()
             .expect("resume source registry lock poisoned")
-            .insert(stage);
+            .insert(stage, exhaustion);
     }
 
     /// Register a stage's maximum recorded effect `input_seq`, from the
@@ -419,18 +473,18 @@ impl ExecutionStrategy for Resume {
             MiddlewareExecutionScope::ResumeHandler
         }
     }
-    fn missing_outcome_is_corruption(&self, at: ExecutionPosition) -> bool {
+    fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect {
         // The effect-miss decision is positional, never generational (F7): a
         // miss at or below the stage's recorded mark is a torn prefix, beyond
         // it a live call. No registered mark means no recorded effects, so
         // every miss is live.
         match self.state.recorded_effect_seq_max(at.stage_id) {
-            Some(max) => at.position <= max,
-            None => false,
+            Some(max) if at.position <= max => UnrecordedEffect::Corrupt,
+            _ => UnrecordedEffect::Execute,
         }
     }
-    fn in_doubt_effect_is_fatal(&self) -> bool {
-        false
+    fn in_doubt_authorizes_attempt(&self) -> bool {
+        true
     }
     fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
         EffectPortRegistrationPolicy::Required
@@ -443,11 +497,9 @@ impl ExecutionStrategy for Resume {
         }
     }
     fn source_replay_exhausted(&self, stage: StageId) -> SourceReplayExhaustion {
-        if self.state.is_infinite_source(stage) {
-            SourceReplayExhaustion::ContinueLive
-        } else {
-            SourceReplayExhaustion::Terminate
-        }
+        self.state
+            .source_exhaustion(stage)
+            .unwrap_or(SourceReplayExhaustion::Terminate)
     }
     fn heartbeat_policy_for(&self, stage: StageId) -> HeartbeatExecutionPolicy {
         if self.state.stage_is_live(stage) {
@@ -459,18 +511,16 @@ impl ExecutionStrategy for Resume {
 }
 
 /// A sealed archive is a finished recording: a missing recorded outcome in it
-/// is genuine corruption. An archive that is neither completed nor cancelled is
-/// only ever reconstructed leniently, and then only under
-/// `allow_incomplete_archive`.
+/// is genuine corruption. An archive that is neither completed nor cancelled
+/// is replayed only under `allow_incomplete_archive`, which tolerates its torn
+/// tail.
 fn archive_is_sealed(status: ArchiveStatus) -> bool {
     matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled)
 }
 
-/// Whether a replay over this archive runs a missing outcome live rather than
-/// treating it as corruption. Reproduces the old
-/// `EffectRuntimeMode::from_replay_archive` policy: sealed or
-/// non-`allow_incomplete` archives are strict; an unsealed archive admitted
-/// under `allow_incomplete_archive` is lenient.
+/// Whether a replay over this archive treats a missing outcome as the end of
+/// the recording rather than corruption: only an unsealed archive admitted
+/// under `allow_incomplete_archive`.
 fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
     !archive_is_sealed(status) && allow_incomplete
 }
@@ -574,17 +624,24 @@ impl RuntimeExecution {
         archive: Option<Arc<dyn ReplayArchive>>,
     ) -> Self {
         use crate::effects::EffectRuntimeMode;
+        let mut resume = None;
         let strategy: Arc<dyn ExecutionStrategy> = match mode {
             EffectRuntimeMode::Live => Arc::new(Live),
             EffectRuntimeMode::ReplayStrict => Arc::new(Replay { incomplete: false }),
-            EffectRuntimeMode::ResumeIncomplete => Arc::new(Replay { incomplete: true }),
+            EffectRuntimeMode::ReplayIncomplete => Arc::new(Replay { incomplete: true }),
+            // Catch-up with no registered effect mark: every miss is live.
+            EffectRuntimeMode::Resume => {
+                let state = Arc::new(ResumeState::new(ReaderGeneration(1)));
+                resume = Some(ResumeControl(Arc::clone(&state)));
+                Arc::new(Resume { state })
+            }
         };
         Self {
             strategy,
             archive,
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
-            resume: None,
+            resume,
         }
     }
 
@@ -655,13 +712,14 @@ impl RuntimeExecution {
         self.strategy.stage_scope(stage)
     }
 
-    /// Whether a missing recorded effect outcome at this position is corruption.
-    pub fn missing_outcome_is_corruption(&self, at: ExecutionPosition) -> bool {
-        self.strategy.missing_outcome_is_corruption(at)
+    /// What a cursor without any recorded attempt means at this position.
+    pub fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect {
+        self.strategy.missing_outcome(at)
     }
 
-    pub fn in_doubt_effect_is_fatal(&self) -> bool {
-        self.strategy.in_doubt_effect_is_fatal()
+    /// Whether an in-doubt attempt authorizes a new at-least-once attempt.
+    pub fn in_doubt_authorizes_attempt(&self) -> bool {
+        self.strategy.in_doubt_authorizes_attempt()
     }
 
     pub fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
@@ -708,7 +766,8 @@ mod tests {
         let s = Live;
         assert_eq!(s.scope_at(at()), Scope::LiveHandler);
         assert_eq!(s.stage_scope(StageId::new()), Scope::LiveHandler);
-        assert!(!s.missing_outcome_is_corruption(at()));
+        assert_eq!(s.missing_outcome(at()), UnrecordedEffect::Execute);
+        assert!(s.in_doubt_authorizes_attempt());
         assert_eq!(
             s.source_phase_for(StageId::new()),
             SourceExecutionPhase::Live
@@ -725,7 +784,12 @@ mod tests {
         let s = Replay { incomplete: false };
         assert_eq!(s.scope_at(at()), Scope::StrictReplayHandler);
         assert_eq!(s.stage_scope(StageId::new()), Scope::StrictReplayHandler);
-        assert!(s.missing_outcome_is_corruption(at()));
+        assert_eq!(s.missing_outcome(at()), UnrecordedEffect::Corrupt);
+        assert!(!s.in_doubt_authorizes_attempt());
+        assert_eq!(
+            s.effect_port_registration_policy(),
+            EffectPortRegistrationPolicy::OptionalStrictReplay
+        );
         assert_eq!(
             s.source_phase_for(StageId::new()),
             SourceExecutionPhase::Replaying
@@ -742,13 +806,17 @@ mod tests {
     }
 
     #[test]
-    fn replay_incomplete_strategy_answers() {
+    fn replay_incomplete_strategy_never_executes() {
         let s = Replay { incomplete: true };
-        // Reconstruction scope yet a missing outcome that runs live: the two
-        // queries deliberately diverge for the incomplete-archive case.
-        assert_eq!(s.scope_at(at()), Scope::ResumeHandler);
-        assert!(!s.missing_outcome_is_corruption(at()));
-        assert!(s.scope_at(at()).is_deterministic_replay());
+        // FLOWIP-134i B13: a torn tail ends the recording; it never runs live.
+        assert_eq!(s.scope_at(at()), Scope::StrictReplayHandler);
+        assert_eq!(s.stage_scope(StageId::new()), Scope::StrictReplayHandler);
+        assert_eq!(s.missing_outcome(at()), UnrecordedEffect::RecordingEnded);
+        assert!(!s.in_doubt_authorizes_attempt());
+        assert_eq!(
+            s.effect_port_registration_policy(),
+            EffectPortRegistrationPolicy::OptionalStrictReplay
+        );
         assert_eq!(
             s.source_replay_exhausted(StageId::new()),
             SourceReplayExhaustion::Terminate
@@ -774,23 +842,54 @@ mod tests {
         assert_eq!(s.scope_at(positioned), Scope::ResumeHandler);
         assert_eq!(s.stage_scope(stage), Scope::ResumeHandler);
         assert!(s.scope_at(positioned).is_deterministic_replay());
-        assert!(!s.missing_outcome_is_corruption(positioned));
+        assert_eq!(s.missing_outcome(positioned), UnrecordedEffect::Execute);
+        assert!(s.in_doubt_authorizes_attempt());
         assert_eq!(s.source_phase_for(stage), SourceExecutionPhase::Replaying);
         assert_eq!(
             s.heartbeat_policy_for(stage),
             HeartbeatExecutionPolicy::DormantUntilLive
         );
 
-        // Only registered infinite sources continue live at exhaustion.
+        // The declaration and recorded completion decide exhaustion (B8): a
+        // natural completion is reproduced, unfinished input continues.
         assert_eq!(
             s.source_replay_exhausted(stage),
             SourceReplayExhaustion::Terminate
         );
-        control.register_infinite_source(stage);
-        assert_eq!(
-            s.source_replay_exhausted(stage),
-            SourceReplayExhaustion::ContinueLive
-        );
+        for (continuation, recorded_eof, expected) in [
+            (
+                SourceContinuation::Refuse,
+                Some(EofKind::Natural),
+                SourceReplayExhaustion::Terminate,
+            ),
+            (
+                SourceContinuation::Seek,
+                Some(EofKind::Natural),
+                SourceReplayExhaustion::Terminate,
+            ),
+            (
+                SourceContinuation::Seek,
+                Some(EofKind::Truncated),
+                SourceReplayExhaustion::ContinueLive,
+            ),
+            (
+                SourceContinuation::Seek,
+                None,
+                SourceReplayExhaustion::ContinueLive,
+            ),
+            (
+                SourceContinuation::Reattach,
+                Some(EofKind::Truncated),
+                SourceReplayExhaustion::ContinueLive,
+            ),
+        ] {
+            control.register_source_continuation(stage, continuation, recorded_eof);
+            assert_eq!(
+                s.source_replay_exhausted(stage),
+                expected,
+                "{continuation:?} after {recorded_eof:?}"
+            );
+        }
 
         // Crossing the boundary flips every per-stage answer to live.
         control.record_generation_boundary(stage, ReaderGeneration(1));
@@ -876,25 +975,25 @@ mod tests {
         };
 
         // No registered mark: every miss is a live call.
-        assert!(!s.missing_outcome_is_corruption(at(1)));
+        assert_eq!(s.missing_outcome(at(1)), UnrecordedEffect::Execute);
 
         // With the mark, a miss within the recorded range is a torn prefix
         // and one beyond it is live, regardless of the stage frontier.
         control.record_effect_high_water(stage, StageInputPosition(5));
-        assert!(s.missing_outcome_is_corruption(at(1)));
-        assert!(s.missing_outcome_is_corruption(at(5)));
-        assert!(!s.missing_outcome_is_corruption(at(6)));
+        assert_eq!(s.missing_outcome(at(1)), UnrecordedEffect::Corrupt);
+        assert_eq!(s.missing_outcome(at(5)), UnrecordedEffect::Corrupt);
+        assert_eq!(s.missing_outcome(at(6)), UnrecordedEffect::Execute);
         control.record_generation_boundary(stage, ReaderGeneration(1));
-        assert!(s.missing_outcome_is_corruption(at(5)));
-        assert!(!s.missing_outcome_is_corruption(at(6)));
+        assert_eq!(s.missing_outcome(at(5)), UnrecordedEffect::Corrupt);
+        assert_eq!(s.missing_outcome(at(6)), UnrecordedEffect::Execute);
     }
 
     #[test]
-    fn replay_incomplete_derivation_matches_old_policy() {
+    fn replay_incomplete_derivation_reads_seal_and_override() {
         // Sealed archives are strict regardless of the flag.
         assert!(!replay_incomplete(ArchiveStatus::Completed, true));
         assert!(!replay_incomplete(ArchiveStatus::Cancelled, true));
-        // Unsealed is lenient only under allow_incomplete_archive.
+        // Unsealed ends at its recording only under allow_incomplete_archive.
         assert!(replay_incomplete(ArchiveStatus::Failed, true));
         assert!(replay_incomplete(ArchiveStatus::Unknown, true));
         assert!(!replay_incomplete(ArchiveStatus::Failed, false));

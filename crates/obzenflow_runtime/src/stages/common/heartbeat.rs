@@ -664,6 +664,13 @@ mod tests {
             Vec::new()
         }
 
+        fn recorded_source_eof(
+            &self,
+            _stage_key: &str,
+        ) -> Option<obzenflow_core::event::payloads::flow_control_payload::EofKind> {
+            unimplemented!("not used in heartbeat tests")
+        }
+
         fn archive_path(&self) -> &Path {
             Path::new("stub-archive")
         }

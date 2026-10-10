@@ -12,7 +12,11 @@ use crate::stages::common::handler_error::StageFatal;
 use crate::stages::source::SourceReaderInitContext;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
+use obzenflow_core::event::payloads::execution_payload::{
+    SourceContinuationRefusal, SourceInputPinnedFact,
+};
 use obzenflow_core::ingress::HostedIngressBindingSlot;
+use obzenflow_core::source::{EncodedSourcePosition, SourcePositionError};
 use obzenflow_core::{ChainEvent, WriterId};
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,7 +91,32 @@ pub trait UnifiedFiniteSourceHandler: sealed::Finite + Send + Sync {
     }
     fn install_writer_id(&mut self, writer_id: WriterId);
     fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
+    /// The acquired reader's input pin, committed before its first record;
+    /// `None` for a reader without positions (FLOWIP-134i B11).
+    fn input_pin(&self) -> Option<Result<SourceInputPinnedFact, SourcePositionError>> {
+        None
+    }
+    /// Validate the recorded pin, then continue strictly after `after`, or at
+    /// the pinned beginning (FLOWIP-134i B1). A reader without positions
+    /// refuses.
+    fn resume_at(
+        &mut self,
+        _pin: &SourceInputPinnedFact,
+        _after: Option<&EncodedSourcePosition>,
+    ) -> Result<(), SourceResumeError> {
+        Err(SourceResumeError::Refused(
+            SourceContinuationRefusal::Unpositioned,
+        ))
+    }
     fn next_invocation(&mut self) -> ErasedSourceInvocation;
+}
+
+/// Why a positioned reader could not continue its committed prefix.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum SourceResumeError {
+    Refused(SourceContinuationRefusal),
+    SeekFailed(SourceError),
 }
 
 /// Runtime-erased asynchronous finite source interface.

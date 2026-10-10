@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! Source positions, progress and input identity (FLOWIP-134i B1, B9, B11).
+//!
+//! A positioned reader reports the position immediately after each record. The
+//! runtime encodes it into that record's protected `source_progress`
+//! provenance, so a fact and its position commit in one append. Input identity
+//! lives once, in the source's input pin. Neither is ever displayed: errors
+//! name what failed, never a position or an identity value.
+
+use ring::digest::{digest, SHA256};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+use std::num::NonZeroU32;
+
+/// Upper bound on an encoded position's canonical JSON size.
+pub const MAX_ENCODED_POSITION_BYTES: usize = 512;
+
+/// A connector's position in its input.
+pub trait SourcePosition: Clone + Serialize + DeserializeOwned + Send + Sync + 'static {
+    /// Exact representation version. The pin records it and resume refuses any
+    /// other. Zero is a compile error:
+    ///
+    /// ```compile_fail
+    /// use obzenflow_core::source::{EncodedSourcePosition, SourcePosition};
+    /// #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    /// struct Offset(u64);
+    /// impl SourcePosition for Offset {
+    ///     const SCHEMA_VERSION: u32 = 0;
+    /// }
+    /// let _ = EncodedSourcePosition::encode(&Offset(0));
+    /// ```
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+fn encoding_version<P: SourcePosition>() -> NonZeroU32 {
+    const {
+        match NonZeroU32::new(P::SCHEMA_VERSION) {
+            Some(version) => version,
+            None => panic!("SourcePosition::SCHEMA_VERSION must be positive"),
+        }
+    }
+}
+
+/// Why a position could not be encoded or decoded. It never carries the
+/// position itself.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SourcePositionError {
+    #[error("the source position could not be encoded")]
+    Unencodable,
+    #[error(
+        "the source position encodes to {size} bytes, above the {MAX_ENCODED_POSITION_BYTES}-byte bound"
+    )]
+    Oversize { size: usize },
+    #[error("the recorded source position has version {recorded}, but the connector reads version {expected}")]
+    VersionMismatch {
+        recorded: NonZeroU32,
+        expected: NonZeroU32,
+    },
+    #[error("the recorded source position could not be decoded")]
+    Undecodable,
+}
+
+/// A position encoded for storage with its representation version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncodedSourcePosition {
+    schema_version: NonZeroU32,
+    value: Value,
+}
+
+impl EncodedSourcePosition {
+    pub fn encode<P: SourcePosition>(position: &P) -> Result<Self, SourcePositionError> {
+        let value = serde_json::to_value(position).map_err(|_| SourcePositionError::Unencodable)?;
+        let encoded = Self {
+            schema_version: encoding_version::<P>(),
+            value,
+        };
+        encoded.check_size()?;
+        Ok(encoded)
+    }
+
+    pub fn decode<P: SourcePosition>(&self) -> Result<P, SourcePositionError> {
+        let expected = encoding_version::<P>();
+        if self.schema_version != expected {
+            return Err(SourcePositionError::VersionMismatch {
+                recorded: self.schema_version,
+                expected,
+            });
+        }
+        self.check_size()?;
+        serde_json::from_value(self.value.clone()).map_err(|_| SourcePositionError::Undecodable)
+    }
+
+    pub fn schema_version(&self) -> NonZeroU32 {
+        self.schema_version
+    }
+
+    fn check_size(&self) -> Result<(), SourcePositionError> {
+        let size = serde_json::to_vec(&self.value)
+            .map_err(|_| SourcePositionError::Unencodable)?
+            .len();
+        if size > MAX_ENCODED_POSITION_BYTES {
+            return Err(SourcePositionError::Oversize { size });
+        }
+        Ok(())
+    }
+}
+
+/// The position after one source record, in that record's protected
+/// provenance (FLOWIP-134i B11). Derived facts never inherit it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceProgress {
+    pub after: EncodedSourcePosition,
+}
+
+/// Why an input identity could not be computed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SourceIdentityError {
+    #[error("the source input identity parts could not be encoded")]
+    Unencodable,
+    #[error("the source input identity parts must be a struct or map of named parts")]
+    NotNamedParts,
+}
+
+/// What decides a source's record boundaries and order (FLOWIP-134i B9): one
+/// digest per named part, so a refusal can name the part that changed without
+/// revealing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceInputIdentity {
+    kind: String,
+    parts: BTreeMap<String, String>,
+}
+
+impl SourceInputIdentity {
+    /// One identity over `parts`, each of whose top-level fields names a part.
+    pub fn new<T: Serialize>(kind: &str, parts: &T) -> Result<Self, SourceIdentityError> {
+        let Value::Object(fields) =
+            serde_json::to_value(parts).map_err(|_| SourceIdentityError::Unencodable)?
+        else {
+            return Err(SourceIdentityError::NotNamedParts);
+        };
+        let parts = fields
+            .into_iter()
+            .map(|(name, value)| Ok((name, canonical_digest(value)?)))
+            .collect::<Result<_, SourceIdentityError>>()?;
+        Ok(Self {
+            kind: kind.to_string(),
+            parts,
+        })
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// The first part, by name, that differs from `recorded`; `kind` when the
+    /// connector kind itself differs.
+    pub fn changed_part(&self, recorded: &Self) -> Option<String> {
+        if self.kind != recorded.kind {
+            return Some("kind".to_string());
+        }
+        self.parts
+            .keys()
+            .chain(recorded.parts.keys())
+            .filter(|name| self.parts.get(*name) != recorded.parts.get(*name))
+            .min()
+            .cloned()
+    }
+
+    /// One digest over the whole identity, for evidence that names it.
+    pub fn digest(&self) -> String {
+        let mut bytes = Vec::new();
+        let mut field = |text: &str| {
+            bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(text.as_bytes());
+        };
+        field(&self.kind);
+        for (name, part) in &self.parts {
+            field(name);
+            field(part);
+        }
+        hex_sha256(&bytes)
+    }
+}
+
+fn canonical_digest(value: Value) -> Result<String, SourceIdentityError> {
+    let bytes =
+        serde_json::to_vec(&canonicalize(value)).map_err(|_| SourceIdentityError::Unencodable)?;
+    Ok(hex_sha256(&bytes))
+}
+
+fn canonicalize(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize(value)))
+                    .collect::<Map<_, _>>(),
+            )
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize).collect()),
+        scalar => scalar,
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let hash = digest(&SHA256, bytes);
+    let mut hex = String::with_capacity(hash.as_ref().len() * 2);
+    for byte in hash.as_ref() {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Offset {
+        record: u64,
+    }
+
+    impl SourcePosition for Offset {}
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct Wide(String);
+
+    impl SourcePosition for Wide {
+        const SCHEMA_VERSION: u32 = 2;
+    }
+
+    #[test]
+    fn positions_round_trip_with_their_version() {
+        let encoded = EncodedSourcePosition::encode(&Offset { record: 300 }).unwrap();
+        assert_eq!(encoded.schema_version(), NonZeroU32::MIN);
+        assert_eq!(encoded.decode::<Offset>().unwrap(), Offset { record: 300 });
+        let restored: EncodedSourcePosition =
+            serde_json::from_value(serde_json::to_value(&encoded).unwrap()).unwrap();
+        assert_eq!(restored, encoded);
+    }
+
+    #[test]
+    fn another_version_or_an_oversize_position_is_refused() {
+        let encoded = EncodedSourcePosition::encode(&Wide("x".into())).unwrap();
+        assert!(matches!(
+            encoded.decode::<Offset>(),
+            Err(SourcePositionError::VersionMismatch { .. })
+        ));
+        assert!(matches!(
+            EncodedSourcePosition::encode(&Wide("x".repeat(MAX_ENCODED_POSITION_BYTES))),
+            Err(SourcePositionError::Oversize { .. })
+        ));
+        let error = EncodedSourcePosition::encode(&Wide("secret".repeat(200))).unwrap_err();
+        assert!(
+            !error.to_string().contains("secret"),
+            "diagnostics never carry the position"
+        );
+    }
+
+    #[derive(Serialize)]
+    struct Parts<'a> {
+        file: &'a str,
+        selection: &'a str,
+    }
+
+    #[test]
+    fn identity_names_the_changed_part_without_revealing_it() {
+        let recorded = SourceInputIdentity::new(
+            "csv",
+            &Parts {
+                file: "inode-1",
+                selection: "all",
+            },
+        )
+        .unwrap();
+        let same = SourceInputIdentity::new(
+            "csv",
+            &Parts {
+                file: "inode-1",
+                selection: "all",
+            },
+        )
+        .unwrap();
+        assert_eq!(same.changed_part(&recorded), None);
+        assert_eq!(same.digest(), recorded.digest());
+
+        let replaced = SourceInputIdentity::new(
+            "csv",
+            &Parts {
+                file: "inode-2",
+                selection: "all",
+            },
+        )
+        .unwrap();
+        assert_eq!(replaced.changed_part(&recorded).as_deref(), Some("file"));
+        assert!(!serde_json::to_string(&replaced)
+            .unwrap()
+            .contains("inode-2"));
+
+        let other_kind = SourceInputIdentity::new(
+            "yaml",
+            &Parts {
+                file: "inode-1",
+                selection: "all",
+            },
+        )
+        .unwrap();
+        assert_eq!(other_kind.changed_part(&recorded).as_deref(), Some("kind"));
+        assert_eq!(
+            SourceInputIdentity::new("csv", &"not named"),
+            Err(SourceIdentityError::NotNamedParts)
+        );
+    }
+}

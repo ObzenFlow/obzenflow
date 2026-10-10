@@ -79,7 +79,7 @@ impl SourceError {
         self.continuation() == SourcePollContinuation::Terminal
     }
 
-    /// Category-only summary for processing status and cleanup evidence.
+    /// Category-only summary for processing status.
     pub(crate) fn safe_summary(&self) -> &'static str {
         match self.kind() {
             SourcePollErrorKind::Timeout => "source timeout",

@@ -85,7 +85,7 @@ fn publish(
                         PublicationStep::Start => E::StartPublished,
                         PublicationStep::Running => E::RunningPublished,
                         PublicationStep::Terminal => E::TerminalPublished,
-                        PublicationStep::Stop => E::ObservationEnded,
+                        PublicationStep::Stop | PublicationStep::Evidence => E::ObservationEnded,
                     },
                     Err(error) => E::OperationalFailure {
                         message: error.to_string(),

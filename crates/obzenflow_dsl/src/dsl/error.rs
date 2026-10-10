@@ -9,6 +9,29 @@ use obzenflow_runtime::bootstrap::ReplayVerb;
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
+use std::path::{Path, PathBuf};
+
+// One diagnostic names every source whose connector cannot continue its
+// interrupted input (FLOWIP-134i B8).
+fn unfinished_sources_refusal(archive: &Path, sources: &[String]) -> String {
+    let quoted: Vec<String> = sources.iter().map(|source| format!("'{source}'")).collect();
+    let named = match quoted.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let (subject, their, connectors) = if sources.len() == 1 {
+        ("source", "its", "its connector cannot")
+    } else {
+        ("sources", "their", "their connectors cannot")
+    };
+    format!(
+        "cannot resume {}: {subject} {named} stopped before the end of {their} input, and \
+         {connectors} continue interrupted input.\nUse a connector that continues \
+         interrupted input, or implement one.",
+        archive.display()
+    )
+}
 
 // Verb-aware refusal copy for the archive sink delivery-safety gate
 // (FLOWIP-120n F16, extended to both archive verbs by FLOWIP-120v): one
@@ -364,6 +387,12 @@ pub enum FlowBuildError {
          for an effect-free bounded rehearsal."
     )]
     ResumeRefusedEphemeralRun,
+
+    #[error("{}", unfinished_sources_refusal(.archive, .sources))]
+    ResumeRefusedUnfinishedSources {
+        archive: PathBuf,
+        sources: Vec<String>,
+    },
 }
 
 impl FlowBuildError {
@@ -412,5 +441,29 @@ impl FlowBuildError {
 impl From<FlowBuildError> for String {
     fn from(err: FlowBuildError) -> Self {
         err.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unfinished_source_refusal_names_every_source() {
+        let archive = Path::new("/runs/interrupted");
+        assert_eq!(
+            unfinished_sources_refusal(archive, &["web_orders".to_string()]),
+            "cannot resume /runs/interrupted: source 'web_orders' stopped before the end of \
+             its input, and its connector cannot continue interrupted input.\nUse a connector \
+             that continues interrupted input, or implement one."
+        );
+        assert!(unfinished_sources_refusal(
+            archive,
+            &["a".to_string(), "b".to_string(), "c".to_string()]
+        )
+        .starts_with(
+            "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped before the end \
+             of their input, and their connectors cannot continue interrupted input."
+        ));
     }
 }

@@ -8,13 +8,14 @@
 //! source stages. While `SignalGate` in
 //! `stages::common::control_strategies` is concerned with how
 //! stages handle *incoming* FlowControl (EOF/Drain/etc), source
-//! strategies govern how sources decide to emit FlowControl on
-//! completion or drain.
+//! strategies govern how sources decide to emit FlowControl at
+//! completion.
 //!
 //! An explicit strategy hook lets sources participate in the same
 //! safety/contract story as other stages, while keeping the default
 //! behaviour unchanged.
 
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use std::collections::HashMap;
 
 /// High-level decision a source control strategy can make
@@ -23,10 +24,7 @@ use std::collections::HashMap;
 /// source implementations map them to concrete FlowControl payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionDecision {
-    /// Use the stage's existing / default EOF semantics.
-    ///
-    /// - Finite sources: natural EOF based on handler completion.
-    /// - Infinite sources: shutdown EOF used today during BeginDrain.
+    /// Natural EOF for an exhausted reader.
     DefaultEof,
 
     /// Emit a "poison" EOF to signal abnormal termination.
@@ -68,37 +66,63 @@ impl Default for CompletionContext {
     }
 }
 
-/// Strategy trait for governing source shutdown / FlowControl emission
-///
-/// Implementations can influence how finite and infinite sources behave
-/// when they complete naturally or when a drain/shutdown is requested.
+/// Strategy trait for governing source FlowControl emission at exhaustion.
 pub trait CompletionGate: Send + Sync + std::fmt::Debug {
-    /// Handle a natural completion for a finite source
-    ///
-    /// Called when a finite source's handler reports completion via
-    /// `is_complete() == true` and the supervisor is ready to shut down.
+    /// Consulted only when the reader reported exhaustion; a stop never asks.
     fn on_natural_completion(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
-        CompletionDecision::DefaultEof
-    }
-
-    /// Handle a drain / shutdown request (finite or infinite)
-    ///
-    /// Called when the supervisor is initiating a graceful drain, e.g.
-    /// due to BeginDrain or external shutdown signals.
-    fn on_begin_drain(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
         CompletionDecision::DefaultEof
     }
 }
 
-/// Default "Jonestown" source strategy
-///
-/// This mirrors the current behaviour for sources:
-/// - Finite sources: emit their natural EOF when complete.
-/// - Infinite sources: emit their existing shutdown EOF on drain.
-///
-/// It is intentionally conservative: it never changes the control action,
-/// leaving all semantics to the existing FSM implementation.
+/// Default "Jonestown" source strategy: natural EOF at exhaustion.
 #[derive(Debug)]
 pub struct JonestownSourceStrategy;
 
 impl CompletionGate for JonestownSourceStrategy {}
+
+/// Why a source completes (FLOWIP-134i B5). The first cause observed wins, so a
+/// source's own drain after exhaustion or replay keeps the earlier cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceCompletionCause {
+    /// The reader reported exhaustion.
+    Exhausted,
+    /// An operator, pipeline or boundary-policy stop arrived before exhaustion.
+    Stopped,
+    /// Replay exhaustion reproduces the archive's recorded kind (FLOWIP-095k);
+    /// `None`: the archive committed no EOF.
+    ReplayExhausted { recorded_kind: Option<EofKind> },
+}
+
+impl SourceCompletionCause {
+    /// Only exhaustion consults the gate; a stop is always `Truncated`.
+    pub(crate) fn eof_kind(
+        self,
+        gate: &dyn CompletionGate,
+        ctx: &mut CompletionContext,
+    ) -> EofKind {
+        match self {
+            Self::Exhausted => match gate.on_natural_completion(ctx) {
+                CompletionDecision::PoisonEof => EofKind::Poison,
+                CompletionDecision::DefaultEof => EofKind::Natural,
+            },
+            Self::Stopped => EofKind::Truncated,
+            Self::ReplayExhausted { recorded_kind } => recorded_kind.unwrap_or(EofKind::Truncated),
+        }
+    }
+}
+
+/// First-writer-wins slot for a source's completion cause.
+#[derive(Debug, Default)]
+pub(crate) struct CompletionCauseSlot(Option<SourceCompletionCause>);
+
+impl CompletionCauseSlot {
+    /// Record why the source completes; a later cause never overrides it.
+    pub(crate) fn record(&mut self, cause: SourceCompletionCause) {
+        self.0.get_or_insert(cause);
+    }
+
+    /// Absent means a stop, so natural EOF requires recorded exhaustion.
+    pub(crate) fn cause(&self) -> SourceCompletionCause {
+        self.0.unwrap_or(SourceCompletionCause::Stopped)
+    }
+}

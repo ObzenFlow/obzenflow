@@ -33,6 +33,14 @@
 //! diagnostics retain the error category and stage identity without logging or
 //! persisting the connector's raw error text. Connector-authored diagnostics
 //! must also exclude credentials and sensitive response data.
+//!
+//! ## Continuation
+//!
+//! Each connector declares how its interrupted input continues on resume
+//! (FLOWIP-134i B8): [`Refuse`] when it cannot, so resuming an unfinished source
+//! refuses before any run starts, or [`Reattach`], for infinite connectors, to
+//! continue live at the committed handoff. Direct handlers declare nothing: a
+//! finite handler lowers to `Refuse` and an infinite one to `Reattach`.
 
 pub mod boundary;
 mod connector;
@@ -47,13 +55,21 @@ pub use boundary::{
     SourcePollCompletion, SourcePollExecution, SourcePollReport, SourcePollResult,
 };
 
+#[doc(hidden)]
+pub use crate::stages::common::handlers::source::{sources_refusing_resume, SourceContinuation};
 pub use crate::stages::common::handlers::source::{
-    RecordDeError, SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    AsyncFiniteContinuation, AsyncInfiniteContinuation, FiniteContinuation, InfiniteContinuation,
+    PositionedFiniteReader, Reattach, RecordDeError, Refuse, Seek, SeekableSource, SourceError,
+    SourceRecord, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 pub use connector::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     InfiniteSourceConnector, SourceReaderInitContext,
+};
+pub use obzenflow_core::source::{
+    EncodedSourcePosition, SourceIdentityError, SourceInputIdentity, SourcePosition,
+    SourcePositionError,
 };
 
 #[cfg(test)]

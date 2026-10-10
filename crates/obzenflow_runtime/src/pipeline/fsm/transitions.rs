@@ -47,6 +47,40 @@ fn publish(event: SystemEvent, step: PublicationStep) -> A {
         step,
     }
 }
+/// Publish reconstruction completion once no stage of a resumed run is still
+/// reconstructing (FLOWIP-134i B6): each crossed into the resume generation
+/// or completed before any stop.
+fn reconstruction_progress(state: &S, ctx: &mut C) -> Vec<A> {
+    if !matches!(state, S::Running | S::Draining) {
+        return Vec::new();
+    }
+    let Some(control) = ctx
+        .runtime_execution
+        .as_ref()
+        .and_then(|execution| execution.resume_control())
+    else {
+        return Vec::new();
+    };
+    let generation = control.resume_generation();
+    let Some(progress) = ctx.reconstruction.as_mut() else {
+        return Vec::new();
+    };
+    progress.pending.retain(|stage| !control.stage_is_live(*stage));
+    if !progress.pending.is_empty() {
+        return Vec::new();
+    }
+    ctx.reconstruction = None;
+    vec![publish(
+        factory(ctx).pipeline_reconstruction_completed(generation.0),
+        PublicationStep::Evidence,
+    )]
+}
+
+pub(super) fn stages_crossed<'a>(state: &'a S, _: &'a E, ctx: &'a mut C) -> Decision<'a> {
+    let actions = reconstruction_progress(state, ctx);
+    decided(change(state.clone(), actions))
+}
+
 fn observe(ctx: &mut C, stage: StageId, snapshot: &StageSnapshot) -> Result<(), FsmError> {
     publication::incorporate(&snapshot.causal_context)
         .map_err(|error| FsmError::HandlerError(error.to_string()))?;
@@ -76,6 +110,7 @@ pub(super) fn unhandled<'a>(
             | E::StartPublished
             | E::RunningPublished
             | E::TerminalPublished
+            | E::StagesCrossed
             | E::MetricsExited(_) => Ok(()),
             _ => Err(invalid_input(state, event)),
         }
@@ -153,8 +188,10 @@ pub(super) fn sources_started<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) ->
         ))
     })
 }
-pub(super) fn running_published<'a>(_: &'a S, _: &'a E, _: &'a mut C) -> Decision<'a> {
-    decided(change(S::Running, vec![]))
+pub(super) fn running_published<'a>(_: &'a S, _: &'a E, ctx: &'a mut C) -> Decision<'a> {
+    // Sources may have crossed before the run was published as running.
+    let actions = reconstruction_progress(&S::Running, ctx);
+    decided(change(S::Running, actions))
 }
 pub(super) fn sources_completed<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
     Box::pin(async move {
@@ -249,6 +286,12 @@ pub(super) fn child_exited<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> De
         match &exit.outcome {
             LifecycleExit::Completed(_) => {
                 ctx.completed_stages.insert(exit.stage_id);
+                // Completing before any stop finished its recorded input.
+                if !ctx.stop_intent.requested {
+                    if let Some(progress) = ctx.reconstruction.as_mut() {
+                        progress.pending.remove(&exit.stage_id);
+                    }
+                }
             }
             LifecycleExit::Cancelled { .. }
                 if matches!(state, S::CancellingChildren | S::FailingChildren { .. }) => {}
@@ -271,7 +314,8 @@ pub(super) fn child_exited<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> De
                 ))
             }
         }
-        Ok(change(state.clone(), vec![]))
+        let actions = reconstruction_progress(state, ctx);
+        Ok(change(state.clone(), actions))
     })
 }
 

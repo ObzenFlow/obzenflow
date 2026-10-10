@@ -4,6 +4,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::path::PathBuf;
 
 /// Errors that can occur in the FlowApplication framework
 #[derive(Debug)]
@@ -34,6 +35,15 @@ pub enum ApplicationError {
     /// uncertified stages, 3 refused or skipped.
     Verification { exit_code: u8, summary: String },
 
+    /// A replay reached a cursor its recording holds no outcome for, as its
+    /// stage-fatal fact records (FLOWIP-134i B13).
+    ReplayRecordingEnded {
+        replayed: PathBuf,
+        stage_key: String,
+        input_position: Option<u64>,
+        resume: PathBuf,
+    },
+
     /// Other error
     Other(Box<dyn Error + Send + Sync>),
 }
@@ -50,6 +60,26 @@ impl fmt::Display for ApplicationError {
             Self::IoError(err) => write!(f, "IO error: {err}"),
             Self::Verification { exit_code, summary } => {
                 write!(f, "replay verification (exit code {exit_code}): {summary}")
+            }
+            Self::ReplayRecordingEnded {
+                replayed,
+                stage_key,
+                input_position,
+                resume,
+            } => {
+                write!(
+                    f,
+                    "replay of {} stopped: stage '{stage_key}' reached the end of its recording",
+                    replayed.display()
+                )?;
+                if let Some(input) = input_position {
+                    write!(f, " at input {input}")?;
+                }
+                write!(
+                    f,
+                    ", and a replay never executes an effect.\nResume {} to finish this run's work.",
+                    resume.display()
+                )
             }
             Self::Other(err) => write!(f, "Application error: {err}"),
         }

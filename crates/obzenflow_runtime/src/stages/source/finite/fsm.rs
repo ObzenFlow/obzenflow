@@ -15,7 +15,7 @@ use crate::stages::common::stage_handle::{
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath};
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, SourceContractEventParams};
@@ -33,7 +33,8 @@ use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
-use crate::stages::source::strategies::{CompletionContext, CompletionGate};
+use crate::stages::source::strategies::{CompletionCauseSlot, CompletionContext, CompletionGate};
+use crate::stages::source::supervision::SourceExit;
 
 // ============================================================================
 // FSM States
@@ -193,6 +194,16 @@ impl<H> FiniteSourceState<H> {
         }
     }
 
+    /// The exit whose transition schedules cleanup (FLOWIP-134i B2).
+    pub(crate) fn exit(&self) -> Option<SourceExit> {
+        match self {
+            Self::Finalising => Some(SourceExit::Finalising),
+            Self::Failing(_) => Some(SourceExit::Failing),
+            Self::Cancelling(_) => Some(SourceExit::Cancelling),
+            _ => None,
+        }
+    }
+
     pub(crate) fn lifecycle_phase(&self) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
         use crate::stages::common::stage_lifecycle::LifecyclePhase as Phase;
         match self {
@@ -224,7 +235,6 @@ pub enum FiniteSourceEvent<H> {
     FinalisationCompleted,
     TerminationSettled,
     InputAcquired,
-    ResumeLiveInput,
 
     /// Source is ready - transition to WaitingForGun state
     Ready,
@@ -257,7 +267,6 @@ impl<H> Clone for FiniteSourceEvent<H> {
             Self::FinalisationCompleted => Self::FinalisationCompleted,
             Self::TerminationSettled => Self::TerminationSettled,
             Self::InputAcquired => Self::InputAcquired,
-            Self::ResumeLiveInput => Self::ResumeLiveInput,
 
             Self::Ready => Self::Ready,
             Self::Start => Self::Start,
@@ -278,7 +287,6 @@ impl<H> std::fmt::Debug for FiniteSourceEvent<H> {
             Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
             Self::TerminationSettled => write!(f, "TerminationSettled"),
             Self::InputAcquired => write!(f, "InputAcquired"),
-            Self::ResumeLiveInput => write!(f, "ResumeLiveInput"),
 
             Self::Ready => write!(f, "Ready"),
             Self::Start => write!(f, "Start"),
@@ -305,8 +313,7 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             | Self::ActivationCompleted
             | Self::FinalisationCompleted
             | Self::TerminationSettled
-            | Self::InputAcquired
-            | Self::ResumeLiveInput => None,
+            | Self::InputAcquired => None,
             Self::Initialize | Self::Ready | Self::Start | Self::BeginDrain | Self::Completed => {
                 None
             }
@@ -324,7 +331,6 @@ impl<H: Send + Sync + 'static> EventVariant for FiniteSourceEvent<H> {
             Self::FinalisationCompleted => "FinalisationCompleted",
             Self::TerminationSettled => "TerminationSettled",
             Self::InputAcquired => "InputAcquired",
-            Self::ResumeLiveInput => "ResumeLiveInput",
 
             FiniteSourceEvent::Ready => "Ready",
             FiniteSourceEvent::Start => "Start",
@@ -373,18 +379,6 @@ pub enum FiniteSourceAction<H> {
 // FSM Context
 // ============================================================================
 
-/// Why the source is completing (FLOWIP-095k). Replay exhaustion reproduces
-/// the archive's recorded kind; live completion consults the control strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SourceCompletionOrigin {
-    #[default]
-    Live,
-    ReplayExhausted {
-        /// The archive's recorded completion kind; `None`: no committed EOF.
-        recorded_kind: Option<EofKind>,
-    },
-}
-
 /// Context for finite source handlers - contains everything actions need
 pub struct FiniteSourceResources<H> {
     /// This source's stage ID
@@ -428,8 +422,8 @@ pub struct FiniteSourceResources<H> {
     /// Mutable context for the source control strategy
     pub control_context: CompletionContext,
 
-    /// Why the source is completing (affects EOF kind, FLOWIP-095k).
-    pub completion_origin: SourceCompletionOrigin,
+    /// Why the source completes (134i B5); the first cause recorded wins.
+    pub(crate) completion: CompletionCauseSlot,
 
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
@@ -487,7 +481,7 @@ impl<H> FiniteSourceResources<H> {
             instrumentation: init.instrumentation,
             control_strategy: init.control_strategy,
             control_context: CompletionContext::new(),
-            completion_origin: SourceCompletionOrigin::Live,
+            completion: CompletionCauseSlot::default(),
             backpressure_writer: init.backpressure_writer,
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
@@ -609,27 +603,11 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
                     .events_processed_total
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                // FLOWIP-095k: replay exhaustion reproduces the archive's
-                // recorded kind and never consults the live control strategy.
-                let eof_kind = match ctx.completion_origin {
-                    SourceCompletionOrigin::Live => {
-                        // Consult the source control strategy (FLOWIP-081a / 051b).
-                        let decision = ctx
-                            .control_strategy
-                            .on_natural_completion(&mut ctx.control_context);
-                        if matches!(
-                            decision,
-                            crate::stages::source::strategies::CompletionDecision::PoisonEof
-                        ) {
-                            EofKind::Poison
-                        } else {
-                            EofKind::Natural
-                        }
-                    }
-                    SourceCompletionOrigin::ReplayExhausted { recorded_kind } => {
-                        recorded_kind.unwrap_or(EofKind::Truncated)
-                    }
-                };
+                // Natural EOF requires recorded exhaustion (134i B5).
+                let eof_kind = ctx
+                    .completion
+                    .cause()
+                    .eof_kind(ctx.control_strategy.as_ref(), &mut ctx.control_context);
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.capture_accounting();
@@ -891,6 +869,7 @@ pub(crate) mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::event::types::SeqNo;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
@@ -904,7 +883,7 @@ pub(crate) mod tests {
 
     use crate::stages::common::handlers::source::traits::FiniteSourceHandler as TestFiniteSourceHandler;
     use crate::stages::source::strategies::{
-        CompletionContext, CompletionDecision, CompletionGate,
+        CompletionContext, CompletionDecision, CompletionGate, SourceCompletionCause,
     };
 
     /// Test stand-in for a degraded-mode source strategy: emits a poison EOF
@@ -923,10 +902,6 @@ pub(crate) mod tests {
             } else {
                 CompletionDecision::DefaultEof
             }
-        }
-
-        fn on_begin_drain(&self, ctx: &mut CompletionContext) -> CompletionDecision {
-            self.on_natural_completion(ctx)
         }
     }
 
@@ -1163,6 +1138,7 @@ pub(crate) mod tests {
                         source_boundary: None,
                         pending_failure: None,
                         reader_acquired: false,
+                        exit: None,
                         $($extra: $value,)*
                     };
                     let build_sync = || $sync {
@@ -1179,6 +1155,8 @@ pub(crate) mod tests {
                         replay_completion: Default::default(),
                         source_boundary: None,
                         pending_failure: None,
+                        reader_acquired: false,
+                        exit: None,
                         $($extra: $value,)*
                     };
                     let build_fsm = |initial_state| {
@@ -1308,11 +1286,13 @@ pub(crate) mod tests {
     source_state_projection_test!(finite_source_states_precede_actions,
         FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState, FiniteSourceEvent,
         FiniteSourceSupervisor, AsyncFiniteSourceSupervisor, true,
-        { pending_boundary_eof: false, pending_boundary_rejected: false });
+        { pending_boundary_eof: false, pending_boundary_rejected: false,
+          continuation: crate::stages::source::SourceContinuation::Refuse });
     source_state_projection_test!(infinite_source_states_precede_actions,
         InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState, InfiniteSourceEvent,
         InfiniteSourceSupervisor, AsyncInfiniteSourceSupervisor, false,
-        { pending_boundary_begin_drain: false });
+        { pending_boundary_begin_drain: false,
+          continuation: crate::stages::source::SourceContinuation::Reattach });
 
     #[tokio::test]
     async fn send_eof_uses_poison_flag_when_breaker_open() {
@@ -1395,6 +1375,10 @@ pub(crate) mod tests {
             ));
 
         // Send EOF with breaker closed
+        ctx.resources_mut()
+            .unwrap()
+            .completion
+            .record(SourceCompletionCause::Exhausted);
         FiniteSourceAction::<DummySource>::SendEOF
             .execute(&mut ctx)
             .await
@@ -1451,6 +1435,11 @@ pub(crate) mod tests {
             .events_processed_total
             .store(10, std::sync::atomic::Ordering::Relaxed);
 
+        ctx_open
+            .resources_mut()
+            .unwrap()
+            .completion
+            .record(SourceCompletionCause::Exhausted);
         FiniteSourceAction::<DummySource>::SendEOF
             .execute(&mut ctx_open)
             .await
@@ -1510,8 +1499,10 @@ pub(crate) mod tests {
                 .execute(&mut ctx)
                 .await
                 .unwrap();
-            ctx.resources_mut().unwrap().completion_origin =
-                SourceCompletionOrigin::ReplayExhausted { recorded_kind };
+            ctx.resources_mut()
+                .unwrap()
+                .completion
+                .record(SourceCompletionCause::ReplayExhausted { recorded_kind });
 
             FiniteSourceAction::<DummySource>::SendEOF
                 .execute(&mut ctx)
@@ -1533,6 +1524,80 @@ pub(crate) mod tests {
                 vec![expected],
                 "recorded {recorded_kind:?} must synthesize {expected:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn send_eof_truncates_a_stop_and_keeps_the_first_cause() {
+        // 134i B5: a stop before exhaustion is `Truncated` whatever the gate
+        // says, an unrecorded cause is a stop, and the first cause wins.
+        let cases: [(&[SourceCompletionCause], EofKind); 4] = [
+            (&[SourceCompletionCause::Stopped], EofKind::Truncated),
+            (&[], EofKind::Truncated),
+            (
+                &[
+                    SourceCompletionCause::Exhausted,
+                    SourceCompletionCause::Stopped,
+                ],
+                EofKind::Natural,
+            ),
+            (
+                &[
+                    SourceCompletionCause::Stopped,
+                    SourceCompletionCause::Exhausted,
+                ],
+                EofKind::Truncated,
+            ),
+        ];
+
+        for (causes, expected) in cases {
+            let stage_id = CoreStageId::new();
+            let data_journal: Arc<dyn Journal<ChainEvent>> =
+                Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+            let mut ctx = FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
+                stage_id,
+                stage_name: "finite_source".to_string(),
+                observers: crate::stages::observer::StageObserverBundle::default(),
+                flow_name: "test_flow".to_string(),
+                flow_id: FlowId::new(),
+                data_journal: data_journal.clone(),
+                error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+                runtime_execution: crate::execution::RuntimeExecution::new(
+                    crate::execution::RuntimeMode::Live,
+                    None,
+                ),
+                bus: Arc::new(FsmMessageBus::new()),
+                instrumentation: Arc::new(StageInstrumentation::new()),
+                control_strategy: Arc::new(
+                    crate::stages::source::strategies::JonestownSourceStrategy,
+                ),
+                backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+                output_contract: StageOutputContract::empty(),
+            });
+            FiniteSourceAction::<DummySource>::AllocateResources
+                .execute(&mut ctx)
+                .await
+                .unwrap();
+            for cause in causes {
+                ctx.resources_mut().unwrap().completion.record(*cause);
+            }
+
+            FiniteSourceAction::<DummySource>::SendEOF
+                .execute(&mut ctx)
+                .await
+                .unwrap();
+
+            let kinds: Vec<EofKind> = data_journal
+                .read_causally_ordered()
+                .await
+                .unwrap()
+                .iter()
+                .filter_map(|env| match &env.payload {
+                    ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(kinds, vec![expected], "causes {causes:?}");
         }
     }
 }

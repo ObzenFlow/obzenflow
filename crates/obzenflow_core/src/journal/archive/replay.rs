@@ -5,6 +5,7 @@
 //! Archive access contracts. Providers implement these; Runtime executes replay.
 
 use crate::event::context::StageType;
+use crate::event::payloads::flow_control_payload::EofKind;
 use crate::journal::reader::JournalReader;
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::{ChainEvent, StageId};
@@ -96,6 +97,10 @@ pub trait ReplayArchive: Send + Sync {
     fn allow_incomplete_archive(&self) -> bool;
 
     fn source_stage_keys(&self) -> Vec<String>;
+
+    /// The EOF kind a source journal committed, `None` when it committed none
+    /// (FLOWIP-134i B8).
+    fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind>;
 
     fn archive_path(&self) -> &Path;
 

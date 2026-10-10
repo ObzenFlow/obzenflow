@@ -43,6 +43,15 @@ event_names! {
     source => "source" {
         CONTRACT_DECLARED => "contract_declared",
         PRODUCTION_FINALIZED => "production_finalized",
+        OPEN_FAILED => "open_failed",
+        READER_ACQUIRED => "reader_acquired",
+        CLEANUP_SUCCEEDED => "cleanup_succeeded",
+        CLEANUP_FAILED => "cleanup_failed",
+        INPUT_PINNED => "input_pinned",
+        POSITIONED => "positioned",
+        STARTED_ON_RESUME => "started_on_resume",
+        CONTINUATION_REFUSED => "continuation_refused",
+        SEEK_FAILED => "seek_failed",
     },
     subscription => "subscription" {
         PROGRESS_REPORTED => "progress_reported",
@@ -101,6 +110,7 @@ pub mod supervisor {
         READY => "ready",
         READY_FOR_RUN => "ready_for_run",
         SOURCES_STARTED => "sources_started",
+        RECONSTRUCTION_COMPLETED => "reconstruction_completed",
         DRAIN_STARTED => "drain_started",
         DRAIN_COMPLETED => "drain_completed",
         ALL_STAGES_COMPLETED => "all_stages_completed",

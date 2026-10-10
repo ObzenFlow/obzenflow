@@ -4,28 +4,30 @@
 
 //! Finite source supervisor implementation using HandlerSupervised pattern
 
-use super::fsm::{
-    FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState,
-    SourceCompletionOrigin,
-};
+use super::fsm::{FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState};
 use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
 use crate::metrics::instrumentation::snapshot_stage_accounting;
-use crate::replay::ReplayDriver;
+use crate::replay::{ReplayDriver, SourceHandoff};
+use crate::stages::common::handlers::source::SourceResumeError;
 use crate::stages::common::handlers::UnifiedFiniteSourceHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
+use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::{
-    around_source_boundary, commit_source_open_failure, drain_pending_outputs_sync,
-    emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
-    poll_error_backoff, poll_error_summary, record_source_stage_fatal, source_error_kind,
-    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
-    PendingFailure, SourceOpenFailureCommit, SourcePollObservation,
+    announce_resumed_live, around_source_boundary, commit_catch_up_marker, commit_reader_acquired,
+    commit_source_fact, commit_source_open_failure, commit_source_seek_failure,
+    drain_pending_outputs_sync, emit_batch_to_pending_outputs, normalise_source_poll_error,
+    observe_source_boundary_rejection, poll_error_backoff, poll_error_summary,
+    record_source_release, record_source_stage_fatal, refuse_source_continuation,
+    source_error_kind, stage_boundary_control_events, stage_source_poll_outputs,
+    terminal_poll_failure, PendingFailure, SourceExit, SourceOpenFailureCommit,
+    SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
-    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
-    SourcePollResult, SourceReaderInitContext,
+    SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
+    SourcePollReport, SourcePollResult, SourceReaderInitContext,
 };
 use crate::supervised_base::base::{self, Registration, Supervisor};
 use crate::supervised_base::handler_supervised::{
@@ -36,7 +38,9 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourceContinuationRefusal, SourcePollKind, SourceResumeFact,
+};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
@@ -64,6 +68,9 @@ pub(crate) struct FiniteSourceSupervisor<H: UnifiedFiniteSourceHandler + Send + 
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// The continuation admitted with the source (FLOWIP-134i B8).
+    pub(crate) continuation: SourceContinuation,
 
     /// Adaptive backoff for synchronous idle polls (FLOWIP-086i).
     pub(crate) idle_backoff: IdleBackoff,
@@ -94,6 +101,12 @@ pub(crate) struct FiniteSourceSupervisor<H: UnifiedFiniteSourceHandler + Send + 
     /// Rejection was observed by the source boundary after emitting control
     /// events; drain those events before transitioning to completion.
     pub(crate) pending_boundary_rejected: bool,
+
+    /// Cleanup releases an acquired reader exactly once (FLOWIP-134i B2).
+    pub(crate) reader_acquired: bool,
+
+    /// The exit whose transition scheduled cleanup.
+    pub(crate) exit: Option<SourceExit>,
 }
 
 impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
@@ -186,11 +199,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
             }
 
             state FiniteSourceState::Running {
-                on FiniteSourceEvent::ResumeLiveInput => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::AcquiringInput, actions: vec![] }) })
-                };
-
-                on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Completed =>|_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
                 };
                 on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
@@ -316,7 +325,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
                 let event = event.clone();
                 Box::pin(async move {
                     if (matches!(state, FiniteSourceState::Draining)
-                        && matches!(event, FiniteSourceEvent::InputAcquired | FiniteSourceEvent::ActivationCompleted | FiniteSourceEvent::ResumeLiveInput))
+                        && matches!(event, FiniteSourceEvent::InputAcquired | FiniteSourceEvent::ActivationCompleted))
                         || matches!(event, FiniteSourceEvent::Initialize | FiniteSourceEvent::Ready | FiniteSourceEvent::BeginDrain | FiniteSourceEvent::Start)
                         || matches!(state, FiniteSourceState::Failing(_) | FiniteSourceState::Cancelling(_) | FiniteSourceState::Failed(_) | FiniteSourceState::Cancelled(_) | FiniteSourceState::Drained)
                     {
@@ -367,6 +376,9 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         context
             .instrumentation
             .transition_to_state(state.variant_name());
+        if let Some(exit) = state.exit() {
+            self.exit = Some(exit);
+        }
     }
 
     fn supervisor_action(&self, action: &Self::Action) -> Option<SupervisorAction<Self::Event>> {
@@ -395,11 +407,34 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
 
     async fn execute_cleanup(
         &mut self,
-        _context: &Self::Context,
+        context: &Self::Context,
     ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
-        self.handler.take();
         self.replay_driver.take();
-        Ok(ActionExecution::Completed)
+        let Some(handler) = self.handler.take() else {
+            return Ok(ActionExecution::Completed);
+        };
+        // Synchronous readers release through `Drop`.
+        drop(handler);
+        let (true, Some(resources)) = (self.reader_acquired, context.resources.as_ref()) else {
+            return Ok(ActionExecution::Completed);
+        };
+        let release = SourceRelease::new(
+            SourcePollKind::Finite,
+            self.exit,
+            resources.completion.cause(),
+            matches!(
+                resources.runtime_execution.source_phase_for(self.stage_id),
+                SourceExecutionPhase::Live
+            ),
+            resources.failure_causal_event_id,
+        );
+        let journal = self.data_journal.clone();
+        let flow_context = self.flow_context.clone();
+        Ok(ActionExecution::Pending(Box::pin(async move {
+            let result = record_source_release(&journal, &flow_context, release, Ok(())).await;
+            Box::new(move |_: &mut FiniteSourceContext<H>| result.map(|()| None))
+                as ActionCompletion<FiniteSourceContext<H>, FiniteSourceEvent<H>>
+        })))
     }
 
     fn writer_id(&self) -> WriterId {
@@ -431,6 +466,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
             data_journal: self.data_journal.clone(),
             flow_context: self.flow_context.clone(),
             stage_id: self.stage_id,
+            continuation: self.continuation,
             idle_backoff: self.idle_backoff.clone(),
             pending_idle_delay: self.pending_idle_delay.take(),
             replay_driver: self.replay_driver.take(),
@@ -440,6 +476,8 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
             pending_failure: self.pending_failure.take(),
             pending_boundary_eof: self.pending_boundary_eof,
             pending_boundary_rejected: self.pending_boundary_rejected,
+            reader_acquired: self.reader_acquired,
+            exit: self.exit,
         };
         Some(Box::pin(async move {
             let mut owned_context = FiniteSourceContext {
@@ -457,6 +495,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                 owner.pending_failure = worker.pending_failure;
                 owner.pending_boundary_eof = worker.pending_boundary_eof;
                 owner.pending_boundary_rejected = worker.pending_boundary_rejected;
+                owner.reader_acquired = worker.reader_acquired;
                 context.resources = owned_context.resources;
                 result
             }) as DispatchCompletion<Self>
@@ -509,34 +548,39 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                             &ctx.runtime_execution,
                             &self.flow_context,
                             StageType::FiniteSource,
+                            self.continuation,
                             &self.data_journal,
                         )
                         .await?,
                     );
                     self.replay_started_at = Some(Instant::now());
-                } else if let Err(error) = self
+                    return Ok(EventLoopDirective::Transition(
+                        FiniteSourceEvent::InputAcquired,
+                    ));
+                }
+                let flow_id = ctx.flow_id.to_string();
+                let stage_flow_context = make_flow_context(
+                    &ctx.flow_name,
+                    &flow_id,
+                    &ctx.stage_name,
+                    self.stage_id,
+                    StageType::FiniteSource,
+                );
+                let resuming = ctx.runtime_execution.resume_control().is_some();
+                let handler = self
                     .handler
                     .as_mut()
-                    .expect("handler available before cleanup")
-                    .acquire(SourceReaderInitContext {
-                        stage_id: self.stage_id,
-                        stage_name: ctx.stage_name.clone(),
-                        flow_name: ctx.flow_name.clone(),
-                    })
-                {
-                    let flow_id = ctx.flow_id.to_string();
-                    let stage_flow_context = make_flow_context(
-                        &ctx.flow_name,
-                        &flow_id,
-                        &ctx.stage_name,
-                        self.stage_id,
-                        StageType::FiniteSource,
-                    );
+                    .expect("handler available before cleanup");
+                if let Err(error) = handler.acquire(SourceReaderInitContext {
+                    stage_id: self.stage_id,
+                    stage_name: ctx.stage_name.clone(),
+                    flow_name: ctx.flow_name.clone(),
+                }) {
                     let failure = commit_source_open_failure(
                         SourceOpenFailureCommit {
                             stage_flow_context: &stage_flow_context,
                             source_type: SourcePollKind::Finite,
-                            resuming: ctx.runtime_execution.resume_control().is_some(),
+                            resuming,
                             error_journal: &ctx.error_journal,
                             instrumentation: &ctx.instrumentation,
                             scope: ctx.runtime_execution.stage_scope(self.stage_id),
@@ -547,6 +591,26 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
                         failure.select(&mut ctx.failure_causal_event_id),
                     )));
+                }
+                self.reader_acquired = true;
+                commit_reader_acquired(
+                    &self.data_journal,
+                    &stage_flow_context,
+                    SourcePollKind::Finite,
+                    resuming,
+                )
+                .await?;
+                // A positioned reader pins its input before its first record.
+                if let Some(pin) = handler.input_pin() {
+                    let pin = pin.map_err(|error| {
+                        format!("source '{}' input pin: {error}", ctx.stage_name)
+                    })?;
+                    commit_source_fact(
+                        &self.data_journal,
+                        &stage_flow_context,
+                        ExecutionPayload::SourceInputPinned(pin),
+                    )
+                    .await?;
                 }
                 Ok(EventLoopDirective::Transition(
                     FiniteSourceEvent::InputAcquired,
@@ -594,6 +658,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                 if matches!(state, FiniteSourceState::Draining) {
                     self.idle_backoff.reset();
                     self.pending_idle_delay = None;
+                    ctx.completion.record(SourceCompletionCause::Stopped);
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
                 }
 
@@ -683,8 +748,10 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                         .replay_driver
                                         .as_ref()
                                         .and_then(|d| d.archived_eof_kind());
-                                    ctx.completion_origin =
-                                        SourceCompletionOrigin::ReplayExhausted { recorded_kind };
+                                    ctx.completion
+                                        .record(SourceCompletionCause::ReplayExhausted {
+                                            recorded_kind,
+                                        });
                                     let (replayed_count, skipped_count) =
                                         self.replay_driver.as_ref().map_or((0, 0), |d| {
                                             (d.replayed_events(), d.skipped_events())
@@ -706,15 +773,10 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
 
                                     Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                                 }
-                                // FLOWIP-120n: recorded prefix exhausted; drop the replay
-                                // driver and continue from the live handler.
+                                // FLOWIP-134i: the recorded prefix is exhausted and its
+                                // outputs committed; continue the unfinished input.
                                 SourceReplayExhaustion::ContinueLive => {
-                                    self.idle_backoff.reset();
-                                    self.pending_idle_delay = None;
-                                    self.replay_driver = None;
-                                    Ok(EventLoopDirective::Transition(
-                                        FiniteSourceEvent::ResumeLiveInput,
-                                    ))
+                                    self.hand_off_to_live(ctx, &stage_flow_context).await
                                 }
                             }
                         }
@@ -753,6 +815,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                 reason = %reason,
                                 "Finite source boundary rejected; completing source"
                             );
+                            ctx.completion.record(SourceCompletionCause::Stopped);
                             let control_events = report.control_events;
                             observe_source_boundary_rejection(
                                 &source_poll_observation,
@@ -840,6 +903,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                 Ok(EventLoopDirective::Continue)
                             }
                             SourcePollResult::Completed(SourcePollCompletion::Eof) => {
+                                ctx.completion.record(SourceCompletionCause::Exhausted);
                                 if poll.operational_events.is_empty()
                                     && report.control_events.is_empty()
                                 {
@@ -946,6 +1010,176 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                 unreachable!("PhantomData variant should never be instantiated")
             }
         }
+    }
+}
+
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervisor<H> {
+    /// Continue a positioned source's interrupted input once its recorded
+    /// prefix is reconstructed and committed (FLOWIP-134i): open, validate the
+    /// pin and seek strictly after the committed prefix, or start a never-pinned
+    /// input (B15), then commit the catch-up marker before the generation
+    /// advances. Every refusal precedes live input.
+    async fn hand_off_to_live(
+        &mut self,
+        ctx: &mut super::fsm::FiniteSourceResources<H>,
+        stage_flow_context: &FlowContext,
+    ) -> Result<EventLoopDirective<FiniteSourceEvent<H>>, Box<dyn Error + Send + Sync>> {
+        let control = ctx
+            .runtime_execution
+            .resume_control()
+            .cloned()
+            .expect("ContinueLive is only returned by the Resume strategy");
+        let (frontier, replayed_count, skipped_count) = {
+            let driver = self
+                .replay_driver
+                .as_ref()
+                .expect("a replaying source has a replay driver");
+            (
+                driver.frontier().handoff(),
+                driver.replayed_events(),
+                driver.skipped_events(),
+            )
+        };
+        let generation = control.resume_generation();
+        control.record_delivered_high_water(self.stage_id, replayed_count);
+
+        let handoff = match frontier {
+            Ok(handoff) => handoff,
+            Err(refusal) => {
+                let failure =
+                    refuse_source_continuation(&ctx.error_journal, stage_flow_context, refusal)
+                        .await?;
+                return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                    failure.select(&mut ctx.failure_causal_event_id),
+                )));
+            }
+        };
+
+        let handler = self
+            .handler
+            .as_mut()
+            .expect("handler available before cleanup");
+        if let Err(error) = handler.acquire(SourceReaderInitContext {
+            stage_id: self.stage_id,
+            stage_name: ctx.stage_name.clone(),
+            flow_name: ctx.flow_name.clone(),
+        }) {
+            let failure = commit_source_open_failure(
+                SourceOpenFailureCommit {
+                    stage_flow_context,
+                    source_type: SourcePollKind::Finite,
+                    resuming: true,
+                    error_journal: &ctx.error_journal,
+                    instrumentation: &ctx.instrumentation,
+                    scope: ctx.runtime_execution.stage_scope(self.stage_id),
+                },
+                &error,
+            )
+            .await?;
+            return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                failure.select(&mut ctx.failure_causal_event_id),
+            )));
+        }
+        self.reader_acquired = true;
+        commit_reader_acquired(
+            &self.data_journal,
+            stage_flow_context,
+            SourcePollKind::Finite,
+            true,
+        )
+        .await?;
+
+        let resumed = match handoff {
+            SourceHandoff::Seek { pin, after } => {
+                let identity_digest = pin.identity.digest();
+                let failure = match handler.resume_at(&pin, after.as_ref()) {
+                    Ok(()) => None,
+                    Err(SourceResumeError::Refused(refusal)) => Some(
+                        refuse_source_continuation(&ctx.error_journal, stage_flow_context, refusal)
+                            .await?,
+                    ),
+                    Err(SourceResumeError::SeekFailed(error)) => Some(
+                        commit_source_seek_failure(
+                            &ctx.error_journal,
+                            stage_flow_context,
+                            identity_digest.clone(),
+                            &error,
+                        )
+                        .await?,
+                    ),
+                };
+                if let Some(failure) = failure {
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                        failure.select(&mut ctx.failure_causal_event_id),
+                    )));
+                }
+                ExecutionPayload::SourcePositioned(SourceResumeFact {
+                    identity_digest,
+                    generation: generation.0,
+                })
+            }
+            SourceHandoff::Start => {
+                let Some(pin) = handler.input_pin() else {
+                    let failure = refuse_source_continuation(
+                        &ctx.error_journal,
+                        stage_flow_context,
+                        SourceContinuationRefusal::Unpositioned,
+                    )
+                    .await?;
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                        failure.select(&mut ctx.failure_causal_event_id),
+                    )));
+                };
+                let pin =
+                    pin.map_err(|error| format!("source '{}' input pin: {error}", ctx.stage_name))?;
+                let identity_digest = pin.identity.digest();
+                commit_source_fact(
+                    &self.data_journal,
+                    stage_flow_context,
+                    ExecutionPayload::SourceInputPinned(pin),
+                )
+                .await?;
+                ExecutionPayload::SourceStartedOnResume(SourceResumeFact {
+                    identity_digest,
+                    generation: generation.0,
+                })
+            }
+        };
+        commit_source_fact(&self.data_journal, stage_flow_context, resumed).await?;
+
+        commit_catch_up_marker(
+            &self.data_journal,
+            &ctx.instrumentation,
+            stage_flow_context,
+            generation,
+        )
+        .await?;
+        self.replay_completion
+            .maybe_emit_completed(
+                &self.flow_context,
+                &self.data_journal,
+                self.replay_started_at,
+                ReplayCompletionFacts {
+                    replayed_count,
+                    skipped_count,
+                    // FLOWIP-095k: the resume handoff synthesizes no terminal EOF.
+                    synthesized_eof_kind: None,
+                },
+            )
+            .await;
+        announce_resumed_live(
+            &self.data_journal,
+            stage_flow_context,
+            &ctx.runtime_execution,
+            replayed_count,
+            generation,
+        )
+        .await;
+        control.record_generation_boundary(self.stage_id, generation);
+        self.idle_backoff.reset();
+        self.pending_idle_delay = None;
+        self.replay_driver = None;
+        Ok(EventLoopDirective::Continue)
     }
 }
 

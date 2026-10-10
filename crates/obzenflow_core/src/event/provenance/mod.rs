@@ -49,6 +49,9 @@ pub struct ChainEventProvenance {
     pub effect_provenance: Option<EffectProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission_seq: Option<AdmissionSeq>,
+    /// The position after this source fact (FLOWIP-134i B11); never derived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_progress: Option<crate::source::SourceProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeProvenance>,
     pub composite_activations: Vec<CompositeActivationContext>,

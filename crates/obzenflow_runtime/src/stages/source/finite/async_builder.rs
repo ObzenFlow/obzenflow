@@ -112,6 +112,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
+            continuation: self.config.continuation,
             idle_backoff: IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(50),
@@ -128,6 +129,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             pending_failure: None,
             pending_boundary_rejected: false,
             reader_acquired: false,
+            exit: None,
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);

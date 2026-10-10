@@ -5,13 +5,20 @@
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourceContinuationRefusal, SourceInputPinnedFact,
+};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::source::{
+    EncodedSourcePosition, SourceInputIdentity, SourcePosition, SourceProgress,
+};
 use obzenflow_core::{ChainEvent, JournalWriterId, StageId, WriterId};
-use obzenflow_runtime::replay::{ReplayContextTemplate, ReplayDriver};
+use obzenflow_runtime::replay::{ReplayContextTemplate, ReplayDriver, SourceHandoff};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 struct TestReader {
@@ -331,4 +338,137 @@ async fn replay_driver_maps_reader_error_to_corrupted_archive() {
         .unwrap();
 
     assert!(matches!(err, ReplayError::CorruptedArchive { .. }));
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct Line(u64);
+
+impl SourcePosition for Line {}
+
+fn at(line: u64) -> EncodedSourcePosition {
+    EncodedSourcePosition::encode(&Line(line)).unwrap()
+}
+
+fn input_pin(file: &str) -> SourceInputPinnedFact {
+    SourceInputPinnedFact {
+        identity: SourceInputIdentity::new("test", &serde_json::json!({ "file": file })).unwrap(),
+        beginning: at(0),
+    }
+}
+
+fn pinned(writer: WriterId, pin: &SourceInputPinnedFact) -> ChainEvent {
+    ChainEventFactory::execution_event(writer, ExecutionPayload::SourceInputPinned(pin.clone()))
+}
+
+fn row(writer: WriterId, after: Option<u64>) -> ChainEvent {
+    let mut event = ChainEventFactory::data_event(
+        writer,
+        "test.row",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({}),
+    );
+    event.source_progress = after.map(|line| SourceProgress { after: at(line) });
+    event
+}
+
+/// Replays `events` to exhaustion: the handoff they support and the input count.
+async fn reconstructed(
+    events: Vec<ChainEvent>,
+) -> (Result<SourceHandoff, SourceContinuationRefusal>, u64) {
+    let reader = Box::new(TestReader {
+        envelopes: events
+            .into_iter()
+            .map(|event| JournalRecord::new(JournalWriterId::new(), event))
+            .collect(),
+        pos: 0,
+        at_end_hint: true,
+        fail: false,
+    });
+    let mut driver = ReplayDriver::new(reader, PathBuf::from("archive.log"), template());
+    drain_driver(&mut driver).await;
+    (driver.frontier().handoff(), driver.replayed_events())
+}
+
+#[tokio::test]
+async fn the_frontier_is_the_last_position_bound_to_the_latest_pin() {
+    let writer = WriterId::from(StageId::new());
+    let first = input_pin("first");
+    let second = input_pin("second");
+
+    // FLOWIP-134i B15: never pinned, nothing admitted.
+    assert_eq!(
+        reconstructed(Vec::new()).await,
+        (Ok(SourceHandoff::Start), 0)
+    );
+    // A pinned empty prefix starts at the recorded beginning; the preserved
+    // pin is not delivered input.
+    assert_eq!(
+        reconstructed(vec![pinned(writer, &first)]).await,
+        (
+            Ok(SourceHandoff::Seek {
+                pin: first.clone(),
+                after: None,
+            }),
+            0
+        )
+    );
+    assert_eq!(
+        reconstructed(vec![
+            pinned(writer, &first),
+            row(writer, Some(1)),
+            row(writer, Some(2)),
+        ])
+        .await,
+        (
+            Ok(SourceHandoff::Seek {
+                pin: first.clone(),
+                after: Some(at(2)),
+            }),
+            2
+        )
+    );
+    // A re-pin binds only the records after it.
+    assert_eq!(
+        reconstructed(vec![
+            pinned(writer, &first),
+            row(writer, Some(1)),
+            pinned(writer, &second),
+        ])
+        .await
+        .0,
+        Ok(SourceHandoff::Seek {
+            pin: second.clone(),
+            after: None,
+        })
+    );
+    assert_eq!(
+        reconstructed(vec![
+            pinned(writer, &first),
+            row(writer, Some(1)),
+            pinned(writer, &second),
+            row(writer, Some(5)),
+        ])
+        .await
+        .0,
+        Ok(SourceHandoff::Seek {
+            pin: second,
+            after: Some(at(5)),
+        })
+    );
+}
+
+#[tokio::test]
+async fn admitted_input_without_its_pin_or_position_refuses() {
+    let writer = WriterId::from(StageId::new());
+    // FLOWIP-134i B11: a positioned record with no preceding pin is corrupt.
+    assert_eq!(
+        reconstructed(vec![row(writer, Some(1))]).await.0,
+        Err(SourceContinuationRefusal::MissingEvidence)
+    );
+    assert_eq!(
+        reconstructed(vec![pinned(writer, &input_pin("file")), row(writer, None)])
+            .await
+            .0,
+        Err(SourceContinuationRefusal::MissingEvidence)
+    );
 }

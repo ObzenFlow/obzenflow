@@ -12,7 +12,8 @@ use obzenflow_runtime::stages::common::handlers::{
     SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::source::{
-    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, SourceReaderInitContext,
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, Reattach, Refuse,
+    SourceReaderInitContext,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
@@ -1150,6 +1151,7 @@ impl<D: PullDecoder> HttpPullSource<D> {
 impl<D: PullDecoder> AsyncFiniteSourceConnector for HttpPullSource<D> {
     type Output = D::Output;
     type Reader = HttpPullReader<D>;
+    type Continuation = Refuse;
 
     async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         Ok(HttpPullReader::new(
@@ -1187,6 +1189,7 @@ impl<D: PullDecoder> HttpPollSource<D> {
 impl<D: PullDecoder> AsyncInfiniteSourceConnector for HttpPollSource<D> {
     type Output = D::Output;
     type Reader = HttpPollReader<D>;
+    type Continuation = Reattach;
 
     async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         Ok(HttpPollReader::new(

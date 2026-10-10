@@ -62,8 +62,12 @@ fn fatal(
 pub fn effect_error_to_handler_error(error: EffectError) -> HandlerError {
     match error {
         error @ EffectError::BindingAuthority { .. } => HandlerError::from(error),
+        error @ EffectError::RecordingEnded { .. } => fatal(
+            StageFatalCode::Replay,
+            StageFatalReason::RecordingEnded,
+            error.to_string(),
+        ),
         error @ (EffectError::MissingRecordedEffect { .. }
-        | EffectError::EffectInDoubt { .. }
         | EffectError::DuplicateRecordedEffect { .. }
         | EffectError::DescriptorMismatch { .. }
         | EffectError::IncompleteOutcomeGroup { .. }) => fatal(

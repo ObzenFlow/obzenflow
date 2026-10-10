@@ -9,7 +9,9 @@ use super::messages::{ContractEdge, MetricsUpdate, Observation, StudioMessage};
 use super::{middleware::MiddlewareView, ContractBoundaryAliases};
 use obzenflow_core::event::journal_record::{ChainJournalRecord, SystemJournalRecord};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::{ChainPayload, MetricsCoordinationEvent, SystemPayload};
+use obzenflow_core::event::{
+    ChainPayload, MetricsCoordinationEvent, PipelineLifecycleEvent, SystemPayload,
+};
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::web::SseFrame;
 
@@ -79,16 +81,15 @@ fn stage_frame(
             error: error.as_deref(),
             at,
         },
-        ExecutionPayload::SourceCleanupFailed {
-            stage_id,
-            stage_name,
-            error,
-        } => StudioMessage::SourceCleanupFailed {
-            stage_id: *stage_id,
-            stage_name,
-            error,
-            at,
-        },
+        ExecutionPayload::SourceCleanupFailed(failure) => {
+            let context = &envelope.envelope.provenance.event.flow_context;
+            StudioMessage::SourceCleanupFailed {
+                stage_id: context.stage_id,
+                stage_name: &context.stage_name,
+                failure,
+                at,
+            }
+        }
         ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_) => {
             let context = &envelope.envelope.provenance.event.flow_context;
             let update = middleware.message(context.stage_id, payload)?;
@@ -172,6 +173,11 @@ fn system_frame(envelope: &SystemJournalRecord) -> Option<SseFrame> {
             descriptor,
             at,
         },
+        // Lineage evidence, not a flow state: `obzenflow-ui` reads an unknown
+        // flow lifecycle type as `Unknown`.
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::ReconstructionCompleted {
+            ..
+        }) => return None,
         SystemPayload::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
         SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark }) => {
             StudioMessage::MetricsWatermark {

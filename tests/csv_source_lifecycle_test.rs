@@ -13,8 +13,8 @@ mod example;
 
 use obzenflow::application::{Banner, Presentation};
 use obzenflow::stages::sources::{
-    CsvRowDecoder, CsvSource, FiniteSourceConnector, SourceReaderInitContext,
-    TypedFiniteSourceHandler,
+    CsvRowDecoder, CsvSource, FiniteSourceConnector, PositionedFiniteReader,
+    SourceReaderInitContext,
 };
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
