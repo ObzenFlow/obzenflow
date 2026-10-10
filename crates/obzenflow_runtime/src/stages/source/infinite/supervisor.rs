@@ -19,7 +19,7 @@ use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompl
 use crate::stages::source::supervision::{
     around_source_boundary, commit_source_open_failure, drain_pending_outputs_sync,
     emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
-    poll_error_backoff, record_source_stage_fatal, source_error_kind,
+    poll_error_backoff, poll_error_summary, record_source_stage_fatal, source_error_kind,
     stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
     PendingFailure, SourceOpenFailureCommit, SourcePollObservation,
 };
@@ -956,8 +956,8 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                             SourcePollResult::HandlerError(error) => {
                                 tracing::warn!(
                                     stage_name = %ctx.stage_name,
-                                    error = %error,
-                                    "Infinite source handler.next() returned error"
+                                    "{}",
+                                    poll_error_summary(&ctx.stage_name, &error)
                                 );
                                 let kind = source_error_kind(&error);
                                 let diagnostic = normalise_source_poll_error(

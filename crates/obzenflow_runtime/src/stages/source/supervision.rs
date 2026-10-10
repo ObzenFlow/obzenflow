@@ -220,9 +220,21 @@ pub(crate) fn terminal_poll_failure(
     diagnostic_event: &ChainEvent,
 ) -> Option<PendingFailure> {
     error.is_terminal().then(|| PendingFailure {
-        message: format!("Source '{stage_name}' cannot continue: {error}"),
+        message: poll_error_summary(stage_name, error),
         causal_event_id: Some(diagnostic_event.id),
     })
+}
+
+/// Operator-facing line for a poll error, rendered from typed fields only.
+pub(crate) fn poll_error_summary(stage_name: &str, error: &SourceError) -> String {
+    match error {
+        _ if error.is_terminal() => format!("Source '{stage_name}' cannot continue: {error}"),
+        SourceError::Validation(diagnostic) => match diagnostic.location().record_index() {
+            Some(index) => format!("Source '{stage_name}' rejected record {index}: {diagnostic}"),
+            None => format!("Source '{stage_name}' rejected a record: {diagnostic}"),
+        },
+        _ => format!("Source '{stage_name}' poll failed: {error}"),
+    }
 }
 
 /// Record-local rejections advanced the reader and terminal reports end it, so
@@ -697,9 +709,9 @@ where
 pub(crate) fn source_open_failure(stage_name: &str, resuming: bool, error: &SourceError) -> String {
     let reason = error.diagnostic();
     if resuming {
-        format!("Cannot resume source '{stage_name}': {reason}. Restore the original input and check its configuration and access before resuming.")
+        format!("Cannot resume source '{stage_name}': {reason}. Restore the original input and check its configuration and access before resuming")
     } else {
-        format!("Cannot start source '{stage_name}': {reason}. Check the input, configuration and access before starting again.")
+        format!("Cannot start source '{stage_name}': {reason}. Check the input, configuration and access before starting again")
     }
 }
 
@@ -1004,10 +1016,41 @@ mod tests {
         let error = SourceError::Validation(SourceDiagnosticReason::SizeLimitExceeded.into());
         assert_eq!(
             source_open_failure("web_orders", false, &error),
-            "Cannot start source 'web_orders': the input exceeds its configured size limit. Check the input, configuration and access before starting again."
+            "Cannot start source 'web_orders': the input exceeds its configured size limit. Check the input, configuration and access before starting again"
         );
         assert!(source_open_failure("web_orders", true, &error)
             .starts_with("Cannot resume source 'web_orders': the input exceeds"));
+    }
+
+    #[test]
+    fn poll_error_summaries_distinguish_rejection_retry_and_terminal() {
+        use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
+        use std::num::NonZeroU32;
+
+        let rejected = SourceError::Validation(
+            SourceDiagnostic::new(SourceDiagnosticReason::InvalidValue)
+                .record(1)
+                .position(NonZeroU32::new(7).unwrap(), NonZeroU32::new(5))
+                .within_field("initial_balance_cents"),
+        );
+        assert_eq!(
+            poll_error_summary("accounts", &rejected),
+            "Source 'accounts' rejected record 1: invalid value in field initial_balance_cents (line 7, column 5)"
+        );
+        let unlocated = SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into());
+        assert!(poll_error_summary("tx", &unlocated).starts_with("Source 'tx' rejected a record: "));
+        let retried = SourceError::Timeout(SourceDiagnosticReason::TimedOut.into());
+        assert_eq!(
+            poll_error_summary("feed", &retried),
+            "Source 'feed' poll failed: source timeout error: the input timed out"
+        );
+        let terminal = SourceError::Terminal {
+            kind: SourcePollErrorKind::Validation,
+            diagnostic: SourceDiagnosticReason::RemoteRejected.into(),
+        };
+        assert!(
+            poll_error_summary("feed", &terminal).starts_with("Source 'feed' cannot continue: ")
+        );
     }
 
     #[test]

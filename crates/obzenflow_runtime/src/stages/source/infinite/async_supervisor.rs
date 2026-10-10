@@ -21,9 +21,10 @@ use crate::stages::source::supervision::SourceControl;
 use crate::stages::source::supervision::{
     around_source_boundary, commit_source_open_failure, drain_pending_outputs_async,
     emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
-    poll_error_backoff, record_source_cleanup_failed, record_source_stage_fatal, source_error_kind,
-    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
-    PendingFailure, SourceOpenFailureCommit, SourcePollObservation,
+    poll_error_backoff, poll_error_summary, record_source_cleanup_failed,
+    record_source_stage_fatal, source_error_kind, stage_boundary_control_events,
+    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceOpenFailureCommit,
+    SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
@@ -1115,8 +1116,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                             SourcePollResult::HandlerError(error) => {
                                 tracing::warn!(
                                     stage_name = %ctx.stage_name,
-                                    error = %error,
-                                    "Async infinite source handler.next() returned error"
+                                    "{}",
+                                    poll_error_summary(&ctx.stage_name, &error)
                                 );
                                 let kind = source_error_kind(&error);
                                 let diagnostic = normalise_source_poll_error(

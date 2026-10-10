@@ -115,6 +115,33 @@ fn retained_launcher_survives_replacement_of_its_running_image() {
     assert!(status.success());
 }
 
+/// A sibling's inherited write descriptor makes a fresh copy ETXTBSY until it
+/// closes; the spawn waits for that instead of failing the owning check.
+#[cfg(target_os = "linux")]
+#[test]
+fn spawning_a_copy_still_held_open_for_writing_waits_for_release() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("true");
+    fs::copy("/bin/true", &executable).unwrap();
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(writer);
+    });
+    let status = process::execute(
+        &mut Command::new(&executable),
+        directory.path(),
+        "busy-executable",
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    release.join().unwrap();
+    assert!(status.success());
+}
+
 const PASS: &str = r#"<testsuites tests="1" failures="0" errors="0"><testsuite name="fixture" tests="1" failures="0" errors="0"><testcase classname="fixture" name="work_completed"/></testsuite></testsuites>"#;
 const EARLY_FAILURE: &str = r#"<testsuites tests="2" failures="1" errors="0"><testsuite name="fixture@stress-0" tests="1" failures="1" errors="0"><testcase classname="fixture" name="work_completed"><failure>lost durable output</failure></testcase></testsuite><testsuite name="fixture@stress-1" tests="1" failures="0" errors="0"><testcase classname="fixture" name="work_completed"/></testsuite></testsuites>"#;
 
