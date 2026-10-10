@@ -48,23 +48,22 @@ pub fn run_example() -> Result<()> {
             let flights_handler = sources::ValuesSource::new(fixtures::flights());
             let validator_handler = FlightValidator;
             let calculator_handler = DelayCalculator;
-            let enricher_handler =
-                joins::inner::<CarrierDetails, FlightRecord, EnrichedFlight, _, _, _, _>(
-                    |carrier| carrier.carrier_code.clone(),
-                    |flight| flight.carrier.clone(),
-                    |carrier, flight| EnrichedFlight {
-                        carrier_code: flight.carrier.clone(),
-                        carrier_name: carrier.carrier_name.clone(),
-                        carrier_country: carrier.country.clone(),
-                        date: flight.date.clone(),
-                        origin: flight.origin.clone(),
-                        destination: flight.destination.clone(),
-                        scheduled_duration: flight.scheduled_duration,
-                        delay_minutes: flight.delay_minutes,
-                        flight_number: flight.flight_number.clone(),
-                        delay_category: flight.delay_category.clone(),
-                    },
-                );
+            let enricher_handler = joins::inner(
+                |carrier: &CarrierDetails| carrier.carrier_code.clone(),
+                |flight: &FlightRecord| flight.carrier.clone(),
+                |carrier, flight| EnrichedFlight {
+                    carrier_code: flight.carrier.clone(),
+                    carrier_name: carrier.carrier_name.clone(),
+                    carrier_country: carrier.country.clone(),
+                    date: flight.date.clone(),
+                    origin: flight.origin.clone(),
+                    destination: flight.destination.clone(),
+                    scheduled_duration: flight.scheduled_duration,
+                    delay_minutes: flight.delay_minutes,
+                    flight_number: flight.flight_number.clone(),
+                    delay_category: flight.delay_category.clone(),
+                },
+            );
             let aggregator_handler = CarrierAggregator;
 
             Ok(flow! {

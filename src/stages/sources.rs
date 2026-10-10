@@ -23,7 +23,7 @@
 //! | Owned values | [`ValuesSource::new`] |
 //! | Tokio receiver | [`ChannelSource::new`] |
 //! | CSV or TSV | [`CsvSource::builder`] |
-//! | YAML document (`yaml` feature) | `YamlSource::builder` |
+//! | YAML document | [`YamlSource::builder`] |
 //! | HTTP pull | [`HttpPullSource::new`] |
 //! | HTTP polling | [`HttpPollSource::new`] |
 //! | Hosted HTTP ingress | `FlowApplication::builder().http_ingress(decoder, config)` |
@@ -61,11 +61,11 @@
 //!
 //! ## YAML sources
 //!
-//! With the `yaml` feature, `YamlSource` reads one bounded YAML document. A
-//! `YamlSelection` names the records: the whole document, a root sequence, or
-//! a sequence at an RFC 6901 pointer. An application-owned `YamlDecoder`
-//! declares the output and decodes each `YamlRecord`; a `YamlDecodeError`
-//! rejects only that record, and reading continues. Aliases, anchors, tags,
+//! [`YamlSource`] reads one bounded YAML document. A [`YamlSelection`] names
+//! the records: the whole document, a root sequence, or a sequence at an
+//! RFC 6901 pointer. An application-owned [`YamlDecoder`] declares the output
+//! and decodes each [`YamlRecord`]; a [`YamlDecodeError`] rejects only that
+//! record, and reading continues. Aliases, anchors, tags,
 //! merge keys and duplicate keys fail opening.
 //!
 //! ## Hosted ingress sources
@@ -102,8 +102,7 @@ pub use obzenflow_adapters::sources::{
 /// In-process sources owning values or a channel receiver.
 pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
-/// Finite YAML source and its application decoder contract (`yaml` feature).
-#[cfg(feature = "yaml")]
+/// Finite YAML source and its application decoder contract.
 pub use obzenflow_adapters::sources::{
     YamlDecodeError, YamlDecoder, YamlReader, YamlRecord, YamlSelection, YamlSource,
     YamlSourceBuilder,

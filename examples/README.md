@@ -31,7 +31,7 @@ Follow the local run guides above for payments, flash-sale allocation,
 and metrics. The bank and AI examples use these commands:
 
 ```sh
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host,yaml
+cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host
 
 cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
   --config examples/one_shot_inference_demo/obzenflow.toml

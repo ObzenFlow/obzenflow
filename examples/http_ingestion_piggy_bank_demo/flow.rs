@@ -12,13 +12,13 @@
 //! - Console sink (prints balances + a transaction table)
 //!
 //! Run with localhost-only defaults:
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host,yaml`
+//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host`
 //!
 //! Recommended control-plane auth example:
 //! Provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete
 //! expected `Authorization` header value before starting the process. The repository
 //! guide at `crates/obzenflow_infra/src/web/README.md` explains the authentication scopes.
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host,yaml -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
+//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
 //!
 //! Accounts `acct-1` (Alice, $10.00) and `acct-2` (Bob, $0.00) open from
 //! `accounts.yaml` before any transaction joins. Post credits and debits:
@@ -85,9 +85,9 @@ pub fn build_flow(
     // This function takes only typed sources, not `HttpIngress<D>` bundles.
     // The runner owns HTTP hosting; the flow owns pipeline topology.
     FlowDefinition::materialize(move |_runtime_config| {
-        let post_entry = joins::inner::<AccountOpened, LedgerEntry, PostedEntry, _, _, _, _>(
-            |account| account.account_id.clone(),
-            |entry| entry.account_id.clone(),
+        let post_entry = joins::inner(
+            |account: &AccountOpened| account.account_id.clone(),
+            |entry: &LedgerEntry| entry.account_id.clone(),
             |account, entry| PostedEntry {
                 account_id: entry.account_id,
                 owner: account.owner,

@@ -272,7 +272,7 @@ fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let reference_source = RefSource::new();
         let stream_source = StreamSource::new();
-        let joined = joins::inner::<RefItem, StreamItem, JoinedItem, _, _, _, _>(
+        let joined = joins::inner(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),
             join_fn,
@@ -304,7 +304,7 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
     FlowDefinition::materialize(move |_runtime_config| {
         let reference_source = RefSource::new();
         let stream_source = StreamSource::new();
-        let joined = joins::inner_live::<RefItem, StreamItem, JoinedItem, _, _, _, _>(
+        let joined = joins::inner_live(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),
             join_fn,
@@ -492,7 +492,7 @@ fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let reference_source = RefSource::new();
         let stream_source = StreamSource::new();
-        let joined = joins::inner_live::<RefItem, StreamItem, JoinedItem, _, _, _, _>(
+        let joined = joins::inner_live(
             |r: &RefItem| r.key.clone(),
             |s: &StreamItem| s.key.clone(),
             join_fn,
