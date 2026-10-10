@@ -75,7 +75,7 @@ target directory so the different compiler flags never invalidate ordinary build
 ```sh
 cargo bench --locked -p obzenflow_benchmarks --profile profiling --features components \
   --bench journal_components --target-dir target/profiling --no-run \
-  --config 'build.rustflags=["--cfg","tokio_unstable","-C","force-frame-pointers=yes"]'
+  --config 'build.rustflags=["-C","force-frame-pointers=yes"]'
 ```
 
 Cargo prints the executable's path. Run it directly so the capture excludes Cargo.

@@ -36,7 +36,7 @@ impl PreparedObservability {
             {
                 if !cfg!(tokio_unstable) {
                     return Err(ApplicationError::InvalidConfiguration(
-                        "Tokio Console requires RUSTFLAGS=\"--cfg tokio_unstable\" at build time"
+                        "Tokio Console requires --cfg tokio_unstable at build time; run it with `cargo tokio-console-run`"
                             .into(),
                     ));
                 }

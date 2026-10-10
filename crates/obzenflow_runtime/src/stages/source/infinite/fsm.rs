@@ -448,6 +448,9 @@ pub struct InfiniteSourceResources<H> {
     /// first credit miss, cleared on successful reserve (FLOWIP-115e).
     pub(crate) backpressure_stall: Option<tokio::time::Instant>,
 
+    /// Committed source diagnostic the lifecycle failure links to (084n B2).
+    pub(crate) failure_causal_event_id: Option<obzenflow_core::EventId>,
+
     /// Phantom to keep the handler type in the context's type parameters
     _marker: PhantomData<H>,
 }
@@ -490,6 +493,7 @@ impl<H> InfiniteSourceResources<H> {
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_stall: None,
+            failure_causal_event_id: None,
             _marker: PhantomData,
         }
     }
@@ -731,7 +735,7 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
                     ),
                     message,
                     ctx.instrumentation.as_ref(),
-                    None,
+                    ctx.failure_causal_event_id,
                 )
                 .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);

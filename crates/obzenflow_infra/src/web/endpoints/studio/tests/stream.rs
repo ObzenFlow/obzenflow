@@ -234,6 +234,7 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
                     batch_count: 0,
                     http_status: 503,
                     retry_after_ms_bucket: None,
+                    diagnostics: Vec::new(),
                 },
             )
             .await;
@@ -1416,7 +1417,9 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
             let attempt = self.0;
             self.0 += 1;
             match attempt {
-                1 => Err(SourceError::Timeout("open the source breaker".into())),
+                1 => Err(SourceError::Timeout(
+                    obzenflow_core::event::SourceDiagnosticReason::TimedOut.into(),
+                )),
                 0..=1000 => Ok(Some(vec![Item(attempt)])),
                 _ => Ok(None),
             }

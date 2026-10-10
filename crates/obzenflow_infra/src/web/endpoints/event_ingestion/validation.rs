@@ -3,8 +3,10 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::schema::TypedPayload;
+use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode};
 use obzenflow_core::ingress::EventSubmission;
 use obzenflow_core::EventType;
+use obzenflow_runtime::stages::{IngressDecodeError, IngressRecord};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -27,19 +29,36 @@ pub enum ValidationError {
     EventTypeMismatch { expected: String, actual: String },
     #[error("unknown event_type: '{event_type}'")]
     UnknownEventType { event_type: String },
-    #[error("validation failed for '{event_type}': {message}")]
-    ValidationFailed { event_type: String, message: String },
+    #[error("validation failed for '{event_type}': {diagnostic}")]
+    ValidationFailed {
+        event_type: String,
+        diagnostic: Box<SourceDiagnostic>,
+    },
 }
 
 impl ValidationError {
     pub fn to_message(&self) -> String {
         self.to_string()
     }
+
+    /// The journalled form; event type strings stay in the HTTP response.
+    pub fn diagnostic(&self) -> SourceDiagnostic {
+        match self {
+            Self::EventTypeMismatch { .. } | Self::UnknownEventType { .. } => {
+                let diagnostic = SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord);
+                match SourceErrorCode::try_new("ingress", "event_type") {
+                    Ok(code) => diagnostic.code(code),
+                    Err(_) => diagnostic,
+                }
+            }
+            Self::ValidationFailed { diagnostic, .. } => diagnostic.as_ref().clone(),
+        }
+    }
 }
 
 pub trait SchemaValidator: Send + Sync + std::fmt::Debug {
     fn event_type(&self) -> EventType;
-    fn validate(&self, payload: &serde_json::Value) -> Result<(), String>;
+    fn validate(&self, payload: &serde_json::Value) -> Result<(), SourceDiagnostic>;
 }
 
 #[derive(Debug)]
@@ -68,10 +87,11 @@ impl<T: TypedPayload + DeserializeOwned + Send + Sync + std::fmt::Debug> SchemaV
         EventType::from(T::EVENT_TYPE)
     }
 
-    fn validate(&self, payload: &serde_json::Value) -> Result<(), String> {
-        serde_json::from_value::<T>(payload.clone())
+    fn validate(&self, payload: &serde_json::Value) -> Result<(), SourceDiagnostic> {
+        IngressRecord::new(payload)
+            .deserialize::<T>()
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(IngressDecodeError::into_diagnostic)
     }
 }
 
@@ -105,9 +125,9 @@ pub fn validate_submission(
 
     validator
         .validate(&submission.data)
-        .map_err(|message| ValidationError::ValidationFailed {
+        .map_err(|diagnostic| ValidationError::ValidationFailed {
             event_type: submission.event_type.to_string(),
-            message,
+            diagnostic: Box::new(diagnostic),
         })
 }
 
@@ -139,5 +159,32 @@ mod tests {
         };
         let err = validate_submission(&submission, &config).unwrap_err();
         assert!(matches!(err, ValidationError::ValidationFailed { .. }));
+        let diagnostic = err.diagnostic();
+        assert_eq!(diagnostic.reason(), SourceDiagnosticReason::MissingField);
+        assert_eq!(
+            diagnostic.location().field_path(),
+            [obzenflow_core::event::FieldSegment::Field(
+                obzenflow_core::event::FieldName::new("required")
+            )]
+        );
+    }
+
+    #[test]
+    fn event_type_refusals_journal_a_code_without_the_submitted_name() {
+        let config = ValidationConfig::Single {
+            validator: Arc::new(TypedValidator::<TestPayload>::new()),
+        };
+        let submission = EventSubmission {
+            event_type: "SECRET.event".into(),
+            data: serde_json::json!({"required": "x"}),
+            metadata: None,
+            ingress_handoff: None,
+        };
+        let err = validate_submission(&submission, &config).unwrap_err();
+        let diagnostic = err.diagnostic();
+        assert_eq!(diagnostic.reason(), SourceDiagnosticReason::InvalidRecord);
+        let code = diagnostic.error_code().expect("event type code");
+        assert_eq!((code.namespace(), code.value()), ("ingress", "event_type"));
+        assert!(!format!("{diagnostic} {diagnostic:?}").contains("SECRET"));
     }
 }

@@ -434,7 +434,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 interests: interests.clone(),
             },
         );
-        let finalise_role = HnFinaliseRole::new(DigestReduceCtx {
+        let finalize_role = HnFinaliseRole::new(DigestReduceCtx {
             mode_label,
             base_url: base_url_for_summary,
             ai_provider: chat_target.provider.to_string(),
@@ -511,7 +511,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                         uses at_least_once(ChatCompletion)
                             via chat
                             with ai_resilience()
-                        => finalise_role,
+                        => finalize_role,
                     },
                     chunking: by_budget {
                         items: |seed: &HnTopStories| seed.stories.clone(),

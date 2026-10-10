@@ -85,6 +85,7 @@ pub enum ExecutionPayload {
     RateLimiter(RateLimiterFact),
     Backpressure(BackpressureFact),
     SourcePollError(SourcePollErrorFact),
+    SourceOpenFailed(SourceOpenFailedFact),
     HttpPullState(HttpPullStateFact),
     AiChunkingPlanned(AiChunkingPlannedFact),
     AccumulatorProgress {
@@ -416,12 +417,53 @@ impl SourcePollErrorKind {
     }
 }
 
+impl SourcePollErrorKind {
+    /// Stable lower-case label used in rendered diagnostics.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Transport => "transport",
+            Self::Deserialization => "deserialization",
+            Self::Validation => "validation",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Whether the reader could continue after reporting a poll error (084n B1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePollContinuation {
+    Recoverable,
+    Terminal,
+}
+
+/// Why the supervisor was opening a reader when acquisition failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOpenIntent {
+    Start,
+    Resume,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourcePollErrorFact {
     pub source_type: SourcePollKind,
     pub error_type: SourcePollErrorKind,
-    pub message: String,
+    pub continuation: SourcePollContinuation,
+    pub diagnostic: super::source_diagnostic::SourceDiagnostic,
+    pub timestamp_ms: u64,
+}
+
+/// Opening evidence, distinct from a poll failure; no poll occurred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceOpenFailedFact {
+    pub source_type: SourcePollKind,
+    pub error_type: SourcePollErrorKind,
+    pub intent: SourceOpenIntent,
+    pub diagnostic: super::source_diagnostic::SourceDiagnostic,
     pub timestamp_ms: u64,
 }
 
@@ -446,7 +488,9 @@ pub struct AiChunkingPlannedFact {
 impl ExecutionPayload {
     pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
         match self {
-            Self::SinkOperationFailed(_) => std::num::NonZeroU32::new(2).unwrap(),
+            Self::SinkOperationFailed(_) | Self::SourcePollError(_) => {
+                std::num::NonZeroU32::new(2).unwrap()
+            }
             _ => std::num::NonZeroU32::MIN,
         }
     }
@@ -473,6 +517,7 @@ impl ExecutionPayload {
             Self::RateLimiter(fact) => fact.event_type(),
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
             Self::SourcePollError(_) => "source.poll_error",
+            Self::SourceOpenFailed(_) => "source.open_failed",
             Self::HttpPullState(_) => "source.http_pull_state",
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
@@ -513,6 +558,7 @@ impl ExecutionPayload {
             | Self::RateLimiter(_)
             | Self::Backpressure(_)
             | Self::SourcePollError(_)
+            | Self::SourceOpenFailed(_)
             | Self::HttpPullState(_)
             | Self::AiChunkingPlanned(_)
             | Self::AccumulatorProgress { .. }

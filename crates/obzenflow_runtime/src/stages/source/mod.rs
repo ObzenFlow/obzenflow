@@ -48,7 +48,7 @@ pub use boundary::{
 };
 
 pub use crate::stages::common::handlers::source::{
-    SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    RecordDeError, SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 pub use connector::{

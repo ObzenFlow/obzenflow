@@ -4,8 +4,7 @@
 
 //! FLOWIP-120n F18: admission-sequence ordering at a source-fed ordered fan-in.
 //!
-//! The piggy bank shape: two infinite sources feed a live join above a
-//! stateful fold and a sink. The reference source posts one row and stays
+//! Two infinite sources feed a live join above a stateful fold and a sink. The reference source posts one row and stays
 //! quiet forever; the stream source keeps emitting. Under the Kahn wait the
 //! join would freeze on the quiet reference side; in seq mode the reference
 //! reader's silence is proof (live run, at the entered generation) and the

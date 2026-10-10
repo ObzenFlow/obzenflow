@@ -54,6 +54,10 @@ pub use payloads::sink_operation_payload::{
     SinkOperationPhase, SinkWritePhase, MAX_SINK_DESTINATION_ERROR_NAMESPACE_BYTES,
     MAX_SINK_DESTINATION_ERROR_VALUE_BYTES,
 };
+pub use payloads::source_diagnostic::{
+    FieldName, FieldSegment, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode,
+    SourceErrorCodeError, SourceLocation, TextPosition, MAX_FIELD_PATH_DEPTH,
+};
 pub use payloads::stage_fatal_payload::{
     StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
 };

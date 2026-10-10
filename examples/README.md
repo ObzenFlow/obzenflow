@@ -8,7 +8,7 @@ and replay. A dash means there is no dedicated tutorial or run guide yet.
 | --- | --- | --- |
 | [char_transform](char_transform.rs) | Stateful text transformation | [Getting started](https://obzenflow.dev/tutorials/getting-started/) |
 | [char_transform_skeleton](char_transform_skeleton.rs) | Flow topology with placeholder handlers | [Getting started](https://obzenflow.dev/tutorials/getting-started/) |
-| [http_ingestion_piggy_bank_demo](http_ingestion_piggy_bank_demo/flow.rs) | HTTP ingress, joins, and a checkbook projection | [Bank transactions](https://obzenflow.dev/tutorials/model-bank-transactions/) |
+| [http_ingestion_piggy_bank_demo](http_ingestion_piggy_bank_demo/flow.rs) | YAML accounts, HTTP ingress, joins, and a checkbook projection | [Bank transactions](https://obzenflow.dev/tutorials/model-bank-transactions/) |
 | [hn_ai_digest_demo](hn_ai_digest_demo/flow.rs) | HTTP input, token budgeting, and AI summarisation | [Live AI inference](https://obzenflow.dev/tutorials/live-ai-inference/) |
 | [one_shot_inference_demo](one_shot_inference_demo/main.rs) | One bounded input and one model decision | — |
 | [payment_gateway_resilience](payment_gateway_resilience/flow.rs) | Gateway effects with retries, circuit breaking, and rate limiting | [Run guide](payment_gateway_resilience/README.md) |
@@ -46,7 +46,9 @@ The digest uses a local mock news endpoint by default; prefix its command with
 [the PostgreSQL config](hn_ai_digest_demo/obzenflow.postgres.toml) and supply a
 connection as described in the [local PostgreSQL guide](../dev/postgres/README.md).
 
-The bank example also includes an [authenticated control-plane config](http_ingestion_piggy_bank_demo/obzenflow.auth.toml);
+The bank example opens its accounts from [accounts.yaml](http_ingestion_piggy_bank_demo/accounts.yaml)
+at startup; transactions arrive over HTTP. It also includes an
+[authenticated control-plane config](http_ingestion_piggy_bank_demo/obzenflow.auth.toml);
 see [managed web authentication](../crates/obzenflow_infra/src/web/README.md) for setup.
 
 To replay a recorded run, add `--replay-from <archive> --verify` to the application

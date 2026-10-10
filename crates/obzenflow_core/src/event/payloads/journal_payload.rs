@@ -160,14 +160,24 @@ impl JournalPayload for ChainPayload {
         {
             return Err(descriptor_mismatch());
         }
-        if let ChainPayload::Execution(
-            crate::event::payloads::execution_payload::ExecutionPayload::SourcePollError(failure),
-        ) = self
-        {
+        let source_failure_category = match self {
+            ChainPayload::Execution(
+                crate::event::payloads::execution_payload::ExecutionPayload::SourcePollError(
+                    failure,
+                ),
+            ) => Some(failure.error_type),
+            ChainPayload::Execution(
+                crate::event::payloads::execution_payload::ExecutionPayload::SourceOpenFailed(
+                    failure,
+                ),
+            ) => Some(failure.error_type),
+            _ => None,
+        };
+        if let Some(category) = source_failure_category {
             use crate::event::status::processing_status::ProcessingStatus;
             match &provenance.processing.status {
                 ProcessingStatus::Error { kind, .. }
-                    if *kind == Some(failure.error_type.processing_error_kind()) => {}
+                    if *kind == Some(category.processing_error_kind()) => {}
                 _ => return Err(descriptor_mismatch()),
             }
         }

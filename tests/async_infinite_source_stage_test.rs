@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -89,10 +90,9 @@ impl TypedAsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
         let mut rx = self.rx.lock().await;
         self.poll_entered.notify_one();
 
-        let first = rx
-            .recv()
-            .await
-            .ok_or_else(|| SourceError::Transport("test channel closed".to_string()))?;
+        let first = rx.recv().await.ok_or(SourceError::Transport(
+            SourceDiagnosticReason::InputClosed.into(),
+        ))?;
 
         let mut out = vec![AsyncInfiniteEvent { n: first }];
 

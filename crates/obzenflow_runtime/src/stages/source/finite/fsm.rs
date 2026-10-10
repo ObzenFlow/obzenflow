@@ -448,6 +448,9 @@ pub struct FiniteSourceResources<H> {
     /// first credit miss, cleared on successful reserve (FLOWIP-115e).
     pub(crate) backpressure_stall: Option<tokio::time::Instant>,
 
+    /// Committed source diagnostic the lifecycle failure links to (084n B2).
+    pub(crate) failure_causal_event_id: Option<obzenflow_core::EventId>,
+
     /// Phantom to keep the handler type in the context's type parameters
     _marker: PhantomData<H>,
 }
@@ -490,6 +493,7 @@ impl<H> FiniteSourceResources<H> {
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_stall: None,
+            failure_causal_event_id: None,
             _marker: PhantomData,
         }
     }
@@ -724,7 +728,7 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
                     ),
                     message,
                     ctx.instrumentation.as_ref(),
-                    None,
+                    ctx.failure_causal_event_id,
                 )
                 .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
@@ -1157,7 +1161,7 @@ pub(crate) mod tests {
                         replay_started_at: None,
                         replay_completion: Default::default(),
                         source_boundary: None,
-                        pending_boundary_error: None,
+                        pending_failure: None,
                         reader_acquired: false,
                         $($extra: $value,)*
                     };
@@ -1174,7 +1178,7 @@ pub(crate) mod tests {
                         replay_started_at: None,
                         replay_completion: Default::default(),
                         source_boundary: None,
-                        pending_boundary_error: None,
+                        pending_failure: None,
                         $($extra: $value,)*
                     };
                     let build_fsm = |initial_state| {

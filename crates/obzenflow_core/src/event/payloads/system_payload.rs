@@ -4,6 +4,7 @@
 
 //! System orchestration payloads and their descriptors.
 
+use crate::event::payloads::source_diagnostic::SourceDiagnostic;
 use crate::event::types::DurationMs;
 use crate::event::vector_clock::VectorClock;
 use crate::event::vocabulary;
@@ -139,6 +140,10 @@ pub enum SystemPayload {
         http_status: u16,
         #[serde(skip_serializing_if = "Option::is_none")]
         retry_after_ms_bucket: Option<u64>,
+        /// One per refused event for `Validation`, empty for other reasons. A
+        /// `/batch` diagnostic's record index is the event's batch position.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<SourceDiagnostic>,
     },
 }
 

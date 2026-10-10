@@ -117,6 +117,8 @@ sysinfo = "0.29"
 
 # I/O and formats
 csv = "1"
+# Event-level YAML 1.2 parser; reports aliases, anchors, tags and spans (FLOWIP-084n B6).
+saphyr-parser = "0.1"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres"] }
 
 # Security / hashing

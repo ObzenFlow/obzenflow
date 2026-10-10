@@ -125,7 +125,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             replay_completion: ReplayCompletionGuard::default(),
             source_boundary: self.config.source_boundary,
             pending_boundary_eof: false,
-            pending_boundary_error: None,
+            pending_failure: None,
             pending_boundary_rejected: false,
             reader_acquired: false,
         };

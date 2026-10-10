@@ -28,8 +28,9 @@ pub use validation::{
 };
 
 pub use obzenflow_adapters::sources::http::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder,
+    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord,
 };
+use obzenflow_core::event::SourceDiagnostic;
 use obzenflow_core::ingress::EventSubmission;
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
@@ -209,11 +210,11 @@ where
         obzenflow_core::EventType::from(D::Output::EVENT_TYPE)
     }
 
-    fn validate(&self, payload: &serde_json::Value) -> Result<(), String> {
+    fn validate(&self, payload: &serde_json::Value) -> Result<(), SourceDiagnostic> {
         self.0
-            .decode(payload.clone())
+            .decode(IngressRecord::new(payload))
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(IngressDecodeError::into_diagnostic)
     }
 }
 
@@ -834,6 +835,19 @@ mod tests {
                     ..
                 } => Some((reason, event_count)),
                 _ => None,
+            })
+            .collect()
+    }
+
+    async fn refusal_diagnostics(journal: &MemoryJournal<SystemEvent>) -> Vec<SourceDiagnostic> {
+        journal
+            .read_causally_ordered()
+            .await
+            .expect("read system journal")
+            .into_iter()
+            .flat_map(|env| match env.into_parts().1 {
+                SystemPayload::IngressRefusal { diagnostics, .. } => diagnostics,
+                _ => Vec::new(),
             })
             .collect()
     }
@@ -1523,6 +1537,20 @@ mod tests {
             refusal_facts(&journal).await,
             vec![(IngressRefusalReason::Validation, 1)]
         );
+        // FLOWIP-084n: the fact names the field and the event's batch position.
+        let diagnostics = refusal_diagnostics(&journal).await;
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].reason(),
+            obzenflow_core::event::SourceDiagnosticReason::MissingField
+        );
+        assert_eq!(diagnostics[0].location().record_index(), Some(1));
+        assert_eq!(
+            diagnostics[0].location().field_path(),
+            [obzenflow_core::event::FieldSegment::Field(
+                obzenflow_core::event::FieldName::new("required")
+            )]
+        );
     }
 
     #[tokio::test]
@@ -1761,8 +1789,11 @@ mod tests {
         impl IngressDecoder for TestPayloadIngress {
             type Output = TestPayload;
 
-            fn decode(&self, data: serde_json::Value) -> Result<Self::Output, IngressDecodeError> {
-                let external = serde_json::from_value::<ExternalOrder>(data)?;
+            fn decode(
+                &self,
+                record: IngressRecord<'_>,
+            ) -> Result<Self::Output, IngressDecodeError> {
+                let external = record.deserialize::<ExternalOrder>()?;
                 Ok(TestPayload {
                     order_id: external.external_order_id,
                 })

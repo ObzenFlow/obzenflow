@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, StageOutputs};
 use obzenflow_dsl::{sink, source, test_flow, transform};
@@ -93,7 +94,9 @@ impl TypedFiniteSourceHandler for ErrorAfterFirstSource {
             }
             1 => {
                 self.current = 2;
-                Err(SourceError::Timeout("source timeout".to_string()))
+                Err(SourceError::Timeout(
+                    SourceDiagnosticReason::TimedOut.into(),
+                ))
             }
             _ => Ok(None),
         }

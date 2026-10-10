@@ -128,6 +128,7 @@ impl HttpEndpoint for BatchEventEndpoint {
         let mut accepted_events = Vec::new();
         let mut rejected = 0usize;
         let mut errors = Vec::new();
+        let mut diagnostics = Vec::new();
 
         if let Some(ref validation) = self.state.config.validation {
             for (batch_index, event) in submission.events.into_iter().enumerate() {
@@ -136,6 +137,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                     Err(e) => {
                         rejected += 1;
                         errors.push(format!("{}: {}", event.event_type, e.to_message()));
+                        diagnostics.push(e.diagnostic().record(batch_index as u64));
                     }
                 }
             }
@@ -155,12 +157,7 @@ impl HttpEndpoint for BatchEventEndpoint {
             };
             if let Some(response) = self
                 .state
-                .record_refusal_or_unavailable(
-                    IngressRefusalReason::Validation,
-                    &attempt,
-                    400,
-                    None,
-                )
+                .record_validation_refusal_or_unavailable(&attempt, diagnostics)
                 .await?
             {
                 return Ok(response);

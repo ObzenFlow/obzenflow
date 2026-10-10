@@ -1,0 +1,9 @@
+# Accounts open once at startup. Transactions post against them over HTTP.
+# Quote identifiers so YAML never reads them as numbers.
+accounts:
+  - account_id: "acct-1"
+    owner: Alice
+    initial_balance_cents: 1000
+  - account_id: "acct-2"
+    owner: Bob
+    initial_balance_cents: 0

@@ -10,55 +10,98 @@
 //! - Infinite sources use `Result<Vec<ChainEvent>, SourceError>`.
 
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::execution_payload::{
+    SourcePollContinuation, SourcePollErrorKind,
+};
+use obzenflow_core::event::SourceDiagnostic;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::WriterId;
 use std::fmt;
 use std::time::Duration;
 
-/// Errors that can occur while polling a source.
+/// Errors that can occur while opening or polling a source.
 ///
-/// This is intentionally small for now; 082h will own any cross-stage
-/// unification with a broader StageError taxonomy.
+/// Every variant carries a typed diagnostic, never connector text (084n B2).
+/// Policies classify through [`SourceError::kind`], so a terminal error keeps
+/// its category's health meaning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceError {
     /// The underlying transport or dependency timed out.
-    Timeout(String),
+    Timeout(SourceDiagnostic),
     /// The underlying transport or dependency failed (e.g. network error).
-    Transport(String),
-    /// The source encountered malformed data it could not deserialize.
-    Deserialization(String),
-    /// The dependency responded successfully, but the decoded domain value
-    /// failed source validation. This is not dependency-health evidence.
-    Validation(String),
+    Transport(SourceDiagnostic),
+    /// The source could not decode a response or input as a whole.
+    Deserialization(SourceDiagnostic),
+    /// A record-local refusal after the input was read. This is not
+    /// dependency-health evidence.
+    Validation(SourceDiagnostic),
     /// Catch-all for other source-specific failures.
-    Other(String),
+    Other(SourceDiagnostic),
+    /// The current reader cannot safely continue. A report, not a lifecycle
+    /// decision: the source supervisor alone chooses the stage outcome.
+    Terminal {
+        kind: SourcePollErrorKind,
+        diagnostic: SourceDiagnostic,
+    },
 }
 
 impl SourceError {
-    /// Runtime diagnostics retain the category, never untrusted connector text.
-    /// Error strings can contain credentials, URLs or rejected input values.
-    pub(crate) fn safe_summary(&self) -> &'static str {
+    pub fn kind(&self) -> SourcePollErrorKind {
         match self {
-            Self::Timeout(_) => "source timeout",
-            Self::Transport(_) => "source transport error",
-            Self::Deserialization(_) => "source deserialization error",
-            Self::Validation(_) => "source validation error",
-            Self::Other(_) => "source error",
+            Self::Timeout(_) => SourcePollErrorKind::Timeout,
+            Self::Transport(_) => SourcePollErrorKind::Transport,
+            Self::Deserialization(_) => SourcePollErrorKind::Deserialization,
+            Self::Validation(_) => SourcePollErrorKind::Validation,
+            Self::Other(_) => SourcePollErrorKind::Other,
+            Self::Terminal { kind, .. } => *kind,
+        }
+    }
+
+    pub fn diagnostic(&self) -> &SourceDiagnostic {
+        match self {
+            Self::Timeout(diagnostic)
+            | Self::Transport(diagnostic)
+            | Self::Deserialization(diagnostic)
+            | Self::Validation(diagnostic)
+            | Self::Other(diagnostic)
+            | Self::Terminal { diagnostic, .. } => diagnostic,
+        }
+    }
+
+    pub fn continuation(&self) -> SourcePollContinuation {
+        match self {
+            Self::Terminal { .. } => SourcePollContinuation::Terminal,
+            _ => SourcePollContinuation::Recoverable,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.continuation() == SourcePollContinuation::Terminal
+    }
+
+    /// Category-only summary for processing status and cleanup evidence.
+    pub(crate) fn safe_summary(&self) -> &'static str {
+        match self.kind() {
+            SourcePollErrorKind::Timeout => "source timeout",
+            SourcePollErrorKind::Transport => "source transport error",
+            SourcePollErrorKind::Deserialization => "source deserialization error",
+            SourcePollErrorKind::Validation => "source validation error",
+            SourcePollErrorKind::Other => "source error",
         }
     }
 }
 
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SourceError::Timeout(msg) => write!(f, "source timeout: {msg}"),
-            SourceError::Transport(msg) => write!(f, "source transport error: {msg}"),
-            SourceError::Deserialization(msg) => {
-                write!(f, "source deserialization error: {msg}")
-            }
-            SourceError::Validation(msg) => write!(f, "source validation error: {msg}"),
-            SourceError::Other(msg) => write!(f, "source error: {msg}"),
+        if self.is_terminal() {
+            f.write_str("terminal ")?;
         }
+        write!(
+            f,
+            "source {} error: {}",
+            self.kind().label(),
+            self.diagnostic()
+        )
     }
 }
 

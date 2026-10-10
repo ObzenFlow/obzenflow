@@ -300,7 +300,7 @@ fn execute_inner(
     }
     *phase = "spawn";
     let mut child = OwnedChild {
-        process: command.spawn()?,
+        process: spawn(command)?,
         reaped: false,
     };
     // Reading the ordinary log file cannot block the child on a pipe. Forward
@@ -391,6 +391,24 @@ fn execute_inner(
             heartbeat = Instant::now();
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A freshly copied launcher stays busy (Linux ETXTBSY) while a sibling
+/// thread's forked child still holds the copy's write descriptor; its exec
+/// closes it, so only that race is retried, within a bounded window.
+fn spawn(command: &mut Command) -> std::io::Result<Child> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
     }
 }
 

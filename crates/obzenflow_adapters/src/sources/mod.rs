@@ -8,13 +8,20 @@ pub mod csv;
 pub mod http;
 pub mod http_pull;
 mod in_process;
+pub mod yaml;
 
 pub use csv::{
     CsvDecodeError, CsvDecoder, CsvReader, CsvRecord, CsvRow, CsvRowDecoder, CsvSource,
     CsvSourceBuilder,
 };
-pub use http::{HostedIngressSource, HttpSourceConfig, IngressDecodeError, IngressDecoder};
+pub use http::{
+    HostedIngressSource, HttpSourceConfig, IngressDecodeError, IngressDecoder, IngressRecord,
+};
 pub use in_process::{ChannelSource, ValuesSource};
+pub use yaml::{
+    YamlDecodeError, YamlDecoder, YamlReader, YamlRecord, YamlSelection, YamlSource,
+    YamlSourceBuilder,
+};
 
 pub use http_pull::{
     simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, FnPullDecoder, HttpPollConfig,

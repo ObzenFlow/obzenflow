@@ -13,6 +13,7 @@ use super::prepared::{
     sealed as admission_sealed, AdmitSource, AsyncSourceReader, ConnectorSource, DirectSource,
     SourceReader, SyncSourceReader,
 };
+use super::record_de::deserialize_json;
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
 use crate::stages::source::{
@@ -24,12 +25,16 @@ use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 
-use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{
+    ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode, StageFatalCode,
+    StageFatalReason,
+};
 use obzenflow_core::ingress::{
     EventSubmission, HostedIngressBindingSlot, IngressContext, SubmissionIngressContext,
     SubmissionPayloadKind,
 };
 use obzenflow_core::{ChainEvent, OneFactStageOutput, TypedPayload, WriterId};
+use serde::de::DeserializeOwned;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -360,42 +365,77 @@ pub trait TypedAsyncInfiniteSourceHandler: Send + Sync {
     }
 }
 
-/// Error returned by an application-owned [`IngressDecoder`].
+/// Error returned by an [`IngressDecoder`]. It carries a typed diagnostic only,
+/// so a refusal journals a reason and field, never submitted values.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{message}")]
-pub struct IngressDecodeError {
-    message: String,
-}
+#[error("{0}")]
+pub struct IngressDecodeError(SourceDiagnostic);
 
 impl IngressDecodeError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+    pub fn missing_field(field: &'static str) -> Self {
+        Self(SourceDiagnostic::new(SourceDiagnosticReason::MissingField).within_field(field))
+    }
+
+    pub fn invalid_value(field: &'static str) -> Self {
+        Self(SourceDiagnostic::new(SourceDiagnosticReason::InvalidValue).within_field(field))
+    }
+
+    pub fn invalid_record() -> Self {
+        Self(SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord))
+    }
+
+    /// Nests the path under a schema-declared parent field.
+    pub fn within_field(self, name: &'static str) -> Self {
+        Self(self.0.within_field(name))
+    }
+
+    pub fn code(self, code: SourceErrorCode) -> Self {
+        Self(self.0.code(code))
+    }
+
+    pub fn into_diagnostic(self) -> SourceDiagnostic {
+        self.0
     }
 }
 
-impl From<serde_json::Error> for IngressDecodeError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::new(error.to_string())
+/// One submitted ingress body. Exposes neither raw text nor request metadata.
+pub struct IngressRecord<'a> {
+    data: &'a serde_json::Value,
+}
+
+impl<'a> IngressRecord<'a> {
+    /// Wraps a body, for example to test a decoder directly.
+    pub fn new(data: &'a serde_json::Value) -> Self {
+        Self { data }
+    }
+
+    /// Deserialize this body with serde. Errors name schema fields only.
+    pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, IngressDecodeError> {
+        deserialize_json(self.data).map_err(IngressDecodeError)
     }
 }
 
-/// User-owned mapping from an admitted ingress body to one domain output.
+impl fmt::Debug for IngressRecord<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IngressRecord").finish_non_exhaustive()
+    }
+}
+
+/// User-owned mapping from one submitted ingress body to one domain output.
 ///
 /// The decoder value owns the source's `Output` contract. The default method
-/// performs ordinary serde JSON decoding; applications can override it for an
-/// external representation that still maps to the declared domain output.
-/// Implementations must be deterministic, side-effect free, and behaviourally
-/// equivalent across clones: hosted HTTP ingress invokes the decoder once for
-/// admission validation and again when the accepted submission reaches the source.
-/// Typed `IngressHandle` submissions already have the `Output` shape and bypass
-/// this external-representation mapping.
+/// deserializes the record with serde; applications override it for an
+/// external representation or a record-local rule, rejecting with a typed
+/// [`IngressDecodeError`]. Implementations must be deterministic, side-effect
+/// free, and behaviourally equivalent across clones: hosted HTTP ingress invokes
+/// the decoder once for admission validation and again when the accepted
+/// submission reaches the source. Typed `IngressHandle` submissions already have
+/// the `Output` shape and bypass this external-representation mapping.
 pub trait IngressDecoder: Clone + Send + Sync + 'static {
     type Output: TypedPayload + Send + Sync + 'static;
 
-    fn decode(&self, data: serde_json::Value) -> Result<Self::Output, IngressDecodeError> {
-        serde_json::from_value(data).map_err(IngressDecodeError::from)
+    fn decode(&self, record: IngressRecord<'_>) -> Result<Self::Output, IngressDecodeError> {
+        record.deserialize()
     }
 }
 
@@ -454,9 +494,9 @@ where
 {
     async fn receive_batch(&mut self) -> Result<Vec<(D::Output, IngressContext)>, SourceError> {
         let rx = &mut self.rx;
-        let first = rx.recv().await.ok_or_else(|| {
-            SourceError::Transport("hosted ingress source channel closed".to_string())
-        })?;
+        let first = rx.recv().await.ok_or(SourceError::Transport(
+            SourceDiagnosticReason::InputClosed.into(),
+        ))?;
         let mut submissions = vec![first];
         while submissions.len() < self.max_batch_size {
             match rx.try_recv() {
@@ -468,12 +508,10 @@ where
         let expected_key = self.slot.ingress_key();
         let mut decoded = Vec::with_capacity(submissions.len());
         for submission in submissions {
+            // Ingress invariants carry no input text; 084l makes them fatal.
+            let invariant = || SourceError::Validation(SourceDiagnosticReason::Unclassified.into());
             if !D::Output::matches_event_type(submission.event_type.as_str()) {
-                return Err(SourceError::Validation(format!(
-                    "hosted ingress event type `{}` is outside configured output `{}`",
-                    submission.event_type,
-                    D::Output::event_type_name(),
-                )));
+                return Err(invariant());
             }
             let SubmissionIngressContext {
                 accepted_at_ns,
@@ -481,28 +519,16 @@ where
                 batch_index,
                 attempt_seq,
                 payload_kind,
-            } = submission.ingress_handoff.ok_or_else(|| {
-                SourceError::Validation(
-                    "hosted ingress submission is missing framework ingress context".to_string(),
-                )
-            })?;
+            } = submission.ingress_handoff.ok_or_else(invariant)?;
             if &ingress_key != expected_key {
-                return Err(SourceError::Validation(format!(
-                    "hosted ingress context key `{ingress_key}` does not match configured key `{expected_key}`"
-                )));
+                return Err(invariant());
             }
+            let record = IngressRecord::new(&submission.data);
             let value = match payload_kind {
-                SubmissionPayloadKind::External => self.decoder.decode(submission.data),
-                SubmissionPayloadKind::TypedOutput => {
-                    serde_json::from_value(submission.data).map_err(IngressDecodeError::from)
-                }
+                SubmissionPayloadKind::External => self.decoder.decode(record),
+                SubmissionPayloadKind::TypedOutput => record.deserialize(),
             }
-            .map_err(|error| {
-                SourceError::Deserialization(format!(
-                    "hosted ingress `{}` decode failed: {error}",
-                    D::Output::event_type_name()
-                ))
-            })?;
+            .map_err(|error| SourceError::Validation(error.into_diagnostic()))?;
             decoded.push((
                 value,
                 IngressContext {
@@ -1091,8 +1117,11 @@ mod tests {
     impl IngressDecoder for OffsetIngress {
         type Output = Row;
 
-        fn decode(&self, data: serde_json::Value) -> Result<Self::Output, IngressDecodeError> {
-            let row = serde_json::from_value::<u32>(data)?;
+        fn decode(&self, record: IngressRecord<'_>) -> Result<Self::Output, IngressDecodeError> {
+            let row = record.deserialize::<u32>()?;
+            if row == 0 {
+                return Err(IngressDecodeError::invalid_value("row"));
+            }
             Ok(Row(row + self.offset))
         }
     }
@@ -1228,7 +1257,9 @@ mod tests {
                 .as_ref()
                 .expect("runtime installs observation sink")
                 .report_http_pull(snapshot);
-            Err(SourceError::Validation("bad decoded row".to_string()))
+            Err(SourceError::Validation(
+                SourceDiagnosticReason::InvalidRecord.into(),
+            ))
         }
 
         fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
@@ -1254,8 +1285,8 @@ mod tests {
                 .into_parts();
         assert!(matches!(
             outcome,
-            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref message))
-                if message == "bad decoded row"
+            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref diagnostic))
+                if diagnostic.reason() == SourceDiagnosticReason::InvalidRecord
         ));
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].writer_id, writer_id);
@@ -1429,6 +1460,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_ingress_rejection_keeps_the_decoder_diagnostic() {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let slot = HostedIngressBindingSlot::new("bank.offset");
+        let mut source = HostedIngressSource::new(OffsetIngress { offset: 40 }, rx, slot);
+
+        tx.send(hosted_submission(0, 301, "bank.offset", None, 21))
+            .await
+            .expect("rule-breaking submission queued");
+        let Err(SourceError::Validation(rule)) = source.next().await else {
+            panic!("a decoder rejection is a record-local validation error");
+        };
+        assert_eq!(rule.reason(), SourceDiagnosticReason::InvalidValue);
+        assert_eq!(
+            rule.location().field_path(),
+            [obzenflow_core::event::FieldSegment::Field(
+                obzenflow_core::event::FieldName::new("row")
+            )]
+        );
+
+        let mut malformed = hosted_submission(1, 302, "bank.offset", None, 22);
+        malformed.data = serde_json::json!("SECRET_VALUE");
+        tx.send(malformed)
+            .await
+            .expect("malformed submission queued");
+        let Err(SourceError::Validation(malformed)) = source.next().await else {
+            panic!("a malformed body is a record-local validation error");
+        };
+        assert_eq!(malformed.reason(), SourceDiagnosticReason::InvalidValue);
+        assert!(!format!("{malformed} {malformed:?}").contains("SECRET"));
+    }
+
+    #[tokio::test]
     async fn hosted_ingress_rejects_a_mixed_batch_atomically() {
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         let slot = HostedIngressBindingSlot::new("bank.accounts");
@@ -1452,8 +1515,8 @@ mod tests {
                 .into_parts();
         assert!(matches!(
             outcome,
-            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref message))
-                if message.contains("outside configured output")
+            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref diagnostic))
+                if diagnostic.reason() == SourceDiagnosticReason::Unclassified
         ));
         assert!(observations.is_empty(), "no partial batch may escape");
     }
