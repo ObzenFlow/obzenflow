@@ -8,7 +8,7 @@
 //!
 //! Every ObzenFlow application follows the same shape: define domain types,
 //! implement handlers, wire them together with the `flow!` macro, and launch
-//! with `FlowApplication::run()`.
+//! with `FlowApplication::builder().run_blocking()`.
 //!
 //! ## 1. Domain types
 //!
@@ -102,23 +102,27 @@
 //! - `a <| b;` declares a backward/feedback edge.
 //! - `(reference, stream) |> joiner;` wires both inputs into a join stage.
 //!
-//! ## 4. `FlowApplication::run()`
+//! ## 4. `FlowApplication::builder().run_blocking()`
 //!
 //! [`crate::application::FlowApplication`] handles runtime setup,
 //! optional HTTP server, CLI argument parsing, Prometheus metrics, and graceful
-//! shutdown. Pass a deferred [`crate::flow::FlowDefinition`] to `run()`:
-//!
-//! ```rust,ignore
-//! FlowApplication::run(build_flow()).await?;
-//! ```
-//!
-//! Or use the builder for finer control:
+//! shutdown. From a plain `fn main()`, pass a deferred
+//! [`crate::flow::FlowDefinition`] to `run_blocking()`, which owns the Tokio
+//! runtime and bounds process exit by `runtime.shutdown_timeout`:
 //!
 //! ```rust,ignore
 //! FlowApplication::builder()
 //!     .with_log_level(LogLevel::Info)
-//!     .run_async(build_flow())
-//!     .await?;
+//!     .run_blocking(build_flow())?;
+//! ```
+//!
+//! Inside a runtime you already own, such as `#[tokio::main]`, use `run()` or
+//! `run_async()`. Your runtime then owns process exit: dropping it waits for
+//! blocking work that never returns, such as a synchronous source call held on
+//! a FIFO, unless you shut it down with a timeout.
+//!
+//! ```rust,ignore
+//! FlowApplication::run(build_flow()).await?;
 //! ```
 //!
 //! ## End-to-end example
@@ -153,8 +157,7 @@
 //!     const SCHEMA_VERSION: u32 = 1;
 //! }
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<()> {
+//! fn main() -> Result<()> {
 //!     let readings = vec![
 //!         Measurement { sensor: "A1".into(), celsius: 22.5 },
 //!         Measurement { sensor: "B2".into(), celsius: 85.0 },
@@ -194,7 +197,7 @@
 //!         })
 //!     });
 //!
-//!     FlowApplication::run(flow).await?;
+//!     FlowApplication::builder().run_blocking(flow)?;
 //!
 //!     Ok(())
 //! }

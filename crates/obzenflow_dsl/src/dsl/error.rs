@@ -6,9 +6,64 @@ use thiserror::Error;
 
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
 use obzenflow_runtime::bootstrap::ReplayVerb;
+use obzenflow_runtime::stages::source::ResumeRefusal;
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
+use std::path::{Path, PathBuf};
+
+// One diagnostic names every source whose connector cannot continue its
+// interrupted input (FLOWIP-134i B8).
+fn unfinished_sources_refusal(archive: &Path, sources: &[String]) -> String {
+    let quoted: Vec<String> = sources.iter().map(|source| format!("'{source}'")).collect();
+    let named = match quoted.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let (subject, their, connectors) = if sources.len() == 1 {
+        ("source", "its", "its connector cannot")
+    } else {
+        ("sources", "their", "their connectors cannot")
+    };
+    format!(
+        "cannot resume {}: {subject} {named} stopped before the end of {their} input, and \
+         {connectors} continue interrupted input.\nUse a connector that continues \
+         interrupted input, or implement one.",
+        archive.display()
+    )
+}
+
+// Every source a resume refuses at archive admission, before any claim
+// (FLOWIP-134i B8, B22).
+fn resume_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> String {
+    let unfinished: Vec<String> = refusals
+        .iter()
+        .filter(|(_, refusal)| *refusal == ResumeRefusal::UnfinishedInput)
+        .map(|(source, _)| source.clone())
+        .collect();
+    let mut paragraphs = Vec::new();
+    if !unfinished.is_empty() {
+        paragraphs.push(unfinished_sources_refusal(archive, &unfinished));
+    }
+    for (source, refusal) in refusals {
+        match refusal {
+            ResumeRefusal::UnfinishedInput => {}
+            ResumeRefusal::RecordedWithoutPositions => paragraphs.push(format!(
+                "cannot resume {}: source '{source}' recorded its input without positions, so \
+                 its connector cannot continue it from where it stopped.\nStart a new run.",
+                archive.display()
+            )),
+            ResumeRefusal::PositionVersion { recorded, expected } => paragraphs.push(format!(
+                "cannot resume {}: source '{source}' recorded positions in version {recorded} \
+                 of its connector's format, and the connector now reads version {expected}.\n\
+                 Resume with the version that recorded them, or start a new run.",
+                archive.display()
+            )),
+        }
+    }
+    paragraphs.join("\n")
+}
 
 // Verb-aware refusal copy for the archive sink delivery-safety gate
 // (FLOWIP-120n F16, extended to both archive verbs by FLOWIP-120v): one
@@ -364,6 +419,17 @@ pub enum FlowBuildError {
          for an effect-free bounded rehearsal."
     )]
     ResumeRefusedEphemeralRun,
+
+    #[error("{}", resume_refusal(.archive, .refusals))]
+    ResumeRefusedSources {
+        archive: PathBuf,
+        refusals: Vec<(String, ResumeRefusal)>,
+    },
+
+    /// The resume could not take its parent's continuation claim (FLOWIP-134i
+    /// B12); its run directory remains as an orphan that ran no stage.
+    #[error(transparent)]
+    ResumeRefusedClaim(obzenflow_core::journal::archive::ReplayError),
 }
 
 impl FlowBuildError {
@@ -412,5 +478,65 @@ impl FlowBuildError {
 impl From<FlowBuildError> for String {
     fn from(err: FlowBuildError) -> Self {
         err.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unfinished_source_refusal_names_every_source() {
+        let archive = Path::new("/runs/interrupted");
+        assert_eq!(
+            unfinished_sources_refusal(archive, &["web_orders".to_string()]),
+            "cannot resume /runs/interrupted: source 'web_orders' stopped before the end of \
+             its input, and its connector cannot continue interrupted input.\nUse a connector \
+             that continues interrupted input, or implement one."
+        );
+        assert!(unfinished_sources_refusal(
+            archive,
+            &["a".to_string(), "b".to_string(), "c".to_string()]
+        )
+        .starts_with(
+            "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped before the end \
+             of their input, and their connectors cannot continue interrupted input."
+        ));
+    }
+
+    /// FLOWIP-134i B22: one refusal names every source, the unfinished ones
+    /// together and each positioned one with its own reason and remedy.
+    #[test]
+    fn resume_refusal_names_each_source_with_its_remedy() {
+        let archive = Path::new("/runs/interrupted");
+        let refusals = vec![
+            ("cards".to_string(), ResumeRefusal::UnfinishedInput),
+            (
+                "ledger".to_string(),
+                ResumeRefusal::RecordedWithoutPositions,
+            ),
+            (
+                "orders".to_string(),
+                ResumeRefusal::PositionVersion {
+                    recorded: std::num::NonZeroU32::MIN,
+                    expected: std::num::NonZeroU32::new(2).unwrap(),
+                },
+            ),
+        ];
+        assert_eq!(
+            resume_refusal(archive, &refusals),
+            [
+                unfinished_sources_refusal(archive, &["cards".to_string()]),
+                "cannot resume /runs/interrupted: source 'ledger' recorded its input without \
+                 positions, so its connector cannot continue it from where it stopped.\nStart a \
+                 new run."
+                    .to_string(),
+                "cannot resume /runs/interrupted: source 'orders' recorded positions in version 1 \
+                 of its connector's format, and the connector now reads version 2.\nResume with \
+                 the version that recorded them, or start a new run."
+                    .to_string(),
+            ]
+            .join("\n")
+        );
     }
 }

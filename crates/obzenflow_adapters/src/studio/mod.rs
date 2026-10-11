@@ -325,6 +325,7 @@ impl StudioProjection {
         };
         self.flow_state = match event {
             PipelineLifecycleEvent::Running { .. }
+            | PipelineLifecycleEvent::ReconstructionCompleted { .. }
             | PipelineLifecycleEvent::Draining { .. }
             | PipelineLifecycleEvent::AllStagesCompleted { .. } => ObservedFlowState::Active,
             PipelineLifecycleEvent::Drained

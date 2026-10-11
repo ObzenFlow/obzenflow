@@ -4,6 +4,7 @@
 
 //! Adapter sinks
 
+mod blocking;
 pub mod console;
 pub mod csv;
 pub mod discard;

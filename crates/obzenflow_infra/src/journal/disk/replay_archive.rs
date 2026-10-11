@@ -14,6 +14,7 @@ use super::reader::DiskJournalReader;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::archive::manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
@@ -21,7 +22,9 @@ use obzenflow_core::journal::archive::manifest::{
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
+use obzenflow_core::source::RecordedSourceFrontier;
 use obzenflow_core::{ChainEvent, StageId};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -37,11 +40,25 @@ pub struct DiskReplayArchive {
     allow_incomplete_archive: bool,
     read_write_lock: Arc<RwLock<()>>,
     /// Max generation with a recorded catch-up boundary in any source journal
-    /// (FLOWIP-120n), scanned once at open. See [`scan_recorded_maxima`].
+    /// (FLOWIP-120n), scanned once at open. See [`scan_source_journals`].
     max_recorded_generation: obzenflow_core::ReaderGeneration,
     /// Max recorded admission sequence in any source journal (FLOWIP-120n
     /// F18), from the same scan. Seeds the resuming run's flow sequencer.
     max_recorded_admission_seq: obzenflow_core::AdmissionSeq,
+    /// Each source journal's committed EOF kind (FLOWIP-134i B8), from the
+    /// same scan; under a merged lineage, the kind ending its merged records.
+    recorded_source_eof: HashMap<String, EofKind>,
+    /// Each source journal's committed frontier (FLOWIP-134i B22), from the
+    /// same scan; under a merged lineage, the frontier of its merged records.
+    recorded_frontier: HashMap<String, RecordedSourceFrontier>,
+    /// Each source journal's count of records a replay re-admits or
+    /// preserves, from the same scan.
+    replayable_by_source: HashMap<String, u64>,
+    /// The generation whose reconstruction this run recorded as complete
+    /// (FLOWIP-134i B6).
+    reconstruction_completed: Option<u64>,
+    /// The runs a resume of this one merges with, nearest first (B6).
+    ancestors: Vec<Arc<DiskReplayArchive>>,
 }
 
 impl DiskReplayArchive {
@@ -49,6 +66,15 @@ impl DiskReplayArchive {
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
     ) -> Result<Self, ReplayError> {
+        let (archive_path, manifest) = Self::read_manifest(archive_path)?;
+        Self::open_manifest(archive_path, manifest, allow_incomplete_archive).await
+    }
+
+    /// An archive's canonical path and its gated manifest, before any journal
+    /// is read.
+    pub(crate) fn read_manifest(
+        archive_path: PathBuf,
+    ) -> Result<(PathBuf, RunManifest), ReplayError> {
         let metadata = std::fs::metadata(&archive_path).map_err(|e| ReplayError::Io {
             message: format!(
                 "Failed to read replay archive metadata: {}",
@@ -59,6 +85,14 @@ impl DiskReplayArchive {
         if !metadata.is_dir() {
             return Err(ReplayError::ArchivePathNotDirectory { path: archive_path });
         }
+        // Lineage links and claims name archives canonically (FLOWIP-134i B6).
+        let archive_path = std::fs::canonicalize(&archive_path).map_err(|e| ReplayError::Io {
+            message: format!(
+                "Failed to resolve replay archive path: {}",
+                archive_path.display()
+            ),
+            source: e,
+        })?;
 
         let manifest_path = archive_path.join(RUN_MANIFEST_FILENAME);
         if !manifest_path.exists() {
@@ -124,15 +158,23 @@ impl DiskReplayArchive {
                     e
                 ),
             })?;
+        Ok((archive_path, manifest))
+    }
 
+    async fn open_manifest(
+        archive_path: PathBuf,
+        manifest: RunManifest,
+        allow_incomplete_archive: bool,
+    ) -> Result<Self, ReplayError> {
         // Journal incarnations are manifest-bound, including empty journals.
         // Incomplete admission cannot turn a conflicting descriptor into evidence.
         super::identity::validate_archive_identities(&archive_path, &manifest)
             .map_err(causal_admission_error)?;
 
         let system_log_path = archive_path.join(&manifest.system_journal_file);
-        let status_derivation = match derive_status_derivation_from_system_log(&system_log_path) {
-            Ok(derivation) => derivation,
+        let (status_derivation, reconstruction_completed) = match scan_system_log(&system_log_path)
+        {
+            Ok(scan) => (scan.derivation, scan.reconstruction_completed),
             Err(err) => {
                 if allow_incomplete_archive
                     && !matches!(err, ReplayError::UnsupportedJournalSchemaVersion { .. })
@@ -143,11 +185,14 @@ impl DiskReplayArchive {
                         error = %err,
                         "Replay archive system.log could not be read; proceeding due to allow_incomplete_archive"
                     );
-                    StatusDerivation {
-                        terminal_events_found: 0,
-                        chosen: ArchiveStatus::Unknown,
-                        warning: Some(err.to_string()),
-                    }
+                    (
+                        StatusDerivation {
+                            terminal_events_found: 0,
+                            chosen: ArchiveStatus::Unknown,
+                            warning: Some(err.to_string()),
+                        },
+                        None,
+                    )
                 } else {
                     return Err(err);
                 }
@@ -161,7 +206,7 @@ impl DiskReplayArchive {
             return Err(ReplayError::IncompleteArchive { status });
         }
 
-        let (max_recorded_generation, max_recorded_admission_seq) = scan_recorded_maxima(
+        let scan = scan_source_journals(
             &archive_path,
             &manifest,
             ReadPolicy::SealedScan {
@@ -173,11 +218,11 @@ impl DiskReplayArchive {
             .as_ref()
             .map(|resume| resume.resume_generation)
             .unwrap_or(0);
-        if entered_generation > max_recorded_generation.0 {
+        if entered_generation > scan.max_generation.0 {
             tracing::debug!(
                 archive_path = %archive_path.display(),
                 manifest_generation = entered_generation,
-                scanned_generation = max_recorded_generation.0,
+                scanned_generation = scan.max_generation.0,
                 "torn catch-up: the manifest's entered generation has no recorded \
                  boundary in any source journal; the journal scan is authoritative"
             );
@@ -190,9 +235,166 @@ impl DiskReplayArchive {
             status_derivation,
             allow_incomplete_archive,
             read_write_lock: Arc::new(RwLock::new(())),
-            max_recorded_generation,
-            max_recorded_admission_seq,
+            max_recorded_generation: scan.max_generation,
+            max_recorded_admission_seq: scan.max_admission_seq,
+            recorded_source_eof: scan.eof_by_source,
+            recorded_frontier: scan.frontier_by_source,
+            replayable_by_source: scan.replayable_by_source,
+            reconstruction_completed,
+            ancestors: Vec::new(),
         })
+    }
+
+    /// Open an archive to resume it. Resuming a replay resumes the run it
+    /// reproduces (FLOWIP-134i B13), and only the head of a history resumes
+    /// (B7, B12). A resumed run that never recorded reconstruction completion
+    /// merges with the runs it resumed from, back to the first that did. Every
+    /// source's records must agree across them; a missing, unreadable or
+    /// disagreeing ancestor refuses before any run starts (B6).
+    pub async fn open_for_resume(
+        archive_path: PathBuf,
+        allow_incomplete_archive: bool,
+    ) -> Result<Self, ReplayError> {
+        let (archive_path, manifest) = Self::resolve_replayed_run(archive_path)?;
+        super::continuation::admit(&archive_path, &manifest)?;
+        let mut head =
+            Self::open_manifest(archive_path, manifest, allow_incomplete_archive).await?;
+        let mut ancestors: Vec<Arc<Self>> = Vec::new();
+        let mut parent = head.unfinished_parent();
+        while let Some(ancestor) = parent {
+            if ancestor == head.archive_path || ancestors.iter().any(|a| a.archive_path == ancestor)
+            {
+                return Err(ReplayError::Parse {
+                    message: format!(
+                        "the resume lineage of {} returns to {}",
+                        head.archive_path.display(),
+                        ancestor.display()
+                    ),
+                });
+            }
+            if !ancestor.exists() {
+                return Err(ReplayError::AncestorMissing {
+                    archive: head.archive_path.clone(),
+                    ancestor,
+                });
+            }
+            let opened = Self::open(ancestor.clone(), true).await.map_err(|error| {
+                ReplayError::AncestorUnreadable {
+                    archive: head.archive_path.clone(),
+                    ancestor,
+                    source: Box::new(error),
+                }
+            })?;
+            parent = opened.unfinished_parent();
+            ancestors.push(Arc::new(opened));
+        }
+        head.merge_lineage(ancestors)?;
+        Ok(head)
+    }
+
+    /// The first run a chain of replays reproduces (B13): a replay adds
+    /// nothing a resume reads.
+    pub(crate) fn resolve_replayed_run(
+        archive_path: PathBuf,
+    ) -> Result<(PathBuf, RunManifest), ReplayError> {
+        let (mut path, mut manifest) = Self::read_manifest(archive_path)?;
+        let mut visited = vec![path.clone()];
+        while let Some(replayed) = replayed_run(&manifest) {
+            if visited.contains(&replayed) {
+                return Err(ReplayError::Parse {
+                    message: format!(
+                        "the replays from {} return to {}",
+                        visited[0].display(),
+                        replayed.display()
+                    ),
+                });
+            }
+            if !replayed.exists() {
+                return Err(ReplayError::ReplayedRunMissing {
+                    replay: path,
+                    replayed,
+                });
+            }
+            (path, manifest) = Self::read_manifest(replayed)?;
+            visited.push(path.clone());
+        }
+        Ok((path, manifest))
+    }
+
+    /// The run this one resumed from, while this run has not recorded its
+    /// reconstruction as complete.
+    fn unfinished_parent(&self) -> Option<PathBuf> {
+        match (&self.manifest.resume, self.reconstruction_completed) {
+            (Some(resume), None) => Some(resume.resumed_from.clone()),
+            _ => None,
+        }
+    }
+
+    /// Each source continues from the longest of its records across the
+    /// lineage, which every shorter member must prefix by recorded event id.
+    /// A tie keeps the ancestor: its descendant added nothing, so the torn
+    /// run's own EOF is dropped.
+    fn merge_lineage(&mut self, ancestors: Vec<Arc<Self>>) -> Result<(), ReplayError> {
+        if ancestors.is_empty() {
+            return Ok(());
+        }
+        let mut merged_eof = HashMap::new();
+        let mut merged_frontier = HashMap::new();
+        for stage_key in self.source_stage_keys() {
+            let members: Vec<&Self> = ancestors
+                .iter()
+                .rev()
+                .map(Arc::as_ref)
+                .chain(std::iter::once(&*self))
+                .filter(|member| member.manifest.stages.contains_key(&stage_key))
+                .collect();
+            let replayable = |member: &Self| {
+                member
+                    .replayable_by_source
+                    .get(&stage_key)
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let Some(longest) = members.iter().copied().reduce(|longest, member| {
+                if replayable(member) > replayable(longest) {
+                    member
+                } else {
+                    longest
+                }
+            }) else {
+                continue;
+            };
+            for member in &members {
+                if !std::ptr::eq(*member, longest) {
+                    verify_source_prefix(member, longest, &stage_key, &self.archive_path)?;
+                }
+            }
+            if let Some(frontier) = longest.recorded_frontier.get(&stage_key) {
+                merged_frontier.insert(stage_key.clone(), frontier.clone());
+            }
+            if let Some(kind) = longest.recorded_source_eof.get(&stage_key) {
+                merged_eof.insert(stage_key, *kind);
+            }
+        }
+        self.recorded_source_eof = merged_eof;
+        self.recorded_frontier = merged_frontier;
+        for ancestor in &ancestors {
+            self.max_recorded_generation = self
+                .max_recorded_generation
+                .max(ancestor.max_recorded_generation);
+            self.max_recorded_admission_seq = self
+                .max_recorded_admission_seq
+                .max(ancestor.max_recorded_admission_seq);
+        }
+        self.ancestors = ancestors;
+        Ok(())
+    }
+
+    fn source_journal(&self, stage_key: &str) -> Option<PathBuf> {
+        self.manifest
+            .stages
+            .get(stage_key)
+            .map(|stage| self.archive_path.join(&stage.data_journal_file))
     }
 
     pub fn status(&self) -> ArchiveStatus {
@@ -381,8 +583,34 @@ impl ReplayArchive for DiskReplayArchive {
         keys
     }
 
+    fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind> {
+        self.recorded_source_eof.get(stage_key).copied()
+    }
+
+    fn recorded_source_frontier(&self, stage_key: &str) -> RecordedSourceFrontier {
+        self.recorded_frontier
+            .get(stage_key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn archive_path(&self) -> &Path {
         &self.archive_path
+    }
+
+    fn claim_continuation(
+        &self,
+        successor: obzenflow_core::FlowId,
+        location: &obzenflow_core::journal::factory::CurrentRunLocator,
+    ) -> Result<(), ReplayError> {
+        super::continuation::publish_claim(&self.archive_path, successor, location.path())
+    }
+
+    fn ancestors(&self) -> Vec<Arc<dyn ReplayArchive>> {
+        self.ancestors
+            .iter()
+            .map(|ancestor| ancestor.clone() as Arc<dyn ReplayArchive>)
+            .collect()
     }
 
     fn manifest_capability(&self, name: &str) -> Option<u32> {
@@ -410,8 +638,140 @@ impl ReplayArchive for DiskReplayArchive {
     }
 }
 
-/// Scan the archive's source journals once and return the max recorded
-/// generation and admission sequence, `0` each when none exists (FLOWIP-120n).
+/// What one open-time scan of the archive's source journals recorded.
+struct SourceJournalScan {
+    max_generation: obzenflow_core::ReaderGeneration,
+    max_admission_seq: obzenflow_core::AdmissionSeq,
+    /// Each source's committed EOF kind, by stage key (FLOWIP-134i B8).
+    eof_by_source: HashMap<String, EofKind>,
+    /// Each source's count of records a replay re-admits or preserves.
+    replayable_by_source: HashMap<String, u64>,
+    /// Each source's committed frontier, folded as a replay reads it (B22).
+    frontier_by_source: HashMap<String, RecordedSourceFrontier>,
+}
+
+/// A shorter member's records for `stage_key` must open the longest member's,
+/// by recorded event id (FLOWIP-134i B6). Streams both journals.
+fn verify_source_prefix(
+    shorter: &DiskReplayArchive,
+    longest: &DiskReplayArchive,
+    stage_key: &str,
+    head: &Path,
+) -> Result<(), ReplayError> {
+    let disagrees = || ReplayError::AncestorDisagrees {
+        archive: head.to_path_buf(),
+        ancestor: if shorter.archive_path == head {
+            longest.archive_path.clone()
+        } else {
+            shorter.archive_path.clone()
+        },
+        stage_key: stage_key.to_string(),
+    };
+    if shorter
+        .replayable_by_source
+        .get(stage_key)
+        .copied()
+        .unwrap_or(0)
+        == 0
+    {
+        return Ok(());
+    }
+    let (Some(prefix_path), Some(extended_path)) = (
+        shorter.source_journal(stage_key),
+        longest.source_journal(stage_key),
+    ) else {
+        return Err(disagrees());
+    };
+    let mut prefix = ReplayableIds::open(prefix_path, shorter.read_policy())?;
+    let mut extended = ReplayableIds::open(extended_path, longest.read_policy())?;
+    while let Some(id) = prefix.next_id()? {
+        if extended.next_id()? != Some(id) {
+            return Err(disagrees());
+        }
+    }
+    Ok(())
+}
+
+/// The event ids of the records a replay of one source journal re-admits or
+/// preserves, in journal order.
+struct ReplayableIds {
+    path: PathBuf,
+    reader: BufReader<File>,
+    buf: Vec<u8>,
+    decoder: Decoder,
+    policy: ReadPolicy,
+    offset: u64,
+    pending: std::collections::VecDeque<obzenflow_core::EventId>,
+    done: bool,
+}
+
+impl ReplayableIds {
+    fn open(path: PathBuf, policy: ReadPolicy) -> Result<Self, ReplayError> {
+        let file = File::open(&path).map_err(|e| ReplayError::Io {
+            message: format!("Failed to open source journal at {}", path.display()),
+            source: e,
+        })?;
+        let decoder = Decoder::new(&path);
+        Ok(Self {
+            path,
+            reader: BufReader::new(file),
+            buf: Vec::new(),
+            decoder,
+            policy,
+            offset: 0,
+            pending: std::collections::VecDeque::new(),
+            done: false,
+        })
+    }
+
+    fn next_id(&mut self) -> Result<Option<obzenflow_core::EventId>, ReplayError> {
+        use obzenflow_core::event::chain_event::ReplayDisposition;
+        loop {
+            if let Some(id) = self.pending.pop_front() {
+                return Ok(Some(id));
+            }
+            if self.done {
+                return Ok(None);
+            }
+            let Some((consumed, termination)) = read_frame_sync(&mut self.reader, &mut self.buf)
+                .map_err(|e| ReplayError::Io {
+                    message: format!("Failed to read source journal at {}", self.path.display()),
+                    source: e,
+                })?
+            else {
+                self.done = true;
+                continue;
+            };
+            let record_offset = self.offset;
+            self.offset += consumed as u64;
+            match dispose(
+                classify_frame::<ChainEvent>(&self.buf, &mut self.decoder, record_offset),
+                termination,
+                self.policy,
+            ) {
+                Disposition::Yield(frame) => self.pending.extend(
+                    frame
+                        .into_records()
+                        .into_iter()
+                        .filter(|record| record.replay_disposition() != ReplayDisposition::ReAuthor)
+                        .map(|record| *record.id()),
+                ),
+                Disposition::EndOfCommittedRecords | Disposition::Skip => self.done = true,
+                Disposition::Corrupt(problem) => {
+                    return Err(ReplayError::CorruptedArchive {
+                        path: self.path.clone(),
+                        record_position: record_offset,
+                        message: problem.to_string(),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Scan the archive's source journals once for the max recorded generation
+/// and admission sequence, `0` each when none exists (FLOWIP-120n), and each
+/// source's committed EOF kind (FLOWIP-134i B8).
 /// The scan is the authority for the resume generation: a torn catch-up
 /// (interrupted before a source authored its watermark) leaves the manifest's
 /// entered generation with no recorded boundary, and entering past it would
@@ -419,23 +779,22 @@ impl ReplayArchive for DiskReplayArchive {
 /// maximum (F18) seeds the resuming run's flow sequencer above every
 /// re-admitted sequence. Cost: one sequential read per source journal at
 /// bootstrap, journals resume re-reads anyway.
-fn scan_recorded_maxima(
+fn scan_source_journals(
     archive_path: &Path,
     manifest: &RunManifest,
     policy: ReadPolicy,
-) -> Result<
-    (
-        obzenflow_core::ReaderGeneration,
-        obzenflow_core::AdmissionSeq,
-    ),
-    ReplayError,
-> {
+) -> Result<SourceJournalScan, ReplayError> {
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
     use obzenflow_core::event::ChainPayload;
 
+    use obzenflow_core::event::chain_event::ReplayDisposition;
+
     let mut max_generation = 0u64;
     let mut max_admission_seq = 0u64;
-    for stage_info in manifest.stages.values() {
+    let mut eof_by_source = HashMap::new();
+    let mut replayable_by_source = HashMap::new();
+    let mut frontier_by_source = HashMap::new();
+    for (stage_key, stage_info) in &manifest.stages {
         if !stage_info.stage_type.is_source() {
             continue;
         }
@@ -476,12 +835,26 @@ fn scan_recorded_maxima(
                 Disposition::Yield(frame) => {
                     for record in frame.into_records() {
                         admission.admit(&record).map_err(causal_admission_error)?;
-                        if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
-                            generation,
-                            ..
-                        }) = &record.payload
-                        {
-                            max_generation = max_generation.max(generation.0);
+                        if record.replay_disposition() != ReplayDisposition::ReAuthor {
+                            *replayable_by_source
+                                .entry(stage_key.clone())
+                                .or_insert(0u64) += 1;
+                            frontier_by_source
+                                .entry(stage_key.clone())
+                                .or_insert_with(RecordedSourceFrontier::default)
+                                .observe(
+                                    &record.payload,
+                                    record.envelope.provenance.event.source_progress.as_ref(),
+                                );
+                        }
+                        if let ChainPayload::FlowControl(control) = &record.payload {
+                            if let FlowControlPayload::CatchUpComplete { generation, .. } = control
+                            {
+                                max_generation = max_generation.max(generation.0);
+                            }
+                            if let Some(kind) = control.eof_kind() {
+                                eof_by_source.insert(stage_key.clone(), kind);
+                            }
                         }
                         if let Some(seq) = record.envelope.provenance.event.admission_seq {
                             max_admission_seq = max_admission_seq.max(seq.0);
@@ -511,15 +884,24 @@ fn scan_recorded_maxima(
             }
         }
     }
-    Ok((
-        obzenflow_core::ReaderGeneration(max_generation),
-        obzenflow_core::AdmissionSeq(max_admission_seq),
-    ))
+    Ok(SourceJournalScan {
+        max_generation: obzenflow_core::ReaderGeneration(max_generation),
+        max_admission_seq: obzenflow_core::AdmissionSeq(max_admission_seq),
+        eof_by_source,
+        replayable_by_source,
+        frontier_by_source,
+    })
 }
 
-pub(crate) fn derive_status_derivation_from_system_log(
-    path: &Path,
-) -> Result<StatusDerivation, ReplayError> {
+/// What a run's system log records about how the run ended.
+pub(crate) struct SystemLogScan {
+    pub(crate) derivation: StatusDerivation,
+    /// The generation whose reconstruction the run recorded as complete
+    /// (FLOWIP-134i B6).
+    pub(crate) reconstruction_completed: Option<u64>,
+}
+
+pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError> {
     if !path.exists() {
         return Err(ReplayError::MissingSystemLog {
             path: path.to_path_buf(),
@@ -535,6 +917,7 @@ pub(crate) fn derive_status_derivation_from_system_log(
 
     let mut chosen = ArchiveStatus::Unknown;
     let mut terminal_events_found: u64 = 0;
+    let mut reconstruction_completed = None;
     let mut line_no = 0u64;
     let mut offset = 0u64;
     let mut decoder = Decoder::new(path);
@@ -578,6 +961,9 @@ pub(crate) fn derive_status_derivation_from_system_log(
                                 terminal_events_found = terminal_events_found.saturating_add(1);
                                 chosen = ArchiveStatus::Cancelled;
                             }
+                            obzenflow_core::event::PipelineLifecycleEvent::ReconstructionCompleted {
+                                generation,
+                            } => reconstruction_completed = Some(*generation),
                             _ => {}
                         }
                     }
@@ -601,18 +987,36 @@ pub(crate) fn derive_status_derivation_from_system_log(
         }
     }
 
-    Ok(StatusDerivation {
-        terminal_events_found,
-        chosen,
-        warning: if terminal_events_found > 1 {
-            Some(
-                "Multiple pipeline terminal events found in system.log; derived status uses last"
-                    .to_string(),
-            )
-        } else {
-            None
+    Ok(SystemLogScan {
+        derivation: StatusDerivation {
+            terminal_events_found,
+            chosen,
+            warning: if terminal_events_found > 1 {
+                Some(
+                    "Multiple pipeline terminal events found in system.log; derived status uses last"
+                        .to_string(),
+                )
+            } else {
+                None
+            },
         },
+        reconstruction_completed,
     })
+}
+
+/// Whether a run recorded reconstruction completion (FLOWIP-134i B6). A system
+/// log that cannot be read records none.
+pub(crate) fn recorded_reconstruction_completion(run: &Path, manifest: &RunManifest) -> bool {
+    scan_system_log(&run.join(&manifest.system_journal_file))
+        .is_ok_and(|scan| scan.reconstruction_completed.is_some())
+}
+
+/// The run a replay reproduces; `None` for a live or resumed run.
+pub(crate) fn replayed_run(manifest: &RunManifest) -> Option<PathBuf> {
+    match (&manifest.replay, &manifest.resume) {
+        (Some(replay), None) => Some(PathBuf::from(&replay.replay_from)),
+        _ => None,
+    }
 }
 
 fn causal_admission_error(error: obzenflow_core::journal::JournalError) -> ReplayError {

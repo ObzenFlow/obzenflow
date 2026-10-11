@@ -14,7 +14,10 @@ use obzenflow_core::id::{FlowId, JournalId, StageId};
 use obzenflow_core::journal::read::*;
 use obzenflow_core::journal::{JournalError, JournalReader, RunManifest};
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+
+mod lineage;
+pub use lineage::{read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing};
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalReadError {
@@ -22,6 +25,9 @@ pub enum JournalReadError {
     Admission(#[from] super::disk::inspect::JournalInspectError),
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// A continuation claim on the run's lineage could not be read.
+    #[error(transparent)]
+    Lineage(#[from] obzenflow_core::journal::archive::ReplayError),
     #[error("invalid run archive: {0}")]
     Invalid(String),
     #[error("conflicting run evidence: {0}")]
@@ -82,6 +88,7 @@ pub struct RunTail {
 }
 
 struct ReadState {
+    run_dir: PathBuf,
     identity: RunIdentity,
     manifest: RunManifest,
     journals: Vec<SelectedJournal>,
@@ -199,6 +206,7 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
     }
     Ok(RunSnapshot {
         state: ReadState {
+            run_dir: path.to_path_buf(),
             identity,
             manifest,
             journals,
@@ -244,6 +252,10 @@ impl RunTail {
     }
     pub fn progress(&self) -> &RunReadProgress {
         &self.state.progress
+    }
+    /// The run's place in its history, read now from manifests and claims.
+    pub fn lineage(&self) -> Result<RunLineage, JournalReadError> {
+        read_run_lineage(&self.state.run_dir)
     }
     pub async fn read_next(&mut self) -> Result<TailRead, JournalReadError> {
         Ok(match self.state.next(false).await? {

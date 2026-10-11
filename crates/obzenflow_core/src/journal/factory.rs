@@ -107,7 +107,9 @@ pub trait FlowJournalFactory: Send {
     ///
     /// Called only on the `Durable` arm; ephemeral runs never receive it.
     /// Durable obligation: a factory declaring `Durable` must persist the
-    /// manifest, or its archive is unreadable at replay/resume time.
+    /// manifest, or its archive is unreadable at replay/resume time. The
+    /// manifest is durable on return, because a resume then claims its parent
+    /// (FLOWIP-134i B12).
     fn write_run_manifest(&self, _manifest: &RunManifest) -> Result<(), JournalError> {
         Ok(())
     }

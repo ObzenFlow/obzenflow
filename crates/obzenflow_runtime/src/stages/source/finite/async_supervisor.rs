@@ -4,10 +4,7 @@
 
 //! Async finite source supervisor implementation using HandlerSupervised pattern
 
-use super::fsm::{
-    FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState,
-    SourceCompletionOrigin,
-};
+use super::fsm::{FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState};
 use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
 use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::replay::ReplayDriver;
@@ -17,18 +14,19 @@ use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
+use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::SourceControl;
 use crate::stages::source::supervision::{
-    around_source_boundary, commit_source_open_failure, drain_pending_outputs_async,
-    emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
-    poll_error_backoff, poll_error_summary, record_source_cleanup_failed,
-    record_source_stage_fatal, source_error_kind, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceOpenFailureCommit,
-    SourcePollObservation,
+    around_source_boundary, commit_reader_acquired, commit_source_open_failure,
+    drain_pending_outputs_async, emit_batch_to_pending_outputs, normalise_source_poll_error,
+    observe_source_boundary_rejection, poll_error_backoff, poll_error_summary,
+    record_source_release, record_source_stage_fatal, source_error_kind,
+    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
+    PendingFailure, SourceExit, SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
-    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
-    SourcePollResult, SourceReaderInitContext,
+    SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
+    SourcePollReport, SourcePollResult, SourceReaderInitContext,
 };
 use crate::supervised_base::base::{self, Registration, Supervisor};
 use crate::supervised_base::handler_supervised::{
@@ -67,6 +65,9 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// The continuation admitted with the source (FLOWIP-134i B8).
+    pub(crate) continuation: SourceContinuation,
 
     /// Adaptive backoff for async polls that deliver no data.
     pub(crate) idle_backoff: IdleBackoff,
@@ -107,8 +108,11 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
     /// events; drain those events before transitioning to completion.
     pub(crate) pending_boundary_rejected: bool,
 
-    /// Cleanup is live-only and attempted at most once.
+    /// Cleanup releases an acquired reader exactly once (FLOWIP-134i B2).
     pub(crate) reader_acquired: bool,
+
+    /// The exit whose transition scheduled cleanup.
+    pub(crate) exit: Option<SourceExit>,
 }
 
 impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> Supervisor
@@ -201,11 +205,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> Supervisor
             }
 
             state FiniteSourceState::Running {
-                on FiniteSourceEvent::ResumeLiveInput => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::AcquiringInput, actions: vec![] }) })
-                };
-
-                on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Completed =>|_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
                 };
                 on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
@@ -331,7 +331,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> Supervisor
                 let event = event.clone();
                 Box::pin(async move {
                     if (matches!(state, FiniteSourceState::Draining)
-                        && matches!(event, FiniteSourceEvent::InputAcquired | FiniteSourceEvent::ActivationCompleted | FiniteSourceEvent::ResumeLiveInput))
+                        && matches!(event, FiniteSourceEvent::InputAcquired | FiniteSourceEvent::ActivationCompleted))
                         || matches!(event, FiniteSourceEvent::Initialize | FiniteSourceEvent::Ready | FiniteSourceEvent::BeginDrain | FiniteSourceEvent::Start)
                         || matches!(state, FiniteSourceState::Failing(_) | FiniteSourceState::Cancelling(_) | FiniteSourceState::Failed(_) | FiniteSourceState::Cancelled(_) | FiniteSourceState::Drained)
                     {
@@ -382,6 +382,9 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
         context
             .instrumentation
             .transition_to_state(state.variant_name());
+        if let Some(exit) = state.exit() {
+            self.exit = Some(exit);
+        }
         if self.last_state.as_ref() != Some(state) {
             let _ = self.state_watcher.update(state.clone());
             self.last_state = Some(state.clone());
@@ -421,20 +424,33 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
 
     async fn execute_cleanup(
         &mut self,
-        _context: &Self::Context,
+        context: &Self::Context,
     ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
         self.replay_driver.take();
         let Some(mut handler) = self.handler.take() else {
             return Ok(ActionExecution::Completed);
         };
         let acquired = self.reader_acquired;
+        let release = context.resources.as_ref().map(|resources| {
+            SourceRelease::new(
+                SourcePollKind::AsyncFinite,
+                self.exit,
+                resources.completion.cause(),
+                matches!(
+                    resources.runtime_execution.source_phase_for(self.stage_id),
+                    SourceExecutionPhase::Live
+                ),
+                resources.failure_causal_event_id,
+            )
+        });
         let flow_context = self.flow_context.clone();
         let journal = self.data_journal.clone();
         Ok(ActionExecution::Pending(Box::pin(async move {
             let result = async {
                 if acquired {
-                    if let Err(error) = handler.drain().await {
-                        record_source_cleanup_failed(&flow_context, &error, &journal).await?;
+                    let drained = handler.drain().await;
+                    if let Some(release) = release {
+                        record_source_release(&journal, &flow_context, release, drained).await?;
                     }
                 }
                 Ok::<_, Box<dyn Error + Send + Sync>>(())
@@ -492,6 +508,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
             data_journal: self.data_journal.clone(),
             flow_context: self.flow_context.clone(),
             stage_id: self.stage_id,
+            continuation: self.continuation,
             external_events: self.external_events.begin_turn(),
             state_watcher: self.state_watcher.clone(),
             last_state: Some(state.clone()),
@@ -503,6 +520,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
             replay_completion: self.replay_completion.clone(),
             pending_failure: self.pending_failure.take(),
             reader_acquired: self.reader_acquired,
+            exit: self.exit,
             pending_boundary_eof: self.pending_boundary_eof,
             pending_boundary_rejected: self.pending_boundary_rejected,
         };
@@ -577,6 +595,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                             &ctx.runtime_execution,
                             &self.flow_context,
                             StageType::FiniteSource,
+                            self.continuation,
                             &self.data_journal,
                         )
                         .await?,
@@ -623,6 +642,20 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                         )));
                     }
                     self.reader_acquired = true;
+                    let flow_id = ctx.flow_id.to_string();
+                    commit_reader_acquired(
+                        &self.data_journal,
+                        &make_flow_context(
+                            &ctx.flow_name,
+                            &flow_id,
+                            &ctx.stage_name,
+                            self.stage_id,
+                            StageType::FiniteSource,
+                        ),
+                        SourcePollKind::AsyncFinite,
+                        ctx.runtime_execution.resume_control().is_some(),
+                    )
+                    .await?;
                     // Return to control dispatch before admitting the first poll.
                 }
                 Ok(EventLoopDirective::Transition(
@@ -680,6 +713,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                 if matches!(state, FiniteSourceState::Draining) {
                     self.idle_backoff.reset();
                     self.pending_idle_delay = None;
+                    ctx.completion.record(SourceCompletionCause::Stopped);
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
                 }
 
@@ -780,8 +814,10 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                         .replay_driver
                                         .as_ref()
                                         .and_then(|d| d.archived_eof_kind());
-                                    ctx.completion_origin =
-                                        SourceCompletionOrigin::ReplayExhausted { recorded_kind };
+                                    ctx.completion
+                                        .record(SourceCompletionCause::ReplayExhausted {
+                                            recorded_kind,
+                                        });
                                     let (replayed_count, skipped_count) =
                                         self.replay_driver.as_ref().map_or((0, 0), |d| {
                                             (d.replayed_events(), d.skipped_events())
@@ -803,15 +839,16 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
 
                                     Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                                 }
-                                // FLOWIP-120n: recorded prefix exhausted; drop the replay
-                                // driver and continue from the live handler.
+                                // FLOWIP-134i B14: asynchronous finite connectors declare
+                                // `Refuse`, so nothing here can continue unpositioned input.
                                 SourceReplayExhaustion::ContinueLive => {
-                                    self.idle_backoff.reset();
-                                    self.pending_idle_delay = None;
-                                    self.replay_driver = None;
-                                    Ok(EventLoopDirective::Transition(
-                                        FiniteSourceEvent::ResumeLiveInput,
-                                    ))
+                                    Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                                        format!(
+                                            "Cannot resume source '{}': its connector does not \
+                                             position its input",
+                                            ctx.stage_name
+                                        ),
+                                    )))
                                 }
                             }
                         }
@@ -903,6 +940,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 reason = %reason,
                                 "Async finite source boundary rejected; completing source"
                             );
+                            ctx.completion.record(SourceCompletionCause::Stopped);
                             let control_events = report.control_events;
                             observe_source_boundary_rejection(
                                 &source_poll_observation,
@@ -985,6 +1023,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 Ok(EventLoopDirective::Continue)
                             }
                             SourcePollResult::Completed(SourcePollCompletion::Eof) => {
+                                ctx.completion.record(SourceCompletionCause::Exhausted);
                                 if poll.operational_events.is_empty()
                                     && report.control_events.is_empty()
                                 {

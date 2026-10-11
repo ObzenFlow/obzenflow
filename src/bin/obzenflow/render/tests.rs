@@ -203,10 +203,13 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
         .finish(
             &mut output,
             &mut Vec::new(),
-            &source.run,
-            &manifest,
+            Observed {
+                run: &source.run,
+                manifest: &manifest,
+                progress: &RunReadProgress::default(),
+                lineage: Ok(RunLineage::default()),
+            },
             ObservationEnd::Snapshot,
-            &RunReadProgress::default(),
         )
         .unwrap();
     let text = String::from_utf8(output).unwrap();
@@ -301,10 +304,13 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
             .finish(
                 &mut output,
                 &mut Vec::new(),
-                &source.run,
-                &manifest,
+                Observed {
+                    run: &source.run,
+                    manifest: &manifest,
+                    progress: &RunReadProgress::default(),
+                    lineage: Ok(RunLineage::default()),
+                },
                 ObservationEnd::Snapshot,
-                &RunReadProgress::default(),
             )
             .unwrap();
         let text = String::from_utf8(output).unwrap();

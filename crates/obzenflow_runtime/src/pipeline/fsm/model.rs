@@ -38,6 +38,8 @@ pub(crate) enum PublicationStep {
     Running,
     Terminal,
     Stop,
+    /// Evidence no transition waits on.
+    Evidence,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,6 +64,8 @@ pub(crate) enum PipelineFsmEvent {
     ChildAcknowledged(StageAck),
     ChildFailed(StageFailure),
     ChildExited(StageExit),
+    /// A stage of a resumed run crossed into the resume generation.
+    StagesCrossed,
     MetricsReady(crate::stages::common::stage_lifecycle::MilestoneAck),
     MetricsExited(crate::stages::common::stage_lifecycle::LifecycleExit),
     ReadyPublished,
@@ -94,6 +98,7 @@ impl EventVariant for PipelineFsmEvent {
             Self::ChildAcknowledged(_) => "ChildAcknowledged",
             Self::ChildFailed(_) => "ChildFailed",
             Self::ChildExited(_) => "ChildExited",
+            Self::StagesCrossed => "StagesCrossed",
             Self::MetricsReady(_) => "MetricsReady",
             Self::MetricsExited(_) => "MetricsExited",
             Self::ReadyPublished => "ReadyPublished",

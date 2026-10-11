@@ -12,7 +12,7 @@ use crate::stages::common::handlers::source::prepared::{
 };
 use crate::stages::common::handlers::source::typed::SourceObservationSink;
 use crate::stages::common::handlers::{
-    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
+    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
 };
 use crate::stages::resources_builder::{StageResources, StageResourcesBuilder};
 use crate::supervised_base::{SupervisorBuilder, SupervisorHandle};
@@ -22,6 +22,7 @@ use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, SourceOpenIntent, SourcePollContinuation, SourcePollErrorKind,
     StageLifecycleFact,
 };
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::archive::{
     ArchiveStatus, ReplayArchive, ReplayError, StatusDerivation,
@@ -171,6 +172,7 @@ impl Reader {
 impl AsyncFiniteSourceConnector for Fixture {
     type Output = Row;
     type Reader = Reader;
+    type Continuation = Refuse;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Reader, SourceError> {
         self.open_reader(context).await
     }
@@ -179,6 +181,7 @@ impl AsyncFiniteSourceConnector for Fixture {
 impl AsyncInfiniteSourceConnector for Fixture {
     type Output = Row;
     type Reader = Reader;
+    type Continuation = Reattach;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Reader, SourceError> {
         self.open_reader(context).await
     }
@@ -308,6 +311,8 @@ macro_rules! lifecycle_family {
             use $state as State;
             type Handler = <Fixture as AdmitSource<dyn $family, ConnectorSource>>::Handler;
             type Handle = crate::supervised_base::StandardHandle<Event<Handler>, State<Handler>>;
+            const CONTINUATION: SourceContinuation =
+                <Fixture as AdmitSource<dyn $family, ConnectorSource>>::CONTINUATION;
 
             async fn build(
                 fixture: Fixture,
@@ -325,7 +330,7 @@ macro_rules! lifecycle_family {
                     // live acquisition. Finite positioning remains FLOWIP-134i.
                     control.record_generation_boundary(stage, control.resume_generation());
                 }
-                let mut config = Config::new(stage, "input", "lifecycle");
+                let mut config = Config::new(stage, "input", "lifecycle", CONTINUATION);
                 config.source_boundary = boundary;
                 (
                     Builder::new(
@@ -448,7 +453,7 @@ macro_rules! lifecycle_family {
                     );
                     let handle = Builder::new(
                         <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
-                        Config::new(stage, "input", "lifecycle"), resources,
+                        Config::new(stage, "input", "lifecycle", CONTINUATION), resources,
                     ).build().await.unwrap();
                     start(&handle).await;
                     notified(&opening).await;
@@ -481,7 +486,7 @@ macro_rules! lifecycle_family {
                 resources.data_journal = journal.clone();
                 let handle = Builder::new(
                     <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
-                    Config::new(stage, "input", "lifecycle"), resources,
+                    Config::new(stage, "input", "lifecycle", CONTINUATION), resources,
                 ).build().await.unwrap();
                 start(&handle).await;
                 notified(&writing).await;
@@ -576,7 +581,7 @@ macro_rules! lifecycle_family {
                     let failures = source_failures(&errors);
                     assert_eq!(failures.len(), 1, "{failures:?}");
                     let (opened_id, ExecutionPayload::SourceOpenFailed(opened)) = failures[0] else {
-                        panic!("expected source.open_failed, got {failures:?}");
+                        panic!("expected runtime.source.open_failed, got {failures:?}");
                     };
                     assert_eq!(opened.error_type, SourcePollErrorKind::Transport);
                     assert_eq!(
@@ -763,6 +768,95 @@ lifecycle_family!(
     UnifiedAsyncInfiniteSourceHandler
 );
 
+/// A synchronous connector whose open blocks until released, or for at most two
+/// seconds, recording which happened.
+struct HeldOpen {
+    counts: Arc<Counts>,
+    release: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+    timed_out: Arc<AtomicBool>,
+}
+
+struct EofReader(Resource);
+
+impl TypedFiniteSourceHandler for EofReader {
+    type Output = Row;
+    fn next(&mut self) -> Result<Option<Vec<Row>>, SourceError> {
+        self.0 .0.polls.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+
+impl FiniteSourceConnector for HeldOpen {
+    type Output = Row;
+    type Reader = EofReader;
+    type Continuation = Refuse;
+    fn open(&self, _context: SourceReaderInitContext) -> Result<EofReader, SourceError> {
+        self.counts.opens.fetch_add(1, Ordering::SeqCst);
+        self.counts.opening.notify_one();
+        let released = self
+            .release
+            .lock()
+            .expect("release receiver")
+            .recv_timeout(Duration::from_secs(2));
+        self.timed_out.store(released.is_err(), Ordering::SeqCst);
+        Ok(EofReader(Resource(self.counts.clone())))
+    }
+}
+
+/// On a single-threaded runtime an inline open would hold the only thread, so
+/// only the open itself could end the hold (FLOWIP-134i B18).
+#[tokio::test]
+async fn held_synchronous_open_leaves_the_runtime_responsive() {
+    type Admit = dyn UnifiedFiniteSourceHandler;
+    let (release, held) = std::sync::mpsc::channel();
+    // The test keeps the receiver alive after the connector is consumed.
+    let held = Arc::new(std::sync::Mutex::new(held));
+    let connector = HeldOpen {
+        counts: Arc::default(),
+        release: held.clone(),
+        timed_out: Arc::default(),
+    };
+    let counts = connector.counts.clone();
+    let timed_out = connector.timed_out.clone();
+    let (stage, resources, _journals) = resources(&counts).await;
+    let config = finite::FiniteSourceConfig::new(
+        stage,
+        "input",
+        "lifecycle",
+        <HeldOpen as AdmitSource<Admit, ConnectorSource>>::CONTINUATION,
+    );
+    let handle = finite::FiniteSourceBuilder::new(
+        <HeldOpen as AdmitSource<Admit, ConnectorSource>>::prepare(connector),
+        config,
+        resources,
+    )
+    .build()
+    .await
+    .unwrap();
+    for event in [
+        finite::FiniteSourceEvent::Initialize,
+        finite::FiniteSourceEvent::Ready,
+        finite::FiniteSourceEvent::Start,
+    ] {
+        handle.send_event(event).await.unwrap();
+    }
+
+    notified(&counts.opening).await;
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
+        .await
+        .expect("source terminates")
+        .unwrap();
+
+    assert!(
+        !timed_out.load(Ordering::SeqCst),
+        "the open held the runtime thread until its own timeout"
+    );
+    assert_eq!(counts.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.polls.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     let mut fixture = Fixture::new(Opening::Ready, Reading::Eof);
@@ -774,7 +868,12 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
         <Fixture as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource>>::prepare(
             fixture,
         ),
-        finite::FiniteSourceConfig::new(stage, "input", "lifecycle"),
+        finite::FiniteSourceConfig::new(
+            stage,
+            "input",
+            "lifecycle",
+            <Fixture as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource>>::CONTINUATION,
+        ),
         resources,
     )
     .build()
@@ -867,7 +966,20 @@ impl ReplayArchive for EmptyArchive {
     fn source_stage_keys(&self) -> Vec<String> {
         vec!["input".into()]
     }
+    fn recorded_source_eof(&self, _: &str) -> Option<EofKind> {
+        None
+    }
+    fn recorded_source_frontier(&self, _: &str) -> obzenflow_core::source::RecordedSourceFrontier {
+        Default::default()
+    }
     fn archive_path(&self) -> &Path {
         Path::new("memory")
+    }
+    fn claim_continuation(
+        &self,
+        _: obzenflow_core::FlowId,
+        _: &obzenflow_core::journal::factory::CurrentRunLocator,
+    ) -> Result<(), ReplayError> {
+        unreachable!()
     }
 }

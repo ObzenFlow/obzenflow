@@ -5,6 +5,7 @@
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
+use crate::execution::UnrecordedEffect;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
 /// `perform` records from its own state rather than boundary-returned events.
@@ -114,6 +115,40 @@ fn reauthor_archived_effect_control(mut event: ChainEvent) -> ChainEvent {
     event
 }
 
+/// The first condition that closes authoring for an invocation. The stage
+/// fails with it whatever the handler does with the returned error.
+#[derive(Debug, Clone)]
+enum AuthoringHalt {
+    Binding(BindingAuthorityFault),
+    /// A replay reached a cursor its recording holds no outcome for
+    /// (FLOWIP-134i B13).
+    RecordingEnded(EffectCursor),
+}
+
+impl AuthoringHalt {
+    fn error(&self) -> EffectError {
+        match self {
+            Self::Binding(fault) => EffectError::BindingAuthority {
+                fault: fault.clone(),
+            },
+            Self::RecordingEnded(cursor) => EffectError::RecordingEnded {
+                cursor: cursor.clone(),
+            },
+        }
+    }
+
+    fn stage_fatal(&self) -> crate::stages::common::handler_error::StageFatal {
+        match self {
+            Self::Binding(fault) => fault.stage_fatal(),
+            Self::RecordingEnded(_) => crate::stages::common::handler_error::StageFatal::new(
+                obzenflow_core::event::StageFatalCode::Replay,
+                obzenflow_core::event::StageFatalReason::RecordingEnded,
+                self.error().to_string(),
+            ),
+        }
+    }
+}
+
 /// The erased effectful authoring core: every runtime declaration, output
 /// contract, replay, and commit check lives here, unchanged by the typed
 /// facade (FLOWIP-120z). `pub(crate)` deliberately: the unit tests exercise
@@ -126,7 +161,7 @@ pub(crate) struct EffectsCore {
     next_output_ordinal: EffectOutputOrdinal,
     routed_output_fact_count: usize,
     committed_facts: Vec<ChainEvent>,
-    binding_fault: Option<BindingAuthorityFault>,
+    halt: Option<AuthoringHalt>,
 }
 
 impl EffectsCore {
@@ -138,7 +173,7 @@ impl EffectsCore {
             next_output_ordinal: EffectOutputOrdinal::new(0),
             routed_output_fact_count: 0,
             committed_facts: Vec::new(),
-            binding_fault: None,
+            halt: None,
         }
     }
 
@@ -153,15 +188,9 @@ impl EffectsCore {
             .map_err(|error| EffectError::ReplayArchive(error.to_string()))
     }
 
-    fn binding_fault_error(&self) -> Option<EffectError> {
-        self.binding_fault
-            .clone()
-            .map(|fault| EffectError::BindingAuthority { fault })
-    }
-
     fn gate_authoring(&self) -> Result<(), EffectError> {
-        match self.binding_fault_error() {
-            Some(error) => Err(error),
+        match &self.halt {
+            Some(halt) => Err(halt.error()),
             None => Ok(()),
         }
     }
@@ -170,9 +199,31 @@ impl EffectsCore {
         self.gate_authoring()
     }
 
+    fn latch(&mut self, halt: AuthoringHalt) -> EffectError {
+        self.halt.get_or_insert(halt).error()
+    }
+
     fn latch_binding_fault(&mut self, fault: BindingAuthorityFault) -> EffectError {
-        let first = self.binding_fault.get_or_insert(fault).clone();
-        EffectError::BindingAuthority { fault: first }
+        self.latch(AuthoringHalt::Binding(fault))
+    }
+
+    /// The refusal for a cursor without any recorded attempt, or `None` when
+    /// this position performs it live (FLOWIP-134i B13).
+    fn unrecorded_effect_error(&mut self, cursor: EffectCursor) -> Option<EffectError> {
+        let at = crate::execution::ExecutionPosition {
+            stage_id: self.ctx.stage_id,
+            position: self.ctx.input_seq,
+            // The effect context carries no generation; the effect-miss
+            // decision is positional (FLOWIP-120n F7).
+            generation: None,
+        };
+        match self.ctx.runtime_execution.missing_outcome(at) {
+            UnrecordedEffect::Execute => None,
+            UnrecordedEffect::Corrupt => Some(EffectError::MissingRecordedEffect { cursor }),
+            UnrecordedEffect::RecordingEnded => {
+                Some(self.latch(AuthoringHalt::RecordingEnded(cursor)))
+            }
+        }
     }
 
     pub(crate) fn project_named_effect<E: NamedEffect>(
@@ -204,12 +255,10 @@ impl EffectsCore {
         }
     }
 
-    pub(crate) fn binding_fault_fatal(
+    pub(crate) fn authoring_halt_fatal(
         &self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {
-        self.binding_fault
-            .as_ref()
-            .map(BindingAuthorityFault::stage_fatal)
+        self.halt.as_ref().map(AuthoringHalt::stage_fatal)
     }
 
     #[cfg(test)]
@@ -695,25 +744,21 @@ impl EffectsCore {
                         ))
                     })?
                     .attempt;
-                if self.ctx.runtime_execution.in_doubt_effect_is_fatal() {
-                    return Err(EffectError::EffectInDoubt {
-                        cursor,
-                        highest_started_attempt,
-                    });
+                if !self.ctx.runtime_execution.in_doubt_authorizes_attempt() {
+                    tracing::debug!(
+                        ?cursor,
+                        highest_started_attempt = highest_started_attempt.get(),
+                        "replay recording ends inside an attempt"
+                    );
+                    return Err(self.latch(AuthoringHalt::RecordingEnded(cursor)));
                 }
                 self.append_replayed_prefix(&cursor, &selected, descriptor.clone())
                     .await?;
                 prior_attempts = attempts;
             }
             EffectHistorySelection::Miss => {
-                if self.ctx.runtime_execution.missing_outcome_is_corruption(
-                    crate::execution::ExecutionPosition {
-                        stage_id: self.ctx.stage_id,
-                        position: self.ctx.input_seq,
-                        generation: None,
-                    },
-                ) {
-                    return Err(EffectError::MissingRecordedEffect { cursor });
+                if let Some(error) = self.unrecorded_effect_error(cursor.clone()) {
+                    return Err(error);
                 }
             }
         }
@@ -1673,16 +1718,8 @@ impl EffectsCore {
                 return Ok(output);
             }
 
-            if self.ctx.runtime_execution.missing_outcome_is_corruption(
-                crate::execution::ExecutionPosition {
-                    stage_id: self.ctx.stage_id,
-                    position: self.ctx.input_seq,
-                    // The effect context carries no generation; the effect-miss
-                    // decision is positional (FLOWIP-120n F7).
-                    generation: None,
-                },
-            ) {
-                return Err(EffectError::MissingRecordedEffect { cursor });
+            if let Some(error) = self.unrecorded_effect_error(cursor.clone()) {
+                return Err(error);
             }
         }
 

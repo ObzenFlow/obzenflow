@@ -485,6 +485,25 @@ where
                         cycle_members.join(", ")
                     )));
                 }
+
+                // FLOWIP-134i B8, B22: a source whose recorded input cannot be
+                // continued refuses the resume before any run or claim exists.
+                if let Some(archive) = obzenflow_runtime::bootstrap::replay_archive() {
+                    let refusals = obzenflow_runtime::stages::source::sources_refusing_resume(
+                        archive.as_ref(),
+                        descriptors.iter().filter_map(|(name, descriptor)| {
+                            descriptor
+                                .source_continuation()
+                                .map(|continuation| (name.as_str(), continuation))
+                        }),
+                    );
+                    if !refusals.is_empty() {
+                        return Err(FlowBuildError::ResumeRefusedSources {
+                            archive: replay.archive_path.clone(),
+                            refusals,
+                        });
+                    }
+                }
             }
 
             // FLOWIP-120n F16, FLOWIP-120v: both archive verbs re-execute
@@ -1152,23 +1171,32 @@ where
         }
 
         // Write run manifest (disk journals persist; memory journals no-op) - FLOWIP-095a.
+        // Lineage links name the opened archive canonically (FLOWIP-134i B6, B16).
         let replay_manifest = obzenflow_runtime::bootstrap::replay_bootstrap().map(|replay| {
             obzenflow_core::journal::archive::manifest::RunManifestReplayConfig {
-                replay_from: replay.archive_path.to_string_lossy().to_string(),
+                replay_from: replay_archive
+                    .as_ref()
+                    .map_or(replay.archive_path.as_path(), |archive| archive.archive_path())
+                    .to_string_lossy()
+                    .to_string(),
                 allow_incomplete_archive: replay.allow_incomplete_archive,
             }
         });
 
         // FLOWIP-120n: a resume run records the archive it resumed from and the
-        // generation it enters; high-water marks are filled by the catch-up read (PR-D).
+        // generation it enters; FLOWIP-134i B6: and the ancestors it merged.
         let resume_manifest = obzenflow_runtime::bootstrap::replay_bootstrap()
             .filter(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
-            .zip(replay_archive.as_ref())
-            .map(|(replay, archive)| {
+            .and(replay_archive.as_ref())
+            .map(|archive| {
                 obzenflow_core::journal::archive::manifest::RunManifestResumeConfig {
-                    resumed_from: replay.archive_path,
+                    resumed_from: archive.archive_path().to_path_buf(),
                     resume_generation: archive.max_recorded_generation().0 + 1,
-                    high_water_by_stage: std::collections::BTreeMap::new(),
+                    merged_from: archive
+                        .ancestors()
+                        .iter()
+                        .map(|ancestor| ancestor.archive_path().to_path_buf())
+                        .collect(),
                 }
             });
 
@@ -1231,6 +1259,22 @@ where
                     e
                 ))
             })?;
+        }
+
+        // FLOWIP-134i B12: a resume takes its parent's continuation claim once
+        // its manifest is durable and before any stage exists.
+        if let (
+            Some(archive),
+            obzenflow_core::journal::factory::RunSubstrateState::Durable(locator),
+        ) = (
+            obzenflow_runtime::bootstrap::replay_bootstrap()
+                .filter(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
+                .and(replay_archive.as_ref()),
+            &__substrate,
+        ) {
+            archive
+                .claim_continuation(flow_id, locator)
+                .map_err(FlowBuildError::ResumeRefusedClaim)?;
         }
 
         // Backpressure materialization (FLOWIP-115e): the resolved mode

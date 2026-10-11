@@ -127,7 +127,137 @@ impl EffectCursorHistory {
 }
 
 impl EffectHistory {
+    /// A resume joins each cursor's history across the archive and the
+    /// ancestors it merges with (FLOWIP-134i B6), oldest first, failing closed
+    /// where they conflict. F7's recorded mark then derives from the join.
     pub async fn load(
+        archive: &Arc<dyn ReplayArchive>,
+        stage_key: &str,
+    ) -> Result<Self, EffectError> {
+        let mut joined: Option<Self> = None;
+        for ancestor in archive.ancestors().iter().rev() {
+            if matches!(
+                ancestor.archived_stage_id(stage_key),
+                Err(ReplayError::StageNotInManifest { .. })
+            ) {
+                continue;
+            }
+            let older = Self::load_archive(ancestor, stage_key).await?;
+            joined = Some(match joined {
+                Some(oldest) => oldest.joined_with(&older)?,
+                None => older,
+            });
+        }
+        let head = Self::load_archive(archive, stage_key).await?;
+        match joined {
+            Some(ancestors) => ancestors.joined_with(&head),
+            None => Ok(head),
+        }
+    }
+
+    /// Join a newer run's history over this one, per cursor.
+    pub(super) fn joined_with(self, newer: &Self) -> Result<Self, EffectError> {
+        let cursors: std::collections::HashSet<EffectCursor> = [&self, newer]
+            .into_iter()
+            .flat_map(|history| {
+                history
+                    .index
+                    .keys()
+                    .chain(history.attempts.keys())
+                    .chain(history.abandonments.keys())
+                    .chain(history.causal.keys())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let histories = cursors
+            .into_iter()
+            .map(|cursor| {
+                let joined = merge_cursor_histories(
+                    &cursor,
+                    self.cursor_history(&cursor),
+                    newer.cursor_history(&cursor),
+                )?;
+                Ok((cursor, joined))
+            })
+            .collect::<Result<Vec<_>, EffectError>>()?;
+        Ok(Self::from_cursor_histories(
+            newer.recorded_flow_id.clone(),
+            histories,
+        ))
+    }
+
+    /// Index validated cursor histories, as one run's history would be.
+    fn from_cursor_histories(
+        recorded_flow_id: RecordedFlowId,
+        histories: Vec<(EffectCursor, EffectCursorHistory)>,
+    ) -> Self {
+        let mut causal = HashMap::new();
+        let mut records = Vec::new();
+        let mut index = HashMap::new();
+        let mut attempts = HashMap::new();
+        let mut abandonments = HashMap::new();
+        let mut terminal_attempts = HashMap::new();
+        let mut grouped_events: GroupedJournalEvents = HashMap::new();
+        let mut attempt_positions = HashMap::new();
+        let mut attempt_events = HashMap::new();
+        for (cursor, history) in histories {
+            causal.insert(cursor.clone(), history.causal);
+            if !history.records.is_empty() {
+                let first = records.len();
+                records.extend(history.records);
+                index.insert(cursor.clone(), (first..records.len()).collect::<Vec<_>>());
+            }
+            for (position, started) in history.attempts.iter().enumerate() {
+                attempt_positions.insert((cursor.clone(), started.attempt), position);
+            }
+            if !history.attempts.is_empty() {
+                attempts.insert(cursor.clone(), history.attempts);
+            }
+            if let Some(abandonment) = history.abandonment {
+                abandonments.insert(cursor.clone(), abandonment);
+            }
+            if let Some(attempt) = history.terminal_attempt {
+                terminal_attempts.insert(cursor.clone(), attempt);
+            }
+            let positioned = |events: Vec<ChainEvent>| {
+                events
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, event)| (position, None, event))
+                    .collect()
+            };
+            if !history.terminal_group_events.is_empty() {
+                grouped_events.insert(
+                    effect_outcome_group_id(&cursor).to_string(),
+                    positioned(history.terminal_group_events),
+                );
+            }
+            for (attempt, events) in history.escape_control_batches {
+                grouped_events.insert(
+                    effect_escape_controls_group_id(&cursor, attempt).to_string(),
+                    positioned(events),
+                );
+            }
+            for (attempt, event) in history.attempt_events {
+                attempt_events.insert((cursor.clone(), attempt), event);
+            }
+        }
+        Self {
+            causal: Arc::new(causal),
+            recorded_flow_id,
+            records: Arc::new(records),
+            index: Arc::new(index),
+            attempts: Arc::new(attempts),
+            abandonments: Arc::new(abandonments),
+            terminal_attempts: Arc::new(terminal_attempts),
+            grouped_events: Arc::new(grouped_events),
+            attempt_positions: Arc::new(attempt_positions),
+            attempt_events: Arc::new(attempt_events),
+        }
+    }
+
+    async fn load_archive(
         archive: &Arc<dyn ReplayArchive>,
         stage_key: &str,
     ) -> Result<Self, EffectError> {
@@ -305,66 +435,10 @@ impl EffectHistory {
         history: EffectCursorHistory,
     ) -> Result<Self, EffectError> {
         validate_cursor_history(&cursor, &history)?;
-        let records = history.records;
-        let index = if records.is_empty() {
-            HashMap::new()
-        } else {
-            HashMap::from([(cursor.clone(), (0..records.len()).collect::<Vec<usize>>())])
-        };
-        let attempts = HashMap::from([(cursor.clone(), history.attempts.clone())]);
-        let abandonments = history
-            .abandonment
-            .map(|abandonment| HashMap::from([(cursor.clone(), abandonment)]))
-            .unwrap_or_default();
-        let terminal_attempts = history
-            .terminal_attempt
-            .map(|attempt| HashMap::from([(cursor.clone(), attempt)]))
-            .unwrap_or_default();
-        let mut grouped_events = HashMap::new();
-        if !history.terminal_group_events.is_empty() {
-            grouped_events.insert(
-                effect_outcome_group_id(&cursor).to_string(),
-                history
-                    .terminal_group_events
-                    .into_iter()
-                    .enumerate()
-                    .map(|(position, event)| (position, None, event))
-                    .collect(),
-            );
-        }
-        for (attempt, events) in history.escape_control_batches {
-            grouped_events.insert(
-                effect_escape_controls_group_id(&cursor, attempt).to_string(),
-                events
-                    .into_iter()
-                    .enumerate()
-                    .map(|(position, event)| (position, None, event))
-                    .collect(),
-            );
-        }
-        let attempt_positions = history
-            .attempts
-            .iter()
-            .enumerate()
-            .map(|(position, attempt)| ((cursor.clone(), attempt.attempt), position))
-            .collect();
-        let attempt_events = history
-            .attempt_events
-            .into_iter()
-            .map(|(attempt, event)| ((cursor.clone(), attempt), event))
-            .collect();
-        Ok(Self {
-            causal: Arc::new(HashMap::new()),
-            recorded_flow_id: recorded_flow_id.into(),
-            records: Arc::new(records),
-            index: Arc::new(index),
-            attempts: Arc::new(attempts),
-            abandonments: Arc::new(abandonments),
-            terminal_attempts: Arc::new(terminal_attempts),
-            grouped_events: Arc::new(grouped_events),
-            attempt_positions: Arc::new(attempt_positions),
-            attempt_events: Arc::new(attempt_events),
-        })
+        Ok(Self::from_cursor_histories(
+            recorded_flow_id.into(),
+            vec![(cursor, history)],
+        ))
     }
 
     /// Build under an explicit torn-tail policy. With `tolerate_torn_tail` false

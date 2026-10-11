@@ -8,7 +8,8 @@
 //! Preparing -> Starting/Active/RunningStandalone on successful preparation;
 //! Preparing -> SettlingFlow on failed preparation with a materialised flow;
 //! Preparing -> StoppingMetrics on failed preparation without a flow.
-//! Starting -> Active on start completion; Starting/Active -> SettlingFlow on stop.
+//! Starting -> Active on start completion; Starting/Active/RunningStandalone ->
+//! SettlingFlow on stop.
 //! SettlingFlow retains Runtime admission bounds through sends and escalation.
 //! Joined journal observation -> StoppingMetrics -> ClosingHost.
 //! A closed host -> Deregistering -> FlushingMetrics; an absent host skips deregistration.
@@ -78,6 +79,7 @@ pub(super) fn new() -> Machine {
         }
         state State::RunningStandalone {
             on Event::Failure => transitions::record_failure;
+            on Event::Stop => transitions::begin_settlement;
             on Event::ObservationFailed => transitions::begin_settlement;
             on Event::StandaloneReturned => transitions::stop_metrics;
         }

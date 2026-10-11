@@ -90,6 +90,13 @@ impl StopIntent {
     }
 }
 
+/// A resumed run's stages that have neither crossed into the resume generation
+/// nor finished their recorded input (FLOWIP-134i B6).
+pub(crate) struct ReconstructionProgress {
+    pub(crate) pending: HashSet<StageId>,
+    pub(crate) crossings: tokio::sync::mpsc::UnboundedReceiver<()>,
+}
+
 pub(crate) struct PipelineContext {
     pub(crate) system_id: SystemId,
     pub(crate) topology: Arc<obzenflow_topology::Topology>,
@@ -105,6 +112,8 @@ pub(crate) struct PipelineContext {
     /// Physical task termination, independent of milestone observation.
     pub(crate) outstanding_children: HashSet<StageId>,
     pub(crate) completed_stages: HashSet<StageId>,
+    /// `None` outside resume and once completion is published.
+    pub(crate) reconstruction: Option<ReconstructionProgress>,
     pub(crate) metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>>,
     pub(crate) stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,

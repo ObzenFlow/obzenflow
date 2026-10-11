@@ -110,10 +110,6 @@ impl CompletionGate for AlwaysPoisonCompletion {
     fn on_natural_completion(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
         CompletionDecision::PoisonEof
     }
-
-    fn on_begin_drain(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
-        CompletionDecision::PoisonEof
-    }
 }
 
 struct AdmitSourcePoll;

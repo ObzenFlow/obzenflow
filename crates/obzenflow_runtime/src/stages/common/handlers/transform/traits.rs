@@ -345,7 +345,7 @@ where
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
         let handler_result = self.handler.process(input, &mut fx).await;
-        if let Some(fatal) = fx.binding_fault_fatal() {
+        if let Some(fatal) = fx.authoring_halt_fatal() {
             return Err(HandlerError::Fatal(fatal));
         }
         match handler_result {

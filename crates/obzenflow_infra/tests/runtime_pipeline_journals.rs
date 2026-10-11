@@ -78,6 +78,16 @@ async fn expired_graceful_stop_aborts_and_joins_without_a_fresh_cleanup_budget()
 }
 
 #[tokio::test]
+async fn graceful_stop_racing_source_completion_is_not_a_failure() {
+    pipeline::graceful_stop_racing_source_completion_is_not_a_failure(journals).await;
+}
+
+#[tokio::test]
+async fn failure_during_graceful_stop_aborts_by_the_graceful_deadline() {
+    pipeline::failure_during_graceful_stop_aborts_by_the_graceful_deadline(journals).await;
+}
+
+#[tokio::test]
 async fn persistent_controls_cannot_starve_acknowledgements_or_child_termination() {
     pipeline::persistent_controls_cannot_starve_acknowledgements_or_child_termination(journals)
         .await;

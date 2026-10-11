@@ -120,6 +120,15 @@ impl SystemEventFactory {
         )
     }
 
+    pub fn pipeline_reconstruction_completed(&self, generation: u64) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::ReconstructionCompleted {
+                generation,
+            }),
+        )
+    }
+
     pub fn pipeline_ready_for_run(&self, stage_count: Option<usize>) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,

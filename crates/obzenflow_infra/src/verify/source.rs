@@ -23,7 +23,7 @@ use obzenflow_core::journal::ArchiveStatus;
 
 use crate::journal::disk::identity::CommitmentAdmission;
 use crate::journal::disk::manifest_gate::require_current_journal_schema_version;
-use crate::journal::disk::replay_archive::derive_status_derivation_from_system_log;
+use crate::journal::disk::replay_archive::scan_system_log;
 use crate::journal::disk::scanner::{
     classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
 };
@@ -126,8 +126,8 @@ impl DiskRunSource {
         })?;
 
         let system_log = run_dir.join(&manifest.system_journal_file);
-        let status = match derive_status_derivation_from_system_log(&system_log) {
-            Ok(derivation) => derivation.chosen,
+        let status = match scan_system_log(&system_log) {
+            Ok(scan) => scan.derivation.chosen,
             Err(err) => {
                 return Err(refused(RefusalReason::StatusGate {
                     run: run_dir.to_path_buf(),

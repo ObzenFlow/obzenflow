@@ -58,7 +58,7 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         | EffectError::Serialization(_)
         | EffectError::Journal(_)
         | EffectError::MissingRecordedEffect { .. }
-        | EffectError::EffectInDoubt { .. }
+        | EffectError::RecordingEnded { .. }
         | EffectError::DuplicateRecordedEffect { .. }
         | EffectError::DescriptorMismatch { .. }
         | EffectError::BoundaryRejected { .. }

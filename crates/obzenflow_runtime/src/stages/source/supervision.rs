@@ -90,6 +90,7 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::source::traits::SourceError;
+use crate::stages::common::handlers::source::SourceContinuation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
@@ -102,11 +103,18 @@ use crate::stages::observer::{
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
+use crate::stages::source::strategies::SourceCompletionCause;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::MiddlewareExecutionScope;
-use obzenflow_core::event::payloads::execution_payload::{SourcePollErrorKind, SourcePollKind};
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourceCleanupFailedFact, SourceCleanupPhase, SourceCleanupSucceededFact,
+    SourceCleanupTrigger, SourceContinuationRefusal, SourceContinuationRefusedFact,
+    SourceOpenIntent, SourcePollErrorKind, SourcePollKind, SourceReaderAcquiredFact,
+    SourceSeekFailedFact,
+};
 use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -124,27 +132,33 @@ pub(crate) async fn acquire_replay_input(
     execution: &crate::execution::RuntimeExecution,
     flow_context: &FlowContext,
     stage_type: obzenflow_core::event::context::StageType,
+    continuation: SourceContinuation,
     journal: &Arc<dyn Journal<ChainEvent>>,
 ) -> Result<crate::replay::ReplayDriver, BoxError> {
     let archive = execution
         .archive_for_io()
         .expect("replaying source has an archive");
-    if stage_type == obzenflow_core::event::context::StageType::InfiniteSource {
-        if let Some(control) = execution.resume_control() {
-            control.register_infinite_source(flow_context.stage_id);
-        }
-    }
     let stage_key = &flow_context.stage_name;
-    let path = archive.source_data_journal_path(stage_key)?;
-    let reader = archive.open_source_reader(stage_key, stage_type).await?;
-    let replay = crate::replay::ReplayDriver::new(
-        reader,
-        path,
-        crate::replay::ReplayContextTemplate {
-            original_flow_id: archive.archive_flow_id().to_string(),
-            original_stage_id: archive.archived_stage_id(stage_key)?,
-        },
-    );
+    if let Some(control) = execution.resume_control() {
+        control.register_source_continuation(
+            flow_context.stage_id,
+            continuation,
+            archive.recorded_source_eof(stage_key),
+        );
+    }
+    let head = replay_member(archive, stage_key, stage_type).await?;
+    // FLOWIP-134i B6: a resume splices the ancestors it merges with.
+    let mut ancestors = Vec::new();
+    for ancestor in archive.ancestors() {
+        if matches!(
+            ancestor.archived_stage_id(stage_key),
+            Err(ReplayError::StageNotInManifest { .. })
+        ) {
+            continue;
+        }
+        ancestors.push(replay_member(&ancestor, stage_key, stage_type).await?);
+    }
+    let replay = crate::replay::ReplayDriver::merged(head, ancestors);
     let event = ChainEventFactory::execution_event(
         flow_context.stage_id.into(),
         obzenflow_core::event::payloads::execution_payload::ExecutionPayload::ReplayLifecycle(
@@ -161,6 +175,21 @@ pub(crate) async fn acquire_replay_input(
     .with_flow_context(flow_context.clone());
     crate::supervised_base::publication::append(journal, event, Default::default()).await?;
     Ok(replay)
+}
+
+async fn replay_member(
+    archive: &Arc<dyn ReplayArchive>,
+    stage_key: &str,
+    stage_type: obzenflow_core::event::context::StageType,
+) -> Result<crate::replay::ReplayMember, ReplayError> {
+    Ok(crate::replay::ReplayMember {
+        journal_path: archive.source_data_journal_path(stage_key)?,
+        reader: archive.open_source_reader(stage_key, stage_type).await?,
+        replay_context: crate::replay::ReplayContextTemplate {
+            original_flow_id: archive.archive_flow_id().to_string(),
+            original_stage_id: archive.archived_stage_id(stage_key)?,
+        },
+    })
 }
 
 pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
@@ -311,6 +340,159 @@ pub(crate) async fn commit_source_open_failure(
     })
 }
 
+/// Commit one source evidence fact (FLOWIP-134i): pins and resume facts to the
+/// data journal, ordered with the source's records, which journal order binds
+/// to the latest pin; refusals to the error journal, before the stage fails.
+pub(crate) async fn commit_source_fact(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_flow_context: &FlowContext,
+    payload: ExecutionPayload,
+) -> Result<EventId, BoxError> {
+    let event =
+        ChainEventFactory::execution_event(WriterId::from(stage_flow_context.stage_id), payload)
+            .with_flow_context(stage_flow_context.clone());
+    let recorded =
+        crate::supervised_base::publication::append(journal, event, AppendOptions::default())
+            .await?;
+    Ok(recorded.envelope.provenance.event.id)
+}
+
+/// Refuse to continue a source's interrupted input before any live input,
+/// naming the source and the remedy (FLOWIP-134i).
+pub(crate) async fn refuse_source_continuation(
+    error_journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_flow_context: &FlowContext,
+    refusal: SourceContinuationRefusal,
+) -> Result<PendingFailure, BoxError> {
+    let message = source_continuation_refusal(&stage_flow_context.stage_name, &refusal);
+    let causal_event_id = commit_source_fact(
+        error_journal,
+        stage_flow_context,
+        ExecutionPayload::SourceContinuationRefused(SourceContinuationRefusedFact { refusal }),
+    )
+    .await?;
+    Ok(PendingFailure {
+        message,
+        causal_event_id: Some(causal_event_id),
+    })
+}
+
+/// A positioned source failed to seek after its committed prefix.
+pub(crate) async fn commit_source_seek_failure(
+    error_journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_flow_context: &FlowContext,
+    identity_digest: String,
+    error: &SourceError,
+) -> Result<PendingFailure, BoxError> {
+    let causal_event_id = commit_source_fact(
+        error_journal,
+        stage_flow_context,
+        ExecutionPayload::SourceSeekFailed(SourceSeekFailedFact {
+            identity_digest,
+            diagnostic: error.diagnostic().clone(),
+        }),
+    )
+    .await?;
+    Ok(PendingFailure {
+        message: format!(
+            "Cannot resume source '{}': seeking after its committed input failed: {}. Restore \
+             the input it read, then resume again",
+            stage_flow_context.stage_name,
+            error.diagnostic()
+        ),
+        causal_event_id: Some(causal_event_id),
+    })
+}
+
+/// Commit a source's catch-up markers behind its reconstructed prefix, one
+/// per generation after the last its recorded markers crossed, so a source
+/// torn before crossing crosses each skipped generation vacuously and every
+/// reader advances one generation per marker (FLOWIP-134i B6). The caller
+/// advances the stage's generation only after they commit.
+pub(crate) async fn commit_catch_up_markers(
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    instrumentation: &Arc<StageInstrumentation>,
+    stage_flow_context: &FlowContext,
+    crossed: obzenflow_core::ReaderGeneration,
+    generation: obzenflow_core::ReaderGeneration,
+) -> Result<(), BoxError> {
+    for next in crossed.0.saturating_add(1)..=generation.0 {
+        let mut marker = ChainEventFactory::catch_up_complete_event(
+            WriterId::from(stage_flow_context.stage_id),
+            obzenflow_core::ReaderGeneration(next),
+            obzenflow_core::StageKey::from(stage_flow_context.stage_name.clone()),
+        );
+        marker.flow_context = stage_flow_context.clone();
+        crate::stages::common::supervision::output_committer::commit_control_output(
+            data_journal,
+            instrumentation,
+            marker,
+        )
+        .await
+        .map_err(|error| -> BoxError { error.to_string().into() })?;
+    }
+    Ok(())
+}
+
+/// Announce a source's live handoff (FLOWIP-120n), the transition the
+/// presentation layer surfaces.
+pub(crate) async fn announce_resumed_live(
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_flow_context: &FlowContext,
+    execution: &crate::execution::RuntimeExecution,
+    replayed_count: u64,
+    generation: obzenflow_core::ReaderGeneration,
+) {
+    let resumed_live = ChainEventFactory::execution_event(
+        WriterId::from(stage_flow_context.stage_id),
+        ExecutionPayload::ReplayLifecycle(
+            obzenflow_core::event::ReplayLifecycleEvent::ResumedLive {
+                archive_flow_id: execution
+                    .archive_for_io()
+                    .map(|archive| archive.archive_flow_id().to_string())
+                    .unwrap_or_default(),
+                replayed_count: obzenflow_core::event::types::Count(replayed_count),
+                generation: generation.0,
+            },
+        ),
+    )
+    .with_flow_context(stage_flow_context.clone());
+    if let Err(error) =
+        crate::supervised_base::publication::append(data_journal, resumed_live, Default::default())
+            .await
+    {
+        tracing::error!(
+            stage_name = %stage_flow_context.stage_name,
+            journal_error = %error,
+            "Failed to append ReplayLifecycle::ResumedLive system event"
+        );
+    }
+}
+
+/// Operator-facing refusal, rendered from typed fields only.
+pub(crate) fn source_continuation_refusal(
+    stage_name: &str,
+    refusal: &SourceContinuationRefusal,
+) -> String {
+    match refusal {
+        SourceContinuationRefusal::InputChanged { part } => format!(
+            "Cannot resume source '{stage_name}': its input changed since it was pinned \
+             ({part}). Restore the input it read, or start a new run"
+        ),
+        SourceContinuationRefusal::MissingEvidence => format!(
+            "Cannot resume source '{stage_name}': its archive lacks the recorded position of an \
+             admitted record. Start a new run"
+        ),
+        SourceContinuationRefusal::PositionUnreadable => format!(
+            "Cannot resume source '{stage_name}': its recorded position was written by another \
+             version of its connector. Resume with that version, or start a new run"
+        ),
+        SourceContinuationRefusal::Unpositioned => format!(
+            "Cannot resume source '{stage_name}': its connector does not position its input"
+        ),
+    }
+}
+
 /// Record a source adapter/runtime invariant through the common fatal lane.
 /// Fatal polls contribute no source output, operational outbox, or policy
 /// settlement evidence.
@@ -336,21 +518,106 @@ pub(crate) async fn record_source_stage_fatal(
     Ok(())
 }
 
-pub(crate) async fn record_source_cleanup_failed(
-    context: &FlowContext,
-    error: &SourceError,
-    journal: &Arc<dyn Journal<ChainEvent>>,
+/// Commit an acquired reader before anything it reads (FLOWIP-134i B2).
+pub(crate) async fn commit_reader_acquired(
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_flow_context: &FlowContext,
+    source_type: SourcePollKind,
+    resuming: bool,
 ) -> Result<(), BoxError> {
-    let event = ChainEventFactory::execution_event(
-        context.stage_id.into(),
-        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SourceCleanupFailed {
-            stage_id: context.stage_id,
-            stage_name: context.stage_name.clone(),
-            error: error.safe_summary().to_string(),
-        },
+    let intent = if resuming {
+        SourceOpenIntent::Resume
+    } else {
+        SourceOpenIntent::Start
+    };
+    commit_source_fact(
+        data_journal,
+        stage_flow_context,
+        ExecutionPayload::SourceReaderAcquired(SourceReaderAcquiredFact {
+            source_type,
+            intent,
+        }),
     )
-    .with_flow_context(context.clone());
-    crate::supervised_base::publication::append(journal, event, Default::default()).await?;
+    .await?;
+    Ok(())
+}
+
+/// The transition that schedules a source's cleanup, recorded when the state
+/// machine enters it (FLOWIP-134i B2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceExit {
+    Finalising,
+    Failing,
+    Cancelling,
+}
+
+/// What a released reader's evidence records, read while the stage still
+/// holds its resources.
+pub(crate) struct SourceRelease {
+    pub(crate) source_type: SourcePollKind,
+    pub(crate) phase: SourceCleanupPhase,
+    pub(crate) trigger: SourceCleanupTrigger,
+    pub(crate) primary_failure: Option<EventId>,
+}
+
+impl SourceRelease {
+    pub(crate) fn new(
+        source_type: SourcePollKind,
+        exit: Option<SourceExit>,
+        completion: SourceCompletionCause,
+        live: bool,
+        primary_failure: Option<EventId>,
+    ) -> Self {
+        let trigger = match (exit, completion) {
+            (Some(SourceExit::Failing), _) => SourceCleanupTrigger::Failed,
+            (Some(SourceExit::Finalising), SourceCompletionCause::Exhausted) => {
+                SourceCleanupTrigger::Exhausted
+            }
+            _ => SourceCleanupTrigger::Stopped,
+        };
+        Self {
+            source_type,
+            phase: if live {
+                SourceCleanupPhase::Live
+            } else {
+                SourceCleanupPhase::Recovery
+            },
+            trigger,
+            primary_failure,
+        }
+    }
+}
+
+/// Record a released reader. A failed release is secondary: it names the
+/// primary failure and never fails the stage (FLOWIP-134i B2).
+pub(crate) async fn record_source_release(
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_flow_context: &FlowContext,
+    release: SourceRelease,
+    outcome: Result<(), SourceError>,
+) -> Result<(), BoxError> {
+    let SourceRelease {
+        source_type,
+        phase,
+        trigger,
+        primary_failure,
+    } = release;
+    let payload = match outcome {
+        Ok(()) => ExecutionPayload::SourceCleanupSucceeded(SourceCleanupSucceededFact {
+            source_type,
+            phase,
+            trigger,
+        }),
+        Err(error) => ExecutionPayload::SourceCleanupFailed(SourceCleanupFailedFact {
+            source_type,
+            phase,
+            trigger,
+            error_type: error.kind(),
+            diagnostic: error.diagnostic().clone(),
+            primary_failure,
+        }),
+    };
+    commit_source_fact(data_journal, stage_flow_context, payload).await?;
     Ok(())
 }
 

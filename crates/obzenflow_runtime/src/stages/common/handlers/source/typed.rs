@@ -4,11 +4,16 @@
 
 //! Typed source authoring and runtime envelope lowering (FLOWIP-134g).
 
+use super::continuation::{
+    AsyncFiniteContinuation, AsyncInfiniteContinuation, AsyncReaderOpener, FiniteContinuation,
+    InfiniteContinuation, SourceContinuation, SyncReaderOpener,
+};
 use super::erased::{
     ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncFinite, SealAsyncInfinite, SealFinite,
-    SealInfinite, UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
-    UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
+    SealInfinite, SourceResumeError, UnifiedAsyncFiniteSourceHandler,
+    UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
+use super::positioned::{PositionedFiniteReader, SourceRecord};
 use super::prepared::{
     sealed as admission_sealed, AdmitSource, AsyncSourceReader, ConnectorSource, DirectSource,
     SourceReader, SyncSourceReader,
@@ -25,6 +30,9 @@ use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 
+use obzenflow_core::event::payloads::execution_payload::{
+    SourceContinuationRefusal, SourceInputPinnedFact,
+};
 use obzenflow_core::event::{
     ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode, StageFatalCode,
     StageFatalReason,
@@ -32,6 +40,9 @@ use obzenflow_core::event::{
 use obzenflow_core::ingress::{
     EventSubmission, HostedIngressBindingSlot, IngressContext, SubmissionIngressContext,
     SubmissionPayloadKind,
+};
+use obzenflow_core::source::{
+    EncodedSourcePosition, SourcePosition, SourcePositionError, SourceProgress,
 };
 use obzenflow_core::{ChainEvent, OneFactStageOutput, TypedPayload, WriterId};
 use serde::de::DeserializeOwned;
@@ -81,6 +92,35 @@ where
         let mut event = fact.into_event(writer_id);
         event.ingress_context = ingress_context;
         events.push(event);
+    }
+    Ok(events)
+}
+
+/// Lower positioned records, each carrying the position after it, so the fact
+/// and its progress commit in one append (FLOWIP-134i B11).
+fn lower_positioned<O, P>(
+    writer_id: WriterId,
+    records: Vec<SourceRecord<O, P>>,
+) -> Result<Vec<ChainEvent>, StageFatal>
+where
+    O: OneFactStageOutput,
+    P: SourcePosition,
+{
+    let mut outputs = Vec::with_capacity(records.len());
+    let mut progress = Vec::with_capacity(records.len());
+    for record in records {
+        let after = EncodedSourcePosition::encode(&record.after).map_err(|error| {
+            protocol_fatal(format!(
+                "source position for `{}`: {error}",
+                std::any::type_name::<P>()
+            ))
+        })?;
+        progress.push(SourceProgress { after });
+        outputs.push((record.value, None));
+    }
+    let mut events = lower_outputs(writer_id, outputs)?;
+    for (event, progress) in events.iter_mut().zip(progress) {
+        event.source_progress = Some(progress);
     }
     Ok(events)
 }
@@ -589,6 +629,10 @@ impl<H> TypedFiniteSourceHandlerAdapter<H> {
         Self::with_reader(SourceReader::acquired(handler))
     }
 
+    pub(super) fn cold(open: SyncReaderOpener<H>) -> Self {
+        Self::with_reader(SourceReader::cold(open))
+    }
+
     fn with_reader(reader: SyncSourceReader<H>) -> Self {
         Self {
             reader,
@@ -607,11 +651,10 @@ impl<H: TypedFiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedFiniteSourceHandlerAdapter<H>;
+    const CONTINUATION: SourceContinuation = SourceContinuation::Refuse;
 
     fn prepare(self) -> Self::Handler {
-        TypedFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |_| {
-            Ok(self)
-        })))
+        TypedFiniteSourceHandlerAdapter::cold(Box::new(move |_| Ok(self)))
     }
 }
 
@@ -622,12 +665,14 @@ impl<C: FiniteSourceConnector>
 
 impl<C: FiniteSourceConnector> AdmitSource<dyn UnifiedFiniteSourceHandler, ConnectorSource> for C {
     type Output = C::Output;
-    type Handler = TypedFiniteSourceHandlerAdapter<C::Reader>;
+    type Handler = <C::Continuation as FiniteContinuation<C::Reader>>::Handler;
+    const CONTINUATION: SourceContinuation =
+        <C::Continuation as FiniteContinuation<C::Reader>>::KIND;
 
     fn prepare(self) -> Self::Handler {
-        TypedFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |context| {
+        <C::Continuation as FiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
             self.open(context)
-        })))
+        }))
     }
 }
 
@@ -672,6 +717,95 @@ impl<H: TypedFiniteSourceHandler> UnifiedFiniteSourceHandler
     }
 }
 
+/// Runtime adapter for a positioned synchronous finite reader (FLOWIP-134i B1).
+#[doc(hidden)]
+pub struct PositionedFiniteSourceHandlerAdapter<R> {
+    reader: SyncSourceReader<R>,
+    writer_id: Option<WriterId>,
+}
+
+impl<R> PositionedFiniteSourceHandlerAdapter<R> {
+    pub(super) fn cold(open: SyncReaderOpener<R>) -> Self {
+        Self {
+            reader: SourceReader::cold(open),
+            writer_id: None,
+        }
+    }
+}
+
+impl<R: PositionedFiniteReader> SealFinite for PositionedFiniteSourceHandlerAdapter<R> {}
+
+impl<R: PositionedFiniteReader + 'static> UnifiedFiniteSourceHandler
+    for PositionedFiniteSourceHandlerAdapter<R>
+{
+    fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
+        self.reader.acquire(context)?;
+        Ok(())
+    }
+
+    fn install_writer_id(&mut self, writer_id: WriterId) {
+        self.writer_id = Some(writer_id);
+    }
+
+    fn input_pin(&self) -> Option<Result<SourceInputPinnedFact, SourcePositionError>> {
+        let reader = self.reader.get()?;
+        Some(
+            EncodedSourcePosition::encode(&reader.beginning()).map(|beginning| {
+                SourceInputPinnedFact {
+                    identity: reader.input_identity().clone(),
+                    beginning,
+                }
+            }),
+        )
+    }
+
+    fn resume_at(
+        &mut self,
+        pin: &SourceInputPinnedFact,
+        after: Option<&EncodedSourcePosition>,
+    ) -> Result<(), SourceResumeError> {
+        let reader = self
+            .reader
+            .get_mut()
+            .expect("the source supervisor must acquire before positioning");
+        if let Some(part) = reader.input_identity().changed_part(&pin.identity) {
+            return Err(SourceResumeError::Refused(
+                SourceContinuationRefusal::InputChanged { part },
+            ));
+        }
+        let position = after
+            .unwrap_or(&pin.beginning)
+            .decode::<R::Position>()
+            .map_err(|_| {
+                SourceResumeError::Refused(SourceContinuationRefusal::PositionUnreadable)
+            })?;
+        reader.seek(position).map_err(SourceResumeError::SeekFailed)
+    }
+
+    fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        let Some(writer_id) = self.writer_id else {
+            return ErasedSourceInvocation::fatal(configuration_fatal(
+                "positioned source adapter invoked before runtime writer identity installation",
+            ));
+        };
+        let reader = self
+            .reader
+            .get_mut()
+            .expect("the source supervisor must acquire before polling");
+        match reader.next() {
+            Ok(Some(records)) => match lower_positioned(writer_id, records) {
+                Ok(events) => ErasedSourceInvocation::completed(
+                    ErasedSourceCompletion::Batch(events),
+                    Vec::new(),
+                ),
+                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
+            },
+            Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof, Vec::new()),
+            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
+        }
+    }
+}
+
 /// Runtime adapter for a synchronous typed infinite source.
 #[doc(hidden)]
 pub struct TypedInfiniteSourceHandlerAdapter<H> {
@@ -682,6 +816,10 @@ pub struct TypedInfiniteSourceHandlerAdapter<H> {
 impl<H> TypedInfiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
         Self::with_reader(SourceReader::acquired(handler))
+    }
+
+    pub(super) fn cold(open: SyncReaderOpener<H>) -> Self {
+        Self::with_reader(SourceReader::cold(open))
     }
 
     fn with_reader(reader: SyncSourceReader<H>) -> Self {
@@ -702,11 +840,10 @@ impl<H: TypedInfiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedInfiniteSourceHandlerAdapter<H>;
+    const CONTINUATION: SourceContinuation = SourceContinuation::Reattach;
 
     fn prepare(self) -> Self::Handler {
-        TypedInfiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |_| {
-            Ok(self)
-        })))
+        TypedInfiniteSourceHandlerAdapter::cold(Box::new(move |_| Ok(self)))
     }
 }
 
@@ -719,12 +856,14 @@ impl<C: InfiniteSourceConnector> AdmitSource<dyn UnifiedInfiniteSourceHandler, C
     for C
 {
     type Output = C::Output;
-    type Handler = TypedInfiniteSourceHandlerAdapter<C::Reader>;
+    type Handler = <C::Continuation as InfiniteContinuation<C::Reader>>::Handler;
+    const CONTINUATION: SourceContinuation =
+        <C::Continuation as InfiniteContinuation<C::Reader>>::KIND;
 
     fn prepare(self) -> Self::Handler {
-        TypedInfiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(
-            move |context| self.open(context),
-        )))
+        <C::Continuation as InfiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
+            self.open(context)
+        }))
     }
 }
 
@@ -783,6 +922,10 @@ impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
         Self::with_reader(SourceReader::acquired(handler))
     }
 
+    pub(super) fn cold(open: AsyncReaderOpener<H>) -> Self {
+        Self::with_reader(SourceReader::cold(open))
+    }
+
     fn with_reader(reader: AsyncSourceReader<H>) -> Self {
         let observation_sink = SourceObservationSink::new();
         Self {
@@ -804,11 +947,12 @@ impl<H: TypedAsyncFiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedAsyncFiniteSourceHandlerAdapter<H>;
+    const CONTINUATION: SourceContinuation = SourceContinuation::Refuse;
 
     fn prepare(self) -> Self::Handler {
-        TypedAsyncFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |_| {
+        TypedAsyncFiniteSourceHandlerAdapter::cold(Box::new(move |_| {
             Box::pin(async move { Ok(self) })
-        })))
+        }))
     }
 }
 
@@ -821,12 +965,14 @@ impl<C: AsyncFiniteSourceConnector>
     AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource> for C
 {
     type Output = C::Output;
-    type Handler = TypedAsyncFiniteSourceHandlerAdapter<C::Reader>;
+    type Handler = <C::Continuation as AsyncFiniteContinuation<C::Reader>>::Handler;
+    const CONTINUATION: SourceContinuation =
+        <C::Continuation as AsyncFiniteContinuation<C::Reader>>::KIND;
 
     fn prepare(self) -> Self::Handler {
-        TypedAsyncFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(
-            move |context| Box::pin(async move { self.open(context).await }),
-        )))
+        <C::Continuation as AsyncFiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
+            Box::pin(async move { self.open(context).await })
+        }))
     }
 }
 
@@ -938,6 +1084,11 @@ impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<
         Self::with_reader(SourceReader::acquired(handler), hosted_slot)
     }
 
+    /// A cold connector reader; hosted ingress is a direct handler only.
+    pub(super) fn cold(open: AsyncReaderOpener<H>) -> Self {
+        Self::with_reader(SourceReader::cold(open), None)
+    }
+
     fn with_reader(
         reader: AsyncSourceReader<H>,
         hosted_slot: Option<HostedIngressBindingSlot>,
@@ -963,6 +1114,7 @@ impl<H: TypedAsyncInfiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedAsyncInfiniteSourceHandlerAdapter<H>;
+    const CONTINUATION: SourceContinuation = SourceContinuation::Reattach;
 
     fn prepare(self) -> Self::Handler {
         let hosted_slot = self
@@ -984,15 +1136,14 @@ impl<C: AsyncInfiniteSourceConnector>
     AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, ConnectorSource> for C
 {
     type Output = C::Output;
-    type Handler = TypedAsyncInfiniteSourceHandlerAdapter<C::Reader>;
+    type Handler = <C::Continuation as AsyncInfiniteContinuation<C::Reader>>::Handler;
+    const CONTINUATION: SourceContinuation =
+        <C::Continuation as AsyncInfiniteContinuation<C::Reader>>::KIND;
 
     fn prepare(self) -> Self::Handler {
-        TypedAsyncInfiniteSourceHandlerAdapter::with_reader(
-            SourceReader::cold(Box::new(move |context| {
-                Box::pin(async move { self.open(context).await })
-            })),
-            None,
-        )
+        <C::Continuation as AsyncInfiniteContinuation<C::Reader>>::cold(Box::new(move |context| {
+            Box::pin(async move { self.open(context).await })
+        }))
     }
 }
 

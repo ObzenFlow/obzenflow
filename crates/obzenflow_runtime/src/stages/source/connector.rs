@@ -18,8 +18,8 @@
 //! awaited cleanup is not guaranteed after abort or process death.
 
 use super::{
-    SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    AsyncFiniteContinuation, AsyncInfiniteContinuation, FiniteContinuation, InfiniteContinuation,
+    SourceError,
 };
 use async_trait::async_trait;
 use obzenflow_core::{OneFactStageOutput, StageId};
@@ -35,7 +35,9 @@ pub struct SourceReaderInitContext {
 /// Reusable configuration for a synchronous source that eventually exhausts.
 pub trait FiniteSourceConnector: Send + Sync + Sized + 'static {
     type Output: OneFactStageOutput + Send + Sync + 'static;
-    type Reader: TypedFiniteSourceHandler<Output = Self::Output> + 'static;
+    type Reader: Send + 'static;
+    /// How interrupted input continues on resume (FLOWIP-134i B8).
+    type Continuation: FiniteContinuation<Self::Reader, Output = Self::Output>;
 
     fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError>;
 }
@@ -44,7 +46,9 @@ pub trait FiniteSourceConnector: Send + Sync + Sized + 'static {
 #[async_trait]
 pub trait AsyncFiniteSourceConnector: Send + Sync + Sized + 'static {
     type Output: OneFactStageOutput + Send + Sync + 'static;
-    type Reader: TypedAsyncFiniteSourceHandler<Output = Self::Output> + 'static;
+    type Reader: Send + 'static;
+    /// How interrupted input continues on resume (FLOWIP-134i B8).
+    type Continuation: AsyncFiniteContinuation<Self::Reader, Output = Self::Output>;
 
     async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError>;
 }
@@ -52,7 +56,9 @@ pub trait AsyncFiniteSourceConnector: Send + Sync + Sized + 'static {
 /// Reusable configuration for a synchronous source stopped by runtime control.
 pub trait InfiniteSourceConnector: Send + Sync + Sized + 'static {
     type Output: OneFactStageOutput + Send + Sync + 'static;
-    type Reader: TypedInfiniteSourceHandler<Output = Self::Output> + 'static;
+    type Reader: Send + 'static;
+    /// How interrupted input continues on resume (FLOWIP-134i B8).
+    type Continuation: InfiniteContinuation<Self::Reader, Output = Self::Output>;
 
     fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError>;
 }
@@ -61,7 +67,9 @@ pub trait InfiniteSourceConnector: Send + Sync + Sized + 'static {
 #[async_trait]
 pub trait AsyncInfiniteSourceConnector: Send + Sync + Sized + 'static {
     type Output: OneFactStageOutput + Send + Sync + 'static;
-    type Reader: TypedAsyncInfiniteSourceHandler<Output = Self::Output> + 'static;
+    type Reader: Send + 'static;
+    /// How interrupted input continues on resume (FLOWIP-134i B8).
+    type Continuation: AsyncInfiniteContinuation<Self::Reader, Output = Self::Output>;
 
     async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError>;
 }

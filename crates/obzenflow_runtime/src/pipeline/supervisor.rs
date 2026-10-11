@@ -103,7 +103,7 @@ impl PipelineSupervisor {
         }
         // Fair polling prevents a busy command producer from starving physical
         // termination or acknowledgements. Empty observation sets stay pending.
-        const INPUTS: usize = 7;
+        const INPUTS: usize = 8;
         for offset in 0..INPUTS {
             let input = (self.next_input + offset) % INPUTS;
             let result = match input {
@@ -148,6 +148,13 @@ impl PipelineSupervisor {
                             Poll::Ready(E::MetricsExited(result))
                         }
                         Poll::Pending => Poll::Pending,
+                    },
+                    None => Poll::Pending,
+                },
+                7 => match ctx.reconstruction.as_mut() {
+                    Some(progress) => match progress.crossings.poll_recv(cx) {
+                        Poll::Ready(Some(())) => Poll::Ready(E::StagesCrossed),
+                        Poll::Ready(None) | Poll::Pending => Poll::Pending,
                     },
                     None => Poll::Pending,
                 },

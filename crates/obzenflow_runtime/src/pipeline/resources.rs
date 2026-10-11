@@ -198,6 +198,9 @@ impl StageDelivery {
                                 return (stage_id, Ok(()));
                             }
                             match handle.begin_drain().await {
+                                // A stage that closed its mailbox is already
+                                // terminating; its exit observation is authoritative.
+                                Err(StageError::MailboxClosed) => Ok(()),
                                 Err(_) if handle.is_drained() => Ok(()),
                                 result => result,
                             }

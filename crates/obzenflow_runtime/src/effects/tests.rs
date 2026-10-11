@@ -1905,8 +1905,30 @@ impl obzenflow_core::journal::archive::ReplayArchive for ScopeMatrixArchive {
         Vec::new()
     }
 
+    fn recorded_source_eof(
+        &self,
+        _stage_key: &str,
+    ) -> Option<obzenflow_core::event::payloads::flow_control_payload::EofKind> {
+        unreachable!("the execution-scope fixture records no source journals")
+    }
+
+    fn recorded_source_frontier(
+        &self,
+        _stage_key: &str,
+    ) -> obzenflow_core::source::RecordedSourceFrontier {
+        unreachable!("the execution-scope fixture records no source journals")
+    }
+
     fn archive_path(&self) -> &Path {
         Path::new("scope-matrix-archive")
+    }
+
+    fn claim_continuation(
+        &self,
+        _: obzenflow_core::FlowId,
+        _: &obzenflow_core::journal::factory::CurrentRunLocator,
+    ) -> Result<(), obzenflow_core::journal::archive::ReplayError> {
+        unreachable!("the execution-scope fixture is never resumed")
     }
 }
 
@@ -1951,6 +1973,49 @@ async fn generated_pre_effect_terminal_keeps_reconstruction_track_only() {
             .expect("the reconstruction lease remains closable"),
         0
     );
+}
+
+#[test]
+fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
+    // FLOWIP-134i B6: a torn resume's history joins its ancestor's per cursor;
+    // F7's recorded mark derives from the join.
+    let record = |input_seq: u64, value: u64| EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
+        cursor: EffectCursor::new("archived_flow", "effect_stage", input_seq, 0_u32),
+        descriptor_hash: EffectDescriptorHash::new("archived-descriptor"),
+        descriptor: EffectDescriptor::new(
+            CountingEffect::EFFECT_TYPE,
+            "archived",
+            CountingEffect::SCHEMA_VERSION,
+            "test-v1",
+            "archived-input",
+        ),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": value }),
+        },
+        origin: None,
+    };
+    let ancestor = EffectHistory::from_records("archived_flow", vec![record(1, 10), record(2, 20)])
+        .expect("ancestor history indexes");
+    let torn = EffectHistory::from_records("archived_flow", vec![record(1, 10)])
+        .expect("torn history indexes");
+    let joined = ancestor
+        .clone()
+        .joined_with(&torn)
+        .expect("agreeing histories join");
+    assert_eq!(joined.max_recorded_input_seq(), Some(2));
+
+    let conflicting = EffectHistory::from_records("archived_flow", vec![record(1, 11)])
+        .expect("conflicting history indexes");
+    let refusal = ancestor
+        .joined_with(&conflicting)
+        .expect_err("incomparable terminals refuse");
+    assert!(matches!(
+        refusal,
+        EffectError::EffectProvenanceMismatch(ref message)
+            if message.contains("conflicting archived and current-run terminals")
+    ));
 }
 
 #[tokio::test]
@@ -1999,7 +2064,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
         completed_journal.clone(),
         parent.clone(),
         Some(completed_history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     ));
     let completed_error = completed
@@ -2021,7 +2086,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
         in_doubt_journal.clone(),
         parent.clone(),
         None,
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     let cursor = EffectCursor::new(
@@ -2245,7 +2310,7 @@ async fn assert_scope_matrix_executable(
         journal.clone(),
         parent,
         history,
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     ctx.runtime_execution = runtime_execution.clone();
@@ -2307,6 +2372,53 @@ async fn assert_scope_matrix_executable(
     );
 }
 
+async fn assert_scope_matrix_recording_ends(
+    runtime_execution: crate::execution::RuntimeExecution,
+    history: Option<Arc<EffectHistory>>,
+    parent: JournalRecord<ChainPayload>,
+) {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let admission = crate::backpressure::DirectFactAdmission::new(
+        obzenflow_core::EventType::from("test.scope-matrix"),
+        NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context_with_mode(
+        journal.clone(),
+        parent,
+        history,
+        EffectRuntimeMode::ReplayIncomplete,
+        EffectPortRegistry::new(),
+    );
+    ctx.runtime_execution = runtime_execution;
+    ctx.backpressure_writer =
+        BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
+
+    let mut effects = EffectsCore::new(ctx);
+    assert!(matches!(
+        effects
+            .perform(AffineCountingEffect {
+                calls: calls.clone(),
+            })
+            .await,
+        Err(EffectError::RecordingEnded { .. })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !admission.is_requested(),
+        "a replay never requests live admission"
+    );
+    assert!(
+        journal.events().is_empty(),
+        "a replay authors nothing past the end of its recording"
+    );
+    assert_eq!(
+        effects.authoring_halt_fatal().map(|fatal| fatal.reason),
+        Some(obzenflow_core::event::StageFatalReason::RecordingEnded)
+    );
+}
+
 #[tokio::test]
 async fn direct_fact_execution_scope_matrix_separates_reconstruction_from_live_admission() {
     let stage_id = StageId::new();
@@ -2348,7 +2460,19 @@ async fn direct_fact_execution_scope_matrix_separates_reconstruction_from_live_a
                 calls: strict_calls.clone(),
             })
             .await,
-        Err(EffectError::EffectInDoubt { .. })
+        Err(EffectError::RecordingEnded { .. })
+    ));
+    // FLOWIP-134i B13: the in-doubt attempt ends the replay whatever the
+    // handler does with the error.
+    assert_eq!(
+        strict_effects
+            .authoring_halt_fatal()
+            .map(|fatal| fatal.reason),
+        Some(obzenflow_core::event::StageFatalReason::RecordingEnded)
+    );
+    assert!(matches!(
+        strict_effects.ensure_authoring_open(),
+        Err(EffectError::RecordingEnded { .. })
     ));
     assert_eq!(strict_calls.load(Ordering::SeqCst), 0);
     assert!(!strict_admission.is_requested());
@@ -2360,18 +2484,22 @@ async fn direct_fact_execution_scope_matrix_separates_reconstruction_from_live_a
         0
     );
 
+    // FLOWIP-134i B13: an incomplete replay reconstructs a hit under strict
+    // scope and ends at a miss or an in-doubt attempt without live admission.
     let incomplete = crate::execution::RuntimeExecution::from_effect_runtime_mode(
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::ReplayIncomplete,
         None,
     );
     assert_scope_matrix_hit(
         incomplete.clone(),
         completed_history.clone(),
         parent.clone(),
-        obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+        obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
     )
     .await;
-    assert_scope_matrix_executable(incomplete, None, parent.clone(), 0).await;
+    assert_scope_matrix_recording_ends(incomplete.clone(), None, parent.clone()).await;
+    assert_scope_matrix_recording_ends(incomplete, Some(in_doubt_history.clone()), parent.clone())
+        .await;
 
     let resume_hit = resume_execution();
     assert_scope_matrix_hit(
@@ -2435,7 +2563,7 @@ async fn generated_resume_withheld_credit_precedes_named_port_resolution() {
             journal.clone(),
             parent.clone(),
             history,
-            EffectRuntimeMode::ResumeIncomplete,
+            EffectRuntimeMode::Resume,
             registry.into_run_registry(),
             &binding,
         );
@@ -3021,7 +3149,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
         catch_up_journal,
         crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         Some(history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     catch_up_context.emit_enabled = true;
@@ -3057,7 +3185,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
         miss_journal,
         crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         Some(miss_history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     miss_context.emit_enabled = true;
@@ -3164,7 +3292,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         resume_journal.clone(),
         crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         Some(history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     resume_context.emit_enabled = true;
@@ -4156,10 +4284,7 @@ async fn effect_and_capture_rows_reconstruct_identical_debt_without_waiting() {
             .expect("effect history"),
     );
 
-    for mode in [
-        EffectRuntimeMode::ReplayStrict,
-        EffectRuntimeMode::ResumeIncomplete,
-    ] {
+    for mode in [EffectRuntimeMode::ReplayStrict, EffectRuntimeMode::Resume] {
         let (registry, stage_id, downstream) = effect_backpressure_fixture(1);
         let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
         let mut ctx = invocation_context_with_mode(
@@ -4981,7 +5106,7 @@ async fn resume_incomplete_missing_effect_executes_with_recorded_cursor() {
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     ));
 
@@ -5031,7 +5156,7 @@ async fn resume_incomplete_recorded_effect_suppresses_execution() {
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     ));
 
@@ -5389,7 +5514,7 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     assert_eq!(later_perform_fault, first_fault);
 
     let fatal = effects
-        .binding_fault_fatal()
+        .authoring_halt_fatal()
         .expect("the latched authority fault must map to a stage fatal");
     assert_eq!(
         fatal.code,
@@ -5440,7 +5565,7 @@ fn missing_domain_projection_latches_binding_authority_before_cursor_or_io() {
     assert_eq!(latched, fault);
     assert_eq!(
         effects
-            .binding_fault_fatal()
+            .authoring_halt_fatal()
             .expect("the projection fault maps to a stage fatal")
             .reason,
         obzenflow_core::event::StageFatalReason::EffectPortBindingMismatch
@@ -5536,7 +5661,7 @@ async fn binding_mismatches_leave_terminal_and_in_doubt_archives_untouched() {
                 journal.clone(),
                 parent.clone(),
                 Some(history.clone()),
-                EffectRuntimeMode::ResumeIncomplete,
+                EffectRuntimeMode::Resume,
                 EffectPortRegistry::new(),
                 &declared_binding,
             ));
@@ -5659,9 +5784,9 @@ async fn concurrent_fan_out_shares_resolver_verdict_but_not_fatal_latches() {
     ));
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
     assert_eq!(port_calls.load(Ordering::SeqCst), 2);
-    assert!(first.binding_fault_fatal().is_none());
-    assert!(second.binding_fault_fatal().is_none());
-    assert!(faulted.binding_fault_fatal().is_some());
+    assert!(first.authoring_halt_fatal().is_none());
+    assert!(second.authoring_halt_fatal().is_none());
+    assert!(faulted.authoring_halt_fatal().is_some());
     assert_eq!(first_journal.events().len(), 2);
     assert_eq!(second_journal.events().len(), 2);
     assert!(fault_journal.events().is_empty());
@@ -6632,7 +6757,7 @@ async fn invariant_escape_resume_sequence(breaker_free: bool) {
         second.clone(),
         parent.clone(),
         Some(first_history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     second_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
@@ -6658,7 +6783,7 @@ async fn invariant_escape_resume_sequence(breaker_free: bool) {
         terminal.clone(),
         parent.clone(),
         Some(second_history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     terminal_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
@@ -6834,7 +6959,7 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
         recovery_journal.clone(),
         recovery_parent.clone(),
         Some(in_doubt_history),
-        EffectRuntimeMode::ResumeIncomplete,
+        EffectRuntimeMode::Resume,
         EffectPortRegistry::new(),
     );
     attach_effect_observer(
@@ -6920,10 +7045,7 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
 
     let cursor = cursor_started_in(&recovery_journal);
     let settled_history = archive_current_cursor(&recovery_journal, &cursor).await;
-    for mode in [
-        EffectRuntimeMode::ReplayStrict,
-        EffectRuntimeMode::ResumeIncomplete,
-    ] {
+    for mode in [EffectRuntimeMode::ReplayStrict, EffectRuntimeMode::Resume] {
         let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
         let replay_calls = Arc::new(AtomicUsize::new(0));
         let replay_observations = Arc::new(EffectObserverLog::default());

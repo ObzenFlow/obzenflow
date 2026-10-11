@@ -8,7 +8,7 @@ use obzenflow_core::StageId;
 use obzenflow_runtime::stages::common::stage_handle::{
     StageAck, StageError, StageEvent, StageFailure, StageHandle, StageMilestone,
 };
-use obzenflow_runtime::supervised_base::SupervisorHandle;
+use obzenflow_runtime::supervised_base::{HandleError, SupervisorHandle};
 use std::sync::Arc;
 
 /// Adapter that bridges generic StandardHandle to the StageHandle trait
@@ -75,7 +75,7 @@ where
 #[async_trait]
 impl<H, E, S> StageHandle for StageHandleAdapter<H, E, S>
 where
-    H: SupervisorHandle<Event = E, State = S> + Send + Sync + 'static,
+    H: SupervisorHandle<Event = E, State = S, Error = HandleError> + Send + Sync + 'static,
     E: Send + Sync + 'static,
     S: Send + Sync + 'static,
 {
@@ -131,7 +131,12 @@ where
         self.inner
             .send_event(event)
             .await
-            .map_err(|e| StageError::EventSendFailed(format!("Failed to send drain event: {e:?}")))
+            .map_err(|error| match error {
+                HandleError::SupervisorNotRunning => StageError::MailboxClosed,
+                error => {
+                    StageError::EventSendFailed(format!("Failed to send drain event: {error:?}"))
+                }
+            })
     }
 
     fn is_ready(&self) -> bool {

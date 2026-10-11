@@ -213,10 +213,10 @@ where
         self.core.drain_committed_facts()
     }
 
-    pub(crate) fn binding_fault_fatal(
+    pub(crate) fn authoring_halt_fatal(
         &self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {
-        self.core.binding_fault_fatal()
+        self.core.authoring_halt_fatal()
     }
 
     pub(crate) async fn preflight_settlement_has_no_unused_history(

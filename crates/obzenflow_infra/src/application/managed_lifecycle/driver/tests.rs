@@ -102,11 +102,7 @@ async fn join_budget_keeps_blocking_task_owned_and_cancels_the_entire_group() {
         );
         assert!(futures::poll!(driver.operation.as_mut().unwrap()).is_pending());
     }
-    let mut finishing = Box::pin(driver.drive(
-        Event::RepeatedSignal,
-        #[cfg(feature = "warp-server")]
-        None,
-    ));
+    let mut finishing = Box::pin(driver.drive(Event::RepeatedSignal, None));
     assert!(
         futures::poll!(&mut finishing).is_pending(),
         "ordinary return requires a join"
@@ -159,11 +155,7 @@ async fn flush_timeout_cancels_only_the_attempt_and_preserves_the_selected_resul
         let _witness = witness;
         std::future::pending::<Observed>().await
     }));
-    let mut finishing = Box::pin(driver.drive(
-        Event::RepeatedSignal,
-        #[cfg(feature = "warp-server")]
-        None,
-    ));
+    let mut finishing = Box::pin(driver.drive(Event::RepeatedSignal, None));
     assert!(futures::poll!(&mut finishing).is_pending());
     tokio::time::advance(Duration::from_secs(5)).await;
     finishing.await;

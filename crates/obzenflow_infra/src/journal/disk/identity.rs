@@ -64,6 +64,26 @@ pub fn read_identity(path: &Path) -> Result<JournalIdentity, JournalError> {
     Ok(descriptor.identity)
 }
 
+/// Every journal file a run's manifest names.
+pub(super) fn manifest_journal_files(
+    manifest: &obzenflow_core::journal::archive::manifest::RunManifest,
+) -> impl Iterator<Item = &str> {
+    let files = std::iter::once(manifest.system_journal_file.as_str()).chain(
+        manifest.stages.values().flat_map(|stage| {
+            [
+                stage.data_journal_file.as_str(),
+                stage.error_journal_file.as_str(),
+            ]
+        }),
+    );
+    files.chain(manifest.metrics_journals.iter().flat_map(|metrics| {
+        [
+            metrics.coordination_journal_file.as_str(),
+            metrics.export_journal_file.as_str(),
+        ]
+    }))
+}
+
 /// Bind every present journal, including empty ones, to its archive namespace.
 pub(super) fn validate_archive_identities(
     directory: &Path,
@@ -73,22 +93,8 @@ pub(super) fn validate_archive_identities(
         .flow_id
         .parse::<FlowId>()
         .map_err(|error| failure("Invalid archive run identity", error))?;
-    let files = std::iter::once(manifest.system_journal_file.as_str()).chain(
-        manifest.stages.values().flat_map(|stage| {
-            [
-                stage.data_journal_file.as_str(),
-                stage.error_journal_file.as_str(),
-            ]
-        }),
-    );
-    let files = files.chain(manifest.metrics_journals.iter().flat_map(|metrics| {
-        [
-            metrics.coordination_journal_file.as_str(),
-            metrics.export_journal_file.as_str(),
-        ]
-    }));
     let mut identities = std::collections::HashSet::new();
-    for file in files {
+    for file in manifest_journal_files(manifest) {
         let path = directory.join(file);
         if !path.exists() {
             continue;

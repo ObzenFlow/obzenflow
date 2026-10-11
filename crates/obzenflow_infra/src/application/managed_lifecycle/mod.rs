@@ -8,7 +8,6 @@ mod driver;
 // Hosted observations remain in the closed vocabulary for non-hosted builds.
 #[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
 mod machine;
-#[cfg(feature = "warp-server")]
 mod signals;
 
 pub(super) use driver::abort_and_join;

@@ -31,6 +31,9 @@ pub enum StageFatalCode {
 pub enum StageFatalReason {
     ProtocolInputIntegrity,
     ReplayDivergence,
+    /// A replay reached a cursor its recording holds no outcome for; only a
+    /// resume finishes that work (FLOWIP-134i B13).
+    RecordingEnded,
     ConfigurationInvariant,
     EffectTargetAssertionMismatch,
     EffectPortRegistrationMissing,

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 #[path = "obzenflow/render.rs"]
 mod render;
-use render::{ColorMode, ObservationEnd, Renderer};
+use render::{ColorMode, ObservationEnd, Observed, Renderer};
 
 #[cfg(test)]
 #[path = "obzenflow/args_tests.rs"]
@@ -347,7 +347,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
                 result = &mut interrupt => {
                     result?;
                     let tail = snapshot.into_tail();
-                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
+                    renderer.finish(&mut output, &mut diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
                     return Ok(0);
                 }
                 record = snapshot.next() => match record {
@@ -367,10 +367,8 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         renderer.finish(
             &mut output,
             &mut diagnostics,
-            tail.identity(),
-            tail.manifest(),
+            Observed::of(&tail),
             ObservationEnd::Snapshot,
-            tail.progress(),
         )?;
         return Ok(0);
     }
@@ -404,7 +402,7 @@ where
         let next = tokio::select! { biased;
             result = &mut interrupt => {
                 result?;
-                renderer.finish(output, diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
+                renderer.finish(output, diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
                 return Ok(0);
             }
             next = tail.read_next() => match next {
@@ -430,10 +428,8 @@ where
             renderer.finish(
                 output,
                 diagnostics,
-                tail.identity(),
-                tail.manifest(),
+                Observed::of(&tail),
                 ObservationEnd::Settled,
-                tail.progress(),
             )?;
             return Ok(0);
         }
@@ -441,7 +437,7 @@ where
             tokio::select! { biased;
                 result = &mut interrupt => {
                     result?;
-                    renderer.finish(output, diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
+                    renderer.finish(output, diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
                     return Ok(0);
                 }
                 _ = pending_wait() => {}

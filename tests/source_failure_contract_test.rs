@@ -22,8 +22,9 @@ use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
-    InfiniteSourceConnector, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    InfiniteSourceConnector, Reattach, Refuse, SourceReaderInitContext,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -101,6 +102,7 @@ struct FailsToOpenAsyncInfinite;
 impl FiniteSourceConnector for FailsToOpenFinite {
     type Output = Row;
     type Reader = RowThenTerminal;
+    type Continuation = Refuse;
     fn open(&self, _: SourceReaderInitContext) -> Result<RowThenTerminal, SourceError> {
         Err(unavailable())
     }
@@ -110,6 +112,7 @@ impl FiniteSourceConnector for FailsToOpenFinite {
 impl AsyncFiniteSourceConnector for FailsToOpenAsyncFinite {
     type Output = Row;
     type Reader = RowThenTerminal;
+    type Continuation = Refuse;
     async fn open(&self, _: SourceReaderInitContext) -> Result<RowThenTerminal, SourceError> {
         Err(unavailable())
     }
@@ -118,6 +121,7 @@ impl AsyncFiniteSourceConnector for FailsToOpenAsyncFinite {
 impl InfiniteSourceConnector for FailsToOpenInfinite {
     type Output = Row;
     type Reader = RowThenTerminal;
+    type Continuation = Reattach;
     fn open(&self, _: SourceReaderInitContext) -> Result<RowThenTerminal, SourceError> {
         Err(unavailable())
     }
@@ -127,6 +131,7 @@ impl InfiniteSourceConnector for FailsToOpenInfinite {
 impl AsyncInfiniteSourceConnector for FailsToOpenAsyncInfinite {
     type Output = Row;
     type Reader = RowThenTerminal;
+    type Continuation = Reattach;
     async fn open(&self, _: SourceReaderInitContext) -> Result<RowThenTerminal, SourceError> {
         Err(unavailable())
     }
@@ -215,7 +220,7 @@ async fn assert_open_failure_contract(base: &Path) {
         "no poll error accompanies an opening failure"
     );
     let (id, ExecutionPayload::SourceOpenFailed(opened)) = failures[0] else {
-        panic!("expected source.open_failed: {failures:?}");
+        panic!("expected runtime.source.open_failed: {failures:?}");
     };
     assert_eq!(opened.intent, SourceOpenIntent::Start);
     assert_eq!(

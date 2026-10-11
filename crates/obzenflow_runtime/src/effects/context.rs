@@ -169,9 +169,7 @@ pub enum EffectRuntimeMode {
     #[default]
     Live,
     ReplayStrict,
-    ResumeIncomplete,
+    /// A replay of an unsealed archive under `allow_incomplete_archive`.
+    ReplayIncomplete,
+    Resume,
 }
-
-// FLOWIP-120r: the former `resume_scope_remains_reconstruction_until_phase_predicate_lands`
-// test moved to `crate::execution` (the strategy policy matrix), which now owns
-// the replay-incomplete -> ResumeHandler mapping.

@@ -379,16 +379,19 @@ fn middleware_context_is_confined_to_the_typed_policy_substrate() {
 #[test]
 fn resume_live_handoff_clears_idle_state_in_every_source_supervisor() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Asynchronous finite connectors declare `Refuse` (FLOWIP-134i B14), so
+    // that supervisor has no resume-live handoff.
     for relative in [
         "crates/obzenflow_runtime/src/stages/source/finite/supervisor.rs",
-        "crates/obzenflow_runtime/src/stages/source/finite/async_supervisor.rs",
         "crates/obzenflow_runtime/src/stages/source/infinite/supervisor.rs",
         "crates/obzenflow_runtime/src/stages/source/infinite/async_supervisor.rs",
     ] {
         let source = fs::read_to_string(root.join(relative)).expect("read source supervisor");
-        let handoff_start = source
+        let arm = source
             .find("SourceReplayExhaustion::ContinueLive =>")
             .unwrap_or_else(|| panic!("{relative} must handle resume-live exhaustion"));
+        // The finite handoff positions its reader in one delegated method.
+        let handoff_start = source.find("async fn hand_off_to_live(").unwrap_or(arm);
         let handoff = &source[handoff_start..];
         let reset = handoff
             .find("self.idle_backoff.reset();")

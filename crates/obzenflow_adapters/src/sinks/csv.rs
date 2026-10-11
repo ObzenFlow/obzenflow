@@ -9,6 +9,7 @@
 //! [`CsvSink::builder`] keeps connector construction aligned with typed
 //! handlers and effects while leaving file I/O cold until materialisation.
 
+use super::blocking::blocking_io;
 use async_trait::async_trait;
 use csv::{Writer, WriterBuilder};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -22,11 +23,11 @@ use obzenflow_runtime::stages::common::handlers::{
     SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -528,32 +529,13 @@ where
         if probe.fault_open() {
             return Err(SinkOperationError::other("injected CSV open failure"));
         }
-        let file_non_empty = self.append
-            && std::fs::metadata(&self.path)
-                .map(|metadata| metadata.len() > 0)
-                .unwrap_or(false);
-
-        if file_non_empty && self.columns.is_none() {
-            return Err(SinkOperationError::validation(
-                "CsvSink append=true requires explicit columns when appending to a non-empty file"
-                    .to_string(),
-            ));
-        }
-
-        let file = if self.append {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-        } else {
-            File::create(&self.path)
-        }
-        .map_err(|error| {
-            SinkOperationError::other(format!(
-                "CsvSink failed to open {}: {error}",
-                self.path.display()
-            ))
-        })?;
+        let path = self.path.clone();
+        let append = self.append;
+        let explicit_columns = self.columns.is_some();
+        let (file, file_non_empty) =
+            blocking_io(move || open_destination(&path, append, explicit_columns))
+                .await?
+                .map_err(|error| *error)?;
 
         let io_gate = CsvIoGate::new();
         let writer = WriterBuilder::new()
@@ -564,7 +546,7 @@ where
             });
         Ok(CsvWriter {
             projection: self.projection.clone(),
-            inner: Mutex::new(CsvSinkInner {
+            inner: Arc::new(Mutex::new(CsvSinkInner {
                 writer,
                 path: self.path.clone(),
                 columns: self.columns.clone(),
@@ -579,16 +561,48 @@ where
                 io_gate,
                 #[cfg(test)]
                 fail_next_buffer_flush: false,
-            }),
+            })),
             probe,
         })
     }
 }
 
-/// Stage-local CSV writer opened from [`CsvSink`].
+/// Opens the destination file, reporting whether an appended file already
+/// holds rows. Runs on the blocking pool (FLOWIP-134i B21).
+fn open_destination(
+    path: &Path,
+    append: bool,
+    explicit_columns: bool,
+) -> Result<(File, bool), Box<SinkOperationError>> {
+    let file_non_empty = append
+        && std::fs::metadata(path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false);
+    if file_non_empty && !explicit_columns {
+        return Err(Box::new(SinkOperationError::validation(
+            "CsvSink append=true requires explicit columns when appending to a non-empty file"
+                .to_string(),
+        )));
+    }
+    let file = if append {
+        OpenOptions::new().create(true).append(true).open(path)
+    } else {
+        File::create(path)
+    }
+    .map_err(|error| {
+        Box::new(SinkOperationError::other(format!(
+            "CsvSink failed to open {}: {error}",
+            path.display()
+        )))
+    })?;
+    Ok((file, file_non_empty))
+}
+
+/// Stage-local CSV writer opened from [`CsvSink`]. Its file state is shared
+/// with the blocking-pool call that writes it.
 pub struct CsvWriter<P> {
     projection: P,
-    inner: Mutex<CsvSinkInner>,
+    inner: Arc<Mutex<CsvSinkInner>>,
     probe: CsvWriterProbe,
 }
 
@@ -628,15 +642,22 @@ where
                     .unwrap_or_else(|_| SinkOperationError::other("CSV projection failed")),
             )
         })?;
-        let mut inner = self.inner.lock().map_err(|_| {
-            SinkWriteFailure::poisoned(
-                SinkWritePhase::Execute,
-                SinkOperationError::other("CsvWriter mutex poisoned"),
-            )
-        })?;
-        inner
-            .consume_report(row, context, &self.probe)
-            .map_err(CsvWriteError::into_failure)
+        let object = encode_row(row).map_err(CsvWriteError::into_failure)?;
+        let inner = Arc::clone(&self.inner);
+        let probe = self.probe.clone();
+        blocking_io(move || {
+            let mut inner = inner.lock().map_err(|_| {
+                SinkWriteFailure::poisoned(
+                    SinkWritePhase::Execute,
+                    SinkOperationError::other("CsvWriter mutex poisoned"),
+                )
+            })?;
+            inner
+                .consume_report(object, context, &probe)
+                .map_err(CsvWriteError::into_failure)
+        })
+        .await
+        .map_err(|error| SinkWriteFailure::current_only(SinkWritePhase::Execute, error))?
     }
 
     async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
@@ -644,11 +665,7 @@ where
         if self.probe.fault_flush() {
             return Err(SinkOperationError::other("injected CSV flush failure"));
         }
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| SinkOperationError::other("CsvWriter mutex poisoned"))?;
-        inner.flush_report(&self.probe)
+        self.flush_on_blocking_pool().await
     }
 
     async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
@@ -656,12 +673,44 @@ where
         if self.probe.fault_drain() {
             return Err(SinkOperationError::other("injected CSV drain failure"));
         }
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| SinkOperationError::other("CsvWriter mutex poisoned"))?;
-        inner.flush_report(&self.probe)
+        self.flush_on_blocking_pool().await
     }
+}
+
+impl<P> CsvWriter<P> {
+    async fn flush_on_blocking_pool(&self) -> SinkOperationResult<SinkWriterLifecycleReport> {
+        let inner = Arc::clone(&self.inner);
+        let probe = self.probe.clone();
+        blocking_io(move || {
+            let mut inner = inner
+                .lock()
+                .map_err(|_| SinkOperationError::other("CsvWriter mutex poisoned"))?;
+            inner.flush_report(&probe)
+        })
+        .await?
+    }
+}
+
+/// Encodes a projected row as the JSON object the writer lays out, on the
+/// async worker: encoding is pure, and only destination I/O moves off it.
+fn encode_row<R: Serialize>(row: R) -> Result<Map<String, Value>, CsvWriteError> {
+    let payload = serde_json::to_value(row).map_err(|error| {
+        CsvWriteError::current(
+            SinkWritePhase::Encode,
+            SinkOperationError::other(format!(
+                "CsvSink failed to serialize projected row: {error}"
+            )),
+        )
+    })?;
+    let Value::Object(object) = payload else {
+        return Err(CsvWriteError::current(
+            SinkWritePhase::Encode,
+            SinkOperationError::validation(format!(
+                "CsvSink requires object payloads, got {payload}"
+            )),
+        ));
+    };
+    Ok(object)
 }
 
 struct CsvWriteError {
@@ -904,29 +953,12 @@ impl CsvSinkInner {
         }
     }
 
-    fn consume_report<R: Serialize>(
+    fn consume_report(
         &mut self,
-        row: R,
+        obj: Map<String, Value>,
         context: SinkWriteContext,
         probe: &CsvWriterProbe,
     ) -> Result<SinkWriteReport, CsvWriteError> {
-        let payload = serde_json::to_value(row).map_err(|error| {
-            CsvWriteError::current(
-                SinkWritePhase::Encode,
-                SinkOperationError::other(format!(
-                    "CsvSink failed to serialize projected row: {error}"
-                )),
-            )
-        })?;
-        let Value::Object(obj) = payload else {
-            return Err(CsvWriteError::current(
-                SinkWritePhase::Encode,
-                SinkOperationError::validation(format!(
-                    "CsvSink requires object payloads, got {payload}"
-                )),
-            ));
-        };
-
         let row = self.payload_to_row(&obj).map_err(|error| {
             CsvWriteError::current(
                 SinkWritePhase::Encode,
@@ -1436,7 +1468,7 @@ mod tests {
             .unwrap();
         let stage_id = StageId::new();
         let description = connector.describe();
-        let mut writer = connector
+        let writer = connector
             .open(SinkWriterInitContext::new(
                 stage_id,
                 "csv".to_string(),
@@ -1446,7 +1478,7 @@ mod tests {
             .expect("CSV connector opens");
         writer
             .inner
-            .get_mut()
+            .lock()
             .expect("CSV writer lock")
             .fail_next_buffer_flush = true;
         let mut sink =
@@ -1761,5 +1793,62 @@ mod tests {
                 if failure.phase() == SinkWritePhase::Encode
                     && failure.error().detail().contains("CsvSink requires object payloads, got 7")
         ));
+    }
+
+    /// FLOWIP-134i B21: an open that blocks, here on a FIFO with no reader,
+    /// leaves the runtime's only thread free while it waits.
+    #[cfg(unix)]
+    #[test]
+    fn a_blocked_open_leaves_a_single_threaded_runtime_responsive() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("rows.csv");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo runs")
+            .success());
+        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
+            .path(&path)
+            .build()
+            .unwrap();
+        let (ticked, tick) = mpsc::channel();
+        let (opened, open_result) = mpsc::channel();
+        let runtime_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let open = tokio::spawn(async move {
+                    connector
+                        .open(SinkWriterInitContext::new(
+                            StageId::new(),
+                            "csv".to_string(),
+                            "test".to_string(),
+                        ))
+                        .await
+                        .map(drop)
+                });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                ticked.send(()).unwrap();
+                opened.send(open.await.unwrap()).unwrap();
+            });
+        });
+        tick.recv_timeout(Duration::from_secs(10))
+            .expect("the runtime keeps running while the open waits");
+        // A reader arrives, so the open completes.
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the FIFO opens for reading");
+        open_result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the open completes")
+            .expect("the open succeeds");
+        drop(reader);
+        runtime_thread.join().unwrap();
     }
 }

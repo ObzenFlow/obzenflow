@@ -5,9 +5,11 @@
 //! Archive access contracts. Providers implement these; Runtime executes replay.
 
 use crate::event::context::StageType;
+use crate::event::payloads::flow_control_payload::EofKind;
+use crate::journal::factory::CurrentRunLocator;
 use crate::journal::reader::JournalReader;
 use crate::journal::{ArchiveStatus, StatusDerivation};
-use crate::{ChainEvent, StageId};
+use crate::{ChainEvent, FlowId, StageId};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -68,6 +70,110 @@ pub enum ReplayError {
 
     #[error("Replay archive parse error: {message}")]
     Parse { message: String },
+
+    /// A torn resumed run merges with the archive it resumed from, which is
+    /// missing or unreadable (FLOWIP-134i B6).
+    #[error(
+        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
+         from, {}, is missing.\nRestore {}, then resume {} again.",
+        .archive.display(),
+        .ancestor.display(),
+        .ancestor.display(),
+        .archive.display()
+    )]
+    AncestorMissing { archive: PathBuf, ancestor: PathBuf },
+
+    #[error(
+        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
+         from, {}, cannot be read: {}.\nRestore {}, then resume {} again.",
+        .archive.display(),
+        .ancestor.display(),
+        .source,
+        .ancestor.display(),
+        .archive.display()
+    )]
+    AncestorUnreadable {
+        archive: PathBuf,
+        ancestor: PathBuf,
+        source: Box<ReplayError>,
+    },
+
+    /// A torn resumed run's source records are not a prefix of its ancestor's.
+    #[error(
+        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
+         from, {}, disagrees with it at source '{}'.\nRestore {} as it was recorded, then \
+         resume {} again.",
+        .archive.display(),
+        .ancestor.display(),
+        .stage_key,
+        .ancestor.display(),
+        .archive.display()
+    )]
+    AncestorDisagrees {
+        archive: PathBuf,
+        ancestor: PathBuf,
+        stage_key: String,
+    },
+
+    /// Only the head of a history resumes (FLOWIP-134i B7).
+    #[error(
+        "cannot resume {}: it was already resumed by {}, the head of this history.\nResume {} \
+         instead.",
+        .archive.display(),
+        .head.display(),
+        .head.display()
+    )]
+    AlreadyContinued { archive: PathBuf, head: PathBuf },
+
+    /// A resumed run whose parent carries no claim never took it over (B12).
+    #[error(
+        "cannot resume {}: it stopped before taking over {}.\nResume {} instead.",
+        .archive.display(),
+        .parent.display(),
+        .parent.display()
+    )]
+    StoppedBeforeTakeover { archive: PathBuf, parent: PathBuf },
+
+    /// A resumed run that lost its parent's claim to another run (B12).
+    #[error(
+        "cannot resume {}: {} was continued by {}, not by this run.\nResume {} instead.",
+        .archive.display(),
+        .parent.display(),
+        .head.display(),
+        .head.display()
+    )]
+    ContinuedByAnother {
+        archive: PathBuf,
+        parent: PathBuf,
+        head: PathBuf,
+    },
+
+    /// A journal of the run still has a live writer (B7).
+    #[error(
+        "cannot resume {}: it is still running.\nStop it, then resume it again.",
+        .archive.display()
+    )]
+    StillRunning { archive: PathBuf },
+
+    /// The run's location cannot hold the claim a resume records (B12).
+    #[error(
+        "cannot resume {}: its run location is not writable, so this resume cannot record \
+         that it continues it.\nMake it writable, or copy it elsewhere to start a separate \
+         history.",
+        .archive.display()
+    )]
+    LocationNotWritable { archive: PathBuf },
+
+    /// Resuming a replay resumes the run it reproduces, which is missing (B13).
+    #[error(
+        "cannot resume {}: the run it replays, {}, is missing.\nRestore {}, then resume {} \
+         again.",
+        .replay.display(),
+        .replayed.display(),
+        .replayed.display(),
+        .replay.display()
+    )]
+    ReplayedRunMissing { replay: PathBuf, replayed: PathBuf },
 }
 
 #[async_trait]
@@ -97,7 +203,32 @@ pub trait ReplayArchive: Send + Sync {
 
     fn source_stage_keys(&self) -> Vec<String>;
 
+    /// The EOF kind a source journal committed, `None` when it committed none
+    /// (FLOWIP-134i B8).
+    fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind>;
+
+    /// The committed frontier a source journal recorded, folded as a replay
+    /// reads it (FLOWIP-134i B22).
+    fn recorded_source_frontier(&self, stage_key: &str) -> crate::source::RecordedSourceFrontier;
+
     fn archive_path(&self) -> &Path;
+
+    /// Take this archive's write-once continuation claim for the run resuming
+    /// it (FLOWIP-134i B12), once that run's manifest is durable and before
+    /// any of its stages exists. A claim already present refuses, naming the
+    /// head of the history.
+    fn claim_continuation(
+        &self,
+        successor: FlowId,
+        location: &CurrentRunLocator,
+    ) -> Result<(), ReplayError>;
+
+    /// The archives a resume merges with, nearest first (FLOWIP-134i B6):
+    /// each ancestor up to the first that recorded reconstruction completion.
+    /// Admission verified that every source's records agree across them.
+    fn ancestors(&self) -> Vec<std::sync::Arc<dyn ReplayArchive>> {
+        Vec::new()
+    }
 
     /// Versioned archive capability advertised by the run manifest.
     fn manifest_capability(&self, _name: &str) -> Option<u32> {

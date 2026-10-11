@@ -17,7 +17,7 @@ pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 /// One version for the journal records, physical frames, and run manifest.
 /// Breaking any of these contracts requires a bump here and fresh archives.
 /// Framework package versions are provenance only, never archive admission gates.
-pub const JOURNAL_SCHEMA_VERSION: &str = "17.0";
+pub const JOURNAL_SCHEMA_VERSION: &str = "18.0";
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
@@ -73,7 +73,7 @@ pub struct RunManifestDirectFactAdmission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifestReplayConfig {
-    /// User-supplied archive path from `--replay-from` (as provided; not normalized).
+    /// The archive this run read, canonicalized (FLOWIP-134i B16).
     pub replay_from: String,
     /// Whether replay proceeded despite missing/corrupt terminal evidence.
     pub allow_incomplete_archive: bool,
@@ -82,14 +82,14 @@ pub struct RunManifestReplayConfig {
 /// Present when this run is a resume of a recorded archive (FLOWIP-120n).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifestResumeConfig {
-    /// The archive this run resumed from.
+    /// The archive this run resumed from, canonicalized.
     pub resumed_from: PathBuf,
     /// The generation this run enters (max recorded generation + 1).
     pub resume_generation: u64,
-    /// Per-stage recorded high-water marks, populated by the catch-up read
-    /// (FLOWIP-120n PR-D); empty until then.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub high_water_by_stage: BTreeMap<String, u64>,
+    /// Ancestors merged because `resumed_from` had not recorded reconstruction
+    /// completion, nearest first (FLOWIP-134i B6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_from: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

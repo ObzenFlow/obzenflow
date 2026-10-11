@@ -24,14 +24,15 @@ pub fn running(stage: StageId) -> ChainEvent {
     )
 }
 
+/// An execution fact whose one free-form field carries `payload_bytes`.
 pub fn execution_fact(stage: StageId, payload_bytes: usize) -> ChainEvent {
     execution(
         stage,
-        ExecutionPayload::SourceCleanupFailed {
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Cancelled {
             stage_id: stage,
-            stage_name: "benchmark_child".into(),
-            error: "x".repeat(payload_bytes),
-        },
+            reason: "x".repeat(payload_bytes),
+            accounting: None,
+        }),
     )
 }
 

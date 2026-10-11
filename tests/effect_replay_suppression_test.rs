@@ -2227,6 +2227,8 @@ async fn cancellation_after_perform_preserves_atomic_terminal_evidence_and_resum
         .await
         .expect("post-perform cancellation should finish bounded cleanup")
         .expect("cancelled flow should resolve");
+    // The interrupted process ends, releasing its journal writers (B7).
+    drop(flow_handle);
 
     let interrupted_archive = latest_run_dir(&journal_base);
     let interrupted_events = read_stage_events(&interrupted_archive, "effectful").await;
@@ -2253,7 +2255,7 @@ async fn cancellation_after_perform_preserves_atomic_terminal_evidence_and_resum
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
+            OsString::from("--resume-from"),
             interrupted_archive.as_os_str().to_os_string(),
             OsString::from("--allow-incomplete-archive"),
         ])
@@ -2355,6 +2357,8 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
         .await
         .expect("cancelled flow should finish its bounded ancillary cleanup")
         .expect("cancelled flow should resolve");
+    // The interrupted process ends, releasing its journal writers (B7).
+    drop(flow_handle);
     assert_eq!(cancelled_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         cancelled_futures.load(Ordering::SeqCst),
@@ -2414,7 +2418,7 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
+            OsString::from("--resume-from"),
             cancelled_archive.as_os_str().to_os_string(),
             OsString::from("--allow-incomplete-archive"),
         ])
@@ -3412,7 +3416,7 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
+            OsString::from("--resume-from"),
             archive_dir.as_os_str().to_os_string(),
             OsString::from("--allow-incomplete-archive"),
         ])
@@ -3497,7 +3501,7 @@ async fn resume_incomplete_runs_effect_boundary_limiter_for_missing_effect_recor
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
+            OsString::from("--resume-from"),
             archive_dir.as_os_str().to_os_string(),
             OsString::from("--allow-incomplete-archive"),
         ])
@@ -3568,7 +3572,7 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
+            OsString::from("--resume-from"),
             archive_dir.as_os_str().to_os_string(),
             OsString::from("--allow-incomplete-archive"),
         ])
@@ -3591,6 +3595,113 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
             .expect("outputs lock poisoned")
             .clone(),
         live_domain_outputs
+    );
+}
+
+/// FLOWIP-134i B13: a replay never executes an effect. A replay of an archive
+/// torn inside an effect stage stops at the end of that stage's recording,
+/// names the stage, the input and the run to resume, and journals the stop.
+#[tokio::test]
+async fn incomplete_replay_stops_at_the_end_of_its_recording() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_flow(
+            journal_base.clone(),
+            live_calls.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+        ))
+        .await
+        .expect("live flow should complete");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 3);
+
+    let archive_dir = latest_run_dir(&journal_base);
+    truncate_stage_before_effect_results(&archive_dir, "effectful");
+    mark_archive_incomplete(&archive_dir);
+
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let error = FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive_dir.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .run_async(build_flow(
+            journal_base.clone(),
+            replay_calls.clone(),
+            replay_outputs.clone(),
+        ))
+        .await
+        .expect_err("a replay stops at the end of its recording");
+
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "a replay never executes an effect"
+    );
+    assert!(replay_outputs
+        .lock()
+        .expect("outputs lock poisoned")
+        .is_empty());
+
+    let replay_run = latest_run_dir(&journal_base);
+    assert_ne!(replay_run, archive_dir);
+    let ended: Vec<_> = read_stage_error_events(&replay_run, "effectful")
+        .await
+        .into_iter()
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal))
+                if fatal.reason == obzenflow_core::event::StageFatalReason::RecordingEnded =>
+            {
+                Some(fatal)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended.len(), 1, "the replay journals one end of recording");
+    let input = ended[0]
+        .input_position
+        .expect("the stop names the input it reached");
+
+    match &error {
+        ApplicationError::ReplayRecordingEnded {
+            replayed,
+            stage_key,
+            input_position,
+            resume,
+        } => {
+            assert_eq!(replayed, &archive_dir);
+            assert_eq!(stage_key, "effectful");
+            assert_eq!(*input_position, Some(input));
+            assert_eq!(
+                resume,
+                &std::fs::canonicalize(&archive_dir).expect("the archive resolves"),
+                "the unclaimed archive is its own head"
+            );
+        }
+        other => panic!("expected the end-of-recording refusal, got: {other}"),
+    }
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&format!(
+            "stage 'effectful' reached the end of its recording at input {input}"
+        )),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "Resume {} to finish this run's work.",
+            std::fs::canonicalize(&archive_dir)
+                .expect("the archive resolves")
+                .display()
+        )),
+        "{rendered}"
     );
 }
 

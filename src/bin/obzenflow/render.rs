@@ -12,6 +12,8 @@ use std::io::Write;
 
 #[path = "render/context.rs"]
 mod context;
+#[path = "render/continuation.rs"]
+mod continuation;
 #[path = "render/event_counts.rs"]
 mod event_counts;
 #[path = "render/payload.rs"]
@@ -57,6 +59,26 @@ impl ObservationEnd {
     }
 }
 
+/// The admitted run the summary describes, with its place in its history
+/// read when the summary renders.
+pub(super) struct Observed<'a> {
+    pub run: &'a RunIdentity,
+    pub manifest: &'a RunManifest,
+    pub progress: &'a RunReadProgress,
+    pub lineage: Result<RunLineage, JournalReadError>,
+}
+
+impl<'a> Observed<'a> {
+    pub(super) fn of(tail: &'a RunTail) -> Self {
+        Self {
+            run: tail.identity(),
+            manifest: tail.manifest(),
+            progress: tail.progress(),
+            lineage: tail.lineage(),
+        }
+    }
+}
+
 pub(super) struct Renderer {
     jsonl: bool,
     full: bool,
@@ -74,6 +96,7 @@ pub(super) struct Renderer {
     event_types: BTreeMap<String, u64>,
     other_event_types: u64,
     event_counts: event_counts::EventCounts,
+    continuations: continuation::Continuations,
 }
 
 impl Renderer {
@@ -109,6 +132,7 @@ impl Renderer {
             event_types: BTreeMap::new(),
             other_event_types: 0,
             event_counts: event_counts::EventCounts::default(),
+            continuations: continuation::Continuations::default(),
         }
     }
 
@@ -176,6 +200,7 @@ impl Renderer {
         let journal = format!("{stage}/{}", journal_label(record.journal.kind));
         self.records += 1;
         *self.journals.entry(journal.clone()).or_default() += 1;
+        self.continuations.record(&record);
         if !self.jsonl {
             self.context.register_supervisor(&record)?;
         }

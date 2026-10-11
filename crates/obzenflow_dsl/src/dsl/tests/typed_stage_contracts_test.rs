@@ -21,6 +21,12 @@ mod tests {
         TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
         TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
+    use obzenflow_runtime::stages::source::{
+        AsyncFiniteContinuation, AsyncFiniteSourceConnector, AsyncInfiniteContinuation,
+        AsyncInfiniteSourceConnector, FiniteContinuation, FiniteSourceConnector,
+        InfiniteContinuation, InfiniteSourceConnector, Reattach, Refuse, SourceContinuation,
+        SourceReaderInitContext,
+    };
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
     use serde::{Deserialize, Serialize};
@@ -165,6 +171,72 @@ mod tests {
 
         async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(vec![])
+        }
+    }
+
+    /// One connector per family, carrying the continuation `C` (FLOWIP-134i B8).
+    struct DeclaringConnector<C>(std::marker::PhantomData<fn() -> C>);
+
+    impl<C> DeclaringConnector<C> {
+        fn new() -> Self {
+            Self(std::marker::PhantomData)
+        }
+    }
+
+    impl<C> SourceTyping for DeclaringConnector<C> {
+        type Output = InputEvent;
+    }
+
+    impl<C: FiniteContinuation<SyncExactSource, Output = InputEvent>> FiniteSourceConnector
+        for DeclaringConnector<C>
+    {
+        type Output = InputEvent;
+        type Reader = SyncExactSource;
+        type Continuation = C;
+
+        fn open(&self, _: SourceReaderInitContext) -> Result<SyncExactSource, SourceError> {
+            Ok(SyncExactSource)
+        }
+    }
+
+    #[async_trait]
+    impl<C: AsyncFiniteContinuation<AsyncExactSource, Output = InputEvent>>
+        AsyncFiniteSourceConnector for DeclaringConnector<C>
+    {
+        type Output = InputEvent;
+        type Reader = AsyncExactSource;
+        type Continuation = C;
+
+        async fn open(&self, _: SourceReaderInitContext) -> Result<AsyncExactSource, SourceError> {
+            Ok(AsyncExactSource)
+        }
+    }
+
+    impl<C: InfiniteContinuation<InfiniteExactSource, Output = InputEvent>> InfiniteSourceConnector
+        for DeclaringConnector<C>
+    {
+        type Output = InputEvent;
+        type Reader = InfiniteExactSource;
+        type Continuation = C;
+
+        fn open(&self, _: SourceReaderInitContext) -> Result<InfiniteExactSource, SourceError> {
+            Ok(InfiniteExactSource)
+        }
+    }
+
+    #[async_trait]
+    impl<C: AsyncInfiniteContinuation<AsyncInfiniteExactSource, Output = InputEvent>>
+        AsyncInfiniteSourceConnector for DeclaringConnector<C>
+    {
+        type Output = InputEvent;
+        type Reader = AsyncInfiniteExactSource;
+        type Continuation = C;
+
+        async fn open(
+            &self,
+            _: SourceReaderInitContext,
+        ) -> Result<AsyncInfiniteExactSource, SourceError> {
+            Ok(AsyncInfiniteExactSource)
         }
     }
 
@@ -535,6 +607,68 @@ mod tests {
         expected: Vec<TypeHint>,
     ) {
         assert_eq!(metadata.output_contract, expected);
+    }
+
+    /// FLOWIP-134i B8: admission captures each family's continuation, which
+    /// resume admission reads from the descriptor.
+    #[test]
+    fn source_admission_captures_each_family_continuation() {
+        let direct = [
+            crate::source!(name: "source", InputEvent => SyncExactSource),
+            crate::async_source!(name: "async_source", InputEvent => AsyncExactSource),
+            crate::infinite_source!(name: "infinite", InputEvent => InfiniteExactSource),
+            crate::async_infinite_source!(
+                name: "async_infinite",
+                InputEvent => AsyncInfiniteExactSource
+            ),
+        ];
+        assert_eq!(
+            direct.map(|descriptor| descriptor.source_continuation()),
+            [
+                Some(SourceContinuation::Refuse),
+                Some(SourceContinuation::Refuse),
+                Some(SourceContinuation::Reattach),
+                Some(SourceContinuation::Reattach),
+            ],
+            "direct handlers lower to their family default"
+        );
+
+        let finite_refuse = DeclaringConnector::<Refuse>::new();
+        let async_finite_refuse = DeclaringConnector::<Refuse>::new();
+        let infinite_refuse = DeclaringConnector::<Refuse>::new();
+        let infinite_reattach = DeclaringConnector::<Reattach>::new();
+        let async_infinite_refuse = DeclaringConnector::<Refuse>::new();
+        let async_infinite_reattach = DeclaringConnector::<Reattach>::new();
+        let connectors = [
+            crate::source!(name: "finite_refuse", InputEvent => finite_refuse),
+            crate::async_source!(name: "async_finite_refuse", InputEvent => async_finite_refuse),
+            crate::infinite_source!(name: "infinite_refuse", InputEvent => infinite_refuse),
+            crate::infinite_source!(name: "infinite_reattach", InputEvent => infinite_reattach),
+            crate::async_infinite_source!(
+                name: "async_infinite_refuse",
+                InputEvent => async_infinite_refuse
+            ),
+            crate::async_infinite_source!(
+                name: "async_infinite_reattach",
+                InputEvent => async_infinite_reattach
+            ),
+        ];
+        assert_eq!(
+            connectors.map(|descriptor| descriptor.source_continuation()),
+            [
+                Some(SourceContinuation::Refuse),
+                Some(SourceContinuation::Refuse),
+                Some(SourceContinuation::Refuse),
+                Some(SourceContinuation::Reattach),
+                Some(SourceContinuation::Refuse),
+                Some(SourceContinuation::Reattach),
+            ],
+            "connectors carry their declared continuation"
+        );
+
+        let transform =
+            crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform);
+        assert_eq!(transform.source_continuation(), None);
     }
 
     #[test]

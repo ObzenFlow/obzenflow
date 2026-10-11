@@ -127,6 +127,9 @@ pub enum ReplayDisposition {
     ReAdmit,
     /// Runtime-computed: the re-running stage regenerates it.
     ReAuthor,
+    /// Source-local evidence the `ReplayDriver` copies into the new run's
+    /// source journal without delivery or data credit (FLOWIP-134i B11).
+    Preserve,
 }
 
 impl ChainEvent {

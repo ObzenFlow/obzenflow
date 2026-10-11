@@ -132,6 +132,12 @@ mod tests {
             None
         }
 
+        fn source_continuation(
+            &self,
+        ) -> Option<obzenflow_runtime::stages::source::SourceContinuation> {
+            None
+        }
+
         fn effect_declarations(&self) -> Vec<EffectDeclaration> {
             vec![EffectDeclaration::of::<FixtureEffect>()]
         }

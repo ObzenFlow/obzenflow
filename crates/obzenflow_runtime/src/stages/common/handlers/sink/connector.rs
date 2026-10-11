@@ -33,6 +33,12 @@
 //! must not implement an internal retry loop or background commit task. Destination
 //! redelivery classification describes semantics only; the archive gate remains a
 //! runtime decision.
+//!
+//! Connector and writer methods run on the runtime's async workers and must not
+//! block. Do blocking destination I/O, such as file or console writes, through
+//! `tokio::task::spawn_blocking`: a call blocked on a worker stalls every task
+//! scheduled there and cannot be aborted by a stop. The runtime releases each
+//! writer on the blocking pool, so `Drop` may block (FLOWIP-134i B21).
 
 use super::error::{SinkOperationResult, SinkWriteFailure, SinkWriteResult};
 use super::typed::{SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriter};

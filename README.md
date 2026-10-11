@@ -57,7 +57,7 @@ fn build_flow() -> FlowDefinition {
     })
 }
 
-FlowApplication::run(build_flow()).await?;
+FlowApplication::builder().run_blocking(build_flow())?;
 ```
 
 No features are enabled by default. The [examples catalog](https://github.com/obzenflow/obzenflow/blob/main/examples/README.md) lists runnable flows and the feature flags and configuration they need, including HTTP services, AI inference, PostgreSQL, and metrics.

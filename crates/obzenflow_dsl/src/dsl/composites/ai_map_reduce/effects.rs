@@ -103,8 +103,12 @@ fn fatal_from_effect(error: EffectError) -> HandlerError {
             StageFatalReason::JournalFailure,
             message,
         ),
+        error @ EffectError::RecordingEnded { .. } => fatal(
+            StageFatalCode::Replay,
+            StageFatalReason::RecordingEnded,
+            error.to_string(),
+        ),
         error @ (EffectError::MissingRecordedEffect { .. }
-        | EffectError::EffectInDoubt { .. }
         | EffectError::DuplicateRecordedEffect { .. }
         | EffectError::DescriptorMismatch { .. }
         | EffectError::IncompleteOutcomeGroup { .. }) => fatal(
@@ -412,7 +416,7 @@ where
 mod tests {
     use super::*;
     use obzenflow_core::ai::CanonicalizationComponent;
-    use obzenflow_runtime::effects::{EffectAttemptOrdinal, EffectCursor};
+    use obzenflow_runtime::effects::EffectCursor;
 
     #[test]
     fn canonicalization_components_map_one_to_one_into_domain_failures() {
@@ -443,17 +447,16 @@ mod tests {
     }
 
     #[test]
-    fn strict_in_doubt_history_maps_to_typed_replay_fatal() {
-        let error = EffectError::EffectInDoubt {
+    fn replay_recording_end_maps_to_typed_replay_fatal() {
+        let error = EffectError::RecordingEnded {
             cursor: EffectCursor::new("flow", "stage", 1_u64, 0_u32),
-            highest_started_attempt: EffectAttemptOrdinal::new(1),
         };
 
         let fatal = fatal_from_effect(error)
             .as_fatal()
-            .expect("in-doubt history is stage-fatal")
+            .expect("the end of a recording is stage-fatal")
             .clone();
         assert_eq!(fatal.code, StageFatalCode::Replay);
-        assert_eq!(fatal.reason, StageFatalReason::ReplayDivergence);
+        assert_eq!(fatal.reason, StageFatalReason::RecordingEnded);
     }
 }

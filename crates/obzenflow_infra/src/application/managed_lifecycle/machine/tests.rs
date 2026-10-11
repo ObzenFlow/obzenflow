@@ -73,7 +73,22 @@ async fn host_error_precedence_survives_cleanup_and_duplicate_failure_observatio
         (Event::Standalone, "RunningStandalone"),
         (Event::StandaloneReturned, "StoppingMetrics"),
     ];
-    for trace in [hosted, standalone] {
+    // A signal settles a standalone run as it settles an active one.
+    let standalone_stopped = vec![
+        (Event::Standalone, "RunningStandalone"),
+        (
+            Event::Stop(
+                StopReason::Graceful,
+                StopInput {
+                    terminal: false,
+                    admitted: None,
+                },
+            ),
+            "SettlingFlow",
+        ),
+        (Event::PublicationObserved, "StoppingMetrics"),
+    ];
+    for trace in [hosted, standalone, standalone_stopped] {
         for origins in [
             [FailureOrigin::Application, FailureOrigin::Host],
             [FailureOrigin::Host, FailureOrigin::Application],

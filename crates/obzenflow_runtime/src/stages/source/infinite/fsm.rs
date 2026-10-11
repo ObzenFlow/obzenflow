@@ -14,7 +14,7 @@ use crate::stages::common::stage_handle::{
 
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::Count;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
@@ -32,7 +32,8 @@ use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
-use crate::stages::source::strategies::{CompletionContext, CompletionGate};
+use crate::stages::source::strategies::{CompletionCauseSlot, CompletionContext, CompletionGate};
+use crate::stages::source::supervision::SourceExit;
 
 // ============================================================================
 // FSM States
@@ -191,6 +192,16 @@ impl<H> InfiniteSourceState<H> {
                 Self::Cancelling(cause)
             }
             _ => Self::Failing(cause),
+        }
+    }
+
+    /// The exit whose transition schedules cleanup (FLOWIP-134i B2).
+    pub(crate) fn exit(&self) -> Option<SourceExit> {
+        match self {
+            Self::Finalising => Some(SourceExit::Finalising),
+            Self::Failing(_) => Some(SourceExit::Failing),
+            Self::Cancelling(_) => Some(SourceExit::Cancelling),
+            _ => None,
         }
     }
 
@@ -373,18 +384,6 @@ pub enum InfiniteSourceAction<H> {
 // FSM Context
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InfiniteSourceCompletionReason {
-    ExternalDrain,
-    /// The live handler finished or its boundary was rejected.
-    LiveEof,
-    /// Replay exhaustion reproduces the archive's recorded kind (FLOWIP-095k);
-    /// `None`: the archive committed no EOF.
-    ReplayExhausted {
-        recorded_kind: Option<EofKind>,
-    },
-}
-
 /// Context for infinite source handlers - contains everything actions need
 pub struct InfiniteSourceResources<H> {
     /// This source's stage ID
@@ -419,8 +418,8 @@ pub struct InfiniteSourceResources<H> {
     /// Writer ID for this source (initialized during setup)
     pub writer_id: Option<WriterId>,
 
-    /// Why the source is shutting down (affects EOF semantics).
-    pub completion_reason: InfiniteSourceCompletionReason,
+    /// Why the source completes (134i B5); the first cause recorded wins.
+    pub(crate) completion: CompletionCauseSlot,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -484,7 +483,7 @@ impl<H> InfiniteSourceResources<H> {
             runtime_execution: init.runtime_execution,
             bus: init.bus,
             writer_id: None,
-            completion_reason: InfiniteSourceCompletionReason::ExternalDrain,
+            completion: CompletionCauseSlot::default(),
             instrumentation: init.instrumentation,
             control_strategy: init.control_strategy,
             control_context: CompletionContext::new(),
@@ -608,32 +607,10 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
                     )
                 })?;
 
-                // FLOWIP-095k: replay exhaustion reproduces the archive's
-                // recorded kind and never consults the live control strategy.
-                let eof_kind = match ctx.completion_reason {
-                    InfiniteSourceCompletionReason::ExternalDrain => {
-                        let _ = ctx
-                            .control_strategy
-                            .on_begin_drain(&mut ctx.control_context);
-                        EofKind::Poison
-                    }
-                    InfiniteSourceCompletionReason::LiveEof => {
-                        let decision = ctx
-                            .control_strategy
-                            .on_natural_completion(&mut ctx.control_context);
-                        if matches!(
-                            decision,
-                            crate::stages::source::strategies::CompletionDecision::PoisonEof
-                        ) {
-                            EofKind::Poison
-                        } else {
-                            EofKind::Natural
-                        }
-                    }
-                    InfiniteSourceCompletionReason::ReplayExhausted { recorded_kind } => {
-                        recorded_kind.unwrap_or(EofKind::Truncated)
-                    }
-                };
+                // An operator stop is `Truncated`, never `Poison` (134i B5).
+                let cause = ctx.completion.cause();
+                let eof_kind =
+                    cause.eof_kind(ctx.control_strategy.as_ref(), &mut ctx.control_context);
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.capture_accounting();
@@ -717,7 +694,7 @@ impl<H: Send + Sync + 'static> InfiniteSourceAction<H> {
                     stage_name = %ctx.stage_name,
                     emitted,
                     eof_kind = ?eof_kind,
-                    reason = ?ctx.completion_reason,
+                    cause = ?cause,
                     "Infinite source sent EOF and production_finalized"
                 );
                 Ok(())

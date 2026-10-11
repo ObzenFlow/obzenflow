@@ -122,6 +122,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
             data_journal: self.resources.data_journal.clone(),
             flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
+            continuation: self.config.continuation,
             idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(10),
@@ -133,6 +134,8 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
             source_boundary: self.config.source_boundary,
             pending_boundary_begin_drain: false,
             pending_failure: None,
+            reader_acquired: false,
+            exit: None,
         };
 
         // Clone what we need for the task

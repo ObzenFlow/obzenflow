@@ -205,13 +205,19 @@
 //! [`AsyncInfiniteSourceConnector`]. Each returns its corresponding typed handler
 //! and receives only [`SourceReaderInitContext`], never runtime controls.
 //!
+//! Each connector also declares how a resumed run continues its interrupted
+//! input. [`Refuse`] refuses the resume; [`Seek`] continues a
+//! [`PositionedFiniteReader`] strictly after its last committed record, as
+//! [`CsvSource`] and [`YamlSource`] do; [`Reattach`] reattaches an infinite
+//! input live.
+//!
 //! The default HTTP client requires the `http-pull` feature.
 //! Applications supplying their own [`HttpClient`] do not require that feature.
 
 /// CSV file source, decoder contract, and string-preserving row support.
 pub use obzenflow_adapters::sources::{
-    CsvDecodeError, CsvDecoder, CsvReader, CsvRecord, CsvRow, CsvRowDecoder, CsvSource,
-    CsvSourceBuilder,
+    CsvDecodeError, CsvDecoder, CsvPosition, CsvReader, CsvRecord, CsvRow, CsvRowDecoder,
+    CsvSource, CsvSourceBuilder,
 };
 
 /// In-process sources owning values or a channel receiver.
@@ -219,7 +225,7 @@ pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
 
 /// Finite YAML source and its application decoder contract.
 pub use obzenflow_adapters::sources::{
-    YamlDecodeError, YamlDecoder, YamlReader, YamlRecord, YamlSelection, YamlSource,
+    YamlDecodeError, YamlDecoder, YamlPosition, YamlReader, YamlRecord, YamlSelection, YamlSource,
     YamlSourceBuilder,
 };
 
@@ -262,4 +268,11 @@ pub use obzenflow_core::event::{
 pub use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     InfiniteSourceConnector, SourceReaderInitContext,
+};
+
+/// Connector continuation declarations and the positioned reader contract
+/// (FLOWIP-134i).
+pub use obzenflow_runtime::stages::source::{
+    PositionedFiniteReader, Reattach, Refuse, Seek, SeekableSource, SourceIdentityError,
+    SourceInputIdentity, SourcePosition, SourceRecord,
 };

@@ -7,9 +7,9 @@
 //! Admission selects an existing typed adapter. Its reader stays cold until the
 //! supervisor acquires it; this module has no polling or envelope-lowering path.
 
+use super::continuation::{AsyncReaderOpener, SourceContinuation, SyncReaderOpener};
 use super::SourceError;
 use crate::stages::source::SourceReaderInitContext;
-use futures::future::BoxFuture;
 use obzenflow_core::OneFactStageOutput;
 
 pub(super) mod sealed {
@@ -26,6 +26,8 @@ pub trait AdmitSource<Family: ?Sized, Kind>:
 {
     type Output: OneFactStageOutput + Send + Sync + 'static;
     type Handler: Send + Sync + 'static;
+    /// The continuation captured with the source, before any open (FLOWIP-134i B8).
+    const CONTINUATION: SourceContinuation;
 
     fn prepare(self) -> Self::Handler;
 }
@@ -35,14 +37,8 @@ pub enum DirectSource {}
 #[doc(hidden)]
 pub enum ConnectorSource {}
 
-type SyncOpener<H> =
-    Box<dyn FnOnce(SourceReaderInitContext) -> Result<H, SourceError> + Send + Sync>;
-type AsyncOpener<H> = Box<
-    dyn FnOnce(SourceReaderInitContext) -> BoxFuture<'static, Result<H, SourceError>> + Send + Sync,
->;
-
-pub(super) type SyncSourceReader<H> = SourceReader<H, SyncOpener<H>>;
-pub(super) type AsyncSourceReader<H> = SourceReader<H, AsyncOpener<H>>;
+pub(super) type SyncSourceReader<H> = SourceReader<H, SyncReaderOpener<H>>;
+pub(super) type AsyncSourceReader<H> = SourceReader<H, AsyncReaderOpener<H>>;
 
 /// Reader ownership shared by all typed adapters, independent of poll semantics.
 pub(super) struct SourceReader<H, F> {

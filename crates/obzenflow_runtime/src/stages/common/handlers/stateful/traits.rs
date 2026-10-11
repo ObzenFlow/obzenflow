@@ -531,7 +531,7 @@ where
             })?;
         }
         *state = draft;
-        if let Some(fatal) = fx.binding_fault_fatal() {
+        if let Some(fatal) = fx.authoring_halt_fatal() {
             return Err(HandlerError::Fatal(fatal));
         }
         if decide_result.as_ref().is_err_and(HandlerError::is_fatal) {

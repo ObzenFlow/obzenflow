@@ -1878,7 +1878,7 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         | EffectError::Serialization(_)
         | EffectError::Journal(_)
         | EffectError::MissingRecordedEffect { .. }
-        | EffectError::EffectInDoubt { .. }
+        | EffectError::RecordingEnded { .. }
         | EffectError::DuplicateRecordedEffect { .. }
         | EffectError::DescriptorMismatch { .. }
         | EffectError::BoundaryRejected { .. }

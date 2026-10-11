@@ -33,6 +33,12 @@ name = "obzenflow_cli_test"
 path = "tests/obzenflow_cli_test.rs"
 required-features = ["cli"]
 
+# FLOWIP-134i B4: re-executes itself as each run and drives the CLI binary.
+[[test]]
+name = "durable_execution_contract_test"
+path = "tests/durable_execution_contract_test.rs"
+required-features = ["cli"]
+
 [workspace]
 resolver = "2"
 members = ["crates/*", "xtask"]

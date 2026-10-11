@@ -20,8 +20,9 @@ use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::sink::SinkWriteFailure;
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
-    InfiniteSourceConnector, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    InfiniteSourceConnector, Reattach, Refuse, SourceReaderInitContext,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -708,6 +709,7 @@ struct SyncFiniteConnector(Arc<Counters>);
 impl FiniteSourceConnector for SyncFiniteConnector {
     type Output = SourceFact;
     type Reader = SyncFinite;
+    type Continuation = Refuse;
     fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         assert_eq!(context.flow_name, "typed_source_journal_parity");
         assert!(!context.stage_name.is_empty());
@@ -728,6 +730,7 @@ struct AsyncFiniteConnector(Arc<Counters>);
 impl AsyncFiniteSourceConnector for AsyncFiniteConnector {
     type Output = SourceFact;
     type Reader = AsyncFinite;
+    type Continuation = Refuse;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         assert_eq!(context.flow_name, "typed_source_journal_parity");
         assert!(!context.stage_name.is_empty());
@@ -747,6 +750,7 @@ struct SyncInfiniteConnector(Arc<Counters>);
 impl InfiniteSourceConnector for SyncInfiniteConnector {
     type Output = SourceFact;
     type Reader = SyncInfinite;
+    type Continuation = Reattach;
     fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         assert_eq!(context.flow_name, "typed_source_journal_parity");
         assert!(!context.stage_name.is_empty());
@@ -767,6 +771,7 @@ struct AsyncInfiniteConnector(Arc<Counters>);
 impl AsyncInfiniteSourceConnector for AsyncInfiniteConnector {
     type Output = SourceFact;
     type Reader = AsyncInfinite;
+    type Continuation = Reattach;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         assert_eq!(context.flow_name, "typed_source_journal_parity");
         assert!(!context.stage_name.is_empty());

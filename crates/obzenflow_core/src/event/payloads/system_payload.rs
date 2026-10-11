@@ -213,6 +213,12 @@ pub enum PipelineLifecycleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         stage_count: Option<usize>,
     },
+    /// Every stage of a resumed run crossed its catch-up boundary or finished
+    /// its recorded input, so the run alone is resume authority (FLOWIP-134i
+    /// B6). Evidence only; nothing waits on it.
+    ReconstructionCompleted {
+        generation: u64,
+    },
     /// Runtime admitted this intent; publication may follow admission later.
     StopAdmitted {
         admission: PipelineStopAdmission,
@@ -263,6 +269,7 @@ impl PipelineLifecycleEvent {
             Self::Starting => supervisor::START_ACCEPTED,
             Self::ReadyForRun { .. } => supervisor::READY_FOR_RUN,
             Self::Running { .. } => supervisor::SOURCES_STARTED,
+            Self::ReconstructionCompleted { .. } => supervisor::RECONSTRUCTION_COMPLETED,
             Self::StopAdmitted { admission } => match admission {
                 PipelineStopAdmission::Graceful { .. } => supervisor::GRACEFUL_STOP_ACCEPTED,
                 PipelineStopAdmission::Cancel { .. } => supervisor::CANCEL_ACCEPTED,

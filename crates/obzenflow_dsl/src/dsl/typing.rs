@@ -31,7 +31,7 @@ use obzenflow_runtime::stages::common::handlers::source::traits::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,
 };
-use obzenflow_runtime::stages::common::handlers::source::SourceError;
+use obzenflow_runtime::stages::common::handlers::source::{SourceContinuation, SourceError};
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkInputOrder,
     SinkWriteFailure, StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
@@ -645,6 +645,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
         handler: handler.prepare(),
+        continuation: H::CONTINUATION,
         source_policies,
         ingress_policy,
         observers,
@@ -682,7 +683,7 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, handler.prepare());
+    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, handler.prepare(), H::CONTINUATION);
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -722,6 +723,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
         handler: handler.prepare(),
+        continuation: H::CONTINUATION,
         source_policies,
         ingress_policy,
         observers,
@@ -759,7 +761,8 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, handler.prepare());
+    let mut descriptor =
+        AsyncInfiniteSourceDescriptor::new(name, handler.prepare(), H::CONTINUATION);
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -791,6 +794,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
         handler: PlaceholderFiniteSource::<PrimaryOutput>::new(message),
+        continuation: SourceContinuation::Refuse,
         source_policies,
         ingress_policy,
         observers,
@@ -820,6 +824,7 @@ where
     let mut descriptor = AsyncFiniteSourceDescriptor::new(
         name,
         PlaceholderAsyncSource::<PrimaryOutput>::new(message),
+        SourceContinuation::Refuse,
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
@@ -849,6 +854,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
         handler: PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
+        continuation: SourceContinuation::Reattach,
         source_policies,
         ingress_policy,
         observers,
@@ -878,6 +884,7 @@ where
     let mut descriptor = AsyncInfiniteSourceDescriptor::new(
         name,
         PlaceholderAsyncSource::<PrimaryOutput>::new(message),
+        SourceContinuation::Reattach,
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
@@ -1791,6 +1798,10 @@ impl StageDescriptor for TypedStageDescriptor {
 
     fn sink_description(&self) -> Option<&SinkDescription> {
         self.inner.sink_description()
+    }
+
+    fn source_continuation(&self) -> Option<SourceContinuation> {
+        self.inner.source_continuation()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
@@ -2927,6 +2938,10 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn sink_description(&self) -> Option<&SinkDescription> {
         self.inner.sink_description()
+    }
+
+    fn source_continuation(&self) -> Option<SourceContinuation> {
+        self.inner.source_continuation()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

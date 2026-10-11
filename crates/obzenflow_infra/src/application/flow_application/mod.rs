@@ -124,7 +124,6 @@ struct HostLifecycle {
 #[cfg(all(test, feature = "warp-server"))]
 mod tests;
 
-#[cfg(feature = "warp-server")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ShutdownSignal {
     Sigint,
@@ -385,17 +384,24 @@ impl FlowApplicationBuilder {
     ///
     /// This builds the tokio runtime, initializes observability, and runs the flow.
     /// Use this when you have a plain `fn main()` and want FlowApplication to
-    /// manage the entire runtime lifecycle.
+    /// manage the entire runtime lifecycle, including a bounded exit: blocking
+    /// work still running after the flow ends, such as a synchronous source
+    /// call held on a FIFO, is abandoned once `runtime.shutdown_timeout` passes.
     pub fn run_blocking(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
         let mut params = self.into_launch_params();
         let prepared = params.prepare()?;
+        let shutdown_timeout = prepared.config.runtime.shutdown_timeout;
         // Tracing is installed before runtime construction and task creation.
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| ApplicationError::RuntimeCreationFailed(e.to_string()))?;
 
-        runtime.block_on(FlowApplication::launch_prepared(flow, params, prepared))
+        let result = runtime.block_on(FlowApplication::launch_prepared(flow, params, prepared));
+        // Blocking work cannot be cancelled, so the runtime owner bounds the
+        // wait; healthy work finishes long before it (FLOWIP-134i B20).
+        runtime.shutdown_timeout(shutdown_timeout);
+        result
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
@@ -404,6 +410,11 @@ impl FlowApplicationBuilder {
     /// and want FlowApplication to handle startup and observability. Console
     /// observes framework tasks created after setup; it cannot reconstruct the
     /// creation of tasks already running in the caller's runtime.
+    ///
+    /// Your runtime owns process exit. Dropping it waits for blocking work that
+    /// never returns, such as a synchronous source call held on a FIFO; shut it
+    /// down with [`tokio::runtime::Runtime::shutdown_timeout`], or use
+    /// [`FlowApplicationBuilder::run_blocking`], which does.
     pub async fn run_async(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
         FlowApplication::launch(flow, self.into_launch_params()).await
     }
@@ -499,6 +510,11 @@ impl FlowApplication {
     /// # Returns
     /// * `Ok(())` if flow completes successfully
     /// * `Err(ApplicationError)` if flow fails or cannot start
+    ///
+    /// The flow runs in your runtime, which owns process exit. Dropping it waits
+    /// for blocking work that never returns, such as a synchronous source call
+    /// held on a FIFO. [`FlowApplicationBuilder::run_blocking`] owns the runtime
+    /// and bounds that wait by `runtime.shutdown_timeout`.
     pub async fn run(flow: FlowDefinition) -> Result<(), ApplicationError> {
         Self::run_with_web_endpoints(flow, Vec::new()).await
     }
@@ -658,16 +674,52 @@ impl FlowApplication {
                         obzenflow_runtime::bootstrap::StartupMode::Manual;
                 }
                 if let Some(replay) = bootstrap_config.replay.clone() {
-                    let archive = crate::journal::disk::replay_archive::DiskReplayArchive::open(
-                        replay.archive_path,
-                        replay.allow_incomplete_archive,
-                    )
-                    .await
-                    .map_err(|e| {
-                        ApplicationError::InvalidConfiguration(format!(
-                            "Failed to open replay archive: {e}"
-                        ))
+                    use crate::journal::disk::replay_archive::DiskReplayArchive;
+                    use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
+                    // A resume continues the head of a history, merging a torn
+                    // run with its ancestors (FLOWIP-134i B6, B7, B13); a
+                    // replay reproduces exactly one run.
+                    let archive = match replay.verb {
+                        obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
+                            DiskReplayArchive::open_for_resume(
+                                replay.archive_path.clone(),
+                                replay.allow_incomplete_archive,
+                            )
+                            .await
+                        }
+                        obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
+                            DiskReplayArchive::open(
+                                replay.archive_path.clone(),
+                                replay.allow_incomplete_archive,
+                            )
+                            .await
+                        }
+                    }
+                    .map_err(|e| match e {
+                        ReplayError::AncestorMissing { .. }
+                        | ReplayError::AncestorUnreadable { .. }
+                        | ReplayError::AncestorDisagrees { .. }
+                        | ReplayError::AlreadyContinued { .. }
+                        | ReplayError::StoppedBeforeTakeover { .. }
+                        | ReplayError::ContinuedByAnother { .. }
+                        | ReplayError::StillRunning { .. }
+                        | ReplayError::LocationNotWritable { .. }
+                        | ReplayError::ReplayedRunMissing { .. } => {
+                            ApplicationError::ResumeRefused(e.to_string())
+                        }
+                        other => ApplicationError::InvalidConfiguration(format!(
+                            "Failed to open replay archive: {other}"
+                        )),
                     })?;
+                    if std::fs::canonicalize(&replay.archive_path)
+                        .is_ok_and(|requested| requested != archive.archive_path())
+                    {
+                        println!(
+                            "Resuming {}, the run that {} replays.",
+                            archive.archive_path().display(),
+                            replay.archive_path.display()
+                        );
+                    }
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
                 bootstrap_config
@@ -714,12 +766,14 @@ impl FlowApplication {
                     // FLOWIP-120u F2: the failure carrier holds substrate state; None
                     // means the build failed before substrate selection, so no run
                     // directory exists to point at.
-                    break 'run (
-                        Err(ApplicationError::FlowBuildFailed(failure.error.to_string())),
-                        None,
-                        failure.run,
-                        false,
-                    );
+                    let error = match &failure.error {
+                        obzenflow_dsl::FlowBuildError::ResumeRefusedSources { .. }
+                        | obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
+                            ApplicationError::ResumeRefused(failure.error.to_string())
+                        }
+                        other => ApplicationError::FlowBuildFailed(other.to_string()),
+                    };
+                    break 'run (Err(error), None, failure.run, false);
                 }
             };
 
@@ -1007,6 +1061,17 @@ impl FlowApplication {
                 Ok(())
             }
             (Err(err), flow_name, run_state, _) => {
+                let err = match (&run_mode, run_state.as_ref().and_then(|s| s.locator())) {
+                    (super::run_mode::RunMode::Replay(ctx), Some(locator)) => {
+                        super::replay_stop::refine_replay_failure(
+                            err,
+                            &ctx.archive_path,
+                            locator.path(),
+                        )
+                        .await
+                    }
+                    _ => err,
+                };
                 if let Some(presentation) = &presentation {
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(RunPresentationOutcome::Failed {

@@ -150,6 +150,12 @@ impl JournalPayload for ChainPayload {
                 return Err(descriptor_mismatch());
             }
         }
+        // Only a source fact carries the position after itself (FLOWIP-134i B11).
+        if provenance.source_progress.is_some() && !matches!(self, ChainPayload::Fact(_)) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "source progress rides only on source facts",
+            ));
+        }
         if self.kind() != provenance.event_kind
             || self
                 .framework_schema_version()

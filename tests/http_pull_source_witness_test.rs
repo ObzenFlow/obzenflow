@@ -13,7 +13,8 @@ use obzenflow_adapters::sources::{
     DecodeError, DecodeResult, HttpPullConfig, HttpPullSource, HttpResponse, PullDecoder,
 };
 use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourcePollContinuation, SourcePollErrorKind, StageLifecycleFact,
+    ExecutionPayload, SourceCleanupPhase, SourceCleanupTrigger, SourceOpenIntent,
+    SourcePollContinuation, SourcePollErrorKind, StageLifecycleFact,
 };
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord, SourceDiagnosticReason};
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, RequestSpec};
@@ -144,6 +145,29 @@ fn items(rows: &[JournalRecord<ChainPayload>]) -> usize {
     rows.iter().filter(|row| row.consumes_data_credit()).count()
 }
 
+#[derive(Debug, PartialEq)]
+enum ReaderEvent {
+    Acquired(SourceOpenIntent),
+    Item,
+    Released(SourceCleanupTrigger, SourceCleanupPhase),
+}
+
+/// The source's reader lifecycle and records, in journal order.
+fn reader_lifecycle(rows: &[JournalRecord<ChainPayload>]) -> Vec<ReaderEvent> {
+    rows.iter()
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceReaderAcquired(acquired)) => {
+                Some(ReaderEvent::Acquired(acquired.intent))
+            }
+            ChainPayload::Execution(ExecutionPayload::SourceCleanupSucceeded(released)) => {
+                Some(ReaderEvent::Released(released.trigger, released.phase))
+            }
+            _ if row.consumes_data_credit() => Some(ReaderEvent::Item),
+            _ => None,
+        })
+        .collect()
+}
+
 fn failed_cause(rows: &[JournalRecord<ChainPayload>]) -> Option<Option<EventId>> {
     rows.iter().find_map(|row| match &row.payload {
         ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Failed {
@@ -175,6 +199,17 @@ async fn fatal_decode_after_a_valid_page_fails_without_eof_and_replays_cold() {
     let data = read_pull_journal(&live, "data_journal_file").await;
     let errors = read_pull_journal(&live, "error_journal_file").await;
     assert_eq!(items(&data), 2, "the valid page stays committed");
+    // FLOWIP-134i B2 (AC12): the connector's reader is acquired before its
+    // first record and released once when the source fails.
+    assert_eq!(
+        reader_lifecycle(&data),
+        [
+            ReaderEvent::Acquired(SourceOpenIntent::Start),
+            ReaderEvent::Item,
+            ReaderEvent::Item,
+            ReaderEvent::Released(SourceCleanupTrigger::Failed, SourceCleanupPhase::Live),
+        ]
+    );
     assert!(
         !data.iter().any(|row| row.is_eof()),
         "an abandoned scan writes no EOF"
@@ -216,6 +251,11 @@ async fn fatal_decode_after_a_valid_page_fails_without_eof_and_replays_cold() {
     let replay_data = read_pull_journal(&replay, "data_journal_file").await;
     let replay_errors = read_pull_journal(&replay, "error_journal_file").await;
     assert_eq!(items(&replay_data), 2);
+    assert_eq!(
+        reader_lifecycle(&replay_data),
+        [ReaderEvent::Item, ReaderEvent::Item],
+        "a replay acquires no reader"
+    );
     assert!(!replay_errors.iter().any(|row| matches!(
         row.payload,
         ChainPayload::Execution(ExecutionPayload::SourcePollError(_))

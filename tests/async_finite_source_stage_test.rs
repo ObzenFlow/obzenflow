@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourceCleanupPhase, SourceCleanupTrigger, SourceOpenIntent,
+    SourcePollErrorKind, SourcePollKind,
+};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -308,23 +311,37 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
         .expect("sink events lock")
         .iter()
         .all(|event| !event.consumes_data_credit()));
-    let cleanup_failures = source_journal
+    let lifecycle = source_journal
         .read_causally_ordered()
         .await?
         .into_iter()
         .filter_map(|envelope| match envelope.into_parts().1 {
-            ChainPayload::Execution(ExecutionPayload::SourceCleanupFailed {
-                stage_name,
-                error,
-                ..
-            }) => Some((stage_name, error)),
+            ChainPayload::Execution(
+                payload @ (ExecutionPayload::SourceReaderAcquired(_)
+                | ExecutionPayload::SourceCleanupSucceeded(_)
+                | ExecutionPayload::SourceCleanupFailed(_)),
+            ) => Some(payload),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(cleanup_failures.len(), 1);
-    assert_eq!(cleanup_failures[0].0, "source");
-    assert_eq!(cleanup_failures[0].1, "source error");
-    assert!(!serde_json::to_string(&cleanup_failures)?.contains("SECRET_SENTINEL"));
+    // FLOWIP-134i B2: one acquisition, then one release attempt that failed
+    // after genuine exhaustion, with no primary failure to name.
+    let [ExecutionPayload::SourceReaderAcquired(acquired), ExecutionPayload::SourceCleanupFailed(failure)] =
+        lifecycle.as_slice()
+    else {
+        panic!("expected an acquisition and then one failed release: {lifecycle:?}");
+    };
+    assert_eq!(acquired.source_type, SourcePollKind::AsyncFinite);
+    assert_eq!(acquired.intent, SourceOpenIntent::Start);
+    assert_eq!(failure.trigger, SourceCleanupTrigger::Exhausted);
+    assert_eq!(failure.phase, SourceCleanupPhase::Live);
+    assert_eq!(failure.error_type, SourcePollErrorKind::Other);
+    assert_eq!(
+        failure.diagnostic.reason(),
+        SourceDiagnosticReason::Unclassified
+    );
+    assert_eq!(failure.primary_failure, None);
+    assert!(!serde_json::to_string(failure)?.contains("SECRET_SENTINEL"));
     Ok(())
 }
 
