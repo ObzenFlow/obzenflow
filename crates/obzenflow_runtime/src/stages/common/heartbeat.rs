@@ -671,6 +671,13 @@ mod tests {
             unimplemented!("not used in heartbeat tests")
         }
 
+        fn recorded_source_frontier(
+            &self,
+            _stage_key: &str,
+        ) -> obzenflow_core::source::RecordedSourceFrontier {
+            unimplemented!("not used in heartbeat tests")
+        }
+
         fn archive_path(&self) -> &Path {
             Path::new("stub-archive")
         }

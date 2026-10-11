@@ -13,6 +13,9 @@ use crate::replay::ReplayDriver;
 use crate::stages::common::handlers::source::ErasedSourceInvocation;
 use crate::stages::common::handlers::UnifiedInfiniteSourceHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::stages::common::supervision::blocking::{
+    on_blocking_pool, release_on_blocking_pool, ConnectorCall,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
@@ -20,11 +23,10 @@ use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::{
     announce_resumed_live, around_source_boundary, commit_catch_up_markers, commit_reader_acquired,
     commit_source_open_failure, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    normalise_source_poll_error, observe_source_boundary_rejection, on_blocking_pool,
-    poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
-    release_on_blocking_pool, source_error_kind, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceCall, SourceExit,
-    SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
+    normalise_source_poll_error, observe_source_boundary_rejection, poll_error_backoff,
+    poll_error_summary, record_source_release, record_source_stage_fatal, source_error_kind,
+    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
+    PendingFailure, SourceExit, SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
@@ -581,7 +583,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                 let opened = on_blocking_pool(
                     &mut self.handler,
                     &ctx.stage_name,
-                    SourceCall::Open,
+                    ConnectorCall::Open,
                     move |handler: &mut H| handler.acquire(init),
                 )
                 .await
@@ -852,7 +854,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                             let invocation = on_blocking_pool(
                                 &mut self.handler,
                                 &ctx.stage_name,
-                                SourceCall::Poll,
+                                ConnectorCall::Poll,
                                 |handler: &mut H| handler.next_invocation(),
                             )
                             .await

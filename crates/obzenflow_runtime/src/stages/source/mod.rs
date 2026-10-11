@@ -20,6 +20,10 @@
 //! [`SourceReaderInitContext`] supplies identity only; connectors receive no
 //! journals, execution modes, policy controls or supervisor handles.
 //!
+//! Synchronous connectors run on the blocking pool. Asynchronous connector methods
+//! run on the async workers and must not block; do blocking I/O through
+//! `tokio::task::spawn_blocking` (FLOWIP-134i B18, B21).
+//!
 //! An asynchronous connector owns partial acquisition until it returns its reader.
 //! Errors must release partial resources, and dropping the opening future must
 //! leave no detached work. After acquisition the runtime attempts `drain` once on
@@ -56,7 +60,9 @@ pub use boundary::{
 };
 
 #[doc(hidden)]
-pub use crate::stages::common::handlers::source::{sources_refusing_resume, SourceContinuation};
+pub use crate::stages::common::handlers::source::{
+    sources_refusing_resume, ResumeRefusal, SourceContinuation,
+};
 pub use crate::stages::common::handlers::source::{
     AsyncFiniteContinuation, AsyncInfiniteContinuation, FiniteContinuation, InfiniteContinuation,
     PositionedFiniteReader, Reattach, RecordDeError, Refuse, Seek, SeekableSource, SourceError,

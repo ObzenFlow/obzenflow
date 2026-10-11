@@ -1912,6 +1912,13 @@ impl obzenflow_core::journal::archive::ReplayArchive for ScopeMatrixArchive {
         unreachable!("the execution-scope fixture records no source journals")
     }
 
+    fn recorded_source_frontier(
+        &self,
+        _stage_key: &str,
+    ) -> obzenflow_core::source::RecordedSourceFrontier {
+        unreachable!("the execution-scope fixture records no source journals")
+    }
+
     fn archive_path(&self) -> &Path {
         Path::new("scope-matrix-archive")
     }

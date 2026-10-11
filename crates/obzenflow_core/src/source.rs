@@ -10,6 +10,10 @@
 //! lives once, in the source's input pin. Neither is ever displayed: errors
 //! name what failed, never a position or an identity value.
 
+use crate::event::payloads::execution_payload::{
+    ExecutionPayload, SourceContinuationRefusal, SourceInputPinnedFact,
+};
+use crate::event::ChainPayload;
 use ring::digest::{digest, SHA256};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -36,13 +40,17 @@ pub trait SourcePosition: Clone + Serialize + DeserializeOwned + Send + Sync + '
     const SCHEMA_VERSION: u32 = 1;
 }
 
-fn encoding_version<P: SourcePosition>() -> NonZeroU32 {
-    const {
-        match NonZeroU32::new(P::SCHEMA_VERSION) {
-            Some(version) => version,
-            None => panic!("SourcePosition::SCHEMA_VERSION must be positive"),
-        }
+/// `P`'s representation version, as a constant for declarations that carry
+/// it (FLOWIP-134i B22).
+pub const fn position_version<P: SourcePosition>() -> NonZeroU32 {
+    match NonZeroU32::new(P::SCHEMA_VERSION) {
+        Some(version) => version,
+        None => panic!("SourcePosition::SCHEMA_VERSION must be positive"),
     }
+}
+
+fn encoding_version<P: SourcePosition>() -> NonZeroU32 {
+    const { position_version::<P>() }
 }
 
 /// Why a position could not be encoded or decoded. It never carries the
@@ -116,6 +124,101 @@ impl EncodedSourcePosition {
 #[serde(deny_unknown_fields)]
 pub struct SourceProgress {
     pub after: EncodedSourcePosition,
+}
+
+/// Where a positioned source continues on resume (FLOWIP-134i B1, B15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceHandoff {
+    /// Validate the pin, then continue strictly after `after`, or at the
+    /// pinned beginning when nothing was admitted after it.
+    Seek {
+        pin: SourceInputPinnedFact,
+        after: Option<EncodedSourcePosition>,
+    },
+    /// Never pinned and nothing admitted: pin and read as a fresh run (B15).
+    Start,
+}
+
+/// Why a recorded frontier cannot be continued (FLOWIP-134i B22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFrontierRefusal {
+    /// An admitted record lacks its position or a preceding pin (B11).
+    MissingEvidence,
+    /// The recorded positions use another version of the connector's format.
+    PositionVersion {
+        recorded: NonZeroU32,
+        expected: NonZeroU32,
+    },
+}
+
+impl From<SourceFrontierRefusal> for SourceContinuationRefusal {
+    fn from(refusal: SourceFrontierRefusal) -> Self {
+        match refusal {
+            SourceFrontierRefusal::MissingEvidence => Self::MissingEvidence,
+            SourceFrontierRefusal::PositionVersion { .. } => Self::PositionUnreadable,
+        }
+    }
+}
+
+/// A source journal's committed frontier, folded in journal order
+/// (FLOWIP-134i B11): the latest input pin and the position after the last
+/// admitted record bound to it. Archive admission and the replay handoff both
+/// apply [`Self::handoff`] to it (B22).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RecordedSourceFrontier {
+    pin: Option<SourceInputPinnedFact>,
+    after: Option<EncodedSourcePosition>,
+    admitted: u64,
+    unpositioned: bool,
+}
+
+impl RecordedSourceFrontier {
+    /// Fold one record a replay re-admits or preserves: its payload and the
+    /// position its provenance carries.
+    pub fn observe(&mut self, payload: &ChainPayload, progress: Option<&SourceProgress>) {
+        match payload {
+            ChainPayload::Execution(ExecutionPayload::SourceInputPinned(pin)) => {
+                self.pin = Some(pin.clone());
+                self.after = None;
+            }
+            ChainPayload::Fact(_) => {
+                self.admitted = self.admitted.saturating_add(1);
+                match (progress, &self.pin) {
+                    (Some(progress), Some(_)) => self.after = Some(progress.after.clone()),
+                    _ => self.unpositioned = true,
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Where a connector positioned in version `expected` continues: a
+    /// positioned record with no preceding pin, or an admitted record without
+    /// a position, is missing evidence.
+    pub fn handoff(&self, expected: NonZeroU32) -> Result<SourceHandoff, SourceFrontierRefusal> {
+        if self.unpositioned {
+            return Err(SourceFrontierRefusal::MissingEvidence);
+        }
+        let Some(pin) = &self.pin else {
+            return if self.admitted == 0 {
+                Ok(SourceHandoff::Start)
+            } else {
+                Err(SourceFrontierRefusal::MissingEvidence)
+            };
+        };
+        let recorded = self
+            .after
+            .as_ref()
+            .unwrap_or(&pin.beginning)
+            .schema_version();
+        if recorded != expected {
+            return Err(SourceFrontierRefusal::PositionVersion { recorded, expected });
+        }
+        Ok(SourceHandoff::Seek {
+            pin: pin.clone(),
+            after: self.after.clone(),
+        })
+    }
 }
 
 /// Why an input identity could not be computed.
@@ -321,6 +424,89 @@ mod tests {
         assert_eq!(
             SourceInputIdentity::new("csv", &"not named"),
             Err(SourceIdentityError::NotNamedParts)
+        );
+    }
+
+    fn pin(beginning: &impl SourcePosition) -> crate::ChainEvent {
+        crate::event::ChainEventFactory::execution_event(
+            crate::WriterId::from(crate::StageId::new()),
+            ExecutionPayload::SourceInputPinned(SourceInputPinnedFact {
+                identity: SourceInputIdentity::new("test", &serde_json::json!({ "input": "rows" }))
+                    .unwrap(),
+                beginning: EncodedSourcePosition::encode(beginning).unwrap(),
+            }),
+        )
+    }
+
+    fn record(after: Option<&Offset>) -> crate::ChainEvent {
+        let mut event = crate::event::ChainEventFactory::data_event(
+            crate::WriterId::from(crate::StageId::new()),
+            "test.row",
+            NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
+        event.source_progress = after.map(|after| SourceProgress {
+            after: EncodedSourcePosition::encode(after).unwrap(),
+        });
+        event
+    }
+
+    fn frontier(events: &[crate::ChainEvent]) -> RecordedSourceFrontier {
+        let mut frontier = RecordedSourceFrontier::default();
+        for event in events {
+            frontier.observe(&event.payload, event.source_progress.as_ref());
+        }
+        frontier
+    }
+
+    /// FLOWIP-134i B11, B15, B22: one rule decides where a recorded source
+    /// continues, for admission and the replay handoff alike.
+    #[test]
+    fn a_recorded_frontier_hands_off_or_names_why_it_cannot() {
+        let one = NonZeroU32::MIN;
+        let two = NonZeroU32::new(2).unwrap();
+        let start = Offset { record: 0 };
+        let third = Offset { record: 3 };
+
+        assert_eq!(frontier(&[]).handoff(one), Ok(SourceHandoff::Start));
+        let Ok(SourceHandoff::Seek { after, .. }) = frontier(&[pin(&start)]).handoff(one) else {
+            panic!("a pinned empty prefix seeks from its beginning");
+        };
+        assert_eq!(after, None);
+        let Ok(SourceHandoff::Seek { after, .. }) =
+            frontier(&[pin(&start), record(Some(&third))]).handoff(one)
+        else {
+            panic!("a positioned prefix seeks after its last record");
+        };
+        assert_eq!(after.unwrap().decode::<Offset>().unwrap(), third);
+
+        for (events, case) in [
+            (vec![record(None)], "records without a pin"),
+            (
+                vec![pin(&start), record(None)],
+                "a record without its position",
+            ),
+        ] {
+            assert_eq!(
+                frontier(&events).handoff(one),
+                Err(SourceFrontierRefusal::MissingEvidence),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            frontier(&[pin(&start), record(Some(&third))]).handoff(two),
+            Err(SourceFrontierRefusal::PositionVersion {
+                recorded: one,
+                expected: two,
+            })
+        );
+        assert_eq!(
+            frontier(&[pin(&Wide("x".into()))]).handoff(one),
+            Err(SourceFrontierRefusal::PositionVersion {
+                recorded: two,
+                expected: one,
+            }),
+            "an empty prefix is checked by its pinned beginning"
         );
     }
 }

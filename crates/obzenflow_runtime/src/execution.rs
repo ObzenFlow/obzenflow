@@ -383,10 +383,10 @@ impl ResumeControl {
     ) {
         let exhaustion = match continuation {
             SourceContinuation::Reattach => SourceReplayExhaustion::ContinueLive,
-            SourceContinuation::Seek if recorded_eof != Some(EofKind::Natural) => {
+            SourceContinuation::Seek { .. } if recorded_eof != Some(EofKind::Natural) => {
                 SourceReplayExhaustion::ContinueLive
             }
-            SourceContinuation::Seek | SourceContinuation::Refuse => {
+            SourceContinuation::Seek { .. } | SourceContinuation::Refuse => {
                 SourceReplayExhaustion::Terminate
             }
         };
@@ -857,6 +857,9 @@ mod tests {
             s.source_replay_exhausted(stage),
             SourceReplayExhaustion::Terminate
         );
+        let seek = SourceContinuation::Seek {
+            position_version: std::num::NonZeroU32::MIN,
+        };
         for (continuation, recorded_eof, expected) in [
             (
                 SourceContinuation::Refuse,
@@ -864,20 +867,16 @@ mod tests {
                 SourceReplayExhaustion::Terminate,
             ),
             (
-                SourceContinuation::Seek,
+                seek,
                 Some(EofKind::Natural),
                 SourceReplayExhaustion::Terminate,
             ),
             (
-                SourceContinuation::Seek,
+                seek,
                 Some(EofKind::Truncated),
                 SourceReplayExhaustion::ContinueLive,
             ),
-            (
-                SourceContinuation::Seek,
-                None,
-                SourceReplayExhaustion::ContinueLive,
-            ),
+            (seek, None, SourceReplayExhaustion::ContinueLive),
             (
                 SourceContinuation::Reattach,
                 Some(EofKind::Truncated),

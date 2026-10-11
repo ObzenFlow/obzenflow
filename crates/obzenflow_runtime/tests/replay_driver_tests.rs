@@ -385,7 +385,11 @@ async fn reconstructed(
     });
     let mut driver = ReplayDriver::new(reader, PathBuf::from("archive.log"), template());
     drain_driver(&mut driver).await;
-    (driver.frontier().handoff(), driver.replayed_events())
+    let line_version = obzenflow_core::source::position_version::<Line>();
+    (
+        driver.frontier().handoff(line_version),
+        driver.replayed_events(),
+    )
 }
 
 #[tokio::test]

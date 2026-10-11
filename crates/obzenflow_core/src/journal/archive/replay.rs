@@ -207,6 +207,10 @@ pub trait ReplayArchive: Send + Sync {
     /// (FLOWIP-134i B8).
     fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind>;
 
+    /// The committed frontier a source journal recorded, folded as a replay
+    /// reads it (FLOWIP-134i B22).
+    fn recorded_source_frontier(&self, stage_key: &str) -> crate::source::RecordedSourceFrontier;
+
     fn archive_path(&self) -> &Path;
 
     /// Take this archive's write-once continuation claim for the run resuming

@@ -6,6 +6,7 @@
 //!
 //! A typed sink for printing events to stdout/stderr with reusable formatters.
 
+use super::blocking::blocking_io;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
@@ -687,19 +688,23 @@ where
         let outcome = match frame {
             None => SinkTerminalOutcome::success_via(DeliveryMethod::Noop, Some(0)).with_items(0),
             Some(frame) => {
+                let destination = self.destination;
                 #[cfg(test)]
-                let result = match &self.output {
-                    Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
-                    None => self.destination.write_frame(&frame),
-                };
-                #[cfg(not(test))]
-                let result = self.destination.write_frame(&frame);
-                let bytes = result.map_err(|error| {
+                let output = self.output.clone();
+                let written = blocking_io(move || {
+                    #[cfg(test)]
+                    if let Some(output) = &output {
+                        return write_frame_to(&mut *output.lock().unwrap(), &frame);
+                    }
+                    destination.write_frame(&frame)
+                })
+                .await
+                .and_then(|result| {
+                    result.map_err(|error| SinkOperationError::other(error.to_string()))
+                });
+                let bytes = written.map_err(|error| {
                     self.poisoned = true;
-                    SinkWriteFailure::poisoned(
-                        SinkWritePhase::Execute,
-                        SinkOperationError::other(error.to_string()),
-                    )
+                    SinkWriteFailure::poisoned(SinkWritePhase::Execute, error)
                 })?;
                 SinkTerminalOutcome::success(Some(bytes)).with_items(1)
             }
@@ -799,7 +804,7 @@ where
 }
 
 impl<T, E> TableConsoleWriter<T, E> {
-    fn flush_pending(&mut self) -> io::Result<(Vec<SinkCommitReceipt>, u64)> {
+    async fn flush_pending(&mut self) -> io::Result<(Vec<SinkCommitReceipt>, u64)> {
         if self.poisoned {
             return Err(io::Error::other("console writer is poisoned"));
         }
@@ -817,13 +822,19 @@ impl<T, E> TableConsoleWriter<T, E> {
             self.formatter.max_col_width,
         );
         let frame = label_frame(frame, self.replayed);
+        let destination = self.destination;
         #[cfg(test)]
-        let result = match &self.output {
-            Some(output) => write_frame_to(&mut *output.lock().unwrap(), &frame),
-            None => self.destination.write_frame(&frame),
-        };
-        #[cfg(not(test))]
-        let result = self.destination.write_frame(&frame);
+        let output = self.output.clone();
+        let result = blocking_io(move || {
+            #[cfg(test)]
+            if let Some(output) = &output {
+                return write_frame_to(&mut *output.lock().unwrap(), &frame);
+            }
+            destination.write_frame(&frame)
+        })
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))
+        .and_then(|result| result);
         let bytes = match result {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -886,6 +897,7 @@ where
         {
             receipts = self
                 .flush_pending()
+                .await
                 .map_err(|error| {
                     SinkWriteFailure::poisoned(
                         SinkWritePhase::Execute,
@@ -902,6 +914,7 @@ where
             // Preserve the earlier batch's receipts when settling this one.
             receipts.extend(
                 self.flush_pending()
+                    .await
                     .map_err(|error| {
                         SinkWriteFailure::poisoned(
                             SinkWritePhase::Execute,
@@ -919,6 +932,7 @@ where
     async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         let (receipts, bytes) = self
             .flush_pending()
+            .await
             .map_err(|error| SinkOperationError::other(error.to_string()))?;
         if receipts.is_empty() {
             return Ok(SinkWriterLifecycleReport::default());
@@ -1701,5 +1715,69 @@ mod tests {
             .await
             .is_err());
         assert!(output.lock().unwrap().bytes.is_empty());
+    }
+
+    /// FLOWIP-134i B21: a console destination that blocks, such as a pipe that
+    /// stopped draining, leaves the runtime's only thread free while it waits.
+    #[test]
+    fn a_blocked_console_write_leaves_a_single_threaded_runtime_responsive() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        /// Blocks its first write until the gate opens.
+        struct Gated(Option<mpsc::Receiver<()>>);
+        impl Write for Gated {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(gate) = self.0.take() {
+                    gate.recv().map_err(io::Error::other)?;
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (open_gate, gate) = mpsc::channel();
+        let (ticked, tick) = mpsc::channel();
+        let (wrote, written) = mpsc::channel();
+        let runtime_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let connector = ConsoleSink::new(|event: &TestEvent| event.value.clone());
+                let stage = StageId::new();
+                let mut writer = connector
+                    .open(SinkWriterInitContext::new(
+                        stage,
+                        "console".into(),
+                        "test".into(),
+                    ))
+                    .await
+                    .unwrap();
+                writer.output = Some(Arc::new(Mutex::new(Box::new(Gated(Some(gate))))));
+                let mut writer = SinkWriterAdapter::new(
+                    writer,
+                    stage,
+                    connector.describe().default_method().clone(),
+                );
+                let write = tokio::spawn(async move {
+                    writer
+                        .consume_committed_report(input("held"), Default::default())
+                        .await
+                        .is_ok()
+                });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                ticked.send(()).unwrap();
+                wrote.send(write.await.unwrap()).unwrap();
+            });
+        });
+        tick.recv_timeout(Duration::from_secs(10))
+            .expect("the runtime keeps running while the write waits");
+        open_gate.send(()).unwrap();
+        assert!(written
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the write completes"));
+        runtime_thread.join().unwrap();
     }
 }

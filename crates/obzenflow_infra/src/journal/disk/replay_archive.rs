@@ -22,6 +22,7 @@ use obzenflow_core::journal::archive::manifest::{
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
+use obzenflow_core::source::RecordedSourceFrontier;
 use obzenflow_core::{ChainEvent, StageId};
 use std::collections::HashMap;
 use std::fs::File;
@@ -47,6 +48,9 @@ pub struct DiskReplayArchive {
     /// Each source journal's committed EOF kind (FLOWIP-134i B8), from the
     /// same scan; under a merged lineage, the kind ending its merged records.
     recorded_source_eof: HashMap<String, EofKind>,
+    /// Each source journal's committed frontier (FLOWIP-134i B22), from the
+    /// same scan; under a merged lineage, the frontier of its merged records.
+    recorded_frontier: HashMap<String, RecordedSourceFrontier>,
     /// Each source journal's count of records a replay re-admits or
     /// preserves, from the same scan.
     replayable_by_source: HashMap<String, u64>,
@@ -234,6 +238,7 @@ impl DiskReplayArchive {
             max_recorded_generation: scan.max_generation,
             max_recorded_admission_seq: scan.max_admission_seq,
             recorded_source_eof: scan.eof_by_source,
+            recorded_frontier: scan.frontier_by_source,
             replayable_by_source: scan.replayable_by_source,
             reconstruction_completed,
             ancestors: Vec::new(),
@@ -334,6 +339,7 @@ impl DiskReplayArchive {
             return Ok(());
         }
         let mut merged_eof = HashMap::new();
+        let mut merged_frontier = HashMap::new();
         for stage_key in self.source_stage_keys() {
             let members: Vec<&Self> = ancestors
                 .iter()
@@ -363,11 +369,15 @@ impl DiskReplayArchive {
                     verify_source_prefix(member, longest, &stage_key, &self.archive_path)?;
                 }
             }
+            if let Some(frontier) = longest.recorded_frontier.get(&stage_key) {
+                merged_frontier.insert(stage_key.clone(), frontier.clone());
+            }
             if let Some(kind) = longest.recorded_source_eof.get(&stage_key) {
                 merged_eof.insert(stage_key, *kind);
             }
         }
         self.recorded_source_eof = merged_eof;
+        self.recorded_frontier = merged_frontier;
         for ancestor in &ancestors {
             self.max_recorded_generation = self
                 .max_recorded_generation
@@ -577,6 +587,13 @@ impl ReplayArchive for DiskReplayArchive {
         self.recorded_source_eof.get(stage_key).copied()
     }
 
+    fn recorded_source_frontier(&self, stage_key: &str) -> RecordedSourceFrontier {
+        self.recorded_frontier
+            .get(stage_key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn archive_path(&self) -> &Path {
         &self.archive_path
     }
@@ -629,6 +646,8 @@ struct SourceJournalScan {
     eof_by_source: HashMap<String, EofKind>,
     /// Each source's count of records a replay re-admits or preserves.
     replayable_by_source: HashMap<String, u64>,
+    /// Each source's committed frontier, folded as a replay reads it (B22).
+    frontier_by_source: HashMap<String, RecordedSourceFrontier>,
 }
 
 /// A shorter member's records for `stage_key` must open the longest member's,
@@ -774,6 +793,7 @@ fn scan_source_journals(
     let mut max_admission_seq = 0u64;
     let mut eof_by_source = HashMap::new();
     let mut replayable_by_source = HashMap::new();
+    let mut frontier_by_source = HashMap::new();
     for (stage_key, stage_info) in &manifest.stages {
         if !stage_info.stage_type.is_source() {
             continue;
@@ -819,6 +839,13 @@ fn scan_source_journals(
                             *replayable_by_source
                                 .entry(stage_key.clone())
                                 .or_insert(0u64) += 1;
+                            frontier_by_source
+                                .entry(stage_key.clone())
+                                .or_insert_with(RecordedSourceFrontier::default)
+                                .observe(
+                                    &record.payload,
+                                    record.envelope.provenance.event.source_progress.as_ref(),
+                                );
                         }
                         if let ChainPayload::FlowControl(control) = &record.payload {
                             if let FlowControlPayload::CatchUpComplete { generation, .. } = control
@@ -862,6 +889,7 @@ fn scan_source_journals(
         max_admission_seq: obzenflow_core::AdmissionSeq(max_admission_seq),
         eof_by_source,
         replayable_by_source,
+        frontier_by_source,
     })
 }
 

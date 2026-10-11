@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
 use obzenflow_runtime::bootstrap::ReplayVerb;
+use obzenflow_runtime::stages::source::ResumeRefusal;
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
@@ -31,6 +32,37 @@ fn unfinished_sources_refusal(archive: &Path, sources: &[String]) -> String {
          interrupted input, or implement one.",
         archive.display()
     )
+}
+
+// Every source a resume refuses at archive admission, before any claim
+// (FLOWIP-134i B8, B22).
+fn resume_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> String {
+    let unfinished: Vec<String> = refusals
+        .iter()
+        .filter(|(_, refusal)| *refusal == ResumeRefusal::UnfinishedInput)
+        .map(|(source, _)| source.clone())
+        .collect();
+    let mut paragraphs = Vec::new();
+    if !unfinished.is_empty() {
+        paragraphs.push(unfinished_sources_refusal(archive, &unfinished));
+    }
+    for (source, refusal) in refusals {
+        match refusal {
+            ResumeRefusal::UnfinishedInput => {}
+            ResumeRefusal::RecordedWithoutPositions => paragraphs.push(format!(
+                "cannot resume {}: source '{source}' recorded its input without positions, so \
+                 its connector cannot continue it from where it stopped.\nStart a new run.",
+                archive.display()
+            )),
+            ResumeRefusal::PositionVersion { recorded, expected } => paragraphs.push(format!(
+                "cannot resume {}: source '{source}' recorded positions in version {recorded} \
+                 of its connector's format, and the connector now reads version {expected}.\n\
+                 Resume with the version that recorded them, or start a new run.",
+                archive.display()
+            )),
+        }
+    }
+    paragraphs.join("\n")
 }
 
 // Verb-aware refusal copy for the archive sink delivery-safety gate
@@ -388,10 +420,10 @@ pub enum FlowBuildError {
     )]
     ResumeRefusedEphemeralRun,
 
-    #[error("{}", unfinished_sources_refusal(.archive, .sources))]
-    ResumeRefusedUnfinishedSources {
+    #[error("{}", resume_refusal(.archive, .refusals))]
+    ResumeRefusedSources {
         archive: PathBuf,
-        sources: Vec<String>,
+        refusals: Vec<(String, ResumeRefusal)>,
     },
 
     /// The resume could not take its parent's continuation claim (FLOWIP-134i
@@ -470,5 +502,41 @@ mod tests {
             "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped before the end \
              of their input, and their connectors cannot continue interrupted input."
         ));
+    }
+
+    /// FLOWIP-134i B22: one refusal names every source, the unfinished ones
+    /// together and each positioned one with its own reason and remedy.
+    #[test]
+    fn resume_refusal_names_each_source_with_its_remedy() {
+        let archive = Path::new("/runs/interrupted");
+        let refusals = vec![
+            ("cards".to_string(), ResumeRefusal::UnfinishedInput),
+            (
+                "ledger".to_string(),
+                ResumeRefusal::RecordedWithoutPositions,
+            ),
+            (
+                "orders".to_string(),
+                ResumeRefusal::PositionVersion {
+                    recorded: std::num::NonZeroU32::MIN,
+                    expected: std::num::NonZeroU32::new(2).unwrap(),
+                },
+            ),
+        ];
+        assert_eq!(
+            resume_refusal(archive, &refusals),
+            [
+                unfinished_sources_refusal(archive, &["cards".to_string()]),
+                "cannot resume /runs/interrupted: source 'ledger' recorded its input without \
+                 positions, so its connector cannot continue it from where it stopped.\nStart a \
+                 new run."
+                    .to_string(),
+                "cannot resume /runs/interrupted: source 'orders' recorded positions in version 1 \
+                 of its connector's format, and the connector now reads version 2.\nResume with \
+                 the version that recorded them, or start a new run."
+                    .to_string(),
+            ]
+            .join("\n")
+        );
     }
 }

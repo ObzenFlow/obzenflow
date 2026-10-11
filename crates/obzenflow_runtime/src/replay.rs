@@ -5,63 +5,36 @@
 //! Execution of replay through the Core archive and journal contracts.
 
 use obzenflow_core::event::chain_event::ReplayDisposition;
-use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourceContinuationRefusal, SourceInputPinnedFact,
-};
+use obzenflow_core::event::payloads::execution_payload::SourceContinuationRefusal;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::JournalReader;
-use obzenflow_core::source::EncodedSourcePosition;
+use obzenflow_core::source::RecordedSourceFrontier;
+pub use obzenflow_core::source::SourceHandoff;
 use obzenflow_core::{ChainEvent, ReaderGeneration, StageId, WriterId};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
-/// Where a positioned source continues on resume (FLOWIP-134i B1, B15).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceHandoff {
-    /// Validate the pin, then continue strictly after `after`, or at the
-    /// pinned beginning when nothing was admitted after it.
-    Seek {
-        pin: SourceInputPinnedFact,
-        after: Option<EncodedSourcePosition>,
-    },
-    /// Never pinned and nothing admitted: pin and read as a fresh run (B15).
-    Start,
-}
-
-/// The committed frontier a source's replay read (FLOWIP-134i B11): the latest
-/// input pin and the position after the last admitted record bound to it.
+/// The committed frontier a source's replay read (FLOWIP-134i B11), and the
+/// last generation its recorded markers crossed.
 #[derive(Debug, Default, Clone)]
 pub struct SourceFrontier {
-    pin: Option<SourceInputPinnedFact>,
-    after: Option<EncodedSourcePosition>,
-    admitted: u64,
-    unpositioned: bool,
+    recorded: RecordedSourceFrontier,
     crossed: ReaderGeneration,
 }
 
 impl SourceFrontier {
     fn observe(&mut self, event: &ChainEvent) {
-        match &event.payload {
-            ChainPayload::Execution(ExecutionPayload::SourceInputPinned(pin)) => {
-                self.pin = Some(pin.clone());
-                self.after = None;
-            }
-            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
-                generation, ..
-            }) => {
-                self.crossed = self.crossed.max(*generation);
-            }
-            ChainPayload::Fact(_) => {
-                self.admitted = self.admitted.saturating_add(1);
-                match (&event.source_progress, &self.pin) {
-                    (Some(progress), Some(_)) => self.after = Some(progress.after.clone()),
-                    _ => self.unpositioned = true,
-                }
-            }
-            _ => {}
+        if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
+            generation, ..
+        }) = &event.payload
+        {
+            self.crossed = self.crossed.max(*generation);
         }
+        self.recorded
+            .observe(&event.payload, event.source_progress.as_ref());
     }
 
     /// The last generation the source's recorded markers crossed.
@@ -69,20 +42,13 @@ impl SourceFrontier {
         self.crossed
     }
 
-    /// A positioned record with no preceding pin, or an admitted record
-    /// without a position, is missing evidence and refuses.
-    pub fn handoff(&self) -> Result<SourceHandoff, SourceContinuationRefusal> {
-        if self.unpositioned {
-            return Err(SourceContinuationRefusal::MissingEvidence);
-        }
-        match &self.pin {
-            Some(pin) => Ok(SourceHandoff::Seek {
-                pin: pin.clone(),
-                after: self.after.clone(),
-            }),
-            None if self.admitted == 0 => Ok(SourceHandoff::Start),
-            None => Err(SourceContinuationRefusal::MissingEvidence),
-        }
+    /// Where a connector positioned in version `expected` continues, by the
+    /// rule archive admission applied before the claim (B22).
+    pub fn handoff(
+        &self,
+        expected: NonZeroU32,
+    ) -> Result<SourceHandoff, SourceContinuationRefusal> {
+        self.recorded.handoff(expected).map_err(Into::into)
     }
 }
 

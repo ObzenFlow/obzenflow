@@ -767,9 +767,7 @@ impl FlowApplication {
                     // means the build failed before substrate selection, so no run
                     // directory exists to point at.
                     let error = match &failure.error {
-                        obzenflow_dsl::FlowBuildError::ResumeRefusedUnfinishedSources {
-                            ..
-                        }
+                        obzenflow_dsl::FlowBuildError::ResumeRefusedSources { .. }
                         | obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
                             ApplicationError::ResumeRefused(failure.error.to_string())
                         }

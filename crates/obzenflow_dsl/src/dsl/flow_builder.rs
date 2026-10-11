@@ -486,10 +486,10 @@ where
                     )));
                 }
 
-                // FLOWIP-134i B8: a source whose connector cannot continue its
-                // interrupted input refuses the resume before any run exists.
+                // FLOWIP-134i B8, B22: a source whose recorded input cannot be
+                // continued refuses the resume before any run or claim exists.
                 if let Some(archive) = obzenflow_runtime::bootstrap::replay_archive() {
-                    let refused = obzenflow_runtime::stages::source::sources_refusing_resume(
+                    let refusals = obzenflow_runtime::stages::source::sources_refusing_resume(
                         archive.as_ref(),
                         descriptors.iter().filter_map(|(name, descriptor)| {
                             descriptor
@@ -497,10 +497,10 @@ where
                                 .map(|continuation| (name.as_str(), continuation))
                         }),
                     );
-                    if !refused.is_empty() {
-                        return Err(FlowBuildError::ResumeRefusedUnfinishedSources {
+                    if !refusals.is_empty() {
+                        return Err(FlowBuildError::ResumeRefusedSources {
                             archive: replay.archive_path.clone(),
-                            sources: refused,
+                            refusals,
                         });
                     }
                 }

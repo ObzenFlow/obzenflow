@@ -969,6 +969,9 @@ impl ReplayArchive for EmptyArchive {
     fn recorded_source_eof(&self, _: &str) -> Option<EofKind> {
         None
     }
+    fn recorded_source_frontier(&self, _: &str) -> obzenflow_core::source::RecordedSourceFrontier {
+        Default::default()
+    }
     fn archive_path(&self) -> &Path {
         Path::new("memory")
     }

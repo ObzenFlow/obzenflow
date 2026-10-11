@@ -412,3 +412,89 @@ async fn csv_example_exits_while_an_open_is_held() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// Delivery receipts a stage committed.
+async fn deliveries(run: &Path, stage: &str) -> anyhow::Result<usize> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(run.join("run_manifest.json"))?)?;
+    let file = manifest["stages"][stage]["data_journal_file"]
+        .as_str()
+        .unwrap();
+    Ok(
+        replay_testkit::read_journal_envelopes_appended::<ChainEvent>(&run.join(file))
+            .await
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.payload,
+                    obzenflow_core::event::ChainPayload::Delivery(_)
+                )
+            })
+            .count(),
+    )
+}
+
+/// FLOWIP-134i B21: a SIGTERM while the CSV sink's writes are blocked on a
+/// pipe that stopped draining ends the process. The sink writes on the
+/// blocking pool, so the stop deadline can abort it and the application's
+/// runtime abandons the blocked write after `runtime.shutdown_timeout`.
+#[tokio::test(flavor = "multi_thread")]
+async fn csv_example_exits_while_its_output_is_blocked() -> anyhow::Result<()> {
+    use sysinfo::{Pid, PidExt, ProcessExt, Signal, System, SystemExt};
+    let temp = tempfile::tempdir()?;
+    let fixtures = temp.path().join("fixtures");
+    let outputs = temp.path().join("blocked");
+    write_long_fixtures(&fixtures)?;
+    let paths = example::flow::DemoPaths::resolve_in(&fixtures, &outputs)?;
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&paths.output_csv)
+        .status()?
+        .success());
+    // A reader that never reads: the sink's open succeeds, then its rows fill
+    // the pipe and the next write blocks.
+    let stalled_reader = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&paths.output_csv)?;
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])
+        .env(CHILD_FIXTURES, &fixtures)
+        .env(CHILD_OUTPUTS, &outputs)
+        .env("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let run = loop {
+        if let Ok(run) = latest_run(&paths.journals_dir) {
+            if source_eofs(&run, "tickets").await? == [EofKind::Natural] {
+                break run;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tickets never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let pid = Pid::from_u32(child.id().expect("the application is running"));
+    let mut system = System::new();
+    assert!(system.refresh_process(pid));
+    assert_eq!(
+        system.process(pid).unwrap().kill_with(Signal::Term),
+        Some(true)
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(20), child.wait())
+            .await
+            .is_ok(),
+        "the process exits within its stop deadline and shutdown timeout while a write is blocked"
+    );
+    assert!(
+        deliveries(&run, "csv_out").await? < LONG_TICKETS,
+        "the stalled pipe blocked the sink before it delivered every row"
+    );
+    drop(stalled_reader);
+    Ok(())
+}

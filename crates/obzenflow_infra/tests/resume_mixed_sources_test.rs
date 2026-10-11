@@ -820,11 +820,14 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
         .ok_or_else(|| anyhow!("an unfinished Refuse source must refuse the resume"))?
     };
     match &failure.error {
-        obzenflow_dsl::dsl::FlowBuildError::ResumeRefusedUnfinishedSources { archive, sources } => {
+        obzenflow_dsl::dsl::FlowBuildError::ResumeRefusedSources { archive, refusals } => {
             assert_eq!(archive, &recorded_run);
             assert_eq!(
-                sources,
-                &vec!["fin".to_string()],
+                refusals,
+                &vec![(
+                    "fin".to_string(),
+                    obzenflow_runtime::stages::source::ResumeRefusal::UnfinishedInput
+                )],
                 "the reattaching source is not named"
             );
         }
@@ -1372,6 +1375,240 @@ async fn run_lazy_orders(
         replay_testkit::latest_run_dir(journal_base),
         lowest_read.load(Ordering::SeqCst),
     ))
+}
+
+/// `lazy_flow`'s flow for any value that reads the orders, so a resume can
+/// rewire the source and admission still sees the recorded flow.
+macro_rules! orders_flow {
+    ($journal_base:expr, $orders_source:ident, $delivered:expr) => {{
+        let journals = $journal_base.to_path_buf();
+        let collect_handler = DelayedCount {
+            delivered: $delivered,
+            delay: Duration::ZERO,
+        };
+        FlowDefinition::materialize(move |_runtime_config| {
+            Ok(flow! {
+                name: "resume_lazy",
+                journals: disk_journals(journals),
+                backpressure: obzenflow_dsl::backpressure::off(),
+
+                stages: {
+                    orders = source!(Order => $orders_source with {
+                        rate_limit(50.0).burst_capacity(5.0)
+                    });
+                    collect = sink!(Order => collect_handler);
+                },
+
+                topology: {
+                    orders |> collect;
+                }
+            })
+        })
+    }};
+}
+
+/// Orders read by a direct handler, which positions nothing and lowers to
+/// `Refuse` (B8).
+#[derive(Clone, Debug, Default)]
+struct UnpositionedOrders {
+    next: u64,
+}
+
+impl TypedFiniteSourceHandler for UnpositionedOrders {
+    type Output = Order;
+
+    fn next(&mut self) -> Result<Option<Vec<Order>>, SourceError> {
+        self.next += 1;
+        Ok(Some(vec![Order { id: self.next }]))
+    }
+}
+
+/// `Offset`'s format, revised: the same shape under a new version.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RevisedOffset(u64);
+
+impl SourcePosition for RevisedOffset {
+    const SCHEMA_VERSION: u32 = 2;
+}
+
+/// `LazyOrders`, positioned in the revised format.
+#[derive(Clone)]
+struct RevisedLazyOrders(LazyOrders);
+
+struct RevisedOrderReader(LazyOrderReader);
+
+impl SeekableSource for RevisedOrderReader {
+    type Position = RevisedOffset;
+
+    fn input_identity(&self) -> &SourceInputIdentity {
+        self.0.input_identity()
+    }
+
+    fn beginning(&self) -> RevisedOffset {
+        RevisedOffset(0)
+    }
+
+    fn seek(&mut self, position: RevisedOffset) -> Result<(), SourceError> {
+        self.0.seek(Offset(position.0))
+    }
+}
+
+impl PositionedFiniteReader for RevisedOrderReader {
+    type Output = Order;
+
+    fn next(&mut self) -> Result<Option<Vec<SourceRecord<Order, RevisedOffset>>>, SourceError> {
+        Ok(self.0.next()?.map(|records| {
+            records
+                .into_iter()
+                .map(|record| SourceRecord {
+                    value: record.value,
+                    after: RevisedOffset(record.after.0),
+                })
+                .collect()
+        }))
+    }
+}
+
+impl FiniteSourceConnector for RevisedLazyOrders {
+    type Output = Order;
+    type Reader = RevisedOrderReader;
+    type Continuation = Seek<RevisedOffset>;
+
+    fn open(&self, context: SourceReaderInitContext) -> Result<RevisedOrderReader, SourceError> {
+        self.0.open(context).map(RevisedOrderReader)
+    }
+}
+
+/// Run `flow` until its sink has `deliveries`, then stop it.
+async fn record_interrupted(
+    journal_base: &Path,
+    flow: FlowDefinition,
+    delivered: Arc<AtomicUsize>,
+    deliveries: usize,
+) -> Result<PathBuf> {
+    let handle = flow
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
+    wait_for_running(&handle).await?;
+    wait_for_deliveries(&delivered, deliveries).await?;
+    handle.stop_graceful(Duration::from_secs(10)).await?;
+    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    drop(handle);
+    Ok(replay_testkit::latest_run_dir(journal_base))
+}
+
+/// Build `flow` as a resume of `archive`, which must refuse at admission:
+/// no run directory and no claim on the archive (B8, B12, B22).
+async fn refused_at_admission(
+    journal_base: &Path,
+    archive: &Path,
+    flow: FlowDefinition,
+) -> Result<String> {
+    let runs_before = std::fs::read_dir(journal_base.join("flows"))?.count();
+    let bootstrap = install_bootstrap_config(
+        replay_testkit::bootstrap_with_archive(resume_bootstrap(archive)).await,
+    );
+    let failure = flow
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .err();
+    drop(bootstrap);
+    let failure = failure.ok_or_else(|| anyhow!("the resume must refuse at admission"))?;
+    assert_eq!(
+        std::fs::read_dir(journal_base.join("flows"))?.count(),
+        runs_before,
+        "the refusal leaves no run directory"
+    );
+    assert!(
+        !archive.join("run_continuation.json").exists(),
+        "the refused resume claims nothing (B12)"
+    );
+    Ok(failure.error.to_string())
+}
+
+/// FLOWIP-134i B22: a direct handler records its input without positions.
+/// Rewiring the source to a positioned connector cannot continue that input,
+/// so the resume refuses at admission, before it claims the archive or polls.
+#[tokio::test(flavor = "multi_thread")]
+async fn input_recorded_without_positions_refuses_the_resume_at_admission() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let unpositioned = UnpositionedOrders::default();
+    let recorded = record_interrupted(
+        &journal_base,
+        orders_flow!(&journal_base, unpositioned, delivered.clone()),
+        delivered,
+        3,
+    )
+    .await?;
+
+    let positioned = LazyOrders::new();
+    let fetched = positioned.fetched.clone();
+    let refusal = refused_at_admission(
+        &journal_base,
+        &recorded,
+        orders_flow!(&journal_base, positioned, Arc::new(AtomicUsize::new(0))),
+    )
+    .await?;
+    assert_eq!(
+        refusal,
+        format!(
+            "cannot resume {}: source 'orders' recorded its input without positions, so its \
+             connector cannot continue it from where it stopped.\nStart a new run.",
+            recorded.display()
+        )
+    );
+    assert_eq!(
+        fetched.load(Ordering::SeqCst),
+        0,
+        "the refused resume never polls the connector"
+    );
+    Ok(())
+}
+
+/// FLOWIP-134i B22: positions recorded in one version of a connector's format
+/// refuse a resume whose connector reads another, at admission. The archive
+/// stays unclaimed, so resuming with the recording version continues it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_position_version_refuses_the_resume_at_admission() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (recorded, _) = run_lazy_orders(&journal_base, None, (50.0, 5.0), 3).await?;
+
+    let revised = RevisedLazyOrders(LazyOrders::new());
+    let fetched = revised.0.fetched.clone();
+    let refusal = refused_at_admission(
+        &journal_base,
+        &recorded,
+        orders_flow!(&journal_base, revised, Arc::new(AtomicUsize::new(0))),
+    )
+    .await?;
+    assert_eq!(
+        refusal,
+        format!(
+            "cannot resume {}: source 'orders' recorded positions in version 1 of its \
+             connector's format, and the connector now reads version 2.\nResume with the \
+             version that recorded them, or start a new run.",
+            recorded.display()
+        )
+    );
+    assert_eq!(
+        fetched.load(Ordering::SeqCst),
+        0,
+        "the refused resume never polls the connector"
+    );
+
+    let (resumed, _) = run_lazy_orders(&journal_base, Some(&recorded), (50.0, 5.0), 1).await?;
+    assert_ne!(resumed, recorded);
+    assert!(
+        recorded.join("run_continuation.json").exists(),
+        "the recording version's resume claims the untouched archive"
+    );
+    Ok(())
 }
 
 /// FLOWIP-134i B1 (AC3): a lazy billion-record source resumes after a small

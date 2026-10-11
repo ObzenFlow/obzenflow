@@ -11,6 +11,9 @@ use crate::replay::{ReplayDriver, SourceHandoff};
 use crate::stages::common::handlers::source::{ErasedSourceInvocation, SourceResumeError};
 use crate::stages::common::handlers::UnifiedFiniteSourceHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::stages::common::supervision::blocking::{
+    on_blocking_pool, release_on_blocking_pool, ConnectorCall,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
@@ -19,11 +22,11 @@ use crate::stages::source::supervision::{
     announce_resumed_live, around_source_boundary, commit_catch_up_markers, commit_reader_acquired,
     commit_source_fact, commit_source_open_failure, commit_source_seek_failure,
     drain_pending_outputs_sync, emit_batch_to_pending_outputs, normalise_source_poll_error,
-    observe_source_boundary_rejection, on_blocking_pool, poll_error_backoff, poll_error_summary,
+    observe_source_boundary_rejection, poll_error_backoff, poll_error_summary,
     record_source_release, record_source_stage_fatal, refuse_source_continuation,
-    release_on_blocking_pool, source_error_kind, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceCall, SourceExit,
-    SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
+    source_error_kind, stage_boundary_control_events, stage_source_poll_outputs,
+    terminal_poll_failure, PendingFailure, SourceExit, SourceOpenFailureCommit,
+    SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
@@ -577,7 +580,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                 let opened = on_blocking_pool(
                     &mut self.handler,
                     &ctx.stage_name,
-                    SourceCall::Open,
+                    ConnectorCall::Open,
                     move |handler: &mut H| handler.acquire(init),
                 )
                 .await
@@ -804,7 +807,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                             let invocation = on_blocking_pool(
                                 &mut self.handler,
                                 &ctx.stage_name,
-                                SourceCall::Poll,
+                                ConnectorCall::Poll,
                                 |handler: &mut H| handler.next_invocation(),
                             )
                             .await
@@ -1043,13 +1046,21 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervis
             .resume_control()
             .cloned()
             .expect("ContinueLive is only returned by the Resume strategy");
+        // Only a positioned source continues live after its replay (B8).
+        let SourceContinuation::Seek { position_version } = self.continuation else {
+            return Err(format!(
+                "source '{}' continued live without a positioned connector",
+                ctx.stage_name
+            )
+            .into());
+        };
         let (frontier, crossed, replayed_count, skipped_count) = {
             let driver = self
                 .replay_driver
                 .as_ref()
                 .expect("a replaying source has a replay driver");
             (
-                driver.frontier().handoff(),
+                driver.frontier().handoff(position_version),
                 driver.frontier().crossed_generation(),
                 driver.replayed_events(),
                 driver.skipped_events(),
@@ -1078,7 +1089,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervis
         let opened = on_blocking_pool(
             &mut self.handler,
             &ctx.stage_name,
-            SourceCall::Open,
+            ConnectorCall::Open,
             move |handler: &mut H| handler.acquire(init),
         )
         .await
@@ -1115,7 +1126,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervis
                 let seeked = on_blocking_pool(
                     &mut self.handler,
                     &ctx.stage_name,
-                    SourceCall::Seek,
+                    ConnectorCall::Seek,
                     move |handler: &mut H| handler.resume_at(&pin, after.as_ref()),
                 )
                 .await

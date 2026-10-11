@@ -26,6 +26,7 @@ use crate::stages::common::stage_handle::{
     discarded_control_details, FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::stages::common::supervision::blocking::release_on_blocking_pool;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
@@ -1092,7 +1093,11 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
             }
 
             JournalSinkAction::Cleanup => {
-                ctx.handler.take();
+                // A writer's `Drop` is connector code, such as closing a file
+                // (FLOWIP-134i B21).
+                if let Some(handler) = ctx.handler.take() {
+                    release_on_blocking_pool(handler, &ctx.stage_name).await;
+                }
                 ctx.subscription.take();
                 if let Some(heartbeat) = ctx.heartbeat.take() {
                     heartbeat.cancel();
@@ -1243,6 +1248,7 @@ mod tests {
     impl Drop for AuditSink {
         fn drop(&mut self) {
             self.0.drops.fetch_add(1, Ordering::SeqCst);
+            *self.0.drop_thread.lock().unwrap() = Some(std::thread::current().id());
             let instrumentation = self.0.instrumentation.lock().unwrap();
             if let Some(instrumentation) = instrumentation.as_ref() {
                 self.0
@@ -1303,6 +1309,7 @@ mod tests {
     struct Probe {
         instrumentation: std::sync::Mutex<Option<Arc<StageInstrumentation>>>,
         drop_states: std::sync::Mutex<Vec<String>>,
+        drop_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
         block_consume: AtomicBool,
         consumes: AtomicUsize,
         consuming: tokio::sync::Notify,
@@ -1929,6 +1936,29 @@ mod tests {
         let rows = fixture.data.read_all_unordered().await.unwrap();
         assert!(rows.iter().any(|row| matches!(&row.payload,
             ChainPayload::Execution(ExecutionPayload::ContractStatus { pass: false, reason: Some(cause), .. }) if cause == &expected)));
+    }
+
+    /// FLOWIP-134i B21: a writer's `Drop` is connector code, so cleanup runs it
+    /// on the blocking pool, never on the thread driving the stage.
+    #[tokio::test]
+    async fn cleanup_releases_the_writer_off_the_runtime_thread() {
+        let probe = Arc::new(Probe::default());
+        let fixture = fixture(probe.clone());
+        activate(&fixture).await;
+        fixture.handle.received_eof().await.unwrap();
+        let exit = fixture.handle.wait_for_stage_exit().await;
+        assert!(matches!(exit, LifecycleExit::Completed(_)), "{exit:?}");
+        assert_eq!(*probe.drop_states.lock().unwrap(), ["Finalising"]);
+        let released_on = probe
+            .drop_thread
+            .lock()
+            .unwrap()
+            .expect("cleanup released the writer");
+        assert_ne!(
+            released_on,
+            std::thread::current().id(),
+            "the writer is released off the runtime's thread"
+        );
     }
 
     #[tokio::test]

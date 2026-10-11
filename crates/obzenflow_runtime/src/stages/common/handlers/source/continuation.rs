@@ -344,9 +344,12 @@ use crate::stages::source::SourceReaderInitContext;
 use futures::future::BoxFuture;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::journal::archive::ReplayArchive;
-use obzenflow_core::source::SourcePosition;
+use obzenflow_core::source::{
+    position_version, RecordedSourceFrontier, SourceFrontierRefusal, SourcePosition,
+};
 use obzenflow_core::OneFactStageOutput;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 
 /// Unfinished input cannot be continued; resume refuses.
 #[derive(Debug, Clone, Copy, Default)]
@@ -360,42 +363,84 @@ pub struct Seek<P>(PhantomData<fn() -> P>);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Reattach;
 
-/// The continuation a source stage was admitted with.
+/// The continuation a source stage was admitted with. A positioned source
+/// carries the position version its connector reads (FLOWIP-134i B22).
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceContinuation {
     Refuse,
-    Seek,
+    Seek { position_version: NonZeroU32 },
     Reattach,
 }
 
+/// Why a resume refuses a source at archive admission, before any claim.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeRefusal {
+    /// The source stopped before the end of its input, and its connector
+    /// cannot continue interrupted input (B8).
+    UnfinishedInput,
+    /// The source recorded its input without positions (B22).
+    RecordedWithoutPositions,
+    /// The source recorded positions in another version of its connector's
+    /// format (B22).
+    PositionVersion {
+        recorded: NonZeroU32,
+        expected: NonZeroU32,
+    },
+}
+
 impl SourceContinuation {
-    /// Whether a resume may admit this source given the EOF its archived
-    /// journal committed: a `Refuse` source only after natural completion,
-    /// which its replay then reproduces. `Poison` and `Truncated` are not
-    /// natural completion.
-    pub fn admits_resume(self, recorded_eof: Option<EofKind>) -> bool {
+    /// Why a resume must refuse this source, from the EOF and frontier its
+    /// archive recorded. A naturally completed source replays its completion
+    /// whatever its connector; `Poison` and `Truncated` are not natural
+    /// completion.
+    pub fn resume_refusal(
+        self,
+        recorded_eof: Option<EofKind>,
+        frontier: &RecordedSourceFrontier,
+    ) -> Option<ResumeRefusal> {
+        if recorded_eof == Some(EofKind::Natural) {
+            return None;
+        }
         match self {
-            Self::Refuse => recorded_eof == Some(EofKind::Natural),
-            Self::Seek | Self::Reattach => true,
+            Self::Refuse => Some(ResumeRefusal::UnfinishedInput),
+            Self::Seek { position_version } => {
+                frontier
+                    .handoff(position_version)
+                    .err()
+                    .map(|refusal| match refusal {
+                        SourceFrontierRefusal::MissingEvidence => {
+                            ResumeRefusal::RecordedWithoutPositions
+                        }
+                        SourceFrontierRefusal::PositionVersion { recorded, expected } => {
+                            ResumeRefusal::PositionVersion { recorded, expected }
+                        }
+                    })
+            }
+            Self::Reattach => None,
         }
     }
 }
 
-/// The sources a resume of `archive` must refuse, sorted by stage key.
+/// The sources a resume of `archive` must refuse and why, sorted by stage key.
 #[doc(hidden)]
 pub fn sources_refusing_resume<'a>(
     archive: &dyn ReplayArchive,
     sources: impl IntoIterator<Item = (&'a str, SourceContinuation)>,
-) -> Vec<String> {
-    let mut refused: Vec<String> = sources
+) -> Vec<(String, ResumeRefusal)> {
+    let mut refused: Vec<(String, ResumeRefusal)> = sources
         .into_iter()
-        .filter(|(stage_key, continuation)| {
-            !continuation.admits_resume(archive.recorded_source_eof(stage_key))
+        .filter_map(|(stage_key, continuation)| {
+            continuation
+                .resume_refusal(
+                    archive.recorded_source_eof(stage_key),
+                    &archive.recorded_source_frontier(stage_key),
+                )
+                .map(|refusal| (stage_key.to_string(), refusal))
         })
-        .map(|(stage_key, _)| stage_key.to_string())
         .collect();
-    refused.sort();
+    refused.sort_by(|(left, _), (right, _)| left.cmp(right));
     refused
 }
 
@@ -502,7 +547,9 @@ where
 {
     type Output = R::Output;
     type Handler = PositionedFiniteSourceHandlerAdapter<R>;
-    const KIND: SourceContinuation = SourceContinuation::Seek;
+    const KIND: SourceContinuation = SourceContinuation::Seek {
+        position_version: position_version::<P>(),
+    };
 
     fn cold(open: SyncReaderOpener<R>) -> Self::Handler {
         PositionedFiniteSourceHandlerAdapter::cold(open)
@@ -563,20 +610,30 @@ impl<R: TypedAsyncInfiniteSourceHandler + 'static> AsyncInfiniteContinuation<R> 
 mod tests {
     use super::*;
 
+    fn refusal(
+        continuation: SourceContinuation,
+        recorded_eof: Option<EofKind>,
+    ) -> Option<ResumeRefusal> {
+        continuation.resume_refusal(recorded_eof, &RecordedSourceFrontier::default())
+    }
+
     #[test]
     fn refuse_admits_resume_only_after_natural_completion() {
         let refuse = SourceContinuation::Refuse;
-        assert!(refuse.admits_resume(Some(EofKind::Natural)));
-        assert!(
-            !refuse.admits_resume(Some(EofKind::Poison)),
+        assert_eq!(refusal(refuse, Some(EofKind::Natural)), None);
+        assert_eq!(
+            refusal(refuse, Some(EofKind::Poison)),
+            Some(ResumeRefusal::UnfinishedInput),
             "a Jonestown poison is not natural completion"
         );
-        assert!(
-            !refuse.admits_resume(Some(EofKind::Truncated)),
+        assert_eq!(
+            refusal(refuse, Some(EofKind::Truncated)),
+            Some(ResumeRefusal::UnfinishedInput),
             "an operator stop leaves the input unfinished"
         );
-        assert!(
-            !refuse.admits_resume(None),
+        assert_eq!(
+            refusal(refuse, None),
+            Some(ResumeRefusal::UnfinishedInput),
             "a torn source committed no completion"
         );
     }
@@ -589,7 +646,19 @@ mod tests {
             Some(EofKind::Poison),
             Some(EofKind::Truncated),
         ] {
-            assert!(SourceContinuation::Reattach.admits_resume(recorded_eof));
+            assert_eq!(refusal(SourceContinuation::Reattach, recorded_eof), None);
         }
+    }
+
+    /// B15, B22: a positioned source that completed naturally replays its
+    /// completion, and one that never pinned or admitted anything starts.
+    #[test]
+    fn seek_admits_completion_and_a_never_pinned_start() {
+        let seek = SourceContinuation::Seek {
+            position_version: NonZeroU32::MIN,
+        };
+        assert_eq!(refusal(seek, Some(EofKind::Natural)), None);
+        assert_eq!(refusal(seek, Some(EofKind::Truncated)), None);
+        assert_eq!(refusal(seek, None), None);
     }
 }
