@@ -623,3 +623,108 @@ pub async fn expired_graceful_stop_aborts_and_joins_without_a_fresh_cleanup_budg
         }
     }
 }
+
+/// A drain that finds a finishing source's mailbox closed is delivered, so the
+/// stop escalates at its own deadline and never fails the run (FLOWIP-134i B19).
+pub async fn graceful_stop_racing_source_completion_is_not_a_failure(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let _lock = bootstrap_test_lock_async().await;
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Auto,
+        ..Default::default()
+    });
+    let mut journals = make_journals();
+    let system_id = SystemId::new();
+    let journal = new_system_journal(&mut *journals, system_id);
+    let (topology, source, sink) = source_sink_topology_with_source();
+    let mut ctx = test_context(topology, system_id, journal.clone());
+    let mut source_handle = owned_test_stage(source, StageType::FiniteSource, None);
+    source_handle.drain_mailbox_closed = true;
+    let source_signals = source_handle.signals.clone();
+    ctx.source_supervisors
+        .insert(source, Arc::new(source_handle));
+    ctx.stage_supervisors.insert(
+        sink,
+        Arc::new(owned_test_stage(sink, StageType::Sink, None)),
+    );
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(S::Created);
+    let mut states = watcher.subscribe();
+    let task = spawn_supervisor_loop(S::Created, system_id, ctx, receiver, watcher);
+    wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
+
+    sender
+        .send(E::GracefulStop {
+            timeout: Duration::from_millis(50),
+        })
+        .await
+        .unwrap();
+    wait_for_state(&mut states, "Draining", |s| matches!(s, S::Draining)).await;
+    // The source finishes on its own after closing its mailbox.
+    source_signals.complete();
+
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&*states.borrow(), S::Cancelled { reason } if reason == crate::stages::common::stage_handle::STOP_REASON_TIMEOUT)
+    );
+    let rows = journal.read_all_unordered().await.unwrap();
+    assert!(!rows.iter().any(|r| matches!(
+        &r.payload,
+        SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })
+    )));
+}
+
+/// A child failure during a graceful stop aborts by the stop's deadline, not
+/// after the full shutdown timeout (FLOWIP-134i B19).
+pub async fn failure_during_graceful_stop_aborts_by_the_graceful_deadline(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let _lock = bootstrap_test_lock_async().await;
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Auto,
+        ..Default::default()
+    });
+    let mut journals = make_journals();
+    let system_id = SystemId::new();
+    let journal = new_system_journal(&mut *journals, system_id);
+    let (topology, source, sink) = source_sink_topology_with_source();
+    let mut ctx = test_context(topology, system_id, journal.clone());
+    let mut source_handle = owned_test_stage(source, StageType::FiniteSource, None);
+    source_handle.stall_drain = true;
+    ctx.source_supervisors
+        .insert(source, Arc::new(source_handle));
+    let probe = ShutdownProbe::default();
+    let sink_handle = owned_test_stage(sink, StageType::Sink, Some(probe.clone()));
+    let sink_signals = sink_handle.signals.clone();
+    ctx.stage_supervisors.insert(sink, Arc::new(sink_handle));
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(S::Created);
+    let mut states = watcher.subscribe();
+    let task = spawn_supervisor_loop(S::Created, system_id, ctx, receiver, watcher);
+    wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
+
+    sender
+        .send(E::GracefulStop {
+            timeout: Duration::from_millis(50),
+        })
+        .await
+        .unwrap();
+    wait_for_state(&mut states, "Draining", |s| matches!(s, S::Draining)).await;
+    sink_signals.fail(sink, "failure during graceful stop");
+    wait_for_state(&mut states, "FailingChildren", |s| {
+        matches!(s, S::FailingChildren { .. })
+    })
+    .await;
+
+    // The sink ignores cancellation, so only the abort deadline ends the run.
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("abort at the graceful deadline, not the shutdown timeout")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("failure during graceful stop"));
+    assert!(probe.request_abort_count.load(Ordering::Relaxed) > 0);
+}

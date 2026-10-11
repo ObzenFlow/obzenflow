@@ -23,7 +23,9 @@ pub use crate::pipeline::tests::shutdown::{
     application_abort_does_not_turn_owned_child_cancellation_into_failure,
     contract_failure_cause_survives_child_observation_order,
     expired_graceful_stop_aborts_and_joins_without_a_fresh_cleanup_budget,
+    failure_during_graceful_stop_aborts_by_the_graceful_deadline,
     failure_remains_observable_while_child_cleanup_is_blocked,
+    graceful_stop_racing_source_completion_is_not_a_failure,
     terminal_publication_is_owned_until_settlement_and_failure_is_retained,
 };
 pub use crate::pipeline::tests::startup::{

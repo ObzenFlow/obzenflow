@@ -289,6 +289,8 @@ pub(in crate::pipeline) struct TestPipelineStageHandle {
     pub(in crate::pipeline) acknowledge_commands: bool,
 
     pub(in crate::pipeline) stall_drain: bool,
+    /// The stage closed its mailbox while terminating on its own.
+    pub(in crate::pipeline) drain_mailbox_closed: bool,
     pub(in crate::pipeline) panic_on_start: bool,
     pub(in crate::pipeline) id: StageId,
     pub(in crate::pipeline) name: String,
@@ -323,6 +325,7 @@ impl TestPipelineStageHandle {
             signals: Default::default(),
             acknowledge_commands: true,
             stall_drain: false,
+            drain_mailbox_closed: false,
             panic_on_start: false,
             id,
             name: name.into(),
@@ -400,6 +403,9 @@ impl StageHandle for TestPipelineStageHandle {
     }
 
     async fn begin_drain(&self) -> Result<(), StageError> {
+        if self.drain_mailbox_closed {
+            return Err(StageError::MailboxClosed);
+        }
         if self.stall_drain {
             std::future::pending::<()>().await;
         }
@@ -591,6 +597,7 @@ pub(in crate::pipeline) fn owned_test_stage(
         signals: Default::default(),
         acknowledge_commands: true,
         stall_drain: false,
+        drain_mailbox_closed: false,
         panic_on_start: false,
         start_gate: None,
         shutdown_probe: probe,

@@ -10,6 +10,7 @@ use super::fsm::{
 use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
 use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::replay::ReplayDriver;
+use crate::stages::common::handlers::source::ErasedSourceInvocation;
 use crate::stages::common::handlers::UnifiedInfiniteSourceHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -19,10 +20,11 @@ use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::{
     announce_resumed_live, around_source_boundary, commit_catch_up_markers, commit_reader_acquired,
     commit_source_open_failure, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    normalise_source_poll_error, observe_source_boundary_rejection, poll_error_backoff,
-    poll_error_summary, record_source_release, record_source_stage_fatal, source_error_kind,
-    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
-    PendingFailure, SourceExit, SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
+    normalise_source_poll_error, observe_source_boundary_rejection, on_blocking_pool,
+    poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
+    release_on_blocking_pool, source_error_kind, stage_boundary_control_events,
+    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceExit,
+    SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
@@ -413,8 +415,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         let Some(handler) = self.handler.take() else {
             return Ok(ActionExecution::Completed);
         };
-        // Synchronous readers release through `Drop`.
-        drop(handler);
+        // An unacquired handler holds only cold configuration.
         let (true, Some(resources)) = (self.reader_acquired, context.resources.as_ref()) else {
             return Ok(ActionExecution::Completed);
         };
@@ -431,6 +432,8 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         let journal = self.data_journal.clone();
         let flow_context = self.flow_context.clone();
         Ok(ActionExecution::Pending(Box::pin(async move {
+            // Synchronous readers release through `Drop`, off the async workers.
+            release_on_blocking_pool(handler).await;
             let result = record_source_release(&journal, &flow_context, release, Ok(())).await;
             Box::new(move |_: &mut InfiniteSourceContext<H>| result.map(|()| None))
                 as ActionCompletion<InfiniteSourceContext<H>, InfiniteSourceEvent<H>>
@@ -569,16 +572,17 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     StageType::InfiniteSource,
                 );
                 let resuming = ctx.runtime_execution.resume_control().is_some();
-                if let Err(error) = self
-                    .handler
-                    .as_mut()
-                    .expect("handler available before cleanup")
-                    .acquire(SourceReaderInitContext {
-                        stage_id: self.stage_id,
-                        stage_name: ctx.stage_name.clone(),
-                        flow_name: ctx.flow_name.clone(),
-                    })
-                {
+                let init = SourceReaderInitContext {
+                    stage_id: self.stage_id,
+                    stage_name: ctx.stage_name.clone(),
+                    flow_name: ctx.flow_name.clone(),
+                };
+                let opened = on_blocking_pool(&mut self.handler, move |handler: &mut H| {
+                    handler.acquire(init)
+                })
+                .await
+                .map_err(|fatal| fatal.detail)?;
+                if let Err(error) = opened {
                     let failure = commit_source_open_failure(
                         SourceOpenFailureCommit {
                             stage_flow_context: &stage_flow_context,
@@ -841,11 +845,12 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                         source_boundary,
                         Box::pin(async {
                             let poll_started_at = time::Instant::now();
-                            let invocation = self
-                                .handler
-                                .as_mut()
-                                .expect("handler available before cleanup")
-                                .next_invocation();
+                            let invocation =
+                                on_blocking_pool(&mut self.handler, |handler: &mut H| {
+                                    handler.next_invocation()
+                                })
+                                .await
+                                .unwrap_or_else(ErasedSourceInvocation::fatal);
                             let poll_duration = poll_started_at.elapsed();
                             SourcePollReport::from_erased(invocation, poll_duration)
                         }),

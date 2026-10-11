@@ -100,6 +100,9 @@ pub enum StageError {
     HandlerFailure(HandlerError),
     /// Execution was explicitly aborted.
     Aborted,
+    /// The stage closed its mailbox; its exit arrives through completion
+    /// observation, never through command delivery.
+    MailboxClosed,
     /// Retained execution/publication failure with its original source.
     Execution(Arc<dyn Error + Send + Sync>),
     /// Generic error
@@ -121,6 +124,7 @@ impl fmt::Display for StageError {
                 write!(f, "Stage handler failure: {err:?}")
             }
             StageError::Aborted => write!(f, "Stage execution was aborted"),
+            StageError::MailboxClosed => write!(f, "Stage mailbox is closed"),
             StageError::Execution(error) => write!(f, "Stage execution failed: {error}"),
             StageError::Other(msg) => write!(f, "Stage error: {msg}"),
         }

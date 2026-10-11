@@ -240,8 +240,13 @@ fn fail_children(ctx: &mut C, message: String, violation: Option<ViolationCause>
         .expect("failure selected")
         .reason
         .clone();
-    ctx.cleanup_deadline
-        .get_or_insert_with(|| tokio::time::Instant::now() + super::context::stop_drain_timeout());
+    // An admitted graceful-stop deadline still bounds cleanup (FLOWIP-134i B19).
+    let cleanup = tokio::time::Instant::now() + super::context::stop_drain_timeout();
+    let bound = match (&ctx.stop_intent.mode, ctx.stop_intent.deadline) {
+        (Some(FlowStopMode::Graceful { .. }), Some(graceful)) => cleanup.min(graceful),
+        _ => cleanup,
+    };
+    ctx.cleanup_deadline = Some(ctx.cleanup_deadline.map_or(bound, |at| at.min(bound)));
     change(S::FailingChildren { cause }, vec![A::CancelChildren])
 }
 pub(super) fn failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
