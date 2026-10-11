@@ -23,7 +23,7 @@ use crate::stages::source::supervision::{
     normalise_source_poll_error, observe_source_boundary_rejection, on_blocking_pool,
     poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
     release_on_blocking_pool, source_error_kind, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceExit,
+    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceCall, SourceExit,
     SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
@@ -431,9 +431,10 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         );
         let journal = self.data_journal.clone();
         let flow_context = self.flow_context.clone();
+        let stage_name = self.name.clone();
         Ok(ActionExecution::Pending(Box::pin(async move {
             // Synchronous readers release through `Drop`, off the async workers.
-            release_on_blocking_pool(handler).await;
+            release_on_blocking_pool(handler, &stage_name).await;
             let result = record_source_release(&journal, &flow_context, release, Ok(())).await;
             Box::new(move |_: &mut InfiniteSourceContext<H>| result.map(|()| None))
                 as ActionCompletion<InfiniteSourceContext<H>, InfiniteSourceEvent<H>>
@@ -577,9 +578,12 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     stage_name: ctx.stage_name.clone(),
                     flow_name: ctx.flow_name.clone(),
                 };
-                let opened = on_blocking_pool(&mut self.handler, move |handler: &mut H| {
-                    handler.acquire(init)
-                })
+                let opened = on_blocking_pool(
+                    &mut self.handler,
+                    &ctx.stage_name,
+                    SourceCall::Open,
+                    move |handler: &mut H| handler.acquire(init),
+                )
                 .await
                 .map_err(|fatal| fatal.detail)?;
                 if let Err(error) = opened {
@@ -845,12 +849,14 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                         source_boundary,
                         Box::pin(async {
                             let poll_started_at = time::Instant::now();
-                            let invocation =
-                                on_blocking_pool(&mut self.handler, |handler: &mut H| {
-                                    handler.next_invocation()
-                                })
-                                .await
-                                .unwrap_or_else(ErasedSourceInvocation::fatal);
+                            let invocation = on_blocking_pool(
+                                &mut self.handler,
+                                &ctx.stage_name,
+                                SourceCall::Poll,
+                                |handler: &mut H| handler.next_invocation(),
+                            )
+                            .await
+                            .unwrap_or_else(ErasedSourceInvocation::fatal);
                             let poll_duration = poll_started_at.elapsed();
                             SourcePollReport::from_erased(invocation, poll_duration)
                         }),

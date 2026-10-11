@@ -164,8 +164,10 @@ async fn csv_example_replays_through_application_entry_without_either_input() ->
     Ok(())
 }
 
-const LONG_TICKETS: usize = 3_000;
-const TICKETS_AT_CUT: usize = 200;
+// Three runs of this input fit the lane's 60 s budget on CI runners, about
+// three times slower than a developer machine; the stop still lands early.
+const LONG_TICKETS: usize = 1_000;
+const TICKETS_AT_CUT: usize = 100;
 const CHILD_FIXTURES: &str = "OBZENFLOW_134I_CSV_FIXTURES";
 const CHILD_OUTPUTS: &str = "OBZENFLOW_134I_CSV_OUTPUTS";
 
@@ -226,10 +228,10 @@ async fn committed_tickets(run: &Path) -> usize {
     tickets
 }
 
-async fn tickets_eof(run: &Path) -> anyhow::Result<Vec<EofKind>> {
+async fn source_eofs(run: &Path, stage: &str) -> anyhow::Result<Vec<EofKind>> {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(run.join("run_manifest.json"))?)?;
-    let file = manifest["stages"]["tickets"]["data_journal_file"]
+    let file = manifest["stages"][stage]["data_journal_file"]
         .as_str()
         .unwrap();
     Ok(
@@ -245,7 +247,7 @@ async fn tickets_eof(run: &Path) -> anyhow::Result<Vec<EofKind>> {
 }
 
 #[test]
-#[ignore = "subprocess fixture; run by csv_example_resumes_an_interrupted_run"]
+#[ignore = "subprocess fixture; run by the interruption tests below"]
 fn csv_example_child() {
     let fixtures = PathBuf::from(std::env::var_os(CHILD_FIXTURES).expect("the parent's fixtures"));
     let outputs = PathBuf::from(std::env::var_os(CHILD_OUTPUTS).expect("the parent's outputs"));
@@ -310,7 +312,10 @@ async fn csv_example_resumes_an_interrupted_run() -> anyhow::Result<()> {
     assert!(status.success(), "SIGTERM drains the application: {status}");
 
     // The stop is honest: the ticket stream ends truncated, partway through.
-    assert_eq!(tickets_eof(&interrupted).await?, [EofKind::Truncated]);
+    assert_eq!(
+        source_eofs(&interrupted, "tickets").await?,
+        [EofKind::Truncated]
+    );
     let admitted = facts(&interrupted, "tickets").await?.len();
     assert!(
         (TICKETS_AT_CUT..LONG_TICKETS).contains(&admitted),
@@ -338,6 +343,72 @@ async fn csv_example_resumes_an_interrupted_run() -> anyhow::Result<()> {
         std::fs::read(&paths.output_csv)?,
         std::fs::read(&control_paths.output_csv)?,
         "the delivered output equals the control's"
+    );
+    Ok(())
+}
+
+/// FLOWIP-134i B20: a SIGTERM while the tickets open is held on a FIFO ends the
+/// process once the stop deadline aborts the source and the application's
+/// runtime abandons the call after `runtime.shutdown_timeout`.
+#[tokio::test(flavor = "multi_thread")]
+async fn csv_example_exits_while_an_open_is_held() -> anyhow::Result<()> {
+    use sysinfo::{Pid, PidExt, ProcessExt, Signal, System, SystemExt};
+    let temp = tempfile::tempdir()?;
+    let fixtures = temp.path().join("fixtures");
+    let outputs = temp.path().join("held");
+    std::fs::create_dir_all(&fixtures)?;
+    std::fs::write(
+        fixtures.join("customers.csv"),
+        include_str!("../examples/csv_demo_support_sla/fixtures/customers.csv"),
+    )?;
+    let paths = example::flow::DemoPaths::resolve_in(&fixtures, &outputs)?;
+    // Opening a FIFO for reading blocks until a writer appears; none does.
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&paths.tickets_csv)
+        .status()?
+        .success());
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])
+        .env(CHILD_FIXTURES, &fixtures)
+        .env(CHILD_OUTPUTS, &outputs)
+        .env("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    // Both sources start together; the customers finish while the tickets
+    // open waits on the FIFO.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let run = loop {
+        if let Ok(run) = latest_run(&paths.journals_dir) {
+            if source_eofs(&run, "customers").await? == [EofKind::Natural] {
+                break run;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the customers never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let pid = Pid::from_u32(child.id().expect("the application is running"));
+    let mut system = System::new();
+    assert!(system.refresh_process(pid));
+    assert_eq!(
+        system.process(pid).unwrap().kill_with(Signal::Term),
+        Some(true)
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(20), child.wait())
+            .await
+            .is_ok(),
+        "the process exits within its stop deadline and shutdown timeout while the open is held"
+    );
+    // A stop before or after the open would have written `Truncated` (B5).
+    assert_eq!(
+        source_eofs(&run, "tickets").await?,
+        Vec::<EofKind>::new(),
+        "the stop aborted the source inside its open"
     );
     Ok(())
 }

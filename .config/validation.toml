@@ -42,7 +42,7 @@ owner = "independent_lifetimes subprocess"
 [[ignored]]
 binary = "obzenflow::csv_source_lifecycle_test"
 test = "csv_example_child"
-owner = "csv_example_resumes_an_interrupted_run subprocess"
+owner = "csv_source_lifecycle_test interruption subprocess"
 
 [[ignored]]
 binary = "obzenflow::durable_execution_contract_test"

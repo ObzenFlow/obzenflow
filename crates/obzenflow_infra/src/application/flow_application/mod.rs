@@ -384,17 +384,24 @@ impl FlowApplicationBuilder {
     ///
     /// This builds the tokio runtime, initializes observability, and runs the flow.
     /// Use this when you have a plain `fn main()` and want FlowApplication to
-    /// manage the entire runtime lifecycle.
+    /// manage the entire runtime lifecycle, including a bounded exit: blocking
+    /// work still running after the flow ends, such as a synchronous source
+    /// call held on a FIFO, is abandoned once `runtime.shutdown_timeout` passes.
     pub fn run_blocking(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
         let mut params = self.into_launch_params();
         let prepared = params.prepare()?;
+        let shutdown_timeout = prepared.config.runtime.shutdown_timeout;
         // Tracing is installed before runtime construction and task creation.
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| ApplicationError::RuntimeCreationFailed(e.to_string()))?;
 
-        runtime.block_on(FlowApplication::launch_prepared(flow, params, prepared))
+        let result = runtime.block_on(FlowApplication::launch_prepared(flow, params, prepared));
+        // Blocking work cannot be cancelled, so the runtime owner bounds the
+        // wait; healthy work finishes long before it (FLOWIP-134i B20).
+        runtime.shutdown_timeout(shutdown_timeout);
+        result
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
@@ -403,6 +410,11 @@ impl FlowApplicationBuilder {
     /// and want FlowApplication to handle startup and observability. Console
     /// observes framework tasks created after setup; it cannot reconstruct the
     /// creation of tasks already running in the caller's runtime.
+    ///
+    /// Your runtime owns process exit. Dropping it waits for blocking work that
+    /// never returns, such as a synchronous source call held on a FIFO; shut it
+    /// down with [`tokio::runtime::Runtime::shutdown_timeout`], or use
+    /// [`FlowApplicationBuilder::run_blocking`], which does.
     pub async fn run_async(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
         FlowApplication::launch(flow, self.into_launch_params()).await
     }
@@ -498,6 +510,11 @@ impl FlowApplication {
     /// # Returns
     /// * `Ok(())` if flow completes successfully
     /// * `Err(ApplicationError)` if flow fails or cannot start
+    ///
+    /// The flow runs in your runtime, which owns process exit. Dropping it waits
+    /// for blocking work that never returns, such as a synchronous source call
+    /// held on a FIFO. [`FlowApplicationBuilder::run_blocking`] owns the runtime
+    /// and bounds that wait by `runtime.shutdown_timeout`.
     pub async fn run(flow: FlowDefinition) -> Result<(), ApplicationError> {
         Self::run_with_web_endpoints(flow, Vec::new()).await
     }

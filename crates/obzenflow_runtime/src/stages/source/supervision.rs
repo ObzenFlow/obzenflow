@@ -634,11 +634,43 @@ pub(crate) async fn around_source_boundary<'a>(
     }
 }
 
+/// The synchronous connector call a source runs on the blocking pool.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SourceCall {
+    Open,
+    Seek,
+    Poll,
+    Release,
+}
+
+/// Reports a caller dropped mid-call, as a stop deadline's abort does. The
+/// call keeps its blocking-pool thread until it returns (FLOWIP-134i B20).
+struct AbandonedCall<'a> {
+    stage_name: &'a str,
+    call: SourceCall,
+    settled: bool,
+}
+
+impl Drop for AbandonedCall<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            tracing::warn!(
+                stage_name = %self.stage_name,
+                call = ?self.call,
+                "synchronous source call abandoned in progress; it holds a blocking-pool \
+                 thread until it returns"
+            );
+        }
+    }
+}
+
 /// Runs one synchronous reader call on the blocking pool, so connector code
 /// never blocks an async worker (FLOWIP-134i B18). The reader moves into the
 /// call and back, so calls on one reader never overlap.
 pub(crate) async fn on_blocking_pool<H, T>(
     handler: &mut Option<H>,
+    stage_name: &str,
+    kind: SourceCall,
     call: impl FnOnce(&mut H) -> T + Send + 'static,
 ) -> Result<T, StageFatal>
 where
@@ -646,12 +678,18 @@ where
     T: Send + 'static,
 {
     let mut reader = handler.take().expect("handler available before cleanup");
-    match tokio::task::spawn_blocking(move || {
+    let mut in_flight = AbandonedCall {
+        stage_name,
+        call: kind,
+        settled: false,
+    };
+    let joined = tokio::task::spawn_blocking(move || {
         let result = call(&mut reader);
         (reader, result)
     })
-    .await
-    {
+    .await;
+    in_flight.settled = true;
+    match joined {
         Ok((reader, result)) => {
             *handler = Some(reader);
             Ok(result)
@@ -667,8 +705,15 @@ where
 
 /// Drops a synchronous reader on the blocking pool, because `Drop` is
 /// connector code (FLOWIP-134i B18).
-pub(crate) async fn release_on_blocking_pool<H: Send + 'static>(reader: H) {
-    if let Err(error) = tokio::task::spawn_blocking(move || drop(reader)).await {
+pub(crate) async fn release_on_blocking_pool<H: Send + 'static>(reader: H, stage_name: &str) {
+    let mut in_flight = AbandonedCall {
+        stage_name,
+        call: SourceCall::Release,
+        settled: false,
+    };
+    let released = tokio::task::spawn_blocking(move || drop(reader)).await;
+    in_flight.settled = true;
+    if let Err(error) = released {
         // A cancelled release means runtime shutdown already dropped the reader.
         if error.is_panic() {
             std::panic::resume_unwind(error.into_panic());
