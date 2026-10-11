@@ -32,6 +32,7 @@ use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetric
 #[cfg(feature = "warp-server")]
 use crate::web::RuntimeInstanceId;
 use obzenflow_adapters::monitoring::MetricsReadModel;
+use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::HttpEndpoint;
@@ -60,6 +61,7 @@ struct LaunchParams {
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
+    ingress_slots: Vec<HostedIngressBindingSlot>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
@@ -208,6 +210,8 @@ pub struct FlowApplicationBuilder {
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
+    /// FLOWIP-084l: registered hosted ingress, given `[server.ingress]` at launch.
+    ingress_slots: Vec<HostedIngressBindingSlot>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
@@ -352,6 +356,14 @@ impl FlowApplicationBuilder {
     where
         T: TypedPayload + Send + Sync + 'static,
     {
+        let slot = handle.ingress_slot();
+        if !self
+            .ingress_slots
+            .iter()
+            .any(|registered| registered.same_binding(&slot))
+        {
+            self.ingress_slots.push(slot);
+        }
         self.flow_handle_hooks.push(Box::new(move |flow_handle| {
             handle.bind_flow_handle(flow_handle)
         }));
@@ -433,6 +445,7 @@ impl FlowApplicationBuilder {
             flow_handle_hooks: self.flow_handle_hooks,
             presentation: self.presentation,
             cli_args: self.cli_args,
+            ingress_slots: self.ingress_slots,
             #[cfg(all(test, feature = "tokio-console"))]
             test_console_bound_address: self.test_console_bound_address,
             #[cfg(all(test, feature = "warp-server"))]
@@ -592,6 +605,7 @@ impl FlowApplication {
             extra_endpoints,
             flow_handle_hooks,
             presentation,
+            ingress_slots,
             #[cfg(all(test, feature = "warp-server"))]
             test_shutdown_signal,
             #[cfg(all(test, feature = "warp-server"))]
@@ -600,6 +614,19 @@ impl FlowApplication {
             test_host_task,
             ..
         } = std::mem::take(params);
+
+        // FLOWIP-084l: one timing for every hosted ingress, before any source runs.
+        for slot in &ingress_slots {
+            if let Err(installed) = slot.install_timing(config.server.ingress) {
+                if slot.timing() != installed {
+                    return Err(ApplicationError::InvalidConfiguration(format!(
+                        "hosted ingress '{}' is already hosted with different [server.ingress] \
+                         timing",
+                        slot.ingress_key()
+                    )));
+                }
+            }
+        }
 
         // FLOWIP-120i: resolve the run mode once, for banner and footer copy.
         let run_mode = match &config.replay {
@@ -868,9 +895,9 @@ impl FlowApplication {
                     match wiring(WebSurfaceWiringContext {
                         pipeline_state: flow_handle.state_receiver(),
                         // FLOWIP-115d: hand hosted ingress surfaces the host system
-                        // journal so they can append refusal facts. A surface with
-                        // refusal recording enabled fails startup here if it is None.
-                        ingress_refusals: flow_handle.ingress_refusals(),
+                        // journal so they can append attempt evidence. A surface with
+                        // evidence recording enabled fails startup here if it is None.
+                        ingress_evidence: flow_handle.ingress_evidence(),
                     }) {
                         Ok(wired) => application
                             .tasks

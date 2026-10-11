@@ -70,6 +70,7 @@ fn test_derived_event() {
         ingress_key: "test".into(),
         batch_index: Some(1),
         attempt_seq: IngressAttemptSeq(0),
+        request: None,
     });
 
     let child = ChainEventFactory::derived_data_event(

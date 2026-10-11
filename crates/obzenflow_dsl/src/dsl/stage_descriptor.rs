@@ -380,11 +380,10 @@ fn build_source_middleware_and_register_policies(
         })
         .map_err(|e| format!("Stage '{}': {e}", config.name))?;
         // FLOWIP-120n F12: under resume, hosted ingress refuses until the
-        // source supervisor marks the slot live at the catch-up handoff.
-        if obzenflow_runtime::bootstrap::replay_bootstrap()
-            .is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
-        {
-            slot.hold_for_resume_catch_up();
+        // source supervisor marks the slot live at the catch-up handoff. A
+        // strict replay never goes live, so it refuses throughout (FLOWIP-084l).
+        if obzenflow_runtime::bootstrap::replay_bootstrap().is_some() {
+            slot.hold_until_live();
         }
     }
 

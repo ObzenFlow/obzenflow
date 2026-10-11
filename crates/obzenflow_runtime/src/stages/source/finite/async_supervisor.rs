@@ -688,6 +688,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_stall,
                     Some(&ctx.output_contract),
+                    &mut Vec::new(),
                     self.external_events
                         .recv(|event| !FiniteSourceState::defer_external_event(state, event)),
                     || FiniteSourceEvent::Error("External control channel closed".to_string()),

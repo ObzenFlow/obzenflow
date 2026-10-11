@@ -311,10 +311,11 @@ async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
         }
         let shared_slot = slot.clone();
         let definition = FlowDefinition::materialize(move |_| {
-            let (_first_tx, first_rx) = tokio::sync::mpsc::channel(1);
-            let (_second_tx, second_rx) = tokio::sync::mpsc::channel(1);
-            let first = HostedIngressSource::new(HostedInputDecoder, first_rx, shared_slot.clone());
-            let second = HostedIngressSource::new(HostedInputDecoder, second_rx, shared_slot);
+            let (_, first_rx) = tokio::sync::mpsc::channel(1);
+            let (_, second_rx) = tokio::sync::mpsc::channel(1);
+            let first =
+                HostedIngressSource::<HostedInputDecoder>::new(first_rx, shared_slot.clone());
+            let second = HostedIngressSource::<HostedInputDecoder>::new(second_rx, shared_slot);
             Ok(flow! {
                 name: "hosted_slot_ownership_preflight",
                 journals: disk_journals(journal_root),

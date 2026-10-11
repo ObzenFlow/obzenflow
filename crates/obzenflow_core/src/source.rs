@@ -298,7 +298,8 @@ fn canonical_digest(value: Value) -> Result<String, SourceIdentityError> {
     Ok(hex_sha256(&bytes))
 }
 
-fn canonicalize(value: Value) -> Value {
+/// Sorted-key JSON, arrays in order: the canonical form hashed by digests.
+pub(crate) fn canonicalize(value: Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut entries: Vec<_> = map.into_iter().collect();
@@ -316,10 +317,13 @@ fn canonicalize(value: Value) -> Value {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
+    lower_hex(digest(&SHA256, bytes).as_ref())
+}
+
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let hash = digest(&SHA256, bytes);
-    let mut hex = String::with_capacity(hash.as_ref().len() * 2);
-    for byte in hash.as_ref() {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         hex.push(char::from(HEX[usize::from(byte >> 4)]));
         hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }

@@ -57,7 +57,9 @@ pub enum EdgeShedReason {
 /// outcomes (503). `Validation` is a per-event input-validation rejection; it is
 /// journalled (unlike the other protocol 4xx rejects, which the bucketed
 /// HTTP-surface metrics already cover) because a partially accepted batch returns
-/// `200`, so its per-event validation rejections are otherwise invisible.
+/// `202`, so its per-event validation rejections are otherwise invisible.
+/// `IdempotencyKeyConflict` reuses a committed request ID with other content
+/// (FLOWIP-084l).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IngressRefusalReason {
@@ -67,6 +69,7 @@ pub enum IngressRefusalReason {
     ChannelClosed,
     ListenerOverloaded,
     Validation,
+    IdempotencyKeyConflict,
 }
 
 impl IngressRefusalReason {
@@ -79,6 +82,7 @@ impl IngressRefusalReason {
             Self::ChannelClosed => "channel_closed",
             Self::ListenerOverloaded => "listener_overloaded",
             Self::Validation => "validation",
+            Self::IdempotencyKeyConflict => "idempotency_key_conflict",
         }
     }
 

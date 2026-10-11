@@ -144,7 +144,7 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
             topology: None,
             flow_name: "held_parent_poll".into(),
             contract_attachments: None,
-            ingress_refusals: None,
+            ingress_evidence: None,
             metrics_journals: None,
             stage_journals: vec![],
             system_journals: vec![journal.clone()],

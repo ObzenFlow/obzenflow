@@ -235,6 +235,7 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
                     http_status: 503,
                     retry_after_ms_bucket: None,
                     diagnostics: Vec::new(),
+                    request_id: None,
                 },
             )
             .await;

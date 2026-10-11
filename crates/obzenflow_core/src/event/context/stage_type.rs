@@ -43,11 +43,6 @@ impl StageType {
         matches!(self, StageType::FiniteSource)
     }
 
-    /// Check if this is an infinite source
-    pub fn is_infinite_source(&self) -> bool {
-        matches!(self, StageType::InfiniteSource)
-    }
-
     /// Check if this stage generates events
     pub fn generates_events(&self) -> bool {
         self.is_source()

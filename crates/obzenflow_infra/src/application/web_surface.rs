@@ -35,10 +35,10 @@ pub(crate) type WebSurfaceAttachmentParts = (
 pub struct WebSurfaceWiringContext {
     pub pipeline_state: watch::Receiver<PipelineState>,
     /// FLOWIP-115d: the host system journal, so a hosted ingress surface can
-    /// install its refusal-fact writer. `None` when the flow has no system
-    /// journal, in which case a surface with refusal recording enabled fails
+    /// install its attempt-evidence writer. `None` when the flow has no system
+    /// journal, in which case a surface with evidence recording enabled fails
     /// startup.
-    pub ingress_refusals: Option<obzenflow_runtime::pipeline::ingress::IngressRefusalWriter>,
+    pub ingress_evidence: Option<obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter>,
 }
 
 #[derive(Default)]
@@ -205,7 +205,7 @@ mod tests {
 
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state: rx,
-            ingress_refusals: None,
+            ingress_evidence: None,
         })
         .unwrap();
         assert_eq!(wired.tasks.len(), 1);

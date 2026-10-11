@@ -220,6 +220,24 @@ async fn closed_channel() -> SourceError {
         .expect_err("a closed channel cannot continue")
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SkipsEmptyTags {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+}
+
+impl TypedPayload for SkipsEmptyTags {
+    const EVENT_TYPE: &'static str = "flowip_084l.skips_empty_tags";
+}
+
+/// Hosted admission's journal-form proof (FLOWIP-084l B4).
+fn unrepresentable_value() -> SourceError {
+    let refused =
+        obzenflow_runtime::stages::prove_journal_form(SkipsEmptyTags { tags: Vec::new() })
+            .expect_err("an empty skipped list cannot be recorded faithfully");
+    SourceError::Validation(refused.into_diagnostic())
+}
+
 /// Exhaustive by construction: a new reason does not compile until it has a
 /// real producer here, or is the explicit `Unclassified` escape.
 async fn produce(reason: SourceDiagnosticReason) -> Option<SourceError> {
@@ -242,6 +260,7 @@ async fn produce(reason: SourceDiagnosticReason) -> Option<SourceError> {
         UnknownField => yaml_record(b"- {order_id: \"a\", amount_cents: 1, extra: 2}\n"),
         InvalidValue => yaml_record(b"- {order_id: \"a\", amount_cents: lots}\n"),
         InvalidRecord => csv_unknown_variant(),
+        UnrepresentableValue => unrepresentable_value(),
         Unclassified => return None,
     })
 }
@@ -267,6 +286,7 @@ async fn every_reason_has_a_real_producer() {
         UnknownField,
         InvalidValue,
         InvalidRecord,
+        UnrepresentableValue,
         Unclassified,
     ];
     let mut produced = 0;

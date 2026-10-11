@@ -16,14 +16,19 @@
 //!   (infra calls it, adapters implement it).
 //! - [`binding`]: the write-once `HostedIngressBindingSlot` the DSL fills and
 //!   `FlowApplication` reads during web-surface wiring.
+//! - [`identity`]: request identity, content digests and commit receipts
+//!   (FLOWIP-084l).
 //! - [`submission`]: the HTTP submission DTOs and accepted-event
 //!   `IngressContext` provenance.
+//! - [`timing`]: the acknowledgement deadline and idempotency window.
 
 mod admission;
 mod binding;
 mod boundary;
+mod identity;
 mod key;
 mod submission;
+mod timing;
 
 pub use admission::{
     EdgeShedReason, IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
@@ -31,8 +36,10 @@ pub use admission::{
 };
 pub use binding::{FilledHostedIngress, HostedIngressAlreadyBound, HostedIngressBindingSlot};
 pub use boundary::IngressBoundaryMiddleware;
-pub use key::IngressKey;
-pub use submission::{
-    BatchSubmission, EventSubmission, IngressContext, SubmissionIngressContext,
-    SubmissionPayloadKind, SubmissionResponse,
+pub use identity::{
+    IngressContentDigest, IngressOriginal, IngressReceipt, IngressRequestId,
+    IngressRequestIdentity, InvalidIngressRequestId,
 };
+pub use key::IngressKey;
+pub use submission::{BatchSubmission, EventSubmission, IngressContext};
+pub use timing::{IngressTiming, InvalidIngressTiming, OUTCOME_UNKNOWN_RETRY_AFTER};

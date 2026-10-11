@@ -17,12 +17,13 @@ pub mod transform;
 pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
-    EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig, HostedIngressSource,
-    InferenceHandler, IngressDecodeError, IngressDecoder, IngressRecord, InlineSink,
-    ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate, SinkConnector,
-    SinkDescription, SinkWriter, SinkWriterInitContext, SourceObservationSink, StatefulEmission,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler, TypedStatefulHandler,
+    prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig,
+    HostedIngressSource, HostedSubmission, InferenceHandler, IngressDecodeError, IngressDecoder,
+    IngressReceiptSender, IngressRecord, InlineSink, ObserverHandler, ProcessingContext,
+    ResourceManaged, SignalDecision, SignalGate, SinkConnector, SinkDescription, SinkWriter,
+    SinkWriterInitContext, SourceObservationSink, StatefulEmission, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    TypedStatefulHandler,
 };
 
 // FLOWIP-115c runtime control-strategy hooks.

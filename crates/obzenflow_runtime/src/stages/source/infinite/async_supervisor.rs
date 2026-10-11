@@ -678,7 +678,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                 );
                 let observer_scope = ctx.runtime_execution.stage_scope(self.stage_id);
 
-                if let Some(directive) = drain_pending_outputs_async(
+                let mut committed = Vec::new();
+                let drained = drain_pending_outputs_async(
                     &mut ctx.pending_outputs,
                     &stage_flow_context,
                     self.stage_id,
@@ -690,12 +691,18 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_stall,
                     Some(&ctx.output_contract),
+                    &mut committed,
                     self.external_events
                         .recv(|event| !InfiniteSourceState::defer_external_event(state, event)),
                     || InfiniteSourceEvent::Error("External control channel closed".to_string()),
                 )
-                .await?
-                {
+                .await;
+                // FLOWIP-084l: hosted receipts resolve only after their own rows commit.
+                self.handler
+                    .as_mut()
+                    .expect("Running owns a source handler")
+                    .settle_committed(&committed);
+                if let Some(directive) = drained? {
                     // The diagnostic drains first, so control cannot relabel a failure.
                     if let Some(failure) = self.pending_failure.take() {
                         return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
@@ -785,6 +792,12 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                             {
                                 return Err(format!("source replay event descriptor {} does not match its output contract", event.event.descriptor()).into());
                             }
+                            // FLOWIP-084l: rebuild request identities from this
+                            // source's own rows before the slot goes live.
+                            self.handler
+                                .as_mut()
+                                .expect("Running owns a source handler")
+                                .fold_recorded_admission(&event.event);
                             let event = event.admit()?;
                             ctx.instrumentation
                                 .event_loops_with_work_total

@@ -11,15 +11,19 @@
 //! and receive its source for the flow. The builder owns hosting and lifecycle
 //! wiring. For application-owned protocols, clone an [`Ingress::handle`] and
 //! pass the bundle to [`super::FlowApplicationBuilder::ingress`].
+//!
+//! A success answer follows the submission's committed row, and a stable
+//! request ID turns a retry into the original row instead of another copy.
 
 pub use obzenflow_core::ingress::{
     BatchSubmission, EdgeShedReason, EventSubmission, IngressContext, IngressKey,
-    IngressRefusalKind, IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind,
-    SubmissionResponse,
+    IngressRefusalKind, IngressRefusalReason, IngressRequestId, IngressRequestIdentity,
+    IngressTiming, InvalidIngressRequestId,
 };
 pub use obzenflow_infra::web::endpoints::event_ingestion::{
     http_ingress, ingress_source, HttpIngress, HttpIngressAttachment, IngestionConfig, Ingress,
-    IngressHandle, IngressSubmitError, IngressSubmitOutcome,
+    IngressErrorBody, IngressErrorCode, IngressHandle, IngressOutcome, SubmissionMemberOutcome,
+    SubmissionMemberResult, SubmissionResponse,
 };
 pub use obzenflow_infra::web::endpoints::event_ingestion::{
     AuthConfig, AuthError, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,

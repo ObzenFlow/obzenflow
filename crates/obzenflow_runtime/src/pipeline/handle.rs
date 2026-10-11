@@ -29,7 +29,7 @@ pub(crate) struct FlowHandleExtras {
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
-    pub ingress_refusals: Option<super::ingress::IngressRefusalWriter>,
+    pub ingress_evidence: Option<super::ingress::IngressEvidenceWriter>,
     pub metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     pub stage_journals: Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)>,
     pub system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
@@ -76,8 +76,8 @@ pub struct FlowHandle {
     /// baked into the canonical `Topology`.
     contract_attachments: Option<ContractAttachments>,
 
-    /// Host ingress refusals published through this pipeline owner.
-    ingress_refusals: Option<super::ingress::IngressRefusalWriter>,
+    /// Host ingress evidence published through this pipeline owner.
+    ingress_evidence: Option<super::ingress::IngressEvidenceWriter>,
     metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     stage_journals: Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)>,
     system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
@@ -102,8 +102,8 @@ impl FlowHandle {
     pub fn metrics_journals(&self) -> Option<crate::metrics::builder::MetricsJournals> {
         self.metrics_journals.clone()
     }
-    pub fn ingress_refusals(&self) -> Option<super::ingress::IngressRefusalWriter> {
-        self.ingress_refusals.clone()
+    pub fn ingress_evidence(&self) -> Option<super::ingress::IngressEvidenceWriter> {
+        self.ingress_evidence.clone()
     }
     /// Live journal handles for presentation consumers. Reading them never participates in coordination.
     pub fn stage_journals(&self) -> Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)> {
@@ -130,7 +130,7 @@ impl FlowHandle {
             stage_journals,
             system_journals,
             metrics_journals,
-            ingress_refusals,
+            ingress_evidence,
             pipeline_writer_id,
             observations,
             host_observations,
@@ -152,7 +152,7 @@ impl FlowHandle {
             stage_journals,
             system_journals,
             metrics_journals,
-            ingress_refusals,
+            ingress_evidence,
             pipeline_writer_id,
             observations,
             host_observations,

@@ -93,6 +93,10 @@ event_names! {
     backpressure => "backpressure" {
         STALL_DETECTED => "stall_detected",
     },
+    ingress => "ingress" {
+        ATTEMPT_REFUSED => "attempt_refused",
+        DUPLICATE_RECOGNIZED => "duplicate_recognized",
+    },
 }
 
 /// Supervisor grammar, canonical built-in names and shared occurrence suffixes.

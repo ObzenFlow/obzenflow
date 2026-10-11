@@ -117,7 +117,7 @@ enabled = false
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(response.status().as_u16(), 200);
+            assert_eq!(response.status().as_u16(), 202);
             delivered_rx
                 .recv()
                 .await

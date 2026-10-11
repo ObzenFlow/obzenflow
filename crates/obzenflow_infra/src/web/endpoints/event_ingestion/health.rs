@@ -10,13 +10,13 @@ use obzenflow_core::web::{
 };
 use serde::Serialize;
 
-pub struct IngestionHealthEndpoint {
-    state: IngestionState,
+pub struct IngestionHealthEndpoint<T> {
+    state: IngestionState<T>,
     path: String,
 }
 
-impl IngestionHealthEndpoint {
-    pub fn new(state: IngestionState) -> Self {
+impl<T> IngestionHealthEndpoint<T> {
+    pub fn new(state: IngestionState<T>) -> Self {
         let path = join_path(&state.config.base_path, "health");
         Self { state, path }
     }
@@ -32,10 +32,13 @@ struct IngestionHealthResponse {
     resume_live: bool,
     channel_depth: usize,
     channel_capacity: usize,
+    /// FLOWIP-084l: request identities the source currently deduplicates.
+    idempotency_entries: u64,
+    idempotency_window_secs: u64,
 }
 
 #[async_trait]
-impl HttpEndpoint for IngestionHealthEndpoint {
+impl<T: Send + Sync + 'static> HttpEndpoint for IngestionHealthEndpoint<T> {
     fn path(&self) -> &str {
         &self.path
     }
@@ -47,13 +50,16 @@ impl HttpEndpoint for IngestionHealthEndpoint {
     async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
         let pipeline_ready = self.state.is_ready();
         let status = if pipeline_ready { "ready" } else { "not_ready" };
+        let slot = self.state.ingress_slot();
         let body = IngestionHealthResponse {
             status,
             pipeline_ready,
             pipeline_running: self.state.pipeline_running(),
             resume_live: self.state.resume_live(),
             channel_depth: self.state.channel_depth(),
-            channel_capacity: self.state.buffer_capacity,
+            channel_capacity: self.state.channel_capacity(),
+            idempotency_entries: slot.idempotency_entries(),
+            idempotency_window_secs: slot.timing().idempotency_window().as_secs(),
         };
 
         let response = if pipeline_ready {

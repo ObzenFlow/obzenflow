@@ -11,9 +11,10 @@
 //! handle or web-surface wiring.
 
 use super::boundary::IngressBoundaryMiddleware;
+use super::timing::IngressTiming;
 use super::IngressKey;
 use crate::{StageId, StageKey};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The boundary plus replay-stable identity the DSL fills into a hosted-ingress
@@ -64,9 +65,14 @@ impl std::error::Error for HostedIngressAlreadyBound {}
 pub struct HostedIngressBindingSlot {
     ingress_key: IngressKey,
     cell: Arc<OnceLock<FilledHostedIngress>>,
-    /// FLOWIP-120n F12: whether the linked source is past resume catch-up.
-    /// True outside resume; held false from bind until the handoff.
+    /// FLOWIP-120n F12: whether the linked source admits live input. True
+    /// outside replay; held false from bind until the resume handoff, and for
+    /// the whole of a strict replay.
     resume_live: Arc<AtomicBool>,
+    /// FLOWIP-084l: the configured timing, installed once at hosting.
+    timing: Arc<OnceLock<IngressTiming>>,
+    /// FLOWIP-084l: identity-index entries, published by the source's writer.
+    idempotency_entries: Arc<AtomicU64>,
 }
 
 impl HostedIngressBindingSlot {
@@ -75,6 +81,8 @@ impl HostedIngressBindingSlot {
             ingress_key: ingress_key.into(),
             cell: Arc::new(OnceLock::new()),
             resume_live: Arc::new(AtomicBool::new(true)),
+            timing: Arc::new(OnceLock::new()),
+            idempotency_entries: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -109,9 +117,10 @@ impl HostedIngressBindingSlot {
         self.cell.get().is_some()
     }
 
-    /// FLOWIP-120n F12: hold ingress admission until the linked source crosses
-    /// its catch-up boundary. Applied at DSL bind time under `--resume-from`.
-    pub fn hold_for_resume_catch_up(&self) {
+    /// FLOWIP-120n F12: hold ingress admission until the linked source goes
+    /// live. Applied at DSL bind time under `--resume-from` and
+    /// `--replay-from`; a strict replay never goes live (FLOWIP-084l).
+    pub fn hold_until_live(&self) {
         self.resume_live.store(false, Ordering::Release);
     }
 
@@ -121,10 +130,29 @@ impl HostedIngressBindingSlot {
         self.resume_live.store(true, Ordering::Release);
     }
 
-    /// Whether the linked source is past resume catch-up (always true outside
-    /// resume).
+    /// Whether the linked source admits live input (always true outside
+    /// replay).
     pub fn is_resume_live(&self) -> bool {
         self.resume_live.load(Ordering::Acquire)
+    }
+
+    /// Install the configured timing once; a second install returns it back.
+    pub fn install_timing(&self, timing: IngressTiming) -> Result<(), IngressTiming> {
+        self.timing.set(timing)
+    }
+
+    /// The installed timing, or the defaults when hosting installed none.
+    pub fn timing(&self) -> IngressTiming {
+        self.timing.get().copied().unwrap_or_default()
+    }
+
+    /// Publish the source's current identity-index size.
+    pub fn publish_idempotency_entries(&self, entries: u64) {
+        self.idempotency_entries.store(entries, Ordering::Relaxed);
+    }
+
+    pub fn idempotency_entries(&self) -> u64 {
+        self.idempotency_entries.load(Ordering::Relaxed)
     }
 }
 
@@ -145,7 +173,7 @@ mod tests {
         let surface_half = slot.clone();
         assert!(surface_half.is_resume_live());
 
-        slot.hold_for_resume_catch_up();
+        slot.hold_until_live();
         assert!(!surface_half.is_resume_live());
 
         slot.mark_resume_live();

@@ -337,6 +337,14 @@ fn system_wire_names_keep_the_pipeline_author_for_metrics_requests() {
             json!({"system_event_type":"metrics_coordination", "metrics_event":"exported", "watermark":{"entries":[]}}),
             "supervisor.runtime.metrics_aggregator.snapshot.published",
         ),
+        (
+            json!({"system_event_type":"ingress_refusal", "ingress_key":"/api/orders", "stage_id":StageId::new(), "stage_key":"orders", "reason":"idempotency_key_conflict", "attempt_seq":1, "request_count":1, "event_count":1, "batch_count":0, "http_status":422, "request_id":"tx-0001"}),
+            "runtime.ingress.attempt_refused",
+        ),
+        (
+            json!({"system_event_type":"ingress_duplicate_recognized", "ingress_key":"/api/orders", "stage_id":StageId::new(), "stage_key":"orders", "attempt_seq":2, "request_id":"tx-0001", "originals":[{"batch_index":0, "event_id":obzenflow_core::EventId::new()}]}),
+            "runtime.ingress.duplicate_recognized",
+        ),
     ] {
         let payload: SystemPayload =
             serde_json::from_value(payload).unwrap_or_else(|err| panic!("{name}: {err}"));
