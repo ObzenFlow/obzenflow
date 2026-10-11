@@ -119,18 +119,29 @@ impl DiskJournalFactory {
         Ok(journal)
     }
 
-    /// Write `run_manifest.json` into the run directory (FLOWIP-095a).
+    /// Write `run_manifest.json` into the run directory (FLOWIP-095a). It is
+    /// published complete or absent, so no reader sees a partial manifest,
+    /// and is durable before a resume claims its parent (FLOWIP-134i B12).
     pub fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
-        let path = self.run_path().join(RUN_MANIFEST_FILENAME);
+        let run_path = self.run_path();
+        let path = run_path.join(RUN_MANIFEST_FILENAME);
+        let staged = run_path.join(format!("{RUN_MANIFEST_FILENAME}.staged"));
         let body =
             serde_json::to_string_pretty(manifest).map_err(|e| JournalError::Implementation {
                 message: format!("Failed to serialize run manifest: {}", path.display()),
                 source: Box::new(e),
             })?;
-        std::fs::write(&path, body).map_err(|e| JournalError::Implementation {
-            message: format!("Failed to write run manifest: {}", path.display()),
-            source: Box::new(e),
-        })?;
+        std::fs::File::create(&staged)
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, body.as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|()| std::fs::rename(&staged, &path))
+            .and_then(|()| std::fs::File::open(&run_path)?.sync_all())
+            .map_err(|e| JournalError::Implementation {
+                message: format!("Failed to write run manifest: {}", path.display()),
+                source: Box::new(e),
+            })?;
 
         Ok(())
     }

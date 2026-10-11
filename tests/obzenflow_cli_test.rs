@@ -2234,3 +2234,81 @@ mod hosted {
         dir.phase("verified");
     }
 }
+
+/// Run the CLI test flow with `args`, returning the run it wrote.
+async fn run_cli_flow(journal_base: &Path, args: &[&std::ffi::OsStr]) -> PathBuf {
+    FlowApplication::builder()
+        .with_cli_args(
+            std::iter::once(std::ffi::OsStr::new("obzenflow")).chain(args.iter().copied()),
+        )
+        .run_async(build_flow(journal_base.to_path_buf()))
+        .await
+        .expect("the flow completes");
+    std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves")
+}
+
+/// FLOWIP-134i B6, B7, B13, B16: `show` reports where a run stands in its
+/// history and how each source of a resumed run continued.
+#[tokio::test(flavor = "multi_thread")]
+async fn show_reports_lineage_and_source_continuation() {
+    fn show(run: &Path) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+            .arg("show")
+            .arg(run)
+            .args(["--color", "never"])
+            .output()
+            .expect("obzenflow binary should run");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("show prints UTF-8")
+    }
+    // Wrapping long run paths only adds whitespace, so compare without it.
+    let squeezed = |text: &str| text.split_whitespace().collect::<String>();
+    let section = |text: &str, heading: &str| {
+        let body = text
+            .split_once(&format!("\n{heading}\n"))
+            .map_or("", |(_, rest)| rest.split("\n\n").next().unwrap_or(rest));
+        squeezed(body)
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+    let r0 = run_cli_flow(&journal_base, &[]).await;
+    let r1 = run_cli_flow(&journal_base, &["--resume-from".as_ref(), r0.as_os_str()]).await;
+    let replay = run_cli_flow(&journal_base, &["--replay-from".as_ref(), r1.as_os_str()]).await;
+    let (r0_dir, r1_dir) = (r0.display(), r1.display());
+
+    assert_eq!(
+        section(&show(&r0), "LINEAGE"),
+        squeezed(&format!("Continued by {r1_dir}"))
+    );
+    let resumed = show(&r1);
+    let resumed_lineage = |evidence: &str| {
+        squeezed(&format!(
+            "Resumed from {r0_dir}, generation 1 \
+             Rebuild complete; resume needs no earlier run \
+             Evidence {r0_dir} holds generation 0{evidence}"
+        ))
+    };
+    assert_eq!(section(&resumed, "LINEAGE"), resumed_lineage(""));
+    assert_eq!(
+        section(&resumed, "CONTINUATION"),
+        squeezed("ticks journal-only (natural EOF in the recorded run)")
+    );
+    let replayed = show(&replay);
+    assert_eq!(
+        section(&replayed, "LINEAGE"),
+        squeezed(&format!(
+            "Replayed {r1_dir} Evidence {r1_dir} holds generation 1 \
+             Evidence {r0_dir} holds generation 0"
+        ))
+    );
+    assert!(!replayed.contains("\nCONTINUATION\n"), "{replayed}");
+
+    // Deleting an ancestor is a retention choice the lineage reports (B16).
+    std::fs::remove_dir_all(&r0).expect("remove the ancestor");
+    assert_eq!(section(&show(&r1), "LINEAGE"), resumed_lineage(", missing"));
+}

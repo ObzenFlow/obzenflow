@@ -119,6 +119,16 @@ path = "tests/resume_interrupted_catch_up_test.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "resume_effect_suppression_test"
+path = "tests/resume_effect_suppression_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "resume_multi_source_test"
+path = "tests/resume_multi_source_test.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "standalone_embedding_wire_test"
 path = "tests/standalone_embedding_wire_test.rs"
 required-features = ["ai-rig"]

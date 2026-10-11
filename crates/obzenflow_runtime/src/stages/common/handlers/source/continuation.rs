@@ -90,6 +90,243 @@
 //!     }
 //! }
 //! ```
+//!
+//! `Seek<P>` pairs a synchronous finite connector with a reader positioned
+//! for `P`, which returns each record with the position after it:
+//!
+//! ```
+//! # use obzenflow_runtime::stages::source::{
+//! #     FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
+//! #     SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
+//! # };
+//! # #[derive(serde::Serialize, serde::Deserialize)]
+//! # struct Row;
+//! # impl obzenflow_core::TypedPayload for Row {
+//! #     const EVENT_TYPE: &'static str = "doc.row";
+//! # }
+//! #[derive(Clone, serde::Serialize, serde::Deserialize)]
+//! struct Offset(u64);
+//! impl SourcePosition for Offset {}
+//!
+//! struct OffsetReader {
+//!     identity: SourceInputIdentity,
+//! }
+//! impl SeekableSource for OffsetReader {
+//!     type Position = Offset;
+//!     fn input_identity(&self) -> &SourceInputIdentity { &self.identity }
+//!     fn beginning(&self) -> Offset { Offset(0) }
+//!     fn seek(&mut self, _: Offset) -> Result<(), SourceError> { Ok(()) }
+//! }
+//! impl PositionedFiniteReader for OffsetReader {
+//!     type Output = Row;
+//!     fn next(&mut self) -> Result<Option<Vec<SourceRecord<Row, Offset>>>, SourceError> {
+//!         Ok(None)
+//!     }
+//! }
+//! # fn reader() -> OffsetReader { unimplemented!() }
+//!
+//! struct Rows;
+//! impl FiniteSourceConnector for Rows {
+//!     type Output = Row;
+//!     type Reader = OffsetReader;
+//!     type Continuation = Seek<Offset>;
+//!     fn open(&self, _: SourceReaderInitContext) -> Result<OffsetReader, SourceError> {
+//!         Ok(reader())
+//!     }
+//! }
+//! ```
+//!
+//! A reader that is not positioned for `P` cannot seek:
+//!
+//! ```compile_fail,E0277
+//! # use obzenflow_runtime::stages::source::{
+//! #     FiniteSourceConnector, Seek, SourceError, SourcePosition, SourceReaderInitContext,
+//! #     TypedFiniteSourceHandler,
+//! # };
+//! # #[derive(serde::Serialize, serde::Deserialize)]
+//! # struct Row;
+//! # impl obzenflow_core::TypedPayload for Row {
+//! #     const EVENT_TYPE: &'static str = "doc.row";
+//! # }
+//! # #[derive(Clone, serde::Serialize, serde::Deserialize)]
+//! # struct Offset(u64);
+//! # impl SourcePosition for Offset {}
+//! # struct RowReader;
+//! # impl TypedFiniteSourceHandler for RowReader {
+//! #     type Output = Row;
+//! #     fn next(&mut self) -> Result<Option<Vec<Row>>, SourceError> { Ok(None) }
+//! # }
+//! struct Rows;
+//! impl FiniteSourceConnector for Rows {
+//!     type Output = Row;
+//!     type Reader = RowReader;
+//!     type Continuation = Seek<Offset>;
+//!     fn open(&self, _: SourceReaderInitContext) -> Result<RowReader, SourceError> {
+//!         Ok(RowReader)
+//!     }
+//! }
+//! ```
+//!
+//! Every positioned record carries its position:
+//!
+//! ```compile_fail,E0053
+//! # use obzenflow_runtime::stages::source::{
+//! #     PositionedFiniteReader, SeekableSource, SourceError, SourceInputIdentity,
+//! #     SourcePosition,
+//! # };
+//! # #[derive(serde::Serialize, serde::Deserialize)]
+//! # struct Row;
+//! # impl obzenflow_core::TypedPayload for Row {
+//! #     const EVENT_TYPE: &'static str = "doc.row";
+//! # }
+//! # #[derive(Clone, serde::Serialize, serde::Deserialize)]
+//! # struct Offset(u64);
+//! # impl SourcePosition for Offset {}
+//! # struct OffsetReader {
+//! #     identity: SourceInputIdentity,
+//! # }
+//! # impl SeekableSource for OffsetReader {
+//! #     type Position = Offset;
+//! #     fn input_identity(&self) -> &SourceInputIdentity { &self.identity }
+//! #     fn beginning(&self) -> Offset { Offset(0) }
+//! #     fn seek(&mut self, _: Offset) -> Result<(), SourceError> { Ok(()) }
+//! # }
+//! impl PositionedFiniteReader for OffsetReader {
+//!     type Output = Row;
+//!     fn next(&mut self) -> Result<Option<Vec<Row>>, SourceError> {
+//!         Ok(None)
+//!     }
+//! }
+//! ```
+//!
+//! In this release `Seek<P>` belongs to synchronous finite connectors only
+//! (B14). An asynchronous finite connector cannot declare it:
+//!
+//! ```compile_fail,E0277
+//! # use obzenflow_runtime::stages::source::{
+//! #     AsyncFiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
+//! #     SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
+//! # };
+//! # #[derive(serde::Serialize, serde::Deserialize)]
+//! # struct Row;
+//! # impl obzenflow_core::TypedPayload for Row {
+//! #     const EVENT_TYPE: &'static str = "doc.row";
+//! # }
+//! # #[derive(Clone, serde::Serialize, serde::Deserialize)]
+//! # struct Offset(u64);
+//! # impl SourcePosition for Offset {}
+//! # struct OffsetReader {
+//! #     identity: SourceInputIdentity,
+//! # }
+//! # impl SeekableSource for OffsetReader {
+//! #     type Position = Offset;
+//! #     fn input_identity(&self) -> &SourceInputIdentity { &self.identity }
+//! #     fn beginning(&self) -> Offset { Offset(0) }
+//! #     fn seek(&mut self, _: Offset) -> Result<(), SourceError> { Ok(()) }
+//! # }
+//! # impl PositionedFiniteReader for OffsetReader {
+//! #     type Output = Row;
+//! #     fn next(&mut self) -> Result<Option<Vec<SourceRecord<Row, Offset>>>, SourceError> {
+//! #         Ok(None)
+//! #     }
+//! # }
+//! # fn reader() -> OffsetReader { unimplemented!() }
+//! struct Rows;
+//! #[async_trait::async_trait]
+//! impl AsyncFiniteSourceConnector for Rows {
+//!     type Output = Row;
+//!     type Reader = OffsetReader;
+//!     type Continuation = Seek<Offset>;
+//!     async fn open(&self, _: SourceReaderInitContext) -> Result<OffsetReader, SourceError> {
+//!         Ok(reader())
+//!     }
+//! }
+//! ```
+//!
+//! Nor can an infinite connector:
+//!
+//! ```compile_fail,E0277
+//! # use obzenflow_runtime::stages::source::{
+//! #     InfiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
+//! #     SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
+//! # };
+//! # #[derive(serde::Serialize, serde::Deserialize)]
+//! # struct Row;
+//! # impl obzenflow_core::TypedPayload for Row {
+//! #     const EVENT_TYPE: &'static str = "doc.row";
+//! # }
+//! # #[derive(Clone, serde::Serialize, serde::Deserialize)]
+//! # struct Offset(u64);
+//! # impl SourcePosition for Offset {}
+//! # struct OffsetReader {
+//! #     identity: SourceInputIdentity,
+//! # }
+//! # impl SeekableSource for OffsetReader {
+//! #     type Position = Offset;
+//! #     fn input_identity(&self) -> &SourceInputIdentity { &self.identity }
+//! #     fn beginning(&self) -> Offset { Offset(0) }
+//! #     fn seek(&mut self, _: Offset) -> Result<(), SourceError> { Ok(()) }
+//! # }
+//! # impl PositionedFiniteReader for OffsetReader {
+//! #     type Output = Row;
+//! #     fn next(&mut self) -> Result<Option<Vec<SourceRecord<Row, Offset>>>, SourceError> {
+//! #         Ok(None)
+//! #     }
+//! # }
+//! # fn reader() -> OffsetReader { unimplemented!() }
+//! struct Rows;
+//! impl InfiniteSourceConnector for Rows {
+//!     type Output = Row;
+//!     type Reader = OffsetReader;
+//!     type Continuation = Seek<Offset>;
+//!     fn open(&self, _: SourceReaderInitContext) -> Result<OffsetReader, SourceError> {
+//!         Ok(reader())
+//!     }
+//! }
+//! ```
+//!
+//! Nor an asynchronous infinite one:
+//!
+//! ```compile_fail,E0277
+//! # use obzenflow_runtime::stages::source::{
+//! #     AsyncInfiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
+//! #     SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
+//! # };
+//! # #[derive(serde::Serialize, serde::Deserialize)]
+//! # struct Row;
+//! # impl obzenflow_core::TypedPayload for Row {
+//! #     const EVENT_TYPE: &'static str = "doc.row";
+//! # }
+//! # #[derive(Clone, serde::Serialize, serde::Deserialize)]
+//! # struct Offset(u64);
+//! # impl SourcePosition for Offset {}
+//! # struct OffsetReader {
+//! #     identity: SourceInputIdentity,
+//! # }
+//! # impl SeekableSource for OffsetReader {
+//! #     type Position = Offset;
+//! #     fn input_identity(&self) -> &SourceInputIdentity { &self.identity }
+//! #     fn beginning(&self) -> Offset { Offset(0) }
+//! #     fn seek(&mut self, _: Offset) -> Result<(), SourceError> { Ok(()) }
+//! # }
+//! # impl PositionedFiniteReader for OffsetReader {
+//! #     type Output = Row;
+//! #     fn next(&mut self) -> Result<Option<Vec<SourceRecord<Row, Offset>>>, SourceError> {
+//! #         Ok(None)
+//! #     }
+//! # }
+//! # fn reader() -> OffsetReader { unimplemented!() }
+//! struct Rows;
+//! #[async_trait::async_trait]
+//! impl AsyncInfiniteSourceConnector for Rows {
+//!     type Output = Row;
+//!     type Reader = OffsetReader;
+//!     type Continuation = Seek<Offset>;
+//!     async fn open(&self, _: SourceReaderInitContext) -> Result<OffsetReader, SourceError> {
+//!         Ok(reader())
+//!     }
+//! }
+//! ```
 
 use super::erased::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,

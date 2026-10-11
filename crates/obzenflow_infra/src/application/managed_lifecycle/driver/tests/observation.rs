@@ -414,11 +414,7 @@ async fn observation_failure_cancels_pending_runtime_and_retains_source_and_join
                 Event::Stop(StopReason::Graceful, driver.stop_input())
             }
         };
-        let mut running = Box::pin(driver.drive(
-            initial,
-            #[cfg(feature = "warp-server")]
-            None,
-        ));
+        let mut running = Box::pin(driver.drive(initial, None));
         assert!(futures::poll!(&mut running).is_pending());
         if phase != 3 {
             tokio::time::timeout(Duration::from_secs(2), async {

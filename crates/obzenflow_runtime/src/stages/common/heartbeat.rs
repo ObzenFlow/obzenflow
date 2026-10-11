@@ -674,6 +674,14 @@ mod tests {
         fn archive_path(&self) -> &Path {
             Path::new("stub-archive")
         }
+
+        fn claim_continuation(
+            &self,
+            _: obzenflow_core::FlowId,
+            _: &obzenflow_core::journal::factory::CurrentRunLocator,
+        ) -> Result<(), ReplayError> {
+            unimplemented!("not used in heartbeat tests")
+        }
     }
 
     struct TestJournal<T: JournalEvent> {

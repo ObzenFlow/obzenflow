@@ -40,6 +40,16 @@ test = "hosted::child_application"
 owner = "independent_lifetimes subprocess"
 
 [[ignored]]
+binary = "obzenflow::csv_source_lifecycle_test"
+test = "csv_example_child"
+owner = "csv_example_resumes_an_interrupted_run subprocess"
+
+[[ignored]]
+binary = "obzenflow::durable_execution_contract_test"
+test = "durable_execution_contract_child"
+owner = "durable_execution_contract subprocess"
+
+[[ignored]]
 binary = "obzenflow::product_catalog_enrichment"
 test = "product_catalog_enrichment_completes"
 owner = "intentional manual rate-limited example proof, outside required acceptance"

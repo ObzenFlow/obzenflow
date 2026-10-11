@@ -44,6 +44,10 @@ pub enum ApplicationError {
         resume: PathBuf,
     },
 
+    /// A resume refused before any work, naming the run to act on
+    /// (FLOWIP-134i B6, B7, B8, B12, B13).
+    ResumeRefused(String),
+
     /// Other error
     Other(Box<dyn Error + Send + Sync>),
 }
@@ -81,6 +85,7 @@ impl fmt::Display for ApplicationError {
                     resume.display()
                 )
             }
+            Self::ResumeRefused(refusal) => f.write_str(refusal),
             Self::Other(err) => write!(f, "Application error: {err}"),
         }
     }

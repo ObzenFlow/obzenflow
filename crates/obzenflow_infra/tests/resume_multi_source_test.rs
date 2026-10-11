@@ -559,3 +559,164 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
 
     Ok(())
 }
+
+/// Cut a resumed run where a kill would leave it if `src_b` had not crossed:
+/// `src_b` loses its watermark, every downstream stage keeps only the
+/// `recorded` inputs it processed before the uncrossed source held the live
+/// rows back, and the system log keeps nothing from reconstruction
+/// completion on.
+fn tear_before_src_b_crossed(run: &Path, recorded: usize) -> Result<()> {
+    let manifest = replay_testkit::archive_manifest(run);
+    let journal = |key: &str| {
+        run.join(
+            manifest["stages"][key]["data_journal_file"]
+                .as_str()
+                .unwrap(),
+        )
+    };
+    let (src_b, merge, effectful, collect) = (
+        journal("src_b"),
+        journal("merge"),
+        journal("effectful"),
+        journal("collect"),
+    );
+    let system = run.join(manifest["system_journal_file"].as_str().unwrap());
+    let pointer = |record: &serde_json::Value, path: &str| {
+        record
+            .pointer(path)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let kind =
+        |record: &serde_json::Value| pointer(record, "/envelope/provenance/event/event_kind");
+    let event_type =
+        |record: &serde_json::Value| pointer(record, "/envelope/provenance/event/event_type");
+    let outcome_type = EffectValue::event_type_name();
+    let names = |records: &[serde_json::Value], suffix: &str| {
+        records
+            .iter()
+            .any(|record| event_type(record).is_some_and(|name| name.ends_with(suffix)))
+    };
+    // Per journal: inputs seen so far, and whether the cut was reached.
+    let cuts = std::collections::HashMap::from(
+        [&src_b, &merge, &effectful, &collect, &system]
+            .map(|path| (path.clone(), std::cell::Cell::new((0usize, false)))),
+    );
+    obzenflow_infra::testing::journal::retain_archive_frames(run, |path, records| {
+        let Some(cut) = cuts.get(path) else {
+            return true;
+        };
+        let (seen, reached) = cut.get();
+        let seen = seen
+            + records
+                .iter()
+                .filter(|record| {
+                    if path == effectful {
+                        event_type(record).as_deref() == Some(outcome_type.as_str())
+                    } else if path == collect {
+                        kind(record).as_deref() == Some("delivery")
+                    } else {
+                        kind(record).as_deref() == Some("fact")
+                    }
+                })
+                .count();
+        let reached = reached
+            || if path == system {
+                names(records, "reconstruction_completed")
+            } else {
+                names(records, "catch_up_completed") || (path != src_b && seen > recorded)
+            };
+        cut.set((seen, reached));
+        !reached
+    })
+    .map_err(anyhow::Error::from_boxed)?;
+    Ok(())
+}
+
+/// FLOWIP-134i B6: in a torn resume where `src_a` crossed generation 1 and
+/// `src_b` did not, the next resume enters generation 2 and `src_b` crosses
+/// generation 1 vacuously before 2, so every fan-in reader advances by
+/// exactly one generation per watermark (F11).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_torn_before_crossing_crosses_its_skipped_generation_vacuously() -> Result<()> {
+    const RECORDED: u64 = 8;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let resume_of = |archive: PathBuf| ReplayBootstrap {
+        archive_path: archive,
+        allow_incomplete_archive: true,
+        allow_duplicate_sink_delivery: false,
+        verb: ReplayVerb::Resume,
+    };
+
+    // R0 records a 1..=4 and b 101..=104.
+    let recorded = SourceRanges {
+        a_first: 1,
+        a_count: 4,
+        b_first: 101,
+        b_count: 4,
+    };
+    run_until_delivered(&journal_base, &recorded, RECORDED).await?;
+    let r0 = replay_testkit::latest_run_dir(&journal_base);
+
+    // R1 resumes R0 with a 5..=6 live, then is cut as if b never crossed.
+    let a_live = SourceRanges {
+        a_first: 5,
+        a_count: 2,
+        b_first: 105,
+        b_count: 0,
+    };
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_of(r0.clone())).await,
+        );
+        run_until_delivered(&journal_base, &a_live, RECORDED + 2).await?;
+    }
+    let r1 = replay_testkit::latest_run_dir(&journal_base);
+    tear_before_src_b_crossed(&r1, RECORDED as usize)?;
+
+    // R2 resumes the torn R1 with no live input.
+    let quiet = SourceRanges {
+        a_first: 7,
+        a_count: 0,
+        b_first: 105,
+        b_count: 0,
+    };
+    let calls = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_of(r1.clone())).await,
+        );
+        run_until_delivered(&journal_base, &quiet, RECORDED + 2).await?
+    };
+    let r2 = replay_testkit::latest_run_dir(&journal_base);
+    let resume = &replay_testkit::archive_manifest(&r2)["resume"];
+    assert_eq!(resume["resume_generation"], 2);
+    assert_eq!(resume["merged_from"], json!([std::fs::canonicalize(&r0)?]));
+    assert_eq!(
+        calls, 2,
+        "a 5..=6 committed no outcome before the cut, so they execute; the eight \
+         recorded inputs reuse theirs"
+    );
+
+    let catch_up = |stage_key: &str, generation| ResumeRow::CatchUp {
+        stage_key: stage_key.to_string(),
+        generation,
+    };
+    let src_b = resume_rows(&replay_testkit::read_stage_envelopes_appended(&r2, "src_b").await);
+    let mut expected_b = tick_rows("b", 101..=104);
+    expected_b.extend([catch_up("src_b", 1), catch_up("src_b", 2)]);
+    assert_eq!(src_b, expected_b, "b crosses its skipped generation first");
+    let src_a = resume_rows(&replay_testkit::read_stage_envelopes_appended(&r2, "src_a").await);
+    let mut expected_a = tick_rows("a", 1..=4);
+    expected_a.push(catch_up("src_a", 1));
+    expected_a.extend(tick_rows("a", 5..=6));
+    expected_a.push(catch_up("src_a", 2));
+    assert_eq!(src_a, expected_a);
+    let merge_markers: Vec<_> =
+        resume_rows(&replay_testkit::read_stage_envelopes_appended(&r2, "merge").await)
+            .into_iter()
+            .filter(|row| matches!(row, ResumeRow::CatchUp { .. }))
+            .collect();
+    assert_eq!(merge_markers, [catch_up("merge", 1), catch_up("merge", 2)]);
+    Ok(())
+}

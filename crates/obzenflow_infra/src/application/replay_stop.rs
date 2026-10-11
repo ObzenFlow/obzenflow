@@ -12,6 +12,7 @@ use obzenflow_core::event::{ChainPayload, StageFatalReason, StageFatalRecorded};
 use obzenflow_core::journal::read::RunRecordData;
 
 use crate::application::ApplicationError;
+use crate::journal::disk::continuation::run_to_resume;
 use crate::journal::read::{open_disk_run, JournalReadError};
 
 /// Replace a failed replay's error with the end-of-recording refusal when the
@@ -26,7 +27,14 @@ pub(super) async fn refine_replay_failure(
             replayed: replayed.to_path_buf(),
             stage_key: end.stage_key,
             input_position: end.input_position,
-            resume: replayed.to_path_buf(),
+            resume: run_to_resume(replayed).unwrap_or_else(|error| {
+                tracing::warn!(
+                    run = %replayed.display(),
+                    %error,
+                    "could not resolve the head of the replayed run's history"
+                );
+                replayed.to_path_buf()
+            }),
         },
         Ok(None) => error,
         Err(read_error) => {

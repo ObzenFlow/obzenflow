@@ -607,7 +607,7 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
         .resume
         .as_ref()
         .expect("a resumed run records its resume config in the manifest");
-    assert_eq!(resume.resumed_from, recorded_run);
+    assert_eq!(resume.resumed_from, std::fs::canonicalize(&recorded_run)?);
     assert_eq!(resume.resume_generation, 1);
 
     // The owning source journal carries the resumed-live lifecycle fact.

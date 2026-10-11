@@ -23,7 +23,7 @@ mod replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_adapters::sources::{CsvDecoder, CsvSource};
+use obzenflow_adapters::sources::{CsvDecodeError, CsvDecoder, CsvRecord, CsvSource};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, SourceCleanupPhase, SourceCleanupTrigger, SourceContinuationRefusal,
@@ -31,7 +31,8 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{
-    ChainEvent, ChainPayload, JournalRecord, PipelineLifecycleEvent, SystemEvent, SystemPayload,
+    ChainEvent, ChainPayload, JournalRecord, PipelineLifecycleEvent, SourceDiagnosticReason,
+    SystemEvent, SystemPayload,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{
@@ -47,6 +48,10 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
+};
+use obzenflow_runtime::stages::source::{
+    FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceInputIdentity,
+    SourcePosition, SourceReaderInitContext, SourceRecord,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -776,6 +781,8 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    // The interrupted process ends, releasing its journal writers (B7).
+    drop(handle);
     let recorded_run = replay_testkit::latest_run_dir(&journal_base);
 
     // The operator stop cut the finite input short (B5).
@@ -837,6 +844,10 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
         0,
         "the refused resume never polls a source"
     );
+    assert!(
+        !recorded_run.join("run_continuation.json").exists(),
+        "the refused resume claims nothing (B12)"
+    );
 
     Ok(())
 }
@@ -865,17 +876,36 @@ fn write_orders(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Orders whose ids a decoder value scales. The value is application logic,
+/// outside the input identity (B9).
+#[derive(Clone)]
+struct ScaledOrderCsv {
+    factor: u64,
+}
+
+impl CsvDecoder for ScaledOrderCsv {
+    type Output = Order;
+
+    fn decode(&self, record: CsvRecord<'_>) -> Result<Order, CsvDecodeError> {
+        let order: Order = record.deserialize()?;
+        Ok(Order {
+            id: order.id * self.factor,
+        })
+    }
+}
+
 /// Orders read one row per poll, paced by a limiter that admits `burst` rows
 /// at once and then `rate` rows a second.
 fn build_csv_flow(
     journal_base: PathBuf,
     input: PathBuf,
+    decoder: impl CsvDecoder<Output = Order>,
     rate: f64,
     burst: f64,
     delivered: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let orders_source = CsvSource::builder(OrderCsv)
+        let orders_source = CsvSource::builder(decoder)
             .path(input)
             .chunk_size(1)
             .build()
@@ -916,6 +946,7 @@ async fn record_interrupted_csv_run(journal_base: &Path, input: &Path) -> Result
     let handle = build_csv_flow(
         journal_base.to_path_buf(),
         input.to_path_buf(),
+        OrderCsv,
         0.5,
         3.0,
         delivered.clone(),
@@ -937,6 +968,7 @@ async fn resume_csv_run(
     journal_base: &Path,
     input: &Path,
     archive: &Path,
+    decoder: impl CsvDecoder<Output = Order>,
 ) -> Result<(Result<(), obzenflow_runtime::errors::FlowError>, PathBuf)> {
     let _bootstrap = install_bootstrap_config(
         replay_testkit::bootstrap_with_archive(ReplayBootstrap {
@@ -950,6 +982,7 @@ async fn resume_csv_run(
     let handle = build_csv_flow(
         journal_base.to_path_buf(),
         input.to_path_buf(),
+        decoder,
         1000.0,
         100.0,
         Arc::new(AtomicUsize::new(0)),
@@ -1082,7 +1115,8 @@ async fn an_interrupted_csv_source_continues_after_its_last_committed_row() -> R
     let recorded_run = record_interrupted_csv_run(&journal_base, &input).await?;
     let committed = recorded_prefix(&recorded_run).await;
 
-    let (outcome, resumed_run) = resume_csv_run(&journal_base, &input, &recorded_run).await?;
+    let (outcome, resumed_run) =
+        resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     outcome?;
     let mut expected = vec![SourceRow::Pinned];
     expected.extend(orders(1..=committed));
@@ -1098,9 +1132,590 @@ async fn an_interrupted_csv_source_continues_after_its_last_committed_row() -> R
     ]);
     assert_eq!(source_rows(&resumed_run).await, expected);
     assert!(source_errors(&resumed_run).await.is_empty());
-    // B6: every stage crossed, so the resumed run alone is resume authority.
+    // B6: every stage crossed, so the resumed run alone is resume authority
+    // and a resume of it opens no ancestor.
     assert!(reconstruction_completions(&recorded_run).await.is_empty());
     assert_eq!(reconstruction_completions(&resumed_run).await, [1]);
+    let reopened =
+        obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive::open_for_resume(
+            resumed_run.clone(),
+            true,
+        )
+        .await?;
+    assert!(obzenflow_core::journal::archive::ReplayArchive::ancestors(&reopened).is_empty());
+    Ok(())
+}
+
+const BILLION: u64 = 1_000_000_000;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Offset(u64);
+
+impl SourcePosition for Offset {}
+
+/// A billion orders that exist only as they are read: each is generated from
+/// its offset when polled, and the reader holds nothing but that offset.
+struct LazyOrderReader {
+    next: u64,
+    identity: SourceInputIdentity,
+    shape: LazyOrders,
+}
+
+impl SeekableSource for LazyOrderReader {
+    type Position = Offset;
+
+    fn input_identity(&self) -> &SourceInputIdentity {
+        &self.identity
+    }
+
+    fn beginning(&self) -> Offset {
+        Offset(0)
+    }
+
+    fn seek(&mut self, position: Offset) -> Result<(), SourceError> {
+        if self.shape.seek_fails {
+            return Err(SourceError::Transport(
+                SourceDiagnosticReason::InputUnavailable.into(),
+            ));
+        }
+        self.next = position.0;
+        Ok(())
+    }
+}
+
+impl PositionedFiniteReader for LazyOrderReader {
+    type Output = Order;
+
+    fn next(&mut self) -> Result<Option<Vec<SourceRecord<Order, Offset>>>, SourceError> {
+        if self.next == BILLION {
+            return Ok(None);
+        }
+        let mut records = Vec::new();
+        while records.len() < self.shape.batch && self.next < BILLION {
+            self.shape
+                .lowest_read
+                .fetch_min(self.next, Ordering::SeqCst);
+            self.shape.fetched.fetch_add(1, Ordering::SeqCst);
+            self.next += 1;
+            let id = if self.shape.duplicate_payloads {
+                0
+            } else {
+                self.next
+            };
+            records.push(SourceRecord {
+                value: Order { id },
+                after: Offset(self.next),
+            });
+        }
+        Ok(Some(records))
+    }
+}
+
+#[derive(Clone)]
+struct LazyOrders {
+    /// Records per poll.
+    batch: usize,
+    /// Every order carries the same payload; only positions tell them apart.
+    duplicate_payloads: bool,
+    seek_fails: bool,
+    /// The lowest offset this connector's readers generated.
+    lowest_read: Arc<AtomicU64>,
+    fetched: Arc<AtomicU64>,
+}
+
+impl LazyOrders {
+    fn new() -> Self {
+        Self {
+            batch: 1,
+            duplicate_payloads: false,
+            seek_fails: false,
+            lowest_read: Arc::new(AtomicU64::new(u64::MAX)),
+            fetched: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl FiniteSourceConnector for LazyOrders {
+    type Output = Order;
+    type Reader = LazyOrderReader;
+    type Continuation = Seek<Offset>;
+
+    fn open(&self, _: SourceReaderInitContext) -> Result<LazyOrderReader, SourceError> {
+        Ok(LazyOrderReader {
+            next: 0,
+            identity: SourceInputIdentity::new("lazy_orders", &json!({ "records": BILLION }))
+                .expect("the identity encodes"),
+            shape: self.clone(),
+        })
+    }
+}
+
+fn resume_bootstrap(archive: &Path) -> ReplayBootstrap {
+    ReplayBootstrap {
+        archive_path: archive.to_path_buf(),
+        allow_incomplete_archive: true,
+        allow_duplicate_sink_delivery: false,
+        verb: ReplayVerb::Resume,
+    }
+}
+
+/// The positions a source journal committed, decoded in append order.
+async fn committed_offsets(run: &Path) -> Vec<u64> {
+    replay_testkit::read_stage_envelopes_appended(run, "orders")
+        .await
+        .iter()
+        .filter_map(|envelope| envelope.envelope.provenance.event.source_progress.as_ref())
+        .map(|progress| {
+            progress
+                .after
+                .decode::<Offset>()
+                .expect("a committed lazy position")
+                .0
+        })
+        .collect()
+}
+
+/// Counts orders, taking `delay` over each.
+#[derive(Clone, Debug)]
+struct DelayedCount {
+    delivered: Arc<AtomicUsize>,
+    delay: Duration,
+}
+
+#[async_trait]
+impl InlineSink for DelayedCount {
+    type Input = Order;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::Noop)
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(&mut self, _: Order) -> Result<(), SinkWriteFailure> {
+        tokio::time::sleep(self.delay).await;
+        self.delivered.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Lazy orders paced at the source, and by a backpressure window on the edge
+/// when `window` is set.
+fn lazy_flow(
+    journal_base: &Path,
+    orders_source: LazyOrders,
+    (rate, burst): (f64, f64),
+    window: Option<u64>,
+    collect_handler: DelayedCount,
+) -> FlowDefinition {
+    let journals = journal_base.to_path_buf();
+    let backpressure = window.map_or_else(obzenflow_dsl::backpressure::off, |window| {
+        obzenflow_dsl::backpressure::enforced(window).stall_timeout_ms(60_000)
+    });
+    FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "resume_lazy",
+            journals: disk_journals(journals),
+            backpressure: backpressure,
+
+            stages: {
+                orders = source!(Order => orders_source with {
+                    rate_limit(rate).burst_capacity(burst)
+                });
+                collect = sink!(Order => collect_handler);
+            },
+
+            topology: {
+                orders |> collect;
+            }
+        })
+    })
+}
+
+/// Read lazy orders, paced like the CSV flow, until the sink has `deliveries`,
+/// then stop. Returns the run and the lowest offset its reader generated.
+async fn run_lazy_orders(
+    journal_base: &Path,
+    resume: Option<&Path>,
+    pacing: (f64, f64),
+    deliveries: usize,
+) -> Result<(PathBuf, u64)> {
+    let _bootstrap = match resume {
+        Some(archive) => Some(install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_bootstrap(archive)).await,
+        )),
+        None => None,
+    };
+    let orders_source = LazyOrders::new();
+    let lowest_read = orders_source.lowest_read.clone();
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let handle = lazy_flow(
+        journal_base,
+        orders_source,
+        pacing,
+        None,
+        DelayedCount {
+            delivered: delivered.clone(),
+            delay: Duration::ZERO,
+        },
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
+    wait_for_running(&handle).await?;
+    wait_for_deliveries(&delivered, deliveries).await?;
+    handle.stop_graceful(Duration::from_secs(10)).await?;
+    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    drop(handle);
+    Ok((
+        replay_testkit::latest_run_dir(journal_base),
+        lowest_read.load(Ordering::SeqCst),
+    ))
+}
+
+/// FLOWIP-134i B1 (AC3): a lazy billion-record source resumes after a small
+/// committed prefix by seeking past it, without generating or holding any of
+/// the input it already admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lazy_billion_record_source_resumes_without_reading_its_prefix() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (recorded, _) = run_lazy_orders(&journal_base, None, (0.5, 3.0), 3).await?;
+    let recorded_rows = source_rows(&recorded).await;
+    let committed = recorded_rows
+        .iter()
+        .filter(|row| matches!(row, SourceRow::Order(_)))
+        .count() as u64;
+    let mut expected = vec![
+        SourceRow::Acquired(SourceOpenIntent::Start),
+        SourceRow::Pinned,
+    ];
+    expected.extend(orders(1..=committed));
+    expected.extend([
+        SourceRow::Eof(EofKind::Truncated),
+        SourceRow::Released(SourceCleanupTrigger::Stopped, SourceCleanupPhase::Live),
+    ]);
+    assert_eq!(recorded_rows, expected);
+
+    let (resumed, lowest_read) = run_lazy_orders(
+        &journal_base,
+        Some(&recorded),
+        (50.0, 5.0),
+        committed as usize + 5,
+    )
+    .await?;
+    assert_eq!(
+        lowest_read, committed,
+        "the resumed reader generated nothing before its committed position"
+    );
+    let rows = source_rows(&resumed).await;
+    let admitted = rows
+        .iter()
+        .filter(|row| matches!(row, SourceRow::Order(_)))
+        .count() as u64;
+    assert!(
+        admitted > committed,
+        "the resume read live orders: {rows:?}"
+    );
+    let mut expected = vec![SourceRow::Pinned];
+    expected.extend(orders(1..=committed));
+    expected.extend([
+        SourceRow::Acquired(SourceOpenIntent::Resume),
+        SourceRow::Positioned(1),
+        SourceRow::CatchUp,
+    ]);
+    expected.extend(orders(committed + 1..=admitted));
+    expected.extend([
+        SourceRow::Eof(EofKind::Truncated),
+        SourceRow::Released(SourceCleanupTrigger::Stopped, SourceCleanupPhase::Live),
+    ]);
+    assert_eq!(rows, expected, "every order once, in order, without a gap");
+    Ok(())
+}
+
+/// FLOWIP-134i B1 (AC4): a source that fetched a thousand orders but had
+/// committed only those its backpressure window admitted when stopped
+/// resumes after its commits, never its reads. Every order carries the same
+/// payload, so only positions tell them apart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_resumes_after_its_commits_not_its_reads() -> Result<()> {
+    const FETCHED: u64 = 1_000;
+    const WINDOW: u64 = 300;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let duplicates = || LazyOrders {
+        batch: FETCHED as usize,
+        duplicate_payloads: true,
+        ..LazyOrders::new()
+    };
+
+    let orders_source = duplicates();
+    let fetched = orders_source.fetched.clone();
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let handle = lazy_flow(
+        &journal_base,
+        orders_source,
+        (1000.0, 1000.0),
+        Some(WINDOW),
+        DelayedCount {
+            delivered: delivered.clone(),
+            delay: Duration::from_millis(5),
+        },
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
+    wait_for_running(&handle).await?;
+    // One poll fetched a thousand; publication stalls at the window while the
+    // sink drains slowly, and a cancel cuts it there. A graceful stop would
+    // first publish every fetched order.
+    wait_for_deliveries(&delivered, 10).await?;
+    assert_eq!(fetched.load(Ordering::SeqCst), FETCHED);
+    handle.stop().await?;
+    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    drop(handle);
+    let recorded = replay_testkit::latest_run_dir(&journal_base);
+    let committed = committed_offsets(&recorded).await;
+    let prefix = committed.len() as u64;
+    assert_eq!(committed, (1..=prefix).collect::<Vec<_>>());
+    assert!(
+        (WINDOW..FETCHED).contains(&prefix),
+        "fetched {FETCHED}, committed {prefix}"
+    );
+
+    let _bootstrap = install_bootstrap_config(
+        replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded)).await,
+    );
+    let orders_source = duplicates();
+    let lowest_read = orders_source.lowest_read.clone();
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let handle = lazy_flow(
+        &journal_base,
+        orders_source,
+        (1000.0, 1000.0),
+        Some(WINDOW),
+        DelayedCount {
+            delivered: delivered.clone(),
+            delay: Duration::ZERO,
+        },
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
+    wait_for_running(&handle).await?;
+    wait_for_deliveries(&delivered, prefix as usize + 100).await?;
+    handle.stop_graceful(Duration::from_secs(20)).await?;
+    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    drop(handle);
+    assert_eq!(
+        lowest_read.load(Ordering::SeqCst),
+        prefix,
+        "the resume seeks after the last commit, not the last read"
+    );
+    let resumed = replay_testkit::latest_run_dir(&journal_base);
+    let offsets = committed_offsets(&resumed).await;
+    assert!(offsets.len() as u64 > prefix, "the resume read live orders");
+    assert_eq!(
+        offsets,
+        (1..=offsets.len() as u64).collect::<Vec<_>>(),
+        "every order once, by position"
+    );
+    Ok(())
+}
+
+/// FLOWIP-134i B1 (AC6): a seek that fails refuses before any live input. The
+/// source records why, releases its reader and fails the resumed run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_seek_refuses_before_live_input() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (recorded, _) = run_lazy_orders(&journal_base, None, (0.5, 3.0), 3).await?;
+    let committed = source_rows(&recorded)
+        .await
+        .iter()
+        .filter(|row| matches!(row, SourceRow::Order(_)))
+        .count() as u64;
+
+    let _bootstrap = install_bootstrap_config(
+        replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded)).await,
+    );
+    let orders_source = LazyOrders {
+        seek_fails: true,
+        ..LazyOrders::new()
+    };
+    let fetched = orders_source.fetched.clone();
+    let handle = lazy_flow(
+        &journal_base,
+        orders_source,
+        (1000.0, 100.0),
+        None,
+        DelayedCount {
+            delivered: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::ZERO,
+        },
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
+    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the resumed run to fail"))?
+        .expect_err("a failed seek fails the resumed run");
+    drop(handle);
+    assert_eq!(
+        fetched.load(Ordering::SeqCst),
+        0,
+        "nothing is read after it"
+    );
+
+    let resumed = replay_testkit::latest_run_dir(&journal_base);
+    let mut expected = vec![SourceRow::Pinned];
+    expected.extend(orders(1..=committed));
+    expected.extend([
+        SourceRow::Acquired(SourceOpenIntent::Resume),
+        SourceRow::Released(SourceCleanupTrigger::Failed, SourceCleanupPhase::Recovery),
+    ]);
+    assert_eq!(source_rows(&resumed).await, expected);
+    assert!(
+        source_errors(&resumed).await.iter().any(|row| matches!(
+            row.payload,
+            ChainPayload::Execution(ExecutionPayload::SourceSeekFailed(_))
+        )),
+        "the source records its failed seek"
+    );
+    Ok(())
+}
+
+/// FLOWIP-134i B9 (AC6): a changed decoder value resumes. The committed
+/// prefix keeps its recorded values; the new value decodes only the rest, each
+/// remaining row once at its committed position.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_decoder_value_applies_only_to_the_resumed_suffix() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let input = temp.path().join("orders.csv");
+    write_orders(&input)?;
+    let recorded_run = record_interrupted_csv_run(&journal_base, &input).await?;
+    let committed = recorded_prefix(&recorded_run).await;
+
+    let (outcome, resumed_run) = resume_csv_run(
+        &journal_base,
+        &input,
+        &recorded_run,
+        ScaledOrderCsv { factor: 100 },
+    )
+    .await?;
+    outcome?;
+    let mut expected = vec![SourceRow::Pinned];
+    expected.extend(orders(1..=committed));
+    expected.extend([
+        SourceRow::Acquired(SourceOpenIntent::Resume),
+        SourceRow::Positioned(1),
+        SourceRow::CatchUp,
+    ]);
+    expected.extend((committed + 1..=ORDERS).map(|id| SourceRow::Order(id * 100)));
+    expected.extend([
+        SourceRow::Eof(EofKind::Natural),
+        SourceRow::Released(SourceCleanupTrigger::Exhausted, SourceCleanupPhase::Live),
+    ]);
+    assert_eq!(source_rows(&resumed_run).await, expected);
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OrderV2 {
+    id: u64,
+}
+
+impl TypedPayload for OrderV2 {
+    const EVENT_TYPE: &'static str = "resume_mixed.order_v2";
+}
+
+#[derive(Clone)]
+struct OrderV2Csv;
+
+impl CsvDecoder for OrderV2Csv {
+    type Output = OrderV2;
+}
+
+/// FLOWIP-134i B9 (AC6): a decoder with another output type cannot re-admit
+/// the recorded facts, so the resume fails at re-admission before any live row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_decoder_output_type_fails_at_re_admission() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let input = temp.path().join("orders.csv");
+    write_orders(&input)?;
+    let recorded_run = record_interrupted_csv_run(&journal_base, &input).await?;
+    recorded_prefix(&recorded_run).await;
+
+    let _bootstrap = install_bootstrap_config(
+        replay_testkit::bootstrap_with_archive(ReplayBootstrap {
+            archive_path: recorded_run.clone(),
+            allow_incomplete_archive: true,
+            allow_duplicate_sink_delivery: false,
+            verb: ReplayVerb::Resume,
+        })
+        .await,
+    );
+    let orders_source = CsvSource::builder(OrderV2Csv)
+        .path(input.clone())
+        .chunk_size(1)
+        .build()
+        .expect("valid CSV configuration");
+    let collect_handler =
+        replay_testkit::CountDeliveries::<OrderV2>::new(Arc::new(AtomicUsize::new(0)));
+    let journals = journal_base.clone();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "resume_csv",
+            journals: disk_journals(journals),
+
+            stages: {
+                orders = source!(OrderV2 => orders_source);
+                collect = sink!(OrderV2 => collect_handler);
+            },
+
+            topology: {
+                orders |> collect;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
+    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the resumed run to fail"))?
+        .expect_err("recorded orders cannot re-admit as another type");
+    let resumed_run = replay_testkit::latest_run_dir(&journal_base);
+    let mut snapshot = obzenflow_infra::journal::read::open_disk_run(&resumed_run).await?;
+    while snapshot.next().await?.is_some() {}
+    match snapshot
+        .into_tail()
+        .progress()
+        .outcome
+        .as_ref()
+        .map(|recorded| &recorded.outcome)
+    {
+        Some(obzenflow_core::journal::read::RunOutcome::Failed { reason }) => assert!(
+            reason.contains("does not match its output contract"),
+            "{reason}"
+        ),
+        other => panic!("the resumed run must record its failure: {other:?}"),
+    }
+    assert!(
+        !source_rows(&resumed_run)
+            .await
+            .iter()
+            .any(|row| matches!(row, SourceRow::Order(_) | SourceRow::CatchUp)),
+        "nothing is admitted or crossed"
+    );
     Ok(())
 }
 
@@ -1118,7 +1733,8 @@ async fn a_csv_input_changed_since_its_pin_refuses_the_resume() -> Result<()> {
     let mut appended = std::fs::OpenOptions::new().append(true).open(&input)?;
     std::io::Write::write_all(&mut appended, b"9\n")?;
 
-    let (outcome, resumed_run) = resume_csv_run(&journal_base, &input, &recorded_run).await?;
+    let (outcome, resumed_run) =
+        resume_csv_run(&journal_base, &input, &recorded_run, OrderCsv).await?;
     assert!(outcome.is_err(), "a refused source fails the resumed run");
     let mut expected = vec![SourceRow::Pinned];
     expected.extend(orders(1..=committed));
@@ -1158,6 +1774,7 @@ async fn a_csv_source_that_never_pinned_starts_on_resume() -> Result<()> {
     let handle = build_csv_flow(
         journal_base.clone(),
         input.clone(),
+        OrderCsv,
         1000.0,
         100.0,
         Arc::new(AtomicUsize::new(0)),
@@ -1169,11 +1786,14 @@ async fn a_csv_source_that_never_pinned_starts_on_resume() -> Result<()> {
         .await
         .map_err(|_| anyhow!("timeout waiting for the failed open"))?;
     assert!(failed.is_err(), "a missing input fails the source's open");
+    // The failed process ends, releasing its journal writers (B7).
+    drop(handle);
     let failed_run = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(source_rows(&failed_run).await, Vec::new());
 
     write_orders(&input)?;
-    let (outcome, resumed_run) = resume_csv_run(&journal_base, &input, &failed_run).await?;
+    let (outcome, resumed_run) =
+        resume_csv_run(&journal_base, &input, &failed_run, OrderCsv).await?;
     outcome?;
     let mut expected = vec![
         SourceRow::Acquired(SourceOpenIntent::Resume),

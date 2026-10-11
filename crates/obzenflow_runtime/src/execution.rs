@@ -334,7 +334,8 @@ impl ResumeControl {
                 .lock()
                 .expect("resume frontier lock poisoned");
             let entry = frontier.entry(stage).or_default();
-            let crossed = *entry < self.0.resume_generation && generation >= self.0.resume_generation;
+            let crossed =
+                *entry < self.0.resume_generation && generation >= self.0.resume_generation;
             if generation > *entry {
                 *entry = generation;
             }

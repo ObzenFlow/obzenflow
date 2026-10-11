@@ -124,7 +124,6 @@ struct HostLifecycle {
 #[cfg(all(test, feature = "warp-server"))]
 mod tests;
 
-#[cfg(feature = "warp-server")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ShutdownSignal {
     Sigint,
@@ -658,16 +657,52 @@ impl FlowApplication {
                         obzenflow_runtime::bootstrap::StartupMode::Manual;
                 }
                 if let Some(replay) = bootstrap_config.replay.clone() {
-                    let archive = crate::journal::disk::replay_archive::DiskReplayArchive::open(
-                        replay.archive_path,
-                        replay.allow_incomplete_archive,
-                    )
-                    .await
-                    .map_err(|e| {
-                        ApplicationError::InvalidConfiguration(format!(
-                            "Failed to open replay archive: {e}"
-                        ))
+                    use crate::journal::disk::replay_archive::DiskReplayArchive;
+                    use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
+                    // A resume continues the head of a history, merging a torn
+                    // run with its ancestors (FLOWIP-134i B6, B7, B13); a
+                    // replay reproduces exactly one run.
+                    let archive = match replay.verb {
+                        obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
+                            DiskReplayArchive::open_for_resume(
+                                replay.archive_path.clone(),
+                                replay.allow_incomplete_archive,
+                            )
+                            .await
+                        }
+                        obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
+                            DiskReplayArchive::open(
+                                replay.archive_path.clone(),
+                                replay.allow_incomplete_archive,
+                            )
+                            .await
+                        }
+                    }
+                    .map_err(|e| match e {
+                        ReplayError::AncestorMissing { .. }
+                        | ReplayError::AncestorUnreadable { .. }
+                        | ReplayError::AncestorDisagrees { .. }
+                        | ReplayError::AlreadyContinued { .. }
+                        | ReplayError::StoppedBeforeTakeover { .. }
+                        | ReplayError::ContinuedByAnother { .. }
+                        | ReplayError::StillRunning { .. }
+                        | ReplayError::LocationNotWritable { .. }
+                        | ReplayError::ReplayedRunMissing { .. } => {
+                            ApplicationError::ResumeRefused(e.to_string())
+                        }
+                        other => ApplicationError::InvalidConfiguration(format!(
+                            "Failed to open replay archive: {other}"
+                        )),
                     })?;
+                    if std::fs::canonicalize(&replay.archive_path)
+                        .is_ok_and(|requested| requested != archive.archive_path())
+                    {
+                        println!(
+                            "Resuming {}, the run that {} replays.",
+                            archive.archive_path().display(),
+                            replay.archive_path.display()
+                        );
+                    }
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
                 bootstrap_config
@@ -714,12 +749,16 @@ impl FlowApplication {
                     // FLOWIP-120u F2: the failure carrier holds substrate state; None
                     // means the build failed before substrate selection, so no run
                     // directory exists to point at.
-                    break 'run (
-                        Err(ApplicationError::FlowBuildFailed(failure.error.to_string())),
-                        None,
-                        failure.run,
-                        false,
-                    );
+                    let error = match &failure.error {
+                        obzenflow_dsl::FlowBuildError::ResumeRefusedUnfinishedSources {
+                            ..
+                        }
+                        | obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
+                            ApplicationError::ResumeRefused(failure.error.to_string())
+                        }
+                        other => ApplicationError::FlowBuildFailed(other.to_string()),
+                    };
+                    break 'run (Err(error), None, failure.run, false);
                 }
             };
 

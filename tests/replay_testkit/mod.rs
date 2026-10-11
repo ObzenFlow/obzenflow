@@ -30,11 +30,20 @@ use std::path::{Path, PathBuf};
 pub async fn bootstrap_with_archive(
     replay: obzenflow_runtime::bootstrap::ReplayBootstrap,
 ) -> obzenflow_runtime::bootstrap::BootstrapConfig {
-    let archive = obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive::open(
-        replay.archive_path.clone(),
-        replay.allow_incomplete_archive,
-    )
-    .await
+    use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
+    let archive = match replay.verb {
+        obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
+            DiskReplayArchive::open_for_resume(
+                replay.archive_path.clone(),
+                replay.allow_incomplete_archive,
+            )
+            .await
+        }
+        obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
+            DiskReplayArchive::open(replay.archive_path.clone(), replay.allow_incomplete_archive)
+                .await
+        }
+    }
     .expect("test replay archive must open");
     obzenflow_runtime::bootstrap::BootstrapConfig {
         replay: Some(replay),

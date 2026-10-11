@@ -65,7 +65,9 @@ fn reconstruction_progress(state: &S, ctx: &mut C) -> Vec<A> {
     let Some(progress) = ctx.reconstruction.as_mut() else {
         return Vec::new();
     };
-    progress.pending.retain(|stage| !control.stage_is_live(*stage));
+    progress
+        .pending
+        .retain(|stage| !control.stage_is_live(*stage));
     if !progress.pending.is_empty() {
         return Vec::new();
     }

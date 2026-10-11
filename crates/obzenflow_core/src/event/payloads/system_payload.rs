@@ -216,7 +216,9 @@ pub enum PipelineLifecycleEvent {
     /// Every stage of a resumed run crossed its catch-up boundary or finished
     /// its recorded input, so the run alone is resume authority (FLOWIP-134i
     /// B6). Evidence only; nothing waits on it.
-    ReconstructionCompleted { generation: u64 },
+    ReconstructionCompleted {
+        generation: u64,
+    },
     /// Runtime admitted this intent; publication may follow admission later.
     StopAdmitted {
         admission: PipelineStopAdmission,

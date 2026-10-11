@@ -15,13 +15,14 @@
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{StageOutputs, TypedPayload, WriterId};
-use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow_dsl::{flow, infinite_source, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
+    StatefulEmission, TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -629,6 +630,106 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
         0
     );
     assert_eq!(replay_delivered.load(Ordering::SeqCst), 0);
+}
+
+/// Emits `emit` ticks, then idles; only a stop ends it.
+#[derive(Clone, Debug)]
+struct Pulse {
+    next: u64,
+    emit: u64,
+}
+
+impl TypedInfiniteSourceHandler for Pulse {
+    type Output = Tick;
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+        if self.next > self.emit {
+            std::thread::sleep(Duration::from_millis(10));
+            return Ok(Vec::new());
+        }
+        let n = 100 + self.next;
+        self.next += 1;
+        Ok(vec![Tick {
+            n,
+            depth: 0,
+            kind: seed_kind(),
+        }])
+    }
+}
+
+/// FLOWIP-134i B5 (AC7): a graceful stop with finite input unread writes
+/// `Truncated` from every unfinished source, finite or infinite, so a stateful
+/// fan-in over them publishes no end-of-input finalization.
+#[tokio::test(flavor = "multi_thread")]
+async fn graceful_stop_truncates_finite_and_infinite_inputs_of_a_stateful_fan_in() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let base = journal_base.clone();
+    let counter = delivered.clone();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let unread = Ticks::stalling(4);
+        let live = Pulse { next: 1, emit: 4 };
+        let summer = SumHandler::new();
+        let out = replay_testkit::CountDeliveries::<SumResult>::new(counter);
+        Ok(flow! {
+            name: "truncated_fidelity_mixed_fan_in",
+            journals: disk_journals(base),
+
+            stages: {
+                unread = source!(Tick => unread);
+                live = infinite_source!(Tick => live);
+                summer = stateful!(Tick -> SumResult => summer);
+                out = sink!(SumResult => out);
+            },
+
+            topology: {
+                unread |> summer;
+                live |> summer;
+                summer |> out;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .expect("mixed fan-in flow should build");
+    let run = replay_testkit::latest_run_dir(&journal_base);
+
+    // Both sources are mid-stream when the stop arrives.
+    let tick_event_type = Tick::event_type_name();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sources did not produce in time"
+        );
+        let mut produced = 0;
+        for stage in ["unread", "live"] {
+            let rows = std::panic::AssertUnwindSafe(data_rows(&run, stage, &tick_event_type));
+            produced += usize::from(futures::FutureExt::catch_unwind(rows).await.unwrap_or(0) >= 4);
+        }
+        if produced == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    handle
+        .stop_graceful(Duration::from_secs(10))
+        .await
+        .expect("stop should be accepted");
+    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+        .await
+        .expect("stopped run should terminate")
+        .expect("a graceful stop resolves");
+
+    assert_eq!(eof_kinds(&run, "unread").await, vec![EofKind::Truncated]);
+    assert_eq!(eof_kinds(&run, "live").await, vec![EofKind::Truncated]);
+    assert_eq!(
+        data_rows(&run, "summer", SumResult::event_type_name().as_str()).await,
+        0,
+        "no finalization over partial input"
+    );
+    assert_eq!(delivered.load(Ordering::SeqCst), 0);
 }
 
 /// Cycle entry transform: converged seeds emit a done row; everything else

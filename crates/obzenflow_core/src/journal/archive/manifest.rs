@@ -73,7 +73,7 @@ pub struct RunManifestDirectFactAdmission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifestReplayConfig {
-    /// User-supplied archive path from `--replay-from` (as provided; not normalized).
+    /// The archive this run read, canonicalized (FLOWIP-134i B16).
     pub replay_from: String,
     /// Whether replay proceeded despite missing/corrupt terminal evidence.
     pub allow_incomplete_archive: bool,
@@ -82,14 +82,14 @@ pub struct RunManifestReplayConfig {
 /// Present when this run is a resume of a recorded archive (FLOWIP-120n).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifestResumeConfig {
-    /// The archive this run resumed from.
+    /// The archive this run resumed from, canonicalized.
     pub resumed_from: PathBuf,
     /// The generation this run enters (max recorded generation + 1).
     pub resume_generation: u64,
-    /// Per-stage recorded high-water marks, populated by the catch-up read
-    /// (FLOWIP-120n PR-D); empty until then.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub high_water_by_stage: BTreeMap<String, u64>,
+    /// Ancestors merged because `resumed_from` had not recorded reconstruction
+    /// completion, nearest first (FLOWIP-134i B6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_from: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

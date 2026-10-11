@@ -16,7 +16,7 @@ use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
 use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::{
-    announce_resumed_live, around_source_boundary, commit_catch_up_marker, commit_reader_acquired,
+    announce_resumed_live, around_source_boundary, commit_catch_up_markers, commit_reader_acquired,
     commit_source_fact, commit_source_open_failure, commit_source_seek_failure,
     drain_pending_outputs_sync, emit_batch_to_pending_outputs, normalise_source_poll_error,
     observe_source_boundary_rejection, poll_error_backoff, poll_error_summary,
@@ -1029,13 +1029,14 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervis
             .resume_control()
             .cloned()
             .expect("ContinueLive is only returned by the Resume strategy");
-        let (frontier, replayed_count, skipped_count) = {
+        let (frontier, crossed, replayed_count, skipped_count) = {
             let driver = self
                 .replay_driver
                 .as_ref()
                 .expect("a replaying source has a replay driver");
             (
                 driver.frontier().handoff(),
+                driver.frontier().crossed_generation(),
                 driver.replayed_events(),
                 driver.skipped_events(),
             )
@@ -1147,10 +1148,11 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervis
         };
         commit_source_fact(&self.data_journal, stage_flow_context, resumed).await?;
 
-        commit_catch_up_marker(
+        commit_catch_up_markers(
             &self.data_journal,
             &ctx.instrumentation,
             stage_flow_context,
+            crossed,
             generation,
         )
         .await?;

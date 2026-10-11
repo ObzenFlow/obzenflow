@@ -114,6 +114,7 @@ use obzenflow_core::event::payloads::execution_payload::{
     SourceSeekFailedFact,
 };
 use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -145,16 +146,19 @@ pub(crate) async fn acquire_replay_input(
             archive.recorded_source_eof(stage_key),
         );
     }
-    let path = archive.source_data_journal_path(stage_key)?;
-    let reader = archive.open_source_reader(stage_key, stage_type).await?;
-    let replay = crate::replay::ReplayDriver::new(
-        reader,
-        path,
-        crate::replay::ReplayContextTemplate {
-            original_flow_id: archive.archive_flow_id().to_string(),
-            original_stage_id: archive.archived_stage_id(stage_key)?,
-        },
-    );
+    let head = replay_member(archive, stage_key, stage_type).await?;
+    // FLOWIP-134i B6: a resume splices the ancestors it merges with.
+    let mut ancestors = Vec::new();
+    for ancestor in archive.ancestors() {
+        if matches!(
+            ancestor.archived_stage_id(stage_key),
+            Err(ReplayError::StageNotInManifest { .. })
+        ) {
+            continue;
+        }
+        ancestors.push(replay_member(&ancestor, stage_key, stage_type).await?);
+    }
+    let replay = crate::replay::ReplayDriver::merged(head, ancestors);
     let event = ChainEventFactory::execution_event(
         flow_context.stage_id.into(),
         obzenflow_core::event::payloads::execution_payload::ExecutionPayload::ReplayLifecycle(
@@ -171,6 +175,21 @@ pub(crate) async fn acquire_replay_input(
     .with_flow_context(flow_context.clone());
     crate::supervised_base::publication::append(journal, event, Default::default()).await?;
     Ok(replay)
+}
+
+async fn replay_member(
+    archive: &Arc<dyn ReplayArchive>,
+    stage_key: &str,
+    stage_type: obzenflow_core::event::context::StageType,
+) -> Result<crate::replay::ReplayMember, ReplayError> {
+    Ok(crate::replay::ReplayMember {
+        journal_path: archive.source_data_journal_path(stage_key)?,
+        reader: archive.open_source_reader(stage_key, stage_type).await?,
+        replay_context: crate::replay::ReplayContextTemplate {
+            original_flow_id: archive.archive_flow_id().to_string(),
+            original_stage_id: archive.archived_stage_id(stage_key)?,
+        },
+    })
 }
 
 pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
@@ -385,27 +404,33 @@ pub(crate) async fn commit_source_seek_failure(
     })
 }
 
-/// Commit a source's catch-up marker behind its reconstructed prefix. The
-/// caller advances the generation only after it commits (FLOWIP-134i).
-pub(crate) async fn commit_catch_up_marker(
+/// Commit a source's catch-up markers behind its reconstructed prefix, one
+/// per generation after the last its recorded markers crossed, so a source
+/// torn before crossing crosses each skipped generation vacuously and every
+/// reader advances one generation per marker (FLOWIP-134i B6). The caller
+/// advances the stage's generation only after they commit.
+pub(crate) async fn commit_catch_up_markers(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     stage_flow_context: &FlowContext,
+    crossed: obzenflow_core::ReaderGeneration,
     generation: obzenflow_core::ReaderGeneration,
 ) -> Result<(), BoxError> {
-    let mut marker = ChainEventFactory::catch_up_complete_event(
-        WriterId::from(stage_flow_context.stage_id),
-        generation,
-        obzenflow_core::StageKey::from(stage_flow_context.stage_name.clone()),
-    );
-    marker.flow_context = stage_flow_context.clone();
-    crate::stages::common::supervision::output_committer::commit_control_output(
-        data_journal,
-        instrumentation,
-        marker,
-    )
-    .await
-    .map_err(|error| -> BoxError { error.to_string().into() })?;
+    for next in crossed.0.saturating_add(1)..=generation.0 {
+        let mut marker = ChainEventFactory::catch_up_complete_event(
+            WriterId::from(stage_flow_context.stage_id),
+            obzenflow_core::ReaderGeneration(next),
+            obzenflow_core::StageKey::from(stage_flow_context.stage_name.clone()),
+        );
+        marker.flow_context = stage_flow_context.clone();
+        crate::stages::common::supervision::output_committer::commit_control_output(
+            data_journal,
+            instrumentation,
+            marker,
+        )
+        .await
+        .map_err(|error| -> BoxError { error.to_string().into() })?;
+    }
     Ok(())
 }
 

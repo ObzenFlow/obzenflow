@@ -19,7 +19,7 @@ use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompl
 use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::SourceControl;
 use crate::stages::source::supervision::{
-    announce_resumed_live, around_source_boundary, commit_catch_up_marker, commit_reader_acquired,
+    announce_resumed_live, around_source_boundary, commit_catch_up_markers, commit_reader_acquired,
     commit_source_open_failure, drain_pending_outputs_async, emit_batch_to_pending_outputs,
     normalise_source_poll_error, observe_source_boundary_rejection, poll_error_backoff,
     poll_error_summary, record_source_release, record_source_stage_fatal, source_error_kind,
@@ -43,7 +43,9 @@ use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
 };
 use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
-use obzenflow_core::{ChainEvent, Journal, MiddlewareExecutionScope, StageId, WriterId};
+use obzenflow_core::{
+    ChainEvent, Journal, MiddlewareExecutionScope, ReaderGeneration, StageId, WriterId,
+};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::sync::atomic::Ordering;
@@ -850,17 +852,24 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     let control = ctx.runtime_execution.resume_control().expect(
                                         "ContinueLive is only returned by the Resume strategy",
                                     );
-                                    let (replayed_count, skipped_count) =
-                                        self.replay_driver.as_ref().map_or((0, 0), |d| {
-                                            (d.replayed_events(), d.skipped_events())
+                                    let (replayed_count, skipped_count, crossed) = self
+                                        .replay_driver
+                                        .as_ref()
+                                        .map_or((0, 0, ReaderGeneration::default()), |d| {
+                                            (
+                                                d.replayed_events(),
+                                                d.skipped_events(),
+                                                d.frontier().crossed_generation(),
+                                            )
                                         });
                                     control
                                         .record_delivered_high_water(self.stage_id, replayed_count);
                                     let generation = control.resume_generation();
-                                    commit_catch_up_marker(
+                                    commit_catch_up_markers(
                                         &self.data_journal,
                                         &ctx.instrumentation,
                                         &stage_flow_context,
+                                        crossed,
                                         generation,
                                     )
                                     .await?;

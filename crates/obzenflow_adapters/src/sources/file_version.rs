@@ -114,4 +114,32 @@ mod tests {
         let reopened = File::open(&path).unwrap();
         assert_ne!(FileVersion::of(&reopened).unwrap(), pinned);
     }
+
+    /// FLOWIP-134i B10: an edit that keeps the size, a truncation, and an edit
+    /// that restores the modification time all change the version; the change
+    /// time cannot be restored.
+    #[test]
+    fn in_place_edits_and_truncation_change_the_version_whatever_the_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.csv");
+        std::fs::write(&path, "a\n1\n").unwrap();
+        let file = File::open(&path).unwrap();
+        let pinned = FileVersion::of(&file).unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        let edit = |content: &[u8]| {
+            let mut editor = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            editor.write_all(content).unwrap();
+            editor.set_len(content.len() as u64).unwrap();
+            editor.set_modified(modified).unwrap();
+        };
+
+        edit(b"a\n2\n");
+        assert_eq!(file.metadata().unwrap().modified().unwrap(), modified);
+        assert!(matches!(
+            pinned.verify(&file),
+            Err(SourceError::Terminal { .. })
+        ));
+        edit(b"a\n");
+        assert_ne!(FileVersion::of(&file).unwrap(), pinned);
+    }
 }

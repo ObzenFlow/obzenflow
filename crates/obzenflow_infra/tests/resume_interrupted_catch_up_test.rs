@@ -30,6 +30,9 @@ use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_infra::journal::read::{
+    read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing,
+};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
@@ -466,20 +469,23 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
 
     // The source boundary was crossed in R1, so its archive legitimately
     // records generation 1 and R2 enters generation 2. The lineage chains
-    // R2 -> R1 -> R0 in the manifests.
+    // R2 -> R1 -> R0 in the manifests, canonically. R1's transform never
+    // crossed, so R1 recorded no reconstruction completion and R2 merged R0
+    // (FLOWIP-134i B6).
     let r2_manifest = manifest(&r2);
     let resume = r2_manifest
         .resume
         .as_ref()
         .expect("R2 records its resume config");
-    assert_eq!(resume.resumed_from, r1);
+    assert_eq!(resume.resumed_from, std::fs::canonicalize(&r1)?);
     assert_eq!(resume.resume_generation, 2);
+    assert_eq!(resume.merged_from, [std::fs::canonicalize(&r0)?]);
     let r1_manifest = manifest(&r1);
     let r1_resume = r1_manifest
         .resume
         .as_ref()
         .expect("R1 records its resume config");
-    assert_eq!(r1_resume.resumed_from, r0);
+    assert_eq!(r1_resume.resumed_from, std::fs::canonicalize(&r0)?);
     assert_eq!(r1_resume.resume_generation, 1);
 
     // R2's source journal: the original prefix unchanged, the re-admitted
@@ -612,5 +618,196 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
         "the torn archive resumes as a first-generation resume of the same prefix"
     );
 
+    Ok(())
+}
+
+/// Tear R1's source mid-prefix, as a kill during re-admission would: keep its
+/// first `kept` ticks and nothing after them.
+async fn tear_source_after(r1: &Path, kept: usize) -> Result<()> {
+    let src_journal = r1.join(&manifest(r1).stages["src"].data_journal_file);
+    let seen = std::cell::Cell::new(0usize);
+    obzenflow_infra::testing::journal::retain_archive_frames(r1, |path, records| {
+        if path != src_journal {
+            return true;
+        }
+        let facts = records
+            .iter()
+            .filter(|record| {
+                record.pointer("/envelope/provenance/event/event_kind") == Some(&json!("fact"))
+            })
+            .count();
+        seen.set(seen.get() + facts);
+        seen.get() <= kept
+    })
+    .map_err(anyhow::Error::from_boxed)?;
+    assert_eq!(
+        resume_rows(&replay_testkit::read_stage_envelopes_appended(r1, "src").await),
+        ticks(1..=kept as u64)
+    );
+    Ok(())
+}
+
+/// FLOWIP-134i B6: a resume torn before it recorded reconstruction completion
+/// merges with the run it resumed from, so the next resume continues the full
+/// prefix that run committed instead of forgetting it.
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() -> Result<()> {
+    const KEPT: usize = 6;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (r0, r1) = record_and_interrupt(&journal_base).await?;
+    tear_source_after(&r1, KEPT).await?;
+    // `show` names the ancestor the torn head still requires (B6).
+    let (r0, r1) = (std::fs::canonicalize(&r0)?, std::fs::canonicalize(&r1)?);
+    assert_eq!(
+        read_run_lineage(&r1)?,
+        RunLineage {
+            resumed_from: Some(ResumedFrom {
+                parent: r0.clone(),
+                generation: 1,
+            }),
+            standing: Standing::Head,
+            rebuild: Some(Rebuild::Incomplete {
+                generation: 1,
+                requires: vec![r0.clone()],
+            }),
+            evidence: Vec::new(),
+        }
+    );
+
+    let mut expected_src = ticks(1..=RECORDED);
+    expected_src.push(catch_up("src", 1));
+    expected_src.extend(ticks(RECORDED + 1..=RECORDED + R2_LIVE));
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
+                archive_path: r1.clone(),
+                allow_incomplete_archive: true,
+                allow_duplicate_sink_delivery: false,
+                verb: ReplayVerb::Resume,
+            })
+            .await,
+        );
+        let delivered = Arc::new(AtomicU64::new(0));
+        let handle = build_flow(
+            journal_base.to_path_buf(),
+            RECORDED + 1,
+            R2_LIVE,
+            0,
+            delivered.clone(),
+        )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow!("resume of the torn resume failed to build: {e:?}"))?;
+        wait_for_running(&handle).await?;
+        let r2 = replay_testkit::latest_run_dir(&journal_base);
+        wait_for_journal(&r2, "src", "the merged prefix and live tail", |envelopes| {
+            resume_rows(envelopes) == expected_src
+        })
+        .await?;
+        stop_and_wait(handle).await?;
+    }
+    let r2 = replay_testkit::latest_run_dir(&journal_base);
+
+    // R1 re-admitted only six ticks, R0 committed twelve: R2 continues all of
+    // them under one generation-1 boundary, then the live tail.
+    let resume = manifest(&r2).resume.expect("R2 records its resume config");
+    assert_eq!(resume.resumed_from, r1);
+    assert_eq!(resume.merged_from, std::slice::from_ref(&r0));
+    assert_eq!(resume.resume_generation, 1);
+    // Once continued, the torn run requires nothing and names its head.
+    assert_eq!(
+        read_run_lineage(&r1)?,
+        RunLineage {
+            resumed_from: Some(ResumedFrom {
+                parent: r0.clone(),
+                generation: 1,
+            }),
+            standing: Standing::Continued {
+                head: std::fs::canonicalize(&r2)?,
+            },
+            rebuild: Some(Rebuild::Incomplete {
+                generation: 1,
+                requires: Vec::new(),
+            }),
+            evidence: vec![EvidenceHolder {
+                run: r0,
+                generation: Some(0),
+                missing: false,
+            }],
+        }
+    );
+    assert_eq!(
+        resume_rows(&replay_testkit::read_stage_envelopes_appended(&r2, "src").await),
+        expected_src
+    );
+    Ok(())
+}
+
+/// FLOWIP-134i B6: a torn resume whose ancestor is gone, or disagrees with
+/// it, refuses before any run starts, naming the ancestor.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
+    use obzenflow_core::journal::archive::ReplayError;
+    use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (r0, r1) = record_and_interrupt(&journal_base).await?;
+    tear_source_after(&r1, 6).await?;
+    let torn = std::fs::canonicalize(&r1)?;
+
+    // An unrelated recording of the same flow commits different event ids.
+    {
+        let delivered = Arc::new(AtomicU64::new(0));
+        let handle = build_flow(journal_base.clone(), 1, RECORDED, 0, delivered.clone())
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+            .await
+            .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
+        wait_for_running(&handle).await?;
+        wait_for_count(&delivered, RECORDED).await?;
+        stop_and_wait(handle).await?;
+    }
+    let stranger = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+    let manifest_path = r1.join("run_manifest.json");
+    let original = std::fs::read_to_string(&manifest_path)?;
+    let mut rewritten: serde_json::Value = serde_json::from_str(&original)?;
+    rewritten["resume"]["resumed_from"] = json!(stranger);
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&rewritten)?)?;
+    // The stranger carries R0's claim, so R1's link to it is claim-backed.
+    std::fs::copy(
+        r0.join("run_continuation.json"),
+        stranger.join("run_continuation.json"),
+    )?;
+    match DiskReplayArchive::open_for_resume(r1.clone(), true).await {
+        Err(ReplayError::AncestorDisagrees {
+            archive,
+            ancestor,
+            stage_key,
+        }) => {
+            assert_eq!((archive, ancestor), (torn.clone(), stranger));
+            assert_eq!(stage_key, "src");
+        }
+        Err(other) => panic!("expected the disagreeing ancestor to refuse: {other}"),
+        Ok(_) => panic!("a disagreeing ancestor must refuse the resume"),
+    }
+
+    std::fs::write(&manifest_path, original)?;
+    let ancestor = std::fs::canonicalize(&r0)?;
+    std::fs::remove_dir_all(&r0)?;
+    let refusal = DiskReplayArchive::open_for_resume(r1.clone(), true)
+        .await
+        .err()
+        .expect("a torn resume needs the archive it resumed from");
+    let message = refusal.to_string();
+    assert!(
+        matches!(
+            &refusal,
+            ReplayError::AncestorMissing { archive, ancestor: missing }
+                if archive == &torn && missing == &ancestor
+        ),
+        "{message}"
+    );
+    assert!(message.contains(&format!("Restore {}", ancestor.display())));
     Ok(())
 }

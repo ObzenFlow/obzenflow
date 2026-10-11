@@ -1915,6 +1915,14 @@ impl obzenflow_core::journal::archive::ReplayArchive for ScopeMatrixArchive {
     fn archive_path(&self) -> &Path {
         Path::new("scope-matrix-archive")
     }
+
+    fn claim_continuation(
+        &self,
+        _: obzenflow_core::FlowId,
+        _: &obzenflow_core::journal::factory::CurrentRunLocator,
+    ) -> Result<(), obzenflow_core::journal::archive::ReplayError> {
+        unreachable!("the execution-scope fixture is never resumed")
+    }
 }
 
 fn resume_execution() -> crate::execution::RuntimeExecution {
@@ -1958,6 +1966,49 @@ async fn generated_pre_effect_terminal_keeps_reconstruction_track_only() {
             .expect("the reconstruction lease remains closable"),
         0
     );
+}
+
+#[test]
+fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
+    // FLOWIP-134i B6: a torn resume's history joins its ancestor's per cursor;
+    // F7's recorded mark derives from the join.
+    let record = |input_seq: u64, value: u64| EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
+        cursor: EffectCursor::new("archived_flow", "effect_stage", input_seq, 0_u32),
+        descriptor_hash: EffectDescriptorHash::new("archived-descriptor"),
+        descriptor: EffectDescriptor::new(
+            CountingEffect::EFFECT_TYPE,
+            "archived",
+            CountingEffect::SCHEMA_VERSION,
+            "test-v1",
+            "archived-input",
+        ),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": value }),
+        },
+        origin: None,
+    };
+    let ancestor = EffectHistory::from_records("archived_flow", vec![record(1, 10), record(2, 20)])
+        .expect("ancestor history indexes");
+    let torn = EffectHistory::from_records("archived_flow", vec![record(1, 10)])
+        .expect("torn history indexes");
+    let joined = ancestor
+        .clone()
+        .joined_with(&torn)
+        .expect("agreeing histories join");
+    assert_eq!(joined.max_recorded_input_seq(), Some(2));
+
+    let conflicting = EffectHistory::from_records("archived_flow", vec![record(1, 11)])
+        .expect("conflicting history indexes");
+    let refusal = ancestor
+        .joined_with(&conflicting)
+        .expect_err("incomparable terminals refuse");
+    assert!(matches!(
+        refusal,
+        EffectError::EffectProvenanceMismatch(ref message)
+            if message.contains("conflicting archived and current-run terminals")
+    ));
 }
 
 #[tokio::test]

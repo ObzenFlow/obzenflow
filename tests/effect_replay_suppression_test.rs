@@ -2227,6 +2227,8 @@ async fn cancellation_after_perform_preserves_atomic_terminal_evidence_and_resum
         .await
         .expect("post-perform cancellation should finish bounded cleanup")
         .expect("cancelled flow should resolve");
+    // The interrupted process ends, releasing its journal writers (B7).
+    drop(flow_handle);
 
     let interrupted_archive = latest_run_dir(&journal_base);
     let interrupted_events = read_stage_events(&interrupted_archive, "effectful").await;
@@ -2355,6 +2357,8 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
         .await
         .expect("cancelled flow should finish its bounded ancillary cleanup")
         .expect("cancelled flow should resolve");
+    // The interrupted process ends, releasing its journal writers (B7).
+    drop(flow_handle);
     assert_eq!(cancelled_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         cancelled_futures.load(Ordering::SeqCst),
@@ -3676,7 +3680,8 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
             assert_eq!(stage_key, "effectful");
             assert_eq!(*input_position, Some(input));
             assert_eq!(
-                resume, &archive_dir,
+                resume,
+                &std::fs::canonicalize(&archive_dir).expect("the archive resolves"),
                 "the unclaimed archive is its own head"
             );
         }
@@ -3692,7 +3697,9 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
     assert!(
         rendered.contains(&format!(
             "Resume {} to finish this run's work.",
-            archive_dir.display()
+            std::fs::canonicalize(&archive_dir)
+                .expect("the archive resolves")
+                .display()
         )),
         "{rendered}"
     );

@@ -393,6 +393,11 @@ pub enum FlowBuildError {
         archive: PathBuf,
         sources: Vec<String>,
     },
+
+    /// The resume could not take its parent's continuation claim (FLOWIP-134i
+    /// B12); its run directory remains as an orphan that ran no stage.
+    #[error(transparent)]
+    ResumeRefusedClaim(obzenflow_core::journal::archive::ReplayError),
 }
 
 impl FlowBuildError {

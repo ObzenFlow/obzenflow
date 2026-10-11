@@ -9,7 +9,6 @@
 mod tests;
 
 use super::machine;
-#[cfg(feature = "warp-server")]
 use super::signals;
 
 use crate::application::lifecycle_observation::{
@@ -182,23 +181,29 @@ impl ApplicationLifecycle {
         self.attach_flow(flow);
         self.failure = Some(Failure::Application(error));
         let event = Event::Stop(StopReason::BeforeRun, self.stop_input());
-        self.drive(
-            event,
-            #[cfg(feature = "warp-server")]
-            None,
-        )
-        .await;
+        self.drive(event, None).await;
         self.take_result()
     }
 
+    /// A standalone run settles on SIGTERM and SIGINT as a hosted run does.
     pub async fn run_standalone(&mut self, flow: Arc<FlowHandle>) -> Result<(), ApplicationError> {
         self.attach_flow(flow);
-        self.drive(
-            Event::Standalone,
-            #[cfg(feature = "warp-server")]
+        let signals = match signals::Signals::new(
+            #[cfg(test)]
             None,
-        )
-        .await;
+        ) {
+            Ok(signals) => Some(signals),
+            Err(error) => {
+                self.failure = Some(Failure::Application(error));
+                None
+            }
+        };
+        let event = if self.failure.is_some() {
+            Event::Stop(StopReason::BeforeRun, self.stop_input())
+        } else {
+            Event::Standalone
+        };
+        self.drive(event, signals).await;
         self.take_result()
     }
 
@@ -211,12 +216,7 @@ impl ApplicationLifecycle {
             return result;
         }
         self.failure = result.err().map(Failure::Application);
-        self.drive(
-            Event::PreparationFailed,
-            #[cfg(feature = "warp-server")]
-            None,
-        )
-        .await;
+        self.drive(Event::PreparationFailed, None).await;
         self.take_result()
     }
 
@@ -590,11 +590,7 @@ impl ApplicationLifecycle {
         }
     }
 
-    async fn drive(
-        &mut self,
-        initial: Event,
-        #[cfg(feature = "warp-server")] mut signals: Option<signals::Signals>,
-    ) {
+    async fn drive(&mut self, initial: Event, mut signals: Option<signals::Signals>) {
         self.dispatch(initial).await;
         loop {
             if matches!(self.machine.state(), State::Finished) {
@@ -667,13 +663,11 @@ impl ApplicationLifecycle {
                     self.operation = None;
                     self.observe(observed)
                 }
-                reason = async {
-                    #[cfg(feature = "warp-server")]
-                    { signals::next(&mut signals).await }
-                    #[cfg(not(feature = "warp-server"))]
-                    { std::future::pending::<StopReason>().await }
-                } => {
-                    if matches!(self.machine.state(), State::Starting | State::Active) {
+                reason = signals::next(&mut signals) => {
+                    if matches!(
+                        self.machine.state(),
+                        State::Starting | State::Active | State::RunningStandalone
+                    ) {
                         Event::Stop(reason, self.stop_input())
                     } else { Event::RepeatedSignal }
                 }

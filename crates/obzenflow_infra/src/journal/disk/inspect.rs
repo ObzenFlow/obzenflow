@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use super::codec::Decoder;
 use super::manifest_gate::require_current_journal_schema_version;
-use super::replay_archive::derive_status_derivation_from_system_log;
+use super::replay_archive::scan_system_log;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 
 #[derive(Debug, Error)]
@@ -283,8 +283,8 @@ fn archive_status(
     manifest: &RunManifest,
 ) -> Result<ArchiveStatus, JournalInspectError> {
     let system_log = run_dir.join(&manifest.system_journal_file);
-    match derive_status_derivation_from_system_log(&system_log) {
-        Ok(derivation) => Ok(derivation.chosen),
+    match scan_system_log(&system_log) {
+        Ok(scan) => Ok(scan.derivation.chosen),
         Err(
             error
             @ obzenflow_core::journal::archive::ReplayError::UnsupportedJournalSchemaVersion {
@@ -400,7 +400,7 @@ mod tests {
                 .concat()
             };
             std::fs::write(&path, bytes).unwrap();
-            assert!(derive_status_derivation_from_system_log(&path).is_err());
+            assert!(scan_system_log(&path).is_err());
             let mut output = Vec::new();
             assert!(matches!(
                 export_journal_file::<SystemEvent>(

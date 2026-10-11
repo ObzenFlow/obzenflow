@@ -11,6 +11,8 @@ use super::*;
 mod clocks;
 #[path = "summary/events.rs"]
 mod events;
+#[path = "summary/lineage.rs"]
+mod lineage;
 
 const HEADING: &str = "1;38;5;255";
 const BODY: &str = "38;5;252";
@@ -21,11 +23,15 @@ impl Renderer {
         &mut self,
         output: &mut impl Write,
         diagnostics: &mut impl Write,
-        run: &RunIdentity,
-        manifest: &RunManifest,
+        observed: Observed<'_>,
         end: ObservationEnd,
-        progress: &RunReadProgress,
     ) -> Result<(), Error> {
+        let Observed {
+            run,
+            manifest,
+            progress,
+            lineage,
+        } = observed;
         self.flush_pending(output)?;
         if self.jsonl {
             writeln!(
@@ -47,6 +53,8 @@ impl Renderer {
                     )?;
                 }
                 self.manifest_summary(output, manifest)?;
+                self.lineage_summary(output, &lineage)?;
+                self.continuation_summary(output, manifest)?;
                 self.journal_summary(output, manifest)?;
                 self.clock_summary(output, progress)?;
                 self.event_summary(output, manifest)?;

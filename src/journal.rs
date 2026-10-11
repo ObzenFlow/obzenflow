@@ -19,7 +19,8 @@ pub mod read {
     pub use obzenflow_core::journal::read::*;
     pub use obzenflow_core::journal::{RunManifest, RUN_MANIFEST_FILENAME};
     pub use obzenflow_infra::journal::read::{
-        open_disk_run, JournalReadError, RunSnapshot, RunTail,
+        open_disk_run, EvidenceHolder, JournalReadError, Rebuild, ResumedFrom, RunLineage,
+        RunSnapshot, RunTail, Standing,
     };
 }
 

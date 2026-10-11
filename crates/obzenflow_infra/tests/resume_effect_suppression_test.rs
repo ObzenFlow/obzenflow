@@ -435,3 +435,219 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
 
     Ok(())
 }
+
+/// Tear R1 as a kill during the effectful stage's catch-up would: the stage
+/// keeps its first `kept` re-committed outcomes, the sink no receipt, and the
+/// system log nothing from any reconstruction completion on.
+fn tear_effect_catch_up(r1: &Path, kept: usize) -> Result<()> {
+    let manifest = replay_testkit::archive_manifest(r1);
+    let journal = |key: &str| {
+        r1.join(
+            manifest["stages"][key]["data_journal_file"]
+                .as_str()
+                .unwrap(),
+        )
+    };
+    let (enrich, snk) = (journal("enrich"), journal("snk"));
+    let system = r1.join(manifest["system_journal_file"].as_str().unwrap());
+    let outcome_type = EffectValue::event_type_name();
+    let event_type = |record: &serde_json::Value| {
+        record
+            .pointer("/envelope/provenance/event/event_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let outcomes = std::cell::Cell::new(0usize);
+    let receipt_seen = std::cell::Cell::new(false);
+    let completion_seen = std::cell::Cell::new(false);
+    obzenflow_infra::testing::journal::retain_archive_frames(r1, |path, records| {
+        if path == enrich {
+            let committed = records
+                .iter()
+                .filter(|record| event_type(record).as_deref() == Some(outcome_type.as_str()))
+                .count();
+            outcomes.set(outcomes.get() + committed);
+            outcomes.get() <= kept
+        } else if path == snk {
+            receipt_seen.set(
+                receipt_seen.get()
+                    || records.iter().any(|record| {
+                        record.pointer("/envelope/provenance/event/event_kind")
+                            == Some(&json!("delivery"))
+                    }),
+            );
+            !receipt_seen.get()
+        } else if path == system {
+            completion_seen.set(
+                completion_seen.get()
+                    || records.iter().any(|record| {
+                        event_type(record)
+                            .is_some_and(|name| name.ends_with("reconstruction_completed"))
+                    }),
+            );
+            !completion_seen.get()
+        } else {
+            true
+        }
+    })
+    .map_err(anyhow::Error::from_boxed)?;
+    Ok(())
+}
+
+/// FLOWIP-134i B6: a resume torn while its effectful stage re-committed the
+/// recorded history merges with the run it resumed from, so outcomes that
+/// only the ancestor still holds are reused and never executed again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torn_resume_reuses_effects_only_its_ancestor_still_holds() -> Result<()> {
+    const RECORDED: u64 = 6; // readings 1..=6
+    const KEPT: usize = 2; // outcomes the torn resume re-committed
+    const LIVE: u64 = 2; // readings 7..=8
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let recorded_calls = run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    assert_eq!(recorded_calls, RECORDED as usize);
+    let r0 = replay_testkit::latest_run_dir(&journal_base);
+
+    let resume_of = |archive: PathBuf| ReplayBootstrap {
+        archive_path: archive,
+        allow_incomplete_archive: true,
+        allow_duplicate_sink_delivery: false,
+        verb: ReplayVerb::Resume,
+    };
+    let r1_calls = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_of(r0.clone())).await,
+        );
+        run_until_delivered(&journal_base, RECORDED + 1, 0, RECORDED).await?
+    };
+    assert_eq!(r1_calls, 0, "R1 reuses every recorded outcome");
+    let r1 = replay_testkit::latest_run_dir(&journal_base);
+    tear_effect_catch_up(&r1, KEPT)?;
+    assert_eq!(
+        outcome_fact_cursors(&replay_testkit::read_stage_envelopes_appended(&r1, "enrich").await)
+            .len(),
+        KEPT
+    );
+
+    // Without the merge, R2 would trust R1's two outcomes and execute
+    // readings 3..=6 again.
+    let r2_calls = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_of(r1.clone())).await,
+        );
+        run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?
+    };
+    assert_eq!(
+        r2_calls, LIVE as usize,
+        "outcomes committed only in R0 are reused; only the live inputs execute"
+    );
+    let r2 = replay_testkit::latest_run_dir(&journal_base);
+    let merged_from = replay_testkit::archive_manifest(&r2)["resume"]["merged_from"].clone();
+    assert_eq!(merged_from, json!([std::fs::canonicalize(&r0)?]));
+    Ok(())
+}
+
+/// Tear R1's source mid-prefix: keep its first `kept` re-admitted readings.
+fn tear_source_after(r1: &Path, kept: usize) -> Result<()> {
+    let manifest = replay_testkit::archive_manifest(r1);
+    let src = r1.join(
+        manifest["stages"]["src"]["data_journal_file"]
+            .as_str()
+            .unwrap(),
+    );
+    let seen = std::cell::Cell::new(0usize);
+    obzenflow_infra::testing::journal::retain_archive_frames(r1, |path, records| {
+        if path != src {
+            return true;
+        }
+        let facts = records
+            .iter()
+            .filter(|record| {
+                record.pointer("/envelope/provenance/event/event_kind") == Some(&json!("fact"))
+            })
+            .count();
+        seen.set(seen.get() + facts);
+        seen.get() <= kept
+    })
+    .map_err(anyhow::Error::from_boxed)?;
+    Ok(())
+}
+
+/// Replay to completion: the source ends at the end of its recording and the
+/// flow drains. Returns the effect executions the replay's handlers made.
+async fn replay_to_completion(journal_base: &Path) -> Result<usize> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handle = build_flow(
+        journal_base.to_path_buf(),
+        1,
+        0,
+        calls.clone(),
+        Arc::new(AtomicU64::new(0)),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow!("replay flow failed to build: {e:?}"))?;
+    tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the replay to drain"))??;
+    Ok(calls.load(Ordering::SeqCst))
+}
+
+/// FLOWIP-134i B13: a resume torn mid-prefix, replayed to completion, then
+/// resumed through the replay continues the torn run and merges its ancestor,
+/// so outcomes committed only in R0 are reused.
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_through_a_replay_of_a_torn_resume_reuses_ancestor_effects() -> Result<()> {
+    const RECORDED: u64 = 6; // readings 1..=6
+    const KEPT: usize = 2; // readings and outcomes the torn resume kept
+    const LIVE: u64 = 2; // readings 7..=8
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    let r0 = replay_testkit::latest_run_dir(&journal_base);
+    let archive_of = |archive: PathBuf, verb| ReplayBootstrap {
+        archive_path: archive,
+        allow_incomplete_archive: true,
+        allow_duplicate_sink_delivery: false,
+        verb,
+    };
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive_of(r0.clone(), ReplayVerb::Resume))
+                .await,
+        );
+        run_until_delivered(&journal_base, RECORDED + 1, 0, RECORDED).await?;
+    }
+    let r1 = replay_testkit::latest_run_dir(&journal_base);
+    tear_source_after(&r1, KEPT)?;
+    tear_effect_catch_up(&r1, KEPT)?;
+
+    let replay_calls = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive_of(r1.clone(), ReplayVerb::Replay))
+                .await,
+        );
+        replay_to_completion(&journal_base).await?
+    };
+    assert_eq!(replay_calls, 0, "a replay never executes an effect");
+    let replayed = replay_testkit::latest_run_dir(&journal_base);
+
+    let r2_calls = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive_of(replayed, ReplayVerb::Resume)).await,
+        );
+        run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?
+    };
+    assert_eq!(
+        r2_calls, LIVE as usize,
+        "outcomes committed only in R0 are reused; only the live inputs execute"
+    );
+    let resume = replay_testkit::archive_manifest(&replay_testkit::latest_run_dir(&journal_base))
+        ["resume"]
+        .clone();
+    assert_eq!(resume["resumed_from"], json!(std::fs::canonicalize(&r1)?));
+    assert_eq!(resume["merged_from"], json!([std::fs::canonicalize(&r0)?]));
+    Ok(())
+}

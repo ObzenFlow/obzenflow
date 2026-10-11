@@ -883,4 +883,11 @@ impl ReplayArchive for EmptyArchive {
     fn archive_path(&self) -> &Path {
         Path::new("memory")
     }
+    fn claim_continuation(
+        &self,
+        _: obzenflow_core::FlowId,
+        _: &obzenflow_core::journal::factory::CurrentRunLocator,
+    ) -> Result<(), ReplayError> {
+        unreachable!()
+    }
 }
