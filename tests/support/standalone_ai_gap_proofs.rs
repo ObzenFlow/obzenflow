@@ -329,7 +329,8 @@ fn resumable_flow(
             EmbeddingDimensions::try_from(3).unwrap(),
         )
         .map_err(|error| *error)?;
-        let input = BoundedTicketSource::new(first_id, count);
+        let input =
+            crate::replay_testkit::ReattachingSource(BoundedTicketSource::new(first_id, count));
         let collected = CollectEmbedded {
             outputs: outputs.clone(),
         };

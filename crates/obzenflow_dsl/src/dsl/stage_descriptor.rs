@@ -3152,8 +3152,14 @@ mod tests {
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler,
     };
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
+    use obzenflow_runtime::stages::source::RefusedBy;
     use obzenflow_runtime::stages::LivenessSnapshots;
     use serde_json::json;
+
+    /// Raw test handlers declare no continuation.
+    const HANDLER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
+        by: RefusedBy::Handler,
+    };
 
     fn effective_config_for_stage(
         stage_name: &str,
@@ -3720,7 +3726,7 @@ mod tests {
         let descriptor = AsyncFiniteSourceDescriptor::new(
             "configured",
             DummyAsyncFiniteSourceConfigured,
-            SourceContinuation::Refuse,
+            HANDLER_REFUSES,
         );
         assert_eq!(
             UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
@@ -3733,7 +3739,7 @@ mod tests {
         let descriptor = AsyncFiniteSourceDescriptor::new(
             "defaulted",
             DummyAsyncFiniteSourceDefault,
-            SourceContinuation::Refuse,
+            HANDLER_REFUSES,
         );
         assert_eq!(
             UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
@@ -3746,7 +3752,7 @@ mod tests {
         let descriptor = AsyncFiniteSourceDescriptor::new(
             "disabled",
             DummyAsyncFiniteSourceDisabled,
-            SourceContinuation::Refuse,
+            HANDLER_REFUSES,
         );
         assert_eq!(
             UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
@@ -3759,7 +3765,7 @@ mod tests {
         let mut descriptor = AsyncInfiniteSourceDescriptor::new(
             "source",
             DummyAsyncInfiniteSourceDefault,
-            SourceContinuation::Reattach,
+            HANDLER_REFUSES,
         );
         descriptor.source_policies = vec![
             Box::new(
@@ -3829,7 +3835,7 @@ mod tests {
         let descriptor = AsyncInfiniteSourceDescriptor::new(
             "configured",
             DummyAsyncInfiniteSourceConfigured,
-            SourceContinuation::Reattach,
+            HANDLER_REFUSES,
         );
         assert_eq!(
             UnifiedAsyncInfiniteSourceHandler::poll_timeout(&descriptor.handler),
@@ -3842,7 +3848,7 @@ mod tests {
         let descriptor = AsyncInfiniteSourceDescriptor::new(
             "defaulted",
             DummyAsyncInfiniteSourceDefault,
-            SourceContinuation::Reattach,
+            HANDLER_REFUSES,
         );
         assert_eq!(
             UnifiedAsyncInfiniteSourceHandler::poll_timeout(&descriptor.handler),
@@ -4335,7 +4341,7 @@ mod tests {
         let descriptor = FiniteSourceDescriptor {
             name: "cb_source".to_string(),
             handler: DummyFiniteSource,
-            continuation: SourceContinuation::Refuse,
+            continuation: HANDLER_REFUSES,
             source_policies: vec![Box::new(breaker)],
             ingress_policy: None,
             observers: vec![],

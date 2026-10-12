@@ -201,6 +201,7 @@ mod presentation_tests {
         RunMode::Replay(ReplayRunContext {
             archive_path: PathBuf::from("target/catalog-logs/flows/flow_01SOURCE"),
             archive_flow_id: Some("flow_01SOURCE".to_string()),
+            verify: false,
         })
     }
 

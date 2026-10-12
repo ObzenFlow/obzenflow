@@ -16,6 +16,10 @@
 //! unfinished `Refuse` source refuses at admission; an unfinished CSV source
 //! (`Seek`) continues strictly after its last committed row, refuses a changed
 //! input before any live row, and a source that never pinned starts on resume.
+//!
+//! FLOWIP-122i: a reattaching connector records its declared guarantee after
+//! its watermark and before its first live record, and an interrupted infinite
+//! direct handler refuses at admission until it is rebuilt as a connector.
 
 #[path = "../../../tests/replay_testkit/mod.rs"]
 mod replay_testkit;
@@ -23,11 +27,13 @@ mod replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_adapters::sources::{CsvDecodeError, CsvDecoder, CsvRecord, CsvSource};
+use obzenflow_adapters::sources::{
+    ChannelSource, CsvDecodeError, CsvDecoder, CsvRecord, CsvSource,
+};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourceCleanupPhase, SourceCleanupTrigger, SourceContinuationRefusal,
-    SourceOpenIntent,
+    ExecutionPayload, ReattachGuarantee, SourceCleanupPhase, SourceCleanupTrigger,
+    SourceContinuationRefusal, SourceOpenIntent, SourceReattachedFact,
 };
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{
@@ -36,7 +42,8 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{
-    effectful_transform, flow, infinite_source, sink, source, transform, FlowDefinition,
+    async_infinite_source, effectful_transform, flow, infinite_source, sink, source, transform,
+    FlowDefinition,
 };
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
@@ -50,10 +57,11 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::source::{
-    FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceInputIdentity,
-    SourcePosition, SourceReaderInitContext, SourceRecord,
+    FiniteSourceConnector, PositionedFiniteReader, RefusedBy, ResumeRefusal, Seek, SeekableSource,
+    SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
 };
 use obzenflow_runtime::stages::SourceError;
+use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -310,7 +318,8 @@ fn build_flow(
     let inf_count = ranges.inf_count;
     FlowDefinition::materialize(move |_runtime_config| {
         let finite_handler = FiniteChannelSource::new("f", fin_first, fin_count);
-        let infinite_handler = InfiniteChannelSource::new("i", inf_first, inf_count);
+        let infinite_handler =
+            ReattachingSource(InfiniteChannelSource::new("i", inf_first, inf_count));
         let merge_handler = MergeTransform::new();
         let effectful_handler = EffectfulTail { calls };
         let collect_handler = CountingSink { delivered };
@@ -394,12 +403,13 @@ async fn run_until_delivered(
     Ok(calls.load(Ordering::SeqCst))
 }
 
-/// A journal reduced to data payloads, catch-up watermarks, and authored EOF,
-/// in physical append order.
+/// A journal reduced to data payloads, catch-up watermarks, reattachment
+/// evidence and authored EOF, in physical append order.
 #[derive(Debug, Clone, PartialEq)]
 enum MixedRow {
     Data(serde_json::Value),
     CatchUp { stage_key: String, generation: u64 },
+    Reattached(SourceReattachedFact),
     Eof,
 }
 
@@ -417,6 +427,9 @@ fn mixed_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<MixedRow> {
                 stage_key: stage_key.to_string(),
                 generation: generation.0,
             }),
+            ChainPayload::Execution(ExecutionPayload::SourceReattached(fact)) => {
+                Some(MixedRow::Reattached(fact.clone()))
+            }
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => Some(MixedRow::Eof),
             _ => None,
         })
@@ -518,7 +531,8 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
         "the finite source re-admits its rows and re-authors EOF, no watermark"
     );
 
-    // The infinite source authors its watermark and continues live.
+    // The infinite source authors its watermark, records its declared
+    // guarantee before its first live record (FLOWIP-122i), and continues live.
     let inf_rows =
         mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "inf").await);
     let mut expected_inf = tick_rows("i", 101..=104);
@@ -526,10 +540,14 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
         stage_key: "inf".to_string(),
         generation: 1,
     });
+    expected_inf.push(MixedRow::Reattached(SourceReattachedFact {
+        generation: 1,
+        guarantee: ReattachGuarantee::AtMostOnce,
+    }));
     expected_inf.extend(tick_rows("i", 105..=106));
     assert_eq!(
         inf_rows, expected_inf,
-        "the infinite source authors its watermark between prefix and live tail"
+        "the infinite source authors its watermark and guarantee between prefix and live tail"
     );
 
     // The fan-in authors its own single watermark, counting the EOF-exhausted
@@ -733,7 +751,7 @@ fn build_stalling_flow(
             rows: FiniteChannelSource::new("f", 1, 3),
             polls,
         };
-        let infinite_handler = InfiniteChannelSource::new("i", 101, 2);
+        let infinite_handler = ReattachingSource(InfiniteChannelSource::new("i", 101, 2));
         let merge_handler = MergeTransform::new();
         let collect_handler = MergedSink { delivered };
 
@@ -826,7 +844,9 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
                 refusals,
                 &vec![(
                     "fin".to_string(),
-                    obzenflow_runtime::stages::source::ResumeRefusal::UnfinishedInput
+                    ResumeRefusal::UnfinishedInput {
+                        by: RefusedBy::Handler
+                    }
                 )],
                 "the reattaching source is not named"
             );
@@ -836,7 +856,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
     assert!(failure
         .error
         .to_string()
-        .contains("source 'fin' stopped before the end of its input"));
+        .contains("source 'fin' stopped with its input unfinished"));
     assert_eq!(
         std::fs::read_dir(journal_base.join("flows"))?.count(),
         runs_before,
@@ -850,6 +870,310 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
     assert!(
         !recorded_run.join("run_continuation.json").exists(),
         "the refused resume claims nothing (B12)"
+    );
+
+    Ok(())
+}
+
+/// An infinite direct handler that counts its polls.
+#[derive(Clone, Debug)]
+struct PolledTicker {
+    ticks: InfiniteChannelSource,
+    polls: Arc<AtomicUsize>,
+}
+
+impl TypedInfiniteSourceHandler for PolledTicker {
+    type Output = ChannelTick;
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        self.ticks.next()
+    }
+}
+
+fn build_ticker_flow(
+    journal_base: PathBuf,
+    polls: Arc<AtomicUsize>,
+    delivered: Arc<AtomicU64>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let ticker_handler = PolledTicker {
+            ticks: InfiniteChannelSource::new("t", 1, 2),
+            polls,
+        };
+        let merge_handler = MergeTransform::new();
+        let collect_handler = MergedSink { delivered };
+
+        Ok(flow! {
+            name: "resume_direct_ticker",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                ticker = infinite_source!(ChannelTick => ticker_handler);
+                merge = transform!(ChannelTick -> Merged => merge_handler);
+                collect = sink!(Merged => collect_handler);
+            },
+
+            topology: {
+                ticker |> merge;
+                merge |> collect;
+            }
+        })
+    })
+}
+
+/// The ticker flow with its stage rebuilt as a connector, the remedy the
+/// direct-handler refusal names. It continues at 3.
+fn build_reattaching_ticker_flow(
+    journal_base: PathBuf,
+    polls: Arc<AtomicUsize>,
+    delivered: Arc<AtomicU64>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let ticker_handler = ReattachingSource(PolledTicker {
+            ticks: InfiniteChannelSource::new("t", 3, 1),
+            polls,
+        });
+        let merge_handler = MergeTransform::new();
+        let collect_handler = MergedSink { delivered };
+
+        Ok(flow! {
+            name: "resume_direct_ticker",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                ticker = infinite_source!(ChannelTick => ticker_handler);
+                merge = transform!(ChannelTick -> Merged => merge_handler);
+                collect = sink!(Merged => collect_handler);
+            },
+
+            topology: {
+                ticker |> merge;
+                merge |> collect;
+            }
+        })
+    })
+}
+
+/// FLOWIP-122i: an infinite direct handler declares no continuation. Stopped,
+/// it refuses the resume at admission, named as a handler, before any run
+/// directory exists or any source polls; only connectors and hosted ingress
+/// reattach. The refusal's remedy holds: the same stage rebuilt as a
+/// connector resumes the refused archive.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+
+    let delivered = Arc::new(AtomicU64::new(0));
+    let handle = build_ticker_flow(
+        journal_base.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        delivered.clone(),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
+    wait_for_running(&handle).await?;
+    wait_for_count(&delivered, 2).await?;
+    handle.stop_graceful(Duration::from_secs(5)).await?;
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    drop(handle);
+    let recorded_run = replay_testkit::latest_run_dir(&journal_base);
+
+    let runs_before = std::fs::read_dir(journal_base.join("flows"))?.count();
+    let resumed_polls = Arc::new(AtomicUsize::new(0));
+    let failure = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
+        );
+        build_ticker_flow(
+            journal_base.clone(),
+            resumed_polls.clone(),
+            Arc::new(AtomicU64::new(0)),
+        )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .err()
+        .ok_or_else(|| anyhow!("an interrupted infinite direct handler must refuse"))?
+    };
+    match &failure.error {
+        obzenflow_dsl::dsl::FlowBuildError::ResumeRefusedSources { refusals, .. } => {
+            assert_eq!(
+                refusals,
+                &vec![(
+                    "ticker".to_string(),
+                    ResumeRefusal::UnfinishedInput {
+                        by: RefusedBy::Handler
+                    }
+                )]
+            );
+        }
+        other => panic!("expected the unfinished-source refusal, got: {other}"),
+    }
+    assert!(
+        failure.error.to_string().contains(
+            "source 'ticker' stopped with its input unfinished, and its handler cannot \
+             continue interrupted input."
+        ),
+        "{}",
+        failure.error
+    );
+    assert_eq!(
+        std::fs::read_dir(journal_base.join("flows"))?.count(),
+        runs_before,
+        "the refusal leaves no run directory"
+    );
+    assert_eq!(resumed_polls.load(Ordering::SeqCst), 0);
+    assert!(!recorded_run.join("run_continuation.json").exists());
+
+    let delivered = Arc::new(AtomicU64::new(0));
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
+        );
+        let handle = build_reattaching_ticker_flow(
+            journal_base.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            delivered.clone(),
+        )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow!("the rebuilt flow must resume the refused archive: {e:?}"))?;
+        wait_for_running(&handle).await?;
+        // The sink re-consumes the recorded prefix during catch-up.
+        wait_for_count(&delivered, 3).await?;
+        handle.stop_graceful(Duration::from_secs(5)).await?;
+        tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the resumed run to stop"))??;
+    }
+    let resumed_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(recorded_run, resumed_run);
+
+    let mut expected = tick_rows("t", 1..=2);
+    expected.push(MixedRow::CatchUp {
+        stage_key: "ticker".to_string(),
+        generation: 1,
+    });
+    expected.push(MixedRow::Reattached(SourceReattachedFact {
+        generation: 1,
+        guarantee: ReattachGuarantee::AtMostOnce,
+    }));
+    expected.extend(tick_rows("t", 3..=3));
+    expected.push(MixedRow::Eof);
+    assert_eq!(
+        mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "ticker").await),
+        expected
+    );
+
+    Ok(())
+}
+
+fn build_channel_flow(
+    journal_base: PathBuf,
+    ticks: tokio::sync::mpsc::Receiver<ChannelTick>,
+    delivered: Arc<AtomicU64>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let channel_source = ChannelSource::new(ticks);
+        let merge_handler = MergeTransform::new();
+        let collect_handler = MergedSink { delivered };
+
+        Ok(flow! {
+            name: "resume_channel_source",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                chan = async_infinite_source!(ChannelTick => channel_source);
+                merge = transform!(ChannelTick -> Merged => merge_handler);
+                collect = sink!(Merged => collect_handler);
+            },
+
+            topology: {
+                chan |> merge;
+                merge |> collect;
+            }
+        })
+    })
+}
+
+fn tick(value: u64) -> ChannelTick {
+    ChannelTick {
+        channel: "c".to_string(),
+        value,
+    }
+}
+
+/// FLOWIP-122i: `ChannelSource` is a connector that reattaches live with
+/// `AtMostOnce`, recorded after its watermark and before its first live tick.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_channel_source_reattaches_and_records_at_most_once() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+
+    let (sender, ticks) = tokio::sync::mpsc::channel(8);
+    let delivered = Arc::new(AtomicU64::new(0));
+    let handle = build_channel_flow(journal_base.clone(), ticks, delivered.clone())
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
+    wait_for_running(&handle).await?;
+    for value in 1..=2 {
+        sender.send(tick(value)).await?;
+    }
+    wait_for_count(&delivered, 2).await?;
+    handle.stop_graceful(Duration::from_secs(5)).await?;
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    drop(handle);
+    drop(sender);
+    let recorded_run = replay_testkit::latest_run_dir(&journal_base);
+
+    let (sender, ticks) = tokio::sync::mpsc::channel(8);
+    let delivered = Arc::new(AtomicU64::new(0));
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
+        );
+        let handle = build_channel_flow(journal_base.clone(), ticks, delivered.clone())
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+            .await
+            .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
+        wait_for_running(&handle).await?;
+        sender.send(tick(3)).await?;
+        // The sink re-consumes the recorded prefix during catch-up.
+        wait_for_count(&delivered, 3).await?;
+        handle.stop_graceful(Duration::from_secs(5)).await?;
+        tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the resumed run to stop"))??;
+    }
+    let resumed_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(recorded_run, resumed_run);
+
+    let chan_rows =
+        mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "chan").await);
+    let data = |value: u64| MixedRow::Data(json!(tick(value)));
+    assert_eq!(
+        chan_rows,
+        [
+            data(1),
+            data(2),
+            MixedRow::CatchUp {
+                stage_key: "chan".to_string(),
+                generation: 1,
+            },
+            MixedRow::Reattached(SourceReattachedFact {
+                generation: 1,
+                guarantee: ReattachGuarantee::AtMostOnce,
+            }),
+            data(3),
+            MixedRow::Eof,
+        ]
     );
 
     Ok(())

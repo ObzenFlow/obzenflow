@@ -3,12 +3,12 @@
 // https://obzenflow.dev
 
 //! How each source of a resumed run continued, projected from that run's own
-//! source facts (FLOWIP-134i B8, B15), and where a replay's recording ended
-//! (B13).
+//! source facts (FLOWIP-134i B8, B15, FLOWIP-122i), and where a replay's
+//! recording ended (B13).
 
 use super::{RunRecord, RunRecordData};
 use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourceContinuationRefusal,
+    ExecutionPayload, ReattachGuarantee, SourceContinuationRefusal,
 };
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{ChainPayload, ReplayLifecycleEvent, StageFatalReason};
@@ -28,20 +28,17 @@ pub(super) enum SourceContinuation {
     },
     Reattached {
         generation: u64,
+        guarantee: ReattachGuarantee,
     },
     /// It reproduced its lineage's completion and never opened.
     JournalOnly(EofKind),
 }
 
 impl SourceContinuation {
-    /// A refusal or failed seek is final; positioning names a live handoff
-    /// more exactly than the reattachment every handoff announces.
+    /// A refusal or failed seek is final.
     fn then(self, next: Self) -> Self {
         match (self, next) {
             (settled @ (Self::Refused(_) | Self::SeekFailed), _) => settled,
-            (exact @ (Self::Started { .. } | Self::Positioned { .. }), Self::Reattached { .. }) => {
-                exact
-            }
             (_, next) => next,
         }
     }
@@ -94,11 +91,9 @@ impl Continuations {
             ExecutionPayload::SourcePositioned(fact) => SourceContinuation::Positioned {
                 generation: fact.generation,
             },
-            ExecutionPayload::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive {
-                generation,
-                ..
-            }) => SourceContinuation::Reattached {
-                generation: *generation,
+            ExecutionPayload::SourceReattached(fact) => SourceContinuation::Reattached {
+                generation: fact.generation,
+                guarantee: fact.guarantee,
             },
             ExecutionPayload::ReplayLifecycle(ReplayLifecycleEvent::Completed {
                 synthesized_eof_kind: Some(kind),
@@ -127,19 +122,19 @@ impl Continuations {
 
 #[cfg(test)]
 mod tests {
+    use super::ReattachGuarantee;
     use super::SourceContinuation::*;
 
     #[test]
-    fn a_positioned_handoff_outranks_its_live_announcement_and_refusals_are_final() {
-        let positioned = Positioned { generation: 1 };
+    fn refusals_and_failed_seeks_are_final() {
+        let reattached = Reattached {
+            generation: 2,
+            guarantee: ReattachGuarantee::AtMostOnce,
+        };
+        assert_eq!(SeekFailed.then(reattached.clone()), SeekFailed);
         assert_eq!(
-            positioned.clone().then(Reattached { generation: 1 }),
-            positioned
+            Positioned { generation: 1 }.then(reattached.clone()),
+            reattached
         );
-        assert_eq!(
-            Reattached { generation: 1 }.then(Started { generation: 1 }),
-            Started { generation: 1 }
-        );
-        assert_eq!(SeekFailed.then(Reattached { generation: 2 }), SeekFailed);
     }
 }

@@ -6,7 +6,7 @@
 
 use super::continuation::{
     AsyncFiniteContinuation, AsyncInfiniteContinuation, AsyncReaderOpener, FiniteContinuation,
-    InfiniteContinuation, SourceContinuation, SyncReaderOpener,
+    InfiniteContinuation, RefusedBy, SourceContinuation, SyncReaderOpener,
 };
 use super::erased::{
     ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncFinite, SealAsyncInfinite, SealFinite,
@@ -29,7 +29,6 @@ use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 
-use super::hosted::{HostedAdmission, HostedSubmission};
 use obzenflow_core::event::payloads::execution_payload::{
     SourceContinuationRefusal, SourceInputPinnedFact,
 };
@@ -37,17 +36,23 @@ use obzenflow_core::event::{
     ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode, StageFatalCode,
     StageFatalReason,
 };
-use obzenflow_core::ingress::{HostedIngressBindingSlot, IngressContext};
+use obzenflow_core::ingress::IngressContext;
 use obzenflow_core::source::{
     EncodedSourcePosition, SourcePosition, SourcePositionError, SourceProgress,
 };
-use obzenflow_core::{ChainEvent, EventId, OneFactStageOutput, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, OneFactStageOutput, TypedPayload, WriterId};
 use serde::de::DeserializeOwned;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-fn configuration_fatal(detail: impl Into<String>) -> StageFatal {
+/// A direct handler declares no continuation, so its interrupted input
+/// refuses resume (FLOWIP-122i).
+const HANDLER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
+    by: RefusedBy::Handler,
+};
+
+pub(super) fn configuration_fatal(detail: impl Into<String>) -> StageFatal {
     StageFatal::new(
         StageFatalCode::Configuration,
         StageFatalReason::ConfigurationInvariant,
@@ -315,55 +320,6 @@ pub trait TypedInfiniteSourceHandler: Send + Sync {
     fn next(&mut self) -> Result<Vec<Self::Output>, SourceError>;
 }
 
-/// Runtime-owned registration sampled once by an async-infinite adapter.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct SourceRuntimeRegistration {
-    pub(super) hosted_ingress_slot: HostedIngressBindingSlot,
-}
-
-impl fmt::Debug for SourceRuntimeRegistration {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SourceRuntimeRegistration")
-            .field("ingress_key", self.hosted_ingress_slot.ingress_key())
-            .finish()
-    }
-}
-
-impl SourceRuntimeRegistration {
-    pub(super) fn hosted(slot: HostedIngressBindingSlot) -> Self {
-        Self {
-            hosted_ingress_slot: slot,
-        }
-    }
-}
-
-/// One typed async-infinite invocation before runtime envelope lowering.
-#[doc(hidden)]
-pub struct TypedAsyncInfiniteSourceInvocation<O> {
-    outputs: InvocationOutputs<O>,
-}
-
-enum InvocationOutputs<O> {
-    Facts(Vec<O>),
-    /// Admitted hosted members with their receipts (FLOWIP-084l).
-    Hosted(Vec<HostedSubmission<O>>),
-}
-
-impl<O> TypedAsyncInfiniteSourceInvocation<O> {
-    fn facts_only(outputs: Vec<O>) -> Self {
-        Self {
-            outputs: InvocationOutputs::Facts(outputs),
-        }
-    }
-
-    pub(super) fn hosted(submissions: Vec<HostedSubmission<O>>) -> Self {
-        Self {
-            outputs: InvocationOutputs::Hosted(submissions),
-        }
-    }
-}
-
 /// Pure asynchronous infinite source contract.
 #[diagnostic::on_unimplemented(
     message = "this source handler does not witness its arrow contract",
@@ -387,22 +343,6 @@ pub trait TypedAsyncInfiniteSourceHandler: Send + Sync {
     /// Runtime-only installation hook for the closed live-poll observation rail.
     #[doc(hidden)]
     fn install_source_observation_sink(&mut self, _sink: SourceObservationSink) {}
-
-    /// Runtime-owned hosted-ingress registration, if any.
-    #[doc(hidden)]
-    fn runtime_registration(&self) -> Option<SourceRuntimeRegistration> {
-        None
-    }
-
-    /// Runtime-owned invocation hook used to rejoin sealed ingress context.
-    #[doc(hidden)]
-    async fn next_invocation(
-        &mut self,
-    ) -> Result<TypedAsyncInfiniteSourceInvocation<Self::Output>, SourceError> {
-        self.next()
-            .await
-            .map(TypedAsyncInfiniteSourceInvocation::facts_only)
-    }
 }
 
 /// Error returned by an [`IngressDecoder`]. It carries a typed diagnostic only,
@@ -533,7 +473,7 @@ impl<H: TypedFiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedFiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = SourceContinuation::Refuse;
+    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
 
     fn prepare(self) -> Self::Handler {
         TypedFiniteSourceHandlerAdapter::cold(Box::new(move |_| Ok(self)))
@@ -722,7 +662,7 @@ impl<H: TypedInfiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedInfiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = SourceContinuation::Reattach;
+    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
 
     fn prepare(self) -> Self::Handler {
         TypedInfiniteSourceHandlerAdapter::cold(Box::new(move |_| Ok(self)))
@@ -829,7 +769,7 @@ impl<H: TypedAsyncFiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedAsyncFiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = SourceContinuation::Refuse;
+    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
 
     fn prepare(self) -> Self::Handler {
         TypedAsyncFiniteSourceHandlerAdapter::cold(Box::new(move |_| {
@@ -955,37 +895,24 @@ pub struct TypedAsyncInfiniteSourceHandlerAdapter<H> {
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
     recorder: Arc<dyn ObservationRecorder>,
-    hosted_slot: Option<HostedIngressBindingSlot>,
-    /// Hosted ingress only: the single writer's identity index (FLOWIP-084l).
-    admission: Option<HostedAdmission>,
 }
 
 impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
-        let hosted_slot = handler
-            .runtime_registration()
-            .map(|registration| registration.hosted_ingress_slot);
-        Self::with_reader(SourceReader::acquired(handler), hosted_slot)
+        Self::with_reader(SourceReader::acquired(handler))
     }
 
-    /// A cold connector reader; hosted ingress is a direct handler only.
     pub(super) fn cold(open: AsyncReaderOpener<H>) -> Self {
-        Self::with_reader(SourceReader::cold(open), None)
+        Self::with_reader(SourceReader::cold(open))
     }
 
-    fn with_reader(
-        reader: AsyncSourceReader<H>,
-        hosted_slot: Option<HostedIngressBindingSlot>,
-    ) -> Self {
+    fn with_reader(reader: AsyncSourceReader<H>) -> Self {
         let observation_sink = SourceObservationSink::new();
-        let admission = hosted_slot.clone().map(HostedAdmission::new);
         Self {
             reader,
             writer_id: None,
             observation_sink,
             recorder: Arc::new(NoObservations),
-            hosted_slot,
-            admission,
         }
     }
 }
@@ -1000,16 +927,12 @@ impl<H: TypedAsyncInfiniteSourceHandler + 'static>
 {
     type Output = H::Output;
     type Handler = TypedAsyncInfiniteSourceHandlerAdapter<H>;
-    const CONTINUATION: SourceContinuation = SourceContinuation::Reattach;
+    const CONTINUATION: SourceContinuation = HANDLER_REFUSES;
 
     fn prepare(self) -> Self::Handler {
-        let hosted_slot = self
-            .runtime_registration()
-            .map(|registration| registration.hosted_ingress_slot);
-        TypedAsyncInfiniteSourceHandlerAdapter::with_reader(
-            SourceReader::cold(Box::new(move |_| Box::pin(async move { Ok(self) }))),
-            hosted_slot,
-        )
+        TypedAsyncInfiniteSourceHandlerAdapter::cold(Box::new(move |_| {
+            Box::pin(async move { Ok(self) })
+        }))
     }
 }
 
@@ -1067,10 +990,6 @@ where
         self.reader.get().and_then(|handler| handler.poll_timeout())
     }
 
-    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
-        self.hosted_slot.clone()
-    }
-
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
         let Some(writer_id) = self.writer_id else {
             return ErasedSourceInvocation::fatal(configuration_fatal(
@@ -1085,7 +1004,7 @@ where
             .reader
             .get_mut()
             .expect("the source supervisor must acquire before polling")
-            .next_invocation()
+            .next()
             .await;
         let snapshot = match scope.finish() {
             Ok(snapshot) => snapshot,
@@ -1100,27 +1019,18 @@ where
                 )]
             })
             .unwrap_or_default();
-        let lowered = match result {
-            Ok(invocation) => match (invocation.outputs, self.admission.as_mut()) {
-                (InvocationOutputs::Facts(outputs), _) => lower_outputs(
-                    writer_id,
-                    outputs.into_iter().map(|output| (output, None)).collect(),
+        match result {
+            Ok(outputs) => match lower_outputs(
+                writer_id,
+                outputs.into_iter().map(|output| (output, None)).collect(),
+            ) {
+                Ok(events) => ErasedSourceInvocation::completed(
+                    ErasedSourceCompletion::Batch(events),
+                    observations,
                 ),
-                (InvocationOutputs::Hosted(submissions), Some(admission)) => {
-                    admission.admit(writer_id, submissions)
-                }
-                (InvocationOutputs::Hosted(_), None) => Err(configuration_fatal(
-                    "hosted ingress submissions reached a source without a hosted registration",
-                )),
+                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
             },
-            Err(error) => return ErasedSourceInvocation::handler_error(error, observations),
-        };
-        match lowered {
-            Ok(events) => ErasedSourceInvocation::completed(
-                ErasedSourceCompletion::Batch(events),
-                observations,
-            ),
-            Err(fatal) => ErasedSourceInvocation::fatal(fatal),
+            Err(error) => ErasedSourceInvocation::handler_error(error, observations),
         }
     }
 
@@ -1128,18 +1038,6 @@ where
         match self.reader.get_mut() {
             Some(handler) => handler.drain().await,
             None => Ok(()),
-        }
-    }
-
-    fn settle_committed(&mut self, committed: &[EventId]) {
-        if let Some(admission) = self.admission.as_mut() {
-            admission.settle(committed);
-        }
-    }
-
-    fn fold_recorded_admission(&mut self, event: &ChainEvent) {
-        if let Some(admission) = self.admission.as_mut() {
-            admission.fold(event);
         }
     }
 }

@@ -2283,7 +2283,9 @@ async fn show_reports_lineage_and_source_continuation() {
 
     assert_eq!(
         section(&show(&r0), "LINEAGE"),
-        squeezed(&format!("Continued by {r1_dir}"))
+        squeezed(&format!(
+            "Continued by a later run; resume {r1_dir} instead"
+        ))
     );
     let resumed = show(&r1);
     let resumed_lineage = |evidence: &str| {

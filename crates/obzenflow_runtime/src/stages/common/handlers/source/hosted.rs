@@ -9,15 +9,26 @@
 //! committed identities and resolves receipts only after the member's own row
 //! commits. The index is a projection of the source's own rows, so resume
 //! rebuilds it by folding re-admitted rows before the slot goes live.
+//!
+//! FLOWIP-122i B3: because only that writer acknowledges after commit, hosted
+//! ingress is Runtime-owned. It implements no authoring trait and is admitted
+//! with `SenderRedelivers`, a guarantee no connector can declare.
 
-use super::typed::{
-    lower_outputs, protocol_fatal, IngressDecoder, SourceRuntimeRegistration,
-    TypedAsyncInfiniteSourceHandler, TypedAsyncInfiniteSourceInvocation,
+use super::continuation::SourceContinuation;
+use super::erased::{
+    ErasedSourceCompletion, ErasedSourceInvocation, SealAsyncInfinite,
+    UnifiedAsyncInfiniteSourceHandler,
 };
+use super::prepared::{
+    sealed as admission_sealed, AdmitSource, AsyncSourceReader, HostedSource, SourceReader,
+};
+use super::typed::{configuration_fatal, lower_outputs, protocol_fatal, IngressDecoder};
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
+use crate::stages::source::SourceReaderInitContext;
 use crate::typing::SourceTyping;
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
 use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::ingress::{
     HostedIngressBindingSlot, IngressContentDigest, IngressContext, IngressReceipt,
@@ -115,35 +126,103 @@ impl<D: IngressDecoder> SourceTyping for HostedIngressSource<D> {
     type Output = D::Output;
 }
 
-#[async_trait]
-impl<D: IngressDecoder> TypedAsyncInfiniteSourceHandler for HostedIngressSource<D> {
+impl<D: IngressDecoder>
+    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler, HostedSource>
+    for HostedIngressSource<D>
+{
+}
+
+impl<D: IngressDecoder> AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, HostedSource>
+    for HostedIngressSource<D>
+{
     type Output = D::Output;
+    type Handler = HostedIngressAdapter<D>;
+    const CONTINUATION: SourceContinuation = SourceContinuation::Reattach {
+        guarantee: ReattachGuarantee::SenderRedelivers,
+    };
 
-    /// Values only; the runtime polls `next_invocation`, which keeps receipts.
-    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        Ok(self
-            .receive_batch()
-            .await?
-            .into_iter()
-            .map(|submission| submission.value)
-            .collect())
+    fn prepare(self) -> Self::Handler {
+        HostedIngressAdapter::cold(self)
     }
+}
 
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        self.rx.close();
+/// Runtime adapter for hosted ingress: the slot binding is captured at
+/// admission, before any open, and receipts resolve only after commit.
+#[doc(hidden)]
+pub struct HostedIngressAdapter<D: IngressDecoder> {
+    reader: AsyncSourceReader<HostedIngressSource<D>>,
+    slot: HostedIngressBindingSlot,
+    admission: HostedAdmission,
+    writer_id: Option<WriterId>,
+}
+
+impl<D: IngressDecoder> HostedIngressAdapter<D> {
+    fn cold(source: HostedIngressSource<D>) -> Self {
+        let slot = source.slot.clone();
+        Self {
+            reader: SourceReader::cold(Box::new(move |_| Box::pin(async move { Ok(source) }))),
+            admission: HostedAdmission::new(slot.clone()),
+            slot,
+            writer_id: None,
+        }
+    }
+}
+
+impl<D: IngressDecoder> SealAsyncInfinite for HostedIngressAdapter<D> {}
+
+#[async_trait]
+impl<D: IngressDecoder> UnifiedAsyncInfiniteSourceHandler for HostedIngressAdapter<D> {
+    async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
+        self.reader.acquire(context).await?;
         Ok(())
     }
 
-    fn runtime_registration(&self) -> Option<SourceRuntimeRegistration> {
-        Some(SourceRuntimeRegistration::hosted(self.slot.clone()))
+    fn install_writer_id(&mut self, writer_id: WriterId) {
+        self.writer_id = Some(writer_id);
     }
 
-    async fn next_invocation(
-        &mut self,
-    ) -> Result<TypedAsyncInfiniteSourceInvocation<Self::Output>, SourceError> {
-        self.receive_batch()
-            .await
-            .map(TypedAsyncInfiniteSourceInvocation::hosted)
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        Some(self.slot.clone())
+    }
+
+    async fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        let Some(writer_id) = self.writer_id else {
+            return ErasedSourceInvocation::fatal(configuration_fatal(
+                "hosted ingress invoked before runtime writer identity installation",
+            ));
+        };
+        let received = self
+            .reader
+            .get_mut()
+            .expect("the source supervisor must acquire before polling")
+            .receive_batch()
+            .await;
+        match received.map(|submissions| self.admission.admit(writer_id, submissions)) {
+            Ok(Ok(events)) => {
+                ErasedSourceInvocation::completed(ErasedSourceCompletion::Batch(events), Vec::new())
+            }
+            Ok(Err(fatal)) => ErasedSourceInvocation::fatal(fatal),
+            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
+        }
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        if let Some(source) = self.reader.get_mut() {
+            source.rx.close();
+        }
+        Ok(())
+    }
+
+    fn settle_committed(&mut self, committed: &[EventId]) {
+        self.admission.settle(committed);
+    }
+
+    fn fold_recorded_admission(&mut self, event: &ChainEvent) {
+        self.admission.fold(event);
     }
 }
 
@@ -402,10 +481,7 @@ fn unix_now_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::erased::{
-        ErasedSourceCompletion, ErasedSourceOutcome, UnifiedAsyncInfiniteSourceHandler,
-    };
-    use super::super::typed::TypedAsyncInfiniteSourceHandlerAdapter;
+    use super::super::erased::ErasedSourceOutcome;
     use super::*;
     use obzenflow_core::event::StageFatalCode;
     use obzenflow_core::ingress::{
@@ -436,11 +512,11 @@ mod tests {
     struct Harness {
         tx: mpsc::Sender<HostedSubmission<Row>>,
         slot: HostedIngressBindingSlot,
-        adapter: TypedAsyncInfiniteSourceHandlerAdapter<HostedIngressSource<RowIngress>>,
+        adapter: HostedIngressAdapter<RowIngress>,
     }
 
     impl Harness {
-        fn new() -> Self {
+        async fn new() -> Self {
             let (tx, rx) = mpsc::channel(16);
             let slot = HostedIngressBindingSlot::new(KEY);
             slot.install_timing(
@@ -448,13 +524,23 @@ mod tests {
                     .expect("valid timing"),
             )
             .expect("first install");
-            let mut adapter = TypedAsyncInfiniteSourceHandlerAdapter::new(
-                HostedIngressSource::new(rx, slot.clone()),
-            );
+            let source = HostedIngressSource::<RowIngress>::new(rx, slot.clone());
+            let mut adapter = source.prepare();
+            let stage_id = StageId::new();
             UnifiedAsyncInfiniteSourceHandler::install_writer_id(
                 &mut adapter,
-                WriterId::from(StageId::new()),
+                WriterId::from(stage_id),
             );
+            UnifiedAsyncInfiniteSourceHandler::acquire(
+                &mut adapter,
+                SourceReaderInitContext {
+                    stage_id,
+                    stage_name: "tx".into(),
+                    flow_name: "hosted".into(),
+                },
+            )
+            .await
+            .expect("hosted ingress acquires its queue");
             Self { tx, slot, adapter }
         }
 
@@ -530,9 +616,34 @@ mod tests {
         }
     }
 
+    /// FLOWIP-122i B3: Runtime admits hosted ingress with `SenderRedelivers`
+    /// and captures its slot binding before any open.
+    #[test]
+    fn admission_records_that_the_sender_redelivers_before_any_open() {
+        assert_eq!(
+            <HostedIngressSource<RowIngress> as AdmitSource<
+                dyn UnifiedAsyncInfiniteSourceHandler,
+                HostedSource,
+            >>::CONTINUATION,
+            SourceContinuation::Reattach {
+                guarantee: ReattachGuarantee::SenderRedelivers
+            }
+        );
+        let (_tx, rx) = mpsc::channel(1);
+        let adapter =
+            HostedIngressSource::<RowIngress>::new(rx, HostedIngressBindingSlot::new(KEY))
+                .prepare();
+        assert_eq!(
+            adapter
+                .hosted_ingress_slot()
+                .map(|slot| slot.ingress_key().clone()),
+            Some(IngressKey::from(KEY))
+        );
+    }
+
     #[tokio::test]
     async fn receipts_resolve_only_after_their_own_row_commits() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         let mut answer = harness.submit(7, 100, None, None).await;
         let events = harness.poll().await;
         assert_eq!(events.len(), 1);
@@ -550,7 +661,7 @@ mod tests {
 
     #[tokio::test]
     async fn lowering_keeps_the_exact_context_and_identity() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         harness.enqueue(8, 100, Some(0), Some("batch-1")).await;
         harness.enqueue(9, 100, Some(1), Some("batch-1")).await;
         let events = harness.poll().await;
@@ -569,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_identical_requests_share_one_row() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         let mut original = harness.submit(7, 100, None, Some("tx-1")).await;
         let mut retry = harness.submit(7, 100, None, Some("tx-1")).await;
         let events = harness.poll().await;
@@ -590,7 +701,7 @@ mod tests {
 
     #[tokio::test]
     async fn committed_identities_answer_duplicates_and_conflicts_without_rows() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         harness.enqueue(7, 100, None, Some("tx-1")).await;
         let events = harness.poll().await;
         harness.commit(&events);
@@ -618,7 +729,7 @@ mod tests {
 
     #[tokio::test]
     async fn unequal_content_in_one_poll_is_a_conflict() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         harness.enqueue(7, 100, None, Some("tx-1")).await;
         let mut conflict = harness.submit(8, 100, None, Some("tx-1")).await;
         let events = harness.poll().await;
@@ -628,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_members_are_identified_by_index() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         harness.enqueue(7, 100, Some(0), Some("batch-1")).await;
         let events = harness.poll().await;
         harness.commit(&events);
@@ -647,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn retries_accepted_after_the_window_are_admitted_again() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         harness.enqueue(7, 100, None, Some("tx-1")).await;
         let events = harness.poll().await;
         harness.commit(&events);
@@ -666,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_index_reports_its_size() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         harness.enqueue(7, 100, None, Some("tx-1")).await;
         harness.enqueue(8, 100, None, None).await;
         let events = harness.poll().await;
@@ -684,13 +795,13 @@ mod tests {
 
     #[tokio::test]
     async fn resume_folds_recorded_identities_inside_the_window() {
-        let mut recorded = Harness::new();
+        let mut recorded = Harness::new().await;
         let now_s = unix_now_ns() / SECOND_NS;
         recorded.enqueue(7, now_s, None, Some("tx-1")).await;
         recorded.enqueue(8, now_s - 60, None, Some("tx-old")).await;
         let rows = recorded.poll().await;
 
-        let mut resumed = Harness::new();
+        let mut resumed = Harness::new().await;
         for row in &rows {
             UnifiedAsyncInfiniteSourceHandler::fold_recorded_admission(&mut resumed.adapter, row);
         }
@@ -712,7 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_foreign_ingress_context_fails_the_stage_without_receipts() {
-        let mut harness = Harness::new();
+        let mut harness = Harness::new().await;
         let (receipt, mut answer) = oneshot::channel();
         harness
             .tx

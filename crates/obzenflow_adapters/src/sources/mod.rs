@@ -18,7 +18,7 @@ pub use csv::{
 pub use http::{
     HostedIngressSource, HttpSourceConfig, IngressDecodeError, IngressDecoder, IngressRecord,
 };
-pub use in_process::{ChannelSource, ValuesSource};
+pub use in_process::{ChannelReader, ChannelSource, ValuesSource};
 pub use yaml::{
     YamlDecodeError, YamlDecoder, YamlPosition, YamlReader, YamlRecord, YamlSelection, YamlSource,
     YamlSourceBuilder,

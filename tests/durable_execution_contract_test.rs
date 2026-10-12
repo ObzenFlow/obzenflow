@@ -16,7 +16,8 @@
 //!
 //! FLOWIP-084l adds HTTP rows: the web channel becomes hosted ingress, the
 //! parent keeps a sender ledger that survives the server, and I11 checks
-//! every answer against the journal.
+//! every answer against the journal. FLOWIP-122i's I12 checks that only hosted
+//! ingress reattaches, recording that its sender redelivers.
 
 #![cfg(unix)]
 
@@ -41,8 +42,8 @@ use obzenflow::flow::{
 };
 use obzenflow::journal::disk_journals;
 use obzenflow::journal::read::{
-    open_disk_run, ChainPayload, ExecutionPayload, PipelineLifecycleEvent, RunJournalKind,
-    RunOutcome, RunRecord, RunRecordData, SystemPayload,
+    open_disk_run, ChainPayload, ExecutionPayload, FlowControlPayload, PipelineLifecycleEvent,
+    RunJournalKind, RunOutcome, RunRecord, RunRecordData, SystemPayload,
 };
 use obzenflow::journal::JournalRecord;
 use obzenflow::schema::TypedPayload;
@@ -56,6 +57,7 @@ use obzenflow::stages::sources::{
 };
 use obzenflow::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
 use obzenflow::stages::transforms::EffectfulTransformHandler;
+use obzenflow_core::event::payloads::execution_payload::{ReattachGuarantee, SourceReattachedFact};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::EventId;
 use serde::de::DeserializeOwned;
@@ -1111,22 +1113,31 @@ impl Archive {
             .last()
     }
 
-    /// Committed successful deliveries per order, through the consumed fact.
-    fn delivered(&self) -> BTreeMap<String, usize> {
+    /// Each committed successful delivery's order, through the consumed fact,
+    /// or `None` when this read does not hold that payment.
+    fn receipt_orders(&self) -> Vec<Option<String>> {
         let orders: BTreeMap<EventId, String> = self
             .facts::<PaymentAuthorized>("authorize_payment")
             .map(|(row, payment)| (*row.id(), payment.order_id))
             .collect();
-        let mut delivered = BTreeMap::new();
-        for row in self.rows("receipts", RunJournalKind::Data) {
-            if let ChainPayload::Delivery(delivery) = &row.payload {
-                if matches!(delivery.result, DeliveryResult::Success { .. }) {
-                    let order = orders
-                        .get(&delivery.subject.input.event_id)
-                        .expect("a receipt names a payment of its run");
-                    *delivered.entry(order.clone()).or_default() += 1;
+        self.rows("receipts", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Delivery(delivery)
+                    if matches!(delivery.result, DeliveryResult::Success { .. }) =>
+                {
+                    Some(orders.get(&delivery.subject.input.event_id).cloned())
                 }
-            }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Committed successful deliveries per order, for a run that has ended.
+    fn delivered(&self) -> BTreeMap<String, usize> {
+        let mut delivered = BTreeMap::new();
+        for order in self.receipt_orders() {
+            let order = order.expect("a receipt names a payment of its run");
+            *delivered.entry(order).or_default() += 1;
         }
         delivered
     }
@@ -1202,6 +1213,40 @@ impl Archive {
             }
         }
         duplicates
+    }
+
+    /// FLOWIP-122i: every reattachment this run recorded, by source.
+    fn reattachments(&self) -> Vec<(String, SourceReattachedFact)> {
+        self.records
+            .iter()
+            .filter_map(|record| {
+                let RunRecordData::Chain(row) = &record.record else {
+                    return None;
+                };
+                let ChainPayload::Execution(ExecutionPayload::SourceReattached(fact)) =
+                    &row.payload
+                else {
+                    return None;
+                };
+                Some((record.journal.stage.as_ref()?.key.clone(), fact.clone()))
+            })
+            .collect()
+    }
+
+    /// The web channel's rows around its live handoff, in journal order.
+    fn web_handoff(&self) -> Vec<&'static str> {
+        self.rows("web_orders", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. }) => {
+                    Some("catch_up")
+                }
+                ChainPayload::Execution(ExecutionPayload::SourceReattached(_)) => {
+                    Some("reattached")
+                }
+                _ if row.event_type() == CustomerOrderPlaced::event_type_name() => Some("order"),
+                _ => None,
+            })
+            .collect()
     }
 
     fn reconstruction_completed(&self) -> bool {
@@ -1431,6 +1476,39 @@ impl History {
                 usize::from(refused),
                 "{name} {dir}: HTTP refusals along {lineage:?}"
             );
+            // I12 (FLOWIP-122i): only hosted ingress reattaches, and each
+            // resumed run records that its sender redelivers, after the web
+            // channel's watermark and before its first live order.
+            let resumed = archive.manifest()["resume"]["resume_generation"].as_u64();
+            let expected = match (self.scenario.http, resumed, ended) {
+                (Some(_), Some(generation), Ended::Interrupted { .. } | Ended::Stopped) => {
+                    vec![(
+                        "web_orders".to_string(),
+                        SourceReattachedFact {
+                            generation,
+                            guarantee: ReattachGuarantee::SenderRedelivers,
+                        },
+                    )]
+                }
+                _ => Vec::new(),
+            };
+            assert_eq!(
+                archive.reattachments(),
+                expected,
+                "{name} {dir}: reattachments"
+            );
+            if !expected.is_empty() {
+                let handoff = archive.web_handoff();
+                let at = handoff
+                    .iter()
+                    .position(|row| *row == "reattached")
+                    .expect("the reattachment is on the web channel");
+                assert!(
+                    handoff[..at].last() == Some(&"catch_up")
+                        && handoff[at + 1..].iter().all(|row| *row == "order"),
+                    "{name} {dir}: {handoff:?}"
+                );
+            }
         }
         for (order, ids) in &identities {
             assert_eq!(
@@ -1818,7 +1896,10 @@ async fn durable_execution_contract() {
         loop {
             if let Some(archive) = Archive::try_read(&run).await {
                 let outcomes: BTreeSet<String> = archive.outcomes().into_keys().collect();
-                let delivered: BTreeSet<String> = archive.delivered().into_keys().collect();
+                // A live run is read as independent per-journal prefixes, so a
+                // receipt can be read before its payment; the next poll holds both.
+                let delivered: BTreeSet<String> =
+                    archive.receipt_orders().into_iter().flatten().collect();
                 if archive.eof("web_orders") == Some(EofKind::Natural)
                     && outcomes == web
                     && delivered == web

@@ -11,8 +11,9 @@ mod replay_testkit;
 use async_trait::async_trait;
 use obzenflow::middleware::circuit_breaker;
 use obzenflow::stages::sources::{
-    AsyncFiniteSourceConnector, FiniteSourceConnector, PositionedFiniteReader,
-    SourceReaderInitContext, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
+    PositionedFiniteReader, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow::stages::sources::{
     ChannelSource, CsvDecoder, CsvSource, CursorlessPullDecoder, DecodeError, HttpPullConfig,
@@ -214,8 +215,10 @@ async fn http(reply: Reply) -> SourceError {
 async fn closed_channel() -> SourceError {
     let (sender, receiver) = tokio::sync::mpsc::channel::<Order>(1);
     drop(sender);
-    let mut source = ChannelSource::new(receiver);
-    TypedAsyncInfiniteSourceHandler::next(&mut source)
+    let mut reader = AsyncInfiniteSourceConnector::open(&ChannelSource::new(receiver), context())
+        .await
+        .unwrap();
+    TypedAsyncInfiniteSourceHandler::next(&mut reader)
         .await
         .expect_err("a closed channel cannot continue")
 }

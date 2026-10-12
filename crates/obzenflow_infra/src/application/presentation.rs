@@ -142,7 +142,7 @@ impl Banner {
         let mut out = String::new();
 
         if let Some(art) = art {
-            out.push_str(&normalise_art_text(&art));
+            out.push_str(&normalize_art_text(&art));
             out.push('\n');
         } else {
             out.push_str(self.title.trim());
@@ -337,7 +337,7 @@ impl Presentation {
         // one run; announce it whether or not the application banner branches.
         if let RunMode::Resume(ctx) = mode {
             rendered.text.push_str(&format!(
-                "RESUME — catching up on {}, continuing live at the recorded high-water mark.\n",
+                "Resuming from {}. Recorded facts catch up first, then the run continues live at the recorded high-water mark.\n",
                 ctx.source_label()
             ));
         }
@@ -405,11 +405,21 @@ impl RunPresentationOutcome {
         mode: &RunMode,
     ) -> String {
         match mode {
-            RunMode::Replay(ctx) => format!(
-                "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {location}\nVerify it against the source archive: re-run with --replay-from {source_path} --verify\nReplay this replay with: --replay-from {location}",
-                source = ctx.source_label(),
-                source_path = ctx.archive_path.display(),
-            ),
+            RunMode::Replay(ctx) => {
+                // Under --verify the comparison result follows this footer.
+                let verify_hint = if ctx.verify {
+                    String::new()
+                } else {
+                    format!(
+                        "Verify it against the source archive: re-run with --replay-from {} --verify\n",
+                        ctx.archive_path.display()
+                    )
+                };
+                format!(
+                    "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {location}\n{verify_hint}Replay this replay with: --replay-from {location}",
+                    source = ctx.source_label(),
+                )
+            }
             RunMode::Resume(ctx) => format!(
                 "{flow_name} {verb} (resumed from {source}).\nRecorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.\nJournal: {location}\nReplay this run with: --replay-from {location}\nResume it again with: --resume-from {location}",
                 source = ctx.source_label(),
@@ -575,7 +585,7 @@ fn push_bullet_item(out: &mut String, item: &str, prefix: &str, continuation_pre
     }
 }
 
-fn normalise_art_text(raw: &str) -> String {
+fn normalize_art_text(raw: &str) -> String {
     let without_first_newline = raw.strip_prefix('\n').unwrap_or(raw);
     let without_last_newline = without_first_newline
         .strip_suffix('\n')
@@ -588,19 +598,19 @@ fn validate_art_size(kind: &'static str, art: &str) -> Vec<String> {
         "ANSI" => strip_ansi_escape_codes(art),
         _ => art.to_string(),
     };
-    let normalised = normalise_art_text(&visible);
+    let normalized = normalize_art_text(&visible);
 
     let mut max_width = 0usize;
     let mut height = 0usize;
 
-    for line in normalised.lines() {
+    for line in normalized.lines() {
         height += 1;
         max_width = max_width.max(line.len());
     }
 
-    if height == 0 && !normalised.is_empty() {
+    if height == 0 && !normalized.is_empty() {
         height = 1;
-        max_width = normalised.len();
+        max_width = normalized.len();
     }
 
     let mut warnings = Vec::new();
@@ -746,9 +756,9 @@ mod tests {
     }
 
     #[test]
-    fn normalise_art_strips_single_leading_and_trailing_newline() {
-        assert_eq!(normalise_art_text("\nhello\n"), "hello");
-        assert_eq!(normalise_art_text("\n\nhi\n\n"), "\nhi\n");
+    fn normalize_art_strips_single_leading_and_trailing_newline() {
+        assert_eq!(normalize_art_text("\nhello\n"), "hello");
+        assert_eq!(normalize_art_text("\n\nhi\n\n"), "\nhi\n");
     }
 
     #[test]
@@ -848,6 +858,7 @@ mod tests {
         let replay_mode = RunMode::Replay(super::super::run_mode::ReplayRunContext {
             archive_path: PathBuf::from("tmp/archive"),
             archive_flow_id: Some("flow_01SOURCE".to_string()),
+            verify: false,
         });
 
         let completed = RunPresentationOutcome::Completed {
@@ -890,10 +901,33 @@ mod tests {
     }
 
     #[test]
+    fn a_verifying_replay_footer_does_not_suggest_verify_again() {
+        let completed = RunPresentationOutcome::Completed {
+            flow_name: "flow".to_string(),
+            location: Some(CurrentRunLocator::new(PathBuf::from("tmp/replay-run"))),
+            run_mode: RunMode::Replay(super::super::run_mode::ReplayRunContext {
+                archive_path: PathBuf::from("tmp/archive"),
+                archive_flow_id: Some("flow_01SOURCE".to_string()),
+                verify: true,
+            }),
+        };
+        let footer = completed.default_footer();
+        assert!(
+            !footer.contains("--verify"),
+            "the comparison result follows; the footer must not suggest it: {footer}"
+        );
+        assert!(
+            footer.contains("Replay journal: tmp/replay-run\nReplay this replay with: --replay-from tmp/replay-run"),
+            "the replay-of-replay line follows the journal directly: {footer}"
+        );
+    }
+
+    #[test]
     fn default_footer_announces_resume() {
         let resume_mode = RunMode::Resume(super::super::run_mode::ReplayRunContext {
             archive_path: PathBuf::from("tmp/archive"),
             archive_flow_id: Some("flow_01SOURCE".to_string()),
+            verify: false,
         });
 
         let completed = RunPresentationOutcome::Completed {
@@ -942,20 +976,21 @@ mod tests {
         let resume_mode = RunMode::Resume(super::super::run_mode::ReplayRunContext {
             archive_path: PathBuf::from("tmp/archive"),
             archive_flow_id: Some("flow_01SOURCE".to_string()),
+            verify: false,
         });
 
         let presentation = Presentation::new(Banner::new("Start"));
         let rendered = presentation.render_banner(&resume_mode);
         assert!(
             rendered.text.contains(
-                "RESUME — catching up on flow_01SOURCE (tmp/archive), continuing live at the recorded high-water mark."
+                "Resuming from flow_01SOURCE (tmp/archive). Recorded facts catch up first, then the run continues live at the recorded high-water mark."
             ),
             "resume banner must announce catch-up then live: {}",
             rendered.text
         );
 
         let live = presentation.render_banner(&RunMode::Live);
-        assert!(!live.text.contains("RESUME"));
+        assert!(!live.text.contains("Resuming"));
     }
 
     #[test]

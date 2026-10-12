@@ -230,6 +230,7 @@ impl ChainPayload {
                 ExecutionPayload::SourceInputPinned(_) => ReplayDisposition::Preserve,
                 ExecutionPayload::SourcePositioned(_)
                 | ExecutionPayload::SourceStartedOnResume(_)
+                | ExecutionPayload::SourceReattached(_)
                 | ExecutionPayload::SourceContinuationRefused(_)
                 | ExecutionPayload::SourceSeekFailed(_)
                 | ExecutionPayload::SinkAudit(_)

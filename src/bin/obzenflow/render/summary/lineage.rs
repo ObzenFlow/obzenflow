@@ -8,7 +8,9 @@
 
 use super::*;
 use continuation::{RecordingEnd, SourceContinuation};
-use obzenflow_core::event::payloads::execution_payload::SourceContinuationRefusal;
+use obzenflow_core::event::payloads::execution_payload::{
+    ReattachGuarantee, SourceContinuationRefusal,
+};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use std::path::PathBuf;
 
@@ -151,7 +153,10 @@ fn lineage_lines(
         lines.push(("Evidence", format!("{held}{missing}")));
     }
     if let Standing::Continued { head } = &lineage.standing {
-        lines.push(("Continued", format!("by {}", head.display())));
+        lines.push((
+            "Continued",
+            format!("by a later run; resume {} instead", head.display()),
+        ));
     }
     lines
 }
@@ -177,14 +182,29 @@ fn continuation_text(continued: Option<&SourceContinuation>) -> String {
         Some(SourceContinuation::Started { generation }) => {
             format!("started in generation {generation} (the interrupted run failed to open it)")
         }
-        Some(SourceContinuation::Reattached { generation }) => {
-            format!("reattached live in generation {generation}")
+        Some(SourceContinuation::Reattached {
+            generation,
+            guarantee,
+        }) => {
+            format!(
+                "reattached live in generation {generation} ({})",
+                guarantee_label(*guarantee)
+            )
         }
         Some(SourceContinuation::Refused(refusal)) => {
             format!("refused: {}", refusal_text(refusal))
         }
         Some(SourceContinuation::SeekFailed) => "failed to seek past its committed input".into(),
         None => "catch-up incomplete".into(),
+    }
+}
+
+/// The condition an operator checks when input goes missing (FLOWIP-122i B2).
+fn guarantee_label(guarantee: ReattachGuarantee) -> &'static str {
+    match guarantee {
+        ReattachGuarantee::SenderRedelivers => "sender redelivers",
+        ReattachGuarantee::LatestState => "latest state",
+        ReattachGuarantee::AtMostOnce => "at most once",
     }
 }
 
@@ -253,6 +273,21 @@ mod tests {
     }
 
     #[test]
+    fn a_continued_run_names_its_history_head_not_its_successor() {
+        // r0 was continued by r1, which r2 continued; only r2 resumes.
+        let continued = RunLineage {
+            standing: Standing::Continued {
+                head: "/runs/r2".into(),
+            },
+            ..RunLineage::default()
+        };
+        assert_eq!(
+            rendered(&continued, None),
+            ["Continued  by a later run; resume /runs/r2 instead"]
+        );
+    }
+
+    #[test]
     fn lineage_names_the_run_to_resume_for_orphans_and_replays() {
         let orphan = RunLineage {
             resumed_from: Some(ResumedFrom {
@@ -298,6 +333,19 @@ mod tests {
             continuation_text(Some(&SourceContinuation::Started { generation: 1 })),
             "started in generation 1 (the interrupted run failed to open it)"
         );
+        for (guarantee, label) in [
+            (ReattachGuarantee::SenderRedelivers, "sender redelivers"),
+            (ReattachGuarantee::LatestState, "latest state"),
+            (ReattachGuarantee::AtMostOnce, "at most once"),
+        ] {
+            assert_eq!(
+                continuation_text(Some(&SourceContinuation::Reattached {
+                    generation: 1,
+                    guarantee
+                })),
+                format!("reattached live in generation 1 ({label})")
+            );
+        }
         assert_eq!(continuation_text(None), "catch-up incomplete");
     }
 }

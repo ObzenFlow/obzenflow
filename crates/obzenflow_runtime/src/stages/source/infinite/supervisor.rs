@@ -22,11 +22,12 @@ use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompl
 use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::{
     announce_resumed_live, around_source_boundary, commit_catch_up_markers, commit_reader_acquired,
-    commit_source_open_failure, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    normalise_source_poll_error, observe_source_boundary_rejection, poll_error_backoff,
-    poll_error_summary, record_source_release, record_source_stage_fatal, source_error_kind,
-    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
-    PendingFailure, SourceExit, SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
+    commit_source_open_failure, commit_source_reattached, drain_pending_outputs_sync,
+    emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
+    poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
+    source_error_kind, stage_boundary_control_events, stage_source_poll_outputs,
+    terminal_poll_failure, PendingFailure, SourceExit, SourceOpenFailureCommit,
+    SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
@@ -803,6 +804,13 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                         &ctx.instrumentation,
                                         &stage_flow_context,
                                         crossed,
+                                        generation,
+                                    )
+                                    .await?;
+                                    commit_source_reattached(
+                                        &self.data_journal,
+                                        &stage_flow_context,
+                                        self.continuation,
                                         generation,
                                     )
                                     .await?;

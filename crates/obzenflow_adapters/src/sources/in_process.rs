@@ -5,13 +5,16 @@
 //! In-process sources with uniquely owned values or a channel receiver.
 
 use async_trait::async_trait;
+use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::source::{
-    SourceError, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    AsyncInfiniteSourceConnector, AtMostOnce, Reattach, SourceError, SourceReaderInitContext,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use std::fmt;
 use std::iter::Fuse;
+use std::sync::{Mutex, PoisonError};
 use tokio::sync::mpsc;
 
 /// A finite source that transfers its values into one live execution.
@@ -75,10 +78,17 @@ where
     }
 }
 
-/// An infinite source owning one Tokio channel receiver.
-/// A closed channel is a source error. Orderly drain closes the receiver;
-/// use topology fan-out to distribute facts to multiple downstream stages.
+/// An infinite connector owning one Tokio channel receiver until its first
+/// open. Input still buffered in the channel when a run stops is lost, so a
+/// resumed run reattaches with `AtMostOnce` (FLOWIP-122i). A closed channel is
+/// a source error. Orderly drain closes the receiver; use topology fan-out to
+/// distribute facts to multiple downstream stages.
 pub struct ChannelSource<T> {
+    receiver: Mutex<Option<mpsc::Receiver<T>>>,
+}
+
+/// The reader a [`ChannelSource`] transfers its receiver into.
+pub struct ChannelReader<T> {
     receiver: mpsc::Receiver<T>,
 }
 
@@ -88,9 +98,17 @@ impl<T> fmt::Debug for ChannelSource<T> {
     }
 }
 
+impl<T> fmt::Debug for ChannelReader<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChannelReader").finish_non_exhaustive()
+    }
+}
+
 impl<T: TypedPayload + Send + Sync + 'static> ChannelSource<T> {
     pub fn new(receiver: mpsc::Receiver<T>) -> Self {
-        Self { receiver }
+        Self {
+            receiver: Mutex::new(Some(receiver)),
+        }
     }
 }
 
@@ -99,7 +117,26 @@ impl<T: TypedPayload> SourceTyping for ChannelSource<T> {
 }
 
 #[async_trait]
-impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler for ChannelSource<T> {
+impl<T: TypedPayload + Send + Sync + 'static> AsyncInfiniteSourceConnector for ChannelSource<T> {
+    type Output = T;
+    type Reader = ChannelReader<T>;
+    type Continuation = Reattach<AtMostOnce>;
+
+    /// The receiver transfers once; a second open finds the input unavailable.
+    async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        self.receiver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .map(|receiver| ChannelReader { receiver })
+            .ok_or(SourceError::Other(
+                SourceDiagnosticReason::InputUnavailable.into(),
+            ))
+    }
+}
+
+#[async_trait]
+impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler for ChannelReader<T> {
     type Output = T;
 
     async fn next(&mut self) -> Result<Vec<T>, SourceError> {
@@ -108,7 +145,7 @@ impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler fo
             .await
             .map(|item| vec![item])
             .ok_or(SourceError::Other(
-                obzenflow_core::event::SourceDiagnosticReason::InputClosed.into(),
+                SourceDiagnosticReason::InputClosed.into(),
             ))
     }
 
@@ -187,12 +224,32 @@ mod tests {
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert_eq!(polls.load(Ordering::SeqCst), 3);
     }
+    fn context() -> SourceReaderInitContext {
+        SourceReaderInitContext {
+            stage_id: obzenflow_core::StageId::new(),
+            stage_name: "channel".into(),
+            flow_name: "in_process".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_source_transfers_its_receiver_to_one_reader() {
+        let (_tx, rx) = mpsc::channel::<Item>(1);
+        let source = ChannelSource::new(rx);
+        assert!(source.open(context()).await.is_ok());
+        assert!(matches!(
+            source.open(context()).await,
+            Err(SourceError::Other(diagnostic))
+                if diagnostic.reason() == SourceDiagnosticReason::InputUnavailable
+        ));
+    }
+
     #[tokio::test]
     async fn channel_source_drains_pending_items_and_errors_on_close() {
         let (tx, rx) = mpsc::channel(16);
         tx.send(Item(1)).await.unwrap();
         tx.send(Item(2)).await.unwrap();
-        let mut source = ChannelSource::new(rx);
+        let mut source = ChannelSource::new(rx).open(context()).await.unwrap();
         assert_eq!(source.next().await.unwrap(), vec![Item(1)]);
         source.drain().await.unwrap();
         assert!(tx.send(Item(3)).await.is_err());

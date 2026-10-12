@@ -33,6 +33,7 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -201,7 +202,7 @@ fn build_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let reader = BoundedReader::new(first_value, count);
+        let reader = ReattachingSource(BoundedReader::new(first_value, count));
         let enrich_transform = EnrichTransform { calls };
         let counting_sink = CountingSink { delivered };
 

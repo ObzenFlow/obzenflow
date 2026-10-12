@@ -8,6 +8,7 @@
 mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+    use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
     use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
     use obzenflow_runtime::effects::{Effects, StageCompletion};
@@ -16,16 +17,17 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkDescription, SinkInputOrder,
-        SinkWriteFailure, StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
-        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulTransformHandler, HostedIngressSource, IngressDecoder, InlineSink,
+        JoinReferenceView, SinkDescription, SinkInputOrder, SinkWriteFailure, StatefulEmission,
+        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
+        TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::source::{
         AsyncFiniteContinuation, AsyncFiniteSourceConnector, AsyncInfiniteContinuation,
-        AsyncInfiniteSourceConnector, FiniteContinuation, FiniteSourceConnector,
-        InfiniteContinuation, InfiniteSourceConnector, Reattach, Refuse, SourceContinuation,
-        SourceReaderInitContext,
+        AsyncInfiniteSourceConnector, AtMostOnce, FiniteContinuation, FiniteSourceConnector,
+        InfiniteContinuation, InfiniteSourceConnector, LatestState, Reattach, Refuse, RefusedBy,
+        SourceContinuation, SourceReaderInitContext,
     };
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
@@ -609,8 +611,8 @@ mod tests {
         assert_eq!(metadata.output_contract, expected);
     }
 
-    /// FLOWIP-134i B8: admission captures each family's continuation, which
-    /// resume admission reads from the descriptor.
+    /// FLOWIP-134i B8, FLOWIP-122i: admission captures each family's
+    /// continuation, which resume admission reads from the descriptor.
     #[test]
     fn source_admission_captures_each_family_continuation() {
         let direct = [
@@ -622,23 +624,21 @@ mod tests {
                 InputEvent => AsyncInfiniteExactSource
             ),
         ];
+        let handler_refuses = SourceContinuation::Refuse {
+            by: RefusedBy::Handler,
+        };
         assert_eq!(
             direct.map(|descriptor| descriptor.source_continuation()),
-            [
-                Some(SourceContinuation::Refuse),
-                Some(SourceContinuation::Refuse),
-                Some(SourceContinuation::Reattach),
-                Some(SourceContinuation::Reattach),
-            ],
-            "direct handlers lower to their family default"
+            [Some(handler_refuses); 4],
+            "direct handlers declare nothing, so interrupted input refuses"
         );
 
         let finite_refuse = DeclaringConnector::<Refuse>::new();
         let async_finite_refuse = DeclaringConnector::<Refuse>::new();
         let infinite_refuse = DeclaringConnector::<Refuse>::new();
-        let infinite_reattach = DeclaringConnector::<Reattach>::new();
+        let infinite_reattach = DeclaringConnector::<Reattach<LatestState>>::new();
         let async_infinite_refuse = DeclaringConnector::<Refuse>::new();
-        let async_infinite_reattach = DeclaringConnector::<Reattach>::new();
+        let async_infinite_reattach = DeclaringConnector::<Reattach<AtMostOnce>>::new();
         let connectors = [
             crate::source!(name: "finite_refuse", InputEvent => finite_refuse),
             crate::async_source!(name: "async_finite_refuse", InputEvent => async_finite_refuse),
@@ -653,18 +653,46 @@ mod tests {
                 InputEvent => async_infinite_reattach
             ),
         ];
+        let connector_refuses = Some(SourceContinuation::Refuse {
+            by: RefusedBy::Connector,
+        });
         assert_eq!(
             connectors.map(|descriptor| descriptor.source_continuation()),
             [
-                Some(SourceContinuation::Refuse),
-                Some(SourceContinuation::Refuse),
-                Some(SourceContinuation::Refuse),
-                Some(SourceContinuation::Reattach),
-                Some(SourceContinuation::Refuse),
-                Some(SourceContinuation::Reattach),
+                connector_refuses,
+                connector_refuses,
+                connector_refuses,
+                Some(SourceContinuation::Reattach {
+                    guarantee: ReattachGuarantee::LatestState
+                }),
+                connector_refuses,
+                Some(SourceContinuation::Reattach {
+                    guarantee: ReattachGuarantee::AtMostOnce
+                }),
             ],
             "connectors carry their declared continuation"
         );
+
+        // FLOWIP-122i B3: Runtime admits hosted ingress with the one guarantee
+        // no connector can declare.
+        #[derive(Clone)]
+        struct InputIngress;
+        impl IngressDecoder for InputIngress {
+            type Output = InputEvent;
+        }
+        let (_submit, queue) = tokio::sync::mpsc::channel(1);
+        let hosted = HostedIngressSource::<InputIngress>::new(
+            queue,
+            obzenflow_core::ingress::HostedIngressBindingSlot::new("test.input"),
+        );
+        let hosted = crate::async_infinite_source!(name: "hosted", InputEvent => hosted);
+        assert_eq!(
+            hosted.source_continuation(),
+            Some(SourceContinuation::Reattach {
+                guarantee: ReattachGuarantee::SenderRedelivers
+            })
+        );
+        assert!(hosted.hosted_ingress_binding_slot().is_some());
 
         let transform =
             crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform);

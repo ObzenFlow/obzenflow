@@ -1287,12 +1287,14 @@ pub(crate) mod tests {
         FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState, FiniteSourceEvent,
         FiniteSourceSupervisor, AsyncFiniteSourceSupervisor, true,
         { pending_boundary_eof: false, pending_boundary_rejected: false,
-          continuation: crate::stages::source::SourceContinuation::Refuse });
+          continuation: crate::stages::source::SourceContinuation::Refuse {
+              by: crate::stages::source::RefusedBy::Connector } });
     source_state_projection_test!(infinite_source_states_precede_actions,
         InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState, InfiniteSourceEvent,
         InfiniteSourceSupervisor, AsyncInfiniteSourceSupervisor, false,
         { pending_boundary_begin_drain: false,
-          continuation: crate::stages::source::SourceContinuation::Reattach });
+          continuation: crate::stages::source::SourceContinuation::Reattach {
+              guarantee: obzenflow_core::event::payloads::execution_payload::ReattachGuarantee::AtMostOnce } });
 
     #[tokio::test]
     async fn send_eof_uses_poison_flag_when_breaker_open() {

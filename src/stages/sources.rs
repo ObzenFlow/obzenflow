@@ -14,7 +14,9 @@
 //! cloning or collecting. A single value uses `ValuesSource::new([value])`.
 //! [`ChannelSource::new`] transfers a Tokio receiver into one asynchronous
 //! infinite execution. Channel closure is a source error; orderly drain closes
-//! the receiver. Use topology fan-out for multiple consumers.
+//! the receiver. Use topology fan-out for multiple consumers. Values still
+//! buffered in the channel when a run stops are lost, so a resumed run
+//! reattaches with [`AtMostOnce`].
 //!
 //! ## Construction catalogue
 //!
@@ -31,7 +33,9 @@
 //! New polling behaviour implements the appropriate typed handler:
 //! [`TypedFiniteSourceHandler`], [`TypedAsyncFiniteSourceHandler`],
 //! [`TypedInfiniteSourceHandler`] or [`TypedAsyncInfiniteSourceHandler`].
-//! Resource-owning integrations use the corresponding connector and reader.
+//! Resource-owning integrations use the corresponding connector and reader. A
+//! direct handler declares no continuation, so a resume refuses its interrupted
+//! input; a source that must continue after an interruption is a connector.
 //!
 //! ## Source errors
 //!
@@ -191,7 +195,9 @@
 //! config)` (or `.ingress` for another transport), which returns the
 //! [`HostedIngressSource`]. Custom hosting can explicitly compose bundles with
 //! [`crate::application::ingress::ingress_source`] or
-//! [`crate::application::ingress::http_ingress`].
+//! [`crate::application::ingress::http_ingress`]. Hosted ingress acknowledges a
+//! submission only after its row commits, so a resumed run reattaches it live
+//! and records that the sender redelivers what was never acknowledged.
 //!
 //! ## HTTP pull sources
 //!
@@ -209,7 +215,12 @@
 //! input. [`Refuse`] refuses the resume; [`Seek`] continues a
 //! [`PositionedFiniteReader`] strictly after its last committed record, as
 //! [`CsvSource`] and [`YamlSource`] do; [`Reattach`] reattaches an infinite
-//! input live.
+//! input live and names what the interruption could cost: [`LatestState`] when
+//! each observation supersedes the last, as for [`HttpPollSource`], or
+//! [`AtMostOnce`] when no input is admitted twice but uncommitted input, or
+//! input that arrived while no reader was attached, may be lost, as for
+//! [`ChannelSource`]. The resumed run records the guarantee, and
+//! `obzenflow show` reports it.
 //!
 //! The default HTTP client requires the `http-pull` feature.
 //! Applications supplying their own [`HttpClient`] do not require that feature.
@@ -221,7 +232,7 @@ pub use obzenflow_adapters::sources::{
 };
 
 /// In-process sources owning values or a channel receiver.
-pub use obzenflow_adapters::sources::{ChannelSource, ValuesSource};
+pub use obzenflow_adapters::sources::{ChannelReader, ChannelSource, ValuesSource};
 
 /// Finite YAML source and its application decoder contract.
 pub use obzenflow_adapters::sources::{
@@ -270,9 +281,9 @@ pub use obzenflow_runtime::stages::source::{
     InfiniteSourceConnector, SourceReaderInitContext,
 };
 
-/// Connector continuation declarations and the positioned reader contract
-/// (FLOWIP-134i).
+/// Connector continuation declarations, their reattachment guarantees and the
+/// positioned reader contract (FLOWIP-134i, FLOWIP-122i).
 pub use obzenflow_runtime::stages::source::{
-    PositionedFiniteReader, Reattach, Refuse, Seek, SeekableSource, SourceIdentityError,
-    SourceInputIdentity, SourcePosition, SourceRecord,
+    AtMostOnce, LatestState, PositionedFiniteReader, Reattach, Refuse, Seek, SeekableSource,
+    SourceIdentityError, SourceInputIdentity, SourcePosition, SourceRecord,
 };

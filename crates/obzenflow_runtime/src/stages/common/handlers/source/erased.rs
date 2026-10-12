@@ -154,7 +154,10 @@ pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync
     fn install_writer_id(&mut self, writer_id: WriterId);
     fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
     fn poll_timeout(&self) -> Option<Duration>;
-    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot>;
+    /// The binding slot of Runtime-owned hosted ingress (FLOWIP-122i B3).
+    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        None
+    }
     async fn next_invocation(&mut self) -> ErasedSourceInvocation;
     async fn drain(&mut self) -> Result<(), SourceError>;
     /// Rows the journal committed, so hosted receipts can resolve (FLOWIP-084l).

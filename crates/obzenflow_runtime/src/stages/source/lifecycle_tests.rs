@@ -181,7 +181,7 @@ impl AsyncFiniteSourceConnector for Fixture {
 impl AsyncInfiniteSourceConnector for Fixture {
     type Output = Row;
     type Reader = Reader;
-    type Continuation = Reattach;
+    type Continuation = Reattach<AtMostOnce>;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Reader, SourceError> {
         self.open_reader(context).await
     }
