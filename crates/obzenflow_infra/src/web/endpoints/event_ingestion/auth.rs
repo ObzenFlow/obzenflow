@@ -72,7 +72,7 @@ pub fn authorize_request(auth: &AuthConfig, request: &Request) -> Result<(), Aut
     }
 }
 
-fn header_value<'a>(request: &'a Request, header_name: &str) -> Option<&'a str> {
+pub(super) fn header_value<'a>(request: &'a Request, header_name: &str) -> Option<&'a str> {
     request.headers.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case(header_name) {
             Some(v.as_str())

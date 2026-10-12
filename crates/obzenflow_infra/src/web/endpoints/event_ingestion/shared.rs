@@ -2,32 +2,41 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::{SourceDiagnostic, SystemPayload};
+use super::contract::{
+    diagnostic_message, retry_after_secs, IngressErrorCode, BUFFER_FULL, LISTENER_UNAVAILABLE,
+    NOT_READY, OVERLOADED, RATE_LIMITED, SHUTTING_DOWN,
+};
+use super::settlement::{Settlement, SettlementMember};
+use super::validation::{validate_submission, ValidationConfig};
+use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason, SystemPayload};
 use obzenflow_core::ingress::{
     EdgeShedReason, EventSubmission, HostedIngressBindingSlot, IngressAdmissionDecision,
     IngressAdmissionOutcome, IngressAttemptContext, IngressAttemptSeq, IngressBoundaryMiddleware,
-    IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind,
+    IngressContentDigest, IngressContext, IngressKey, IngressOriginal, IngressRefusalReason,
+    IngressRequestId, IngressRequestIdentity,
 };
-use obzenflow_core::web::{EndpointError, ManagedResponse, Response};
+use obzenflow_core::TypedPayload;
 use obzenflow_runtime::pipeline::PipelineState;
-use serde_json::json;
+use obzenflow_runtime::stages::{
+    prove_journal_form, HostedSubmission, IngressDecodeError, IngressDecoder, IngressRecord,
+};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
-use super::{AuthConfig, ValidationConfig};
+use super::AuthConfig;
 
 /// Configuration for event ingestion (FLOWIP-084d).
 #[derive(Debug, Clone)]
 pub struct IngestionConfig {
-    /// Protocol-neutral ingress identity used in accepted-event provenance,
-    /// refusal facts, and metrics. `None` means "derive from `base_path`"
-    /// for the optional hosted HTTP wrapper (FLOWIP-010 §4b: typed key, no
+    /// Protocol-neutral ingress identity used in accepted-event provenance and
+    /// attempt evidence. `None` means "derive from `base_path`" for the
+    /// optional hosted HTTP wrapper (FLOWIP-010 §4b: typed key, no
     /// empty-string sentinel).
-    pub ingress_key: Option<obzenflow_core::ingress::IngressKey>,
+    pub ingress_key: Option<IngressKey>,
 
     /// Base path for endpoints (default: `/api/ingest`).
     ///
@@ -49,16 +58,15 @@ pub struct IngestionConfig {
     /// Optional authentication.
     pub auth: Option<AuthConfig>,
 
-    /// Optional schema validation.
+    /// Optional schema validation, run in addition to the decoder.
     pub validation: Option<ValidationConfig>,
 
-    /// FLOWIP-115d: record hosted-ingress reject/shed attempts (and per-event
-    /// validation rejections) as durable `IngressRefusal` facts on the system
-    /// journal; telemetry projects the refusal count from those facts. On by
-    /// default. Disabling it is an explicit operational choice that forfeits
-    /// replayable refusal evidence. A flow with no system journal must disable
-    /// it, otherwise startup fails.
-    pub record_ingress_refusals: bool,
+    /// FLOWIP-115d, FLOWIP-084l: record ingress attempt evidence (refusals and
+    /// recognized duplicates) as durable system-journal facts. On by default.
+    /// Disabling it is an explicit operational choice that forfeits that
+    /// evidence. A flow with no system journal must disable it, otherwise
+    /// startup fails.
+    pub record_ingress_evidence: bool,
 }
 
 impl Default for IngestionConfig {
@@ -71,98 +79,329 @@ impl Default for IngestionConfig {
             buffer_capacity: 10_000,
             auth: None,
             validation: None,
-            record_ingress_refusals: true,
+            record_ingress_evidence: true,
         }
     }
 }
 
-/// FLOWIP-115d: the system-journal writer that records hosted-ingress refusal
-/// facts. Installed at web-surface wiring time from the host system journal.
-type IngressRefusalWriter = obzenflow_runtime::pipeline::ingress::IngressRefusalWriter;
+type IngressEvidenceWriter = obzenflow_runtime::pipeline::ingress::IngressEvidenceWriter;
 
+/// Attempt evidence could not be written; the protocol answer fails closed.
 #[derive(Debug)]
-pub(crate) struct IngressRefusalRecordError {
-    message: String,
+pub(crate) struct EvidenceUnavailable(String);
+
+impl fmt::Display for EvidenceUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
-impl IngressRefusalRecordError {
-    fn new(message: impl Into<String>) -> Self {
+/// Appends ingress attempt evidence through the pipeline's publication owner.
+#[derive(Clone)]
+pub(crate) struct EvidenceRecorder {
+    enabled: bool,
+    writer: Arc<OnceLock<IngressEvidenceWriter>>,
+    slot: HostedIngressBindingSlot,
+}
+
+/// One refused attempt's fact fields.
+pub(crate) struct RefusalEvidence<'a> {
+    pub reason: IngressRefusalReason,
+    pub attempt: &'a IngressAttemptContext,
+    pub http_status: u16,
+    pub retry_after: Option<Duration>,
+    pub diagnostics: Vec<SourceDiagnostic>,
+    pub request_id: Option<&'a IngressRequestId>,
+}
+
+impl EvidenceRecorder {
+    pub(crate) async fn refusal(
+        &self,
+        evidence: RefusalEvidence<'_>,
+    ) -> Result<(), EvidenceUnavailable> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let (writer, stage_id, stage_key) = self.target()?;
+        let payload = SystemPayload::IngressRefusal {
+            ingress_key: self.slot.ingress_key().clone(),
+            stage_id,
+            stage_key,
+            reason: evidence.reason,
+            attempt_seq: evidence.attempt.attempt_seq,
+            request_count: evidence.attempt.request_count,
+            event_count: evidence.attempt.event_count,
+            batch_count: evidence.attempt.batch_count,
+            http_status: evidence.http_status,
+            // Coarse bucket matching the second-granularity `Retry-After`
+            // the client receives, so audit and response agree.
+            retry_after_ms_bucket: evidence
+                .retry_after
+                .map(|delay| retry_after_secs(delay).saturating_mul(1000)),
+            diagnostics: evidence.diagnostics,
+            request_id: evidence.request_id.cloned(),
+        };
+        self.append(writer, payload).await
+    }
+
+    pub(crate) async fn duplicate(
+        &self,
+        attempt_seq: IngressAttemptSeq,
+        request_id: &IngressRequestId,
+        originals: Vec<IngressOriginal>,
+    ) -> Result<(), EvidenceUnavailable> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let (writer, stage_id, stage_key) = self.target()?;
+        let payload = SystemPayload::IngressDuplicateRecognized {
+            ingress_key: self.slot.ingress_key().clone(),
+            stage_id,
+            stage_key,
+            attempt_seq,
+            request_id: request_id.clone(),
+            originals,
+        };
+        self.append(writer, payload).await
+    }
+
+    fn target(
+        &self,
+    ) -> Result<
+        (
+            &IngressEvidenceWriter,
+            obzenflow_core::StageId,
+            obzenflow_core::StageKey,
+        ),
+        EvidenceUnavailable,
+    > {
+        let key = self.slot.ingress_key();
+        let writer = self.writer.get().ok_or_else(|| {
+            EvidenceUnavailable(format!(
+                "ingress evidence recording is enabled for '{key}' but no system-journal writer \
+                 is installed"
+            ))
+        })?;
+        let filled = self.slot.filled().ok_or_else(|| {
+            EvidenceUnavailable(format!(
+                "ingress evidence recording is enabled for '{key}' but the hosted ingress slot \
+                 is not filled"
+            ))
+        })?;
+        Ok((writer, filled.stage_id, filled.stage_key.clone()))
+    }
+
+    async fn append(
+        &self,
+        writer: &IngressEvidenceWriter,
+        payload: SystemPayload,
+    ) -> Result<(), EvidenceUnavailable> {
+        writer.record(payload).await.map_err(|error| {
+            tracing::warn!(
+                ingress_key = %self.slot.ingress_key(),
+                error = %error,
+                "failed to append ingress evidence; answering listener unavailable"
+            );
+            EvidenceUnavailable(format!(
+                "failed to append ingress evidence for '{}': {error}",
+                self.slot.ingress_key()
+            ))
+        })
+    }
+}
+
+/// A member refused by admission, with the decoder's report for the sender.
+#[derive(Debug, Clone)]
+pub(crate) struct MemberRefusal {
+    pub diagnostic: Box<SourceDiagnostic>,
+    pub message: String,
+}
+
+impl MemberRefusal {
+    fn new(diagnostic: SourceDiagnostic, message: String) -> Self {
         Self {
-            message: message.into(),
+            diagnostic: Box::new(diagnostic),
+            message,
+        }
+    }
+
+    fn decode(error: IngressDecodeError) -> Self {
+        let diagnostic = error.into_diagnostic();
+        let message = diagnostic_message(&diagnostic);
+        Self::new(diagnostic, message)
+    }
+}
+
+/// A decoded, proven value and the identity committed with its row.
+pub(crate) struct AdmittedValue<T> {
+    value: T,
+    request: Option<IngressRequestIdentity>,
+}
+
+/// Admit one protocol submission: event type, configured validator, the
+/// application decoder exactly once, then the journal-form proof (B4).
+pub(crate) fn admit_submission<D: IngressDecoder>(
+    decoder: &D,
+    validation: Option<&ValidationConfig>,
+    submission: &EventSubmission,
+    request_id: Option<&IngressRequestId>,
+) -> Result<AdmittedValue<D::Output>, MemberRefusal> {
+    if !D::Output::matches_event_type(submission.event_type.as_str()) {
+        let error = super::validation::ValidationError::EventTypeMismatch {
+            expected: D::Output::EVENT_TYPE.to_string(),
+            actual: submission.event_type.to_string(),
+        };
+        return Err(MemberRefusal::new(error.diagnostic(), error.to_message()));
+    }
+    if let Some(validation) = validation {
+        validate_submission(submission, validation)
+            .map_err(|error| MemberRefusal::new(error.diagnostic(), error.to_message()))?;
+    }
+    let value = decoder
+        .decode(IngressRecord::new(&submission.data))
+        .and_then(prove_journal_form)
+        .map_err(MemberRefusal::decode)?;
+    Ok(AdmittedValue {
+        value,
+        request: request_id.map(|id| IngressRequestIdentity {
+            id: id.clone(),
+            digest: IngressContentDigest::of_submission(
+                submission.event_type.as_str(),
+                &submission.data,
+            ),
+        }),
+    })
+}
+
+/// Admit one typed in-process value: digest its serde form, then prove it.
+pub(crate) fn admit_typed<T: TypedPayload>(
+    value: T,
+    request_id: Option<&IngressRequestId>,
+) -> Result<AdmittedValue<T>, MemberRefusal> {
+    let request = match request_id {
+        Some(id) => {
+            let form = serde_json::to_value(&value).map_err(|_| {
+                let reason = SourceDiagnosticReason::UnrepresentableValue;
+                MemberRefusal::new(SourceDiagnostic::new(reason), reason.phrase().to_string())
+            })?;
+            Some(IngressRequestIdentity {
+                id: id.clone(),
+                digest: IngressContentDigest::of_typed(form),
+            })
+        }
+        None => None,
+    };
+    let value = prove_journal_form(value).map_err(MemberRefusal::decode)?;
+    Ok(AdmittedValue { value, request })
+}
+
+/// One request's admitted members, ready for the edge and the queue.
+pub(crate) struct AdmittedRequest<T> {
+    pub attempt: IngressAttemptContext,
+    pub request_id: Option<IngressRequestId>,
+    /// `(position in the request, batch index, value)`.
+    pub members: Vec<(usize, Option<usize>, AdmittedValue<T>)>,
+}
+
+/// Why the edge refused a whole request after admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeRefusal {
+    NotReady,
+    BufferFull,
+    ShuttingDown,
+    RateLimited { retry_after: Option<Duration> },
+    Overloaded { retry_after: Option<Duration> },
+    EvidenceUnavailable,
+}
+
+impl EdgeRefusal {
+    pub(crate) fn code(self) -> IngressErrorCode {
+        match self {
+            Self::NotReady => IngressErrorCode::NotReady,
+            Self::BufferFull => IngressErrorCode::BufferFull,
+            Self::ShuttingDown => IngressErrorCode::ShuttingDown,
+            Self::RateLimited { .. } => IngressErrorCode::RateLimited,
+            Self::Overloaded { .. } => IngressErrorCode::Overloaded,
+            Self::EvidenceUnavailable => IngressErrorCode::ListenerUnavailable,
+        }
+    }
+
+    pub(crate) fn status(self) -> u16 {
+        match self {
+            Self::RateLimited { .. } => 429,
+            _ => 503,
+        }
+    }
+
+    pub(crate) fn retry_after(self) -> Duration {
+        match self {
+            Self::RateLimited { retry_after } | Self::Overloaded { retry_after } => {
+                retry_after.unwrap_or(Duration::from_secs(1))
+            }
+            _ => Duration::from_secs(1),
+        }
+    }
+
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::NotReady => NOT_READY,
+            Self::BufferFull => BUFFER_FULL,
+            Self::ShuttingDown => SHUTTING_DOWN,
+            Self::RateLimited { .. } => RATE_LIMITED,
+            Self::Overloaded { .. } => OVERLOADED,
+            Self::EvidenceUnavailable => LISTENER_UNAVAILABLE,
         }
     }
 }
 
-impl fmt::Display for IngressRefusalRecordError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for IngressRefusalRecordError {}
-
-/// Public admission result returned by the handle-first ingress API.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IngressSubmitOutcome {
-    Accepted {
-        attempt_seq: IngressAttemptSeq,
-        event_count: u64,
-    },
-    Rejected {
-        attempt_seq: IngressAttemptSeq,
-        reason: IngressRefusalReason,
-        retry_after: Option<Duration>,
-        event_count: u64,
-    },
-    Shed {
-        attempt_seq: IngressAttemptSeq,
-        reason: EdgeShedReason,
-        retry_after: Option<Duration>,
-        event_count: u64,
-    },
-}
-
-/// Shared state between ingestion endpoints.
-#[derive(Clone)]
-pub struct IngestionState {
-    pub tx: mpsc::Sender<EventSubmission>,
-    pub ready: Arc<AtomicBool>,
-    pub buffer_capacity: usize,
-    pub config: IngestionConfig,
-    /// The resolved ingress identity: the configured key, or derived from
-    /// the normalised `base_path` when the config carries `None`.
-    ingress_key: obzenflow_core::ingress::IngressKey,
+/// Shared state between ingestion endpoints and the in-process handle.
+pub struct IngestionState<T> {
+    tx: mpsc::Sender<HostedSubmission<T>>,
+    ready: Arc<AtomicBool>,
+    buffer_capacity: usize,
+    pub(crate) config: IngestionConfig,
     /// FLOWIP-115d: the hosted-ingress binding slot, shared with this surface's
-    /// source half. The DSL fills it during source-stage materialization; the
-    /// endpoints read the composed admission boundary from it at request time.
+    /// source half. The DSL fills it during source-stage materialization.
     ingress_slot: HostedIngressBindingSlot,
     /// Monotonic per-hosted-ingress submission-attempt sequence.
     attempt_seq: Arc<AtomicU64>,
-    /// FLOWIP-115d: write-once installer for the refusal-fact writer, shared with
-    /// the endpoint clones. `FlowApplication` web-surface wiring fills it from the
-    /// host system journal; a rejected, shed, or validation-refused attempt
-    /// appends one `IngressRefusal` fact through it. Absent means refusal
-    /// recording is disabled.
-    refusal_writer: Arc<OnceLock<IngressRefusalWriter>>,
+    evidence: EvidenceRecorder,
 }
 
-impl IngestionState {
-    pub fn new(mut config: IngestionConfig) -> (Self, mpsc::Receiver<EventSubmission>) {
+impl<T> Clone for IngestionState<T> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            ready: self.ready.clone(),
+            buffer_capacity: self.buffer_capacity,
+            config: self.config.clone(),
+            ingress_slot: self.ingress_slot.clone(),
+            attempt_seq: self.attempt_seq.clone(),
+            evidence: self.evidence.clone(),
+        }
+    }
+}
+
+impl<T> IngestionState<T> {
+    pub fn new(mut config: IngestionConfig) -> (Self, mpsc::Receiver<HostedSubmission<T>>) {
         config.base_path = normalize_base_path(&config.base_path);
         let ingress_key = resolve_ingress_key(config.ingress_key.clone(), &config.base_path);
-
         let buffer_capacity = config.buffer_capacity;
         let (tx, rx) = mpsc::channel(buffer_capacity);
-        let ingress_slot = HostedIngressBindingSlot::new(ingress_key.clone());
+        let ingress_slot = HostedIngressBindingSlot::new(ingress_key);
+        let evidence = EvidenceRecorder {
+            enabled: config.record_ingress_evidence,
+            writer: Arc::new(OnceLock::new()),
+            slot: ingress_slot.clone(),
+        };
         let state = Self {
             tx,
             ready: Arc::new(AtomicBool::new(false)),
             buffer_capacity,
             config,
-            ingress_key,
             ingress_slot,
             attempt_seq: Arc::new(AtomicU64::new(0)),
-            refusal_writer: Arc::new(OnceLock::new()),
+            evidence,
         };
         (state, rx)
     }
@@ -174,163 +413,49 @@ impl IngestionState {
 
     /// The resolved protocol-neutral ingress identity (configured or
     /// derived from the base path).
-    pub fn ingress_key(&self) -> &obzenflow_core::ingress::IngressKey {
-        &self.ingress_key
+    pub fn ingress_key(&self) -> &IngressKey {
+        self.ingress_slot.ingress_key()
     }
 
     /// The composed ingress admission boundary, once the DSL has filled the slot.
-    pub fn ingress_boundary(&self) -> Option<Arc<dyn IngressBoundaryMiddleware>> {
+    pub(crate) fn ingress_boundary(&self) -> Option<Arc<dyn IngressBoundaryMiddleware>> {
         self.ingress_slot.filled().and_then(|f| f.boundary.clone())
     }
 
     /// Allocate the next monotonic per-hosted-ingress submission-attempt sequence.
-    pub fn next_attempt_seq(&self) -> IngressAttemptSeq {
+    pub(crate) fn next_attempt_seq(&self) -> IngressAttemptSeq {
         IngressAttemptSeq(self.attempt_seq.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Whether this surface is configured to record refusal facts (FLOWIP-115d).
-    /// Startup uses this to require a system journal when recording is on.
-    pub(crate) fn refusal_recording_enabled(&self) -> bool {
-        self.config.record_ingress_refusals
+    /// Whether this surface records attempt evidence. Startup uses this to
+    /// require a system journal when recording is on.
+    pub(crate) fn evidence_recording_enabled(&self) -> bool {
+        self.config.record_ingress_evidence
     }
 
-    /// Install the system-journal refusal-fact writer at web-surface wiring time.
-    pub(crate) fn install_refusal_writer(&self, writer: IngressRefusalWriter) {
-        let _ = self.refusal_writer.set(writer);
-    }
-
-    /// Append one durable `IngressRefusal` fact for a refused attempt
-    /// (FLOWIP-115d). No-op only when refusal recording is explicitly disabled.
-    /// When recording is enabled, missing writer/slot wiring or append failure is
-    /// evidence unavailability and callers must fail closed before returning a
-    /// protocol refusal. The projected refusal metric is a fold of these facts, so
-    /// this is the only refusal record kept.
-    ///
-    /// `attempt.event_count` is the number of events this fact refuses (the whole
-    /// rate-limited or shed subset, or the validation-rejected count), which is
-    /// the value carried onto the fact.
-    pub(crate) async fn record_refusal(
-        &self,
-        reason: IngressRefusalReason,
-        attempt: &IngressAttemptContext,
-        http_status: u16,
-        retry_after: Option<Duration>,
-    ) -> Result<(), IngressRefusalRecordError> {
-        self.append_refusal(reason, attempt, http_status, retry_after, Vec::new())
-            .await
-    }
-
-    async fn append_refusal(
-        &self,
-        reason: IngressRefusalReason,
-        attempt: &IngressAttemptContext,
-        http_status: u16,
-        retry_after: Option<Duration>,
-        diagnostics: Vec<SourceDiagnostic>,
-    ) -> Result<(), IngressRefusalRecordError> {
-        if !self.config.record_ingress_refusals {
-            return Ok(());
+    /// Install the system-journal evidence writer at wiring time; the first
+    /// installed writer stays.
+    pub(crate) fn install_evidence_writer(&self, writer: IngressEvidenceWriter) {
+        if self.evidence.writer.set(writer).is_err() {
+            tracing::debug!(
+                ingress_key = %self.ingress_key(),
+                "ingress evidence writer already installed"
+            );
         }
-
-        let Some(writer) = self.refusal_writer.get() else {
-            return Err(IngressRefusalRecordError::new(format!(
-                "ingress refusal recording is enabled for '{}' but no system-journal writer is installed",
-                self.ingress_key
-            )));
-        };
-        let Some(filled) = self.ingress_slot.filled() else {
-            return Err(IngressRefusalRecordError::new(format!(
-                "ingress refusal recording is enabled for '{}' but the hosted ingress slot is not filled",
-                self.ingress_key
-            )));
-        };
-        let payload = SystemPayload::IngressRefusal {
-            ingress_key: self.ingress_key.clone(),
-            stage_id: filled.stage_id,
-            stage_key: filled.stage_key.clone(),
-            reason,
-            attempt_seq: attempt.attempt_seq,
-            request_count: attempt.request_count,
-            event_count: attempt.event_count,
-            batch_count: attempt.batch_count,
-            http_status,
-            // Coarse bucket matching the second-granularity `Retry-After`
-            // the client receives, so audit and response agree.
-            retry_after_ms_bucket: retry_after.map(|d| d.as_secs().max(1).saturating_mul(1000)),
-            diagnostics,
-        };
-        writer
-            .record_ingress_refusal(payload)
-            .await
-            .map(|_| ())
-            .map_err(|e| {
-                IngressRefusalRecordError::new(format!(
-                    "failed to append ingress refusal fact for '{}': {e}",
-                    self.ingress_key
-                ))
-            })
     }
 
-    /// Record refusal evidence or return the fail-closed listener-unavailable
-    /// response required by FLOWIP-115d when evidence cannot be written.
-    pub(crate) async fn record_refusal_or_unavailable(
-        &self,
-        reason: IngressRefusalReason,
-        attempt: &IngressAttemptContext,
-        http_status: u16,
-        retry_after: Option<Duration>,
-    ) -> Result<Option<ManagedResponse>, EndpointError> {
-        let recorded = self
-            .record_refusal(reason, attempt, http_status, retry_after)
-            .await;
-        Self::evidence_or_unavailable(recorded)
-    }
-
-    /// Record a validation refusal with one diagnostic per refused event, or
-    /// fail closed like [`Self::record_refusal_or_unavailable`].
-    pub(crate) async fn record_validation_refusal_or_unavailable(
-        &self,
-        attempt: &IngressAttemptContext,
-        diagnostics: Vec<SourceDiagnostic>,
-    ) -> Result<Option<ManagedResponse>, EndpointError> {
-        let recorded = self
-            .append_refusal(
-                IngressRefusalReason::Validation,
-                attempt,
-                400,
-                None,
-                diagnostics,
-            )
-            .await;
-        Self::evidence_or_unavailable(recorded)
-    }
-
-    fn evidence_or_unavailable(
-        recorded: Result<(), IngressRefusalRecordError>,
-    ) -> Result<Option<ManagedResponse>, EndpointError> {
-        match recorded {
-            Ok(()) => Ok(None),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to append ingress refusal fact; returning listener unavailable"
-                );
-                let response = Response::new(503)
-                    .with_header("Retry-After".to_string(), "1".to_string())
-                    .with_json(&json!({"error": "listener unavailable"}))
-                    .map_err(|err| {
-                        EndpointError::with_source("Serialising endpoint response", err)
-                    })?;
-                Ok(Some(response.into()))
-            }
-        }
+    /// The acknowledgement deadline in force.
+    pub(crate) fn ack_deadline(&self) -> Duration {
+        self.ingress_slot.timing().ack_deadline()
     }
 
     /// Current channel depth.
-    ///
-    /// Uses `mpsc::Sender::capacity()` which returns remaining capacity.
     pub fn channel_depth(&self) -> usize {
         self.buffer_capacity.saturating_sub(self.tx.capacity())
+    }
+
+    pub fn channel_capacity(&self) -> usize {
+        self.buffer_capacity
     }
 
     pub fn is_ready(&self) -> bool {
@@ -371,186 +496,195 @@ impl IngestionState {
         })
     }
 
-    /// Submit one already-deserialized, already-authorized event through the
-    /// protocol-neutral ingress path.
-    pub async fn submit_one(&self, submission: EventSubmission) -> IngressSubmitOutcome {
-        self.submit_one_with_payload_kind(submission, SubmissionPayloadKind::External)
+    /// Record a whole-request refusal before admission and answer it.
+    pub(crate) async fn refuse_not_ready(
+        &self,
+        attempt: &IngressAttemptContext,
+        request_id: Option<&IngressRequestId>,
+    ) -> EdgeRefusal {
+        self.record_edge_refusal(EdgeRefusal::NotReady, attempt, request_id)
             .await
     }
 
-    /// Submit a value that already has the source decoder's typed output shape.
-    pub(crate) async fn submit_typed_output(
+    /// Record the validation refusals of one request, one fact for all of
+    /// its refused members.
+    pub(crate) async fn record_validation_refusals(
         &self,
-        submission: EventSubmission,
-    ) -> IngressSubmitOutcome {
-        self.submit_one_with_payload_kind(submission, SubmissionPayloadKind::TypedOutput)
-            .await
-    }
-
-    async fn submit_one_with_payload_kind(
-        &self,
-        submission: EventSubmission,
-        payload_kind: SubmissionPayloadKind,
-    ) -> IngressSubmitOutcome {
+        attempt_seq: IngressAttemptSeq,
+        batch: bool,
+        request_id: Option<&IngressRequestId>,
+        refused: &[(usize, MemberRefusal)],
+    ) -> Result<(), EvidenceUnavailable> {
         let attempt = IngressAttemptContext {
-            attempt_seq: self.next_attempt_seq(),
+            attempt_seq,
             request_count: 1,
-            event_count: 1,
-            batch_count: 0,
+            event_count: refused.len() as u64,
+            batch_count: u64::from(batch),
         };
-        self.submit_one_with_attempt(submission, attempt, None, payload_kind)
+        let diagnostics = refused
+            .iter()
+            .map(|(position, refusal)| {
+                let diagnostic = SourceDiagnostic::clone(&refusal.diagnostic);
+                if batch {
+                    diagnostic.record(*position as u64)
+                } else {
+                    diagnostic
+                }
+            })
+            .collect();
+        self.evidence
+            .refusal(RefusalEvidence {
+                reason: IngressRefusalReason::Validation,
+                attempt: &attempt,
+                http_status: 400,
+                retry_after: None,
+                diagnostics,
+                request_id,
+            })
             .await
     }
 
-    pub(crate) async fn submit_one_with_attempt(
+    /// Reserve capacity, run edge admission, and queue every admitted member
+    /// with its receipt. The settlement then waits for each member's commit.
+    pub(crate) async fn enqueue(
         &self,
-        mut submission: EventSubmission,
-        attempt: IngressAttemptContext,
-        batch_index: Option<usize>,
-        payload_kind: SubmissionPayloadKind,
-    ) -> IngressSubmitOutcome {
+        request: AdmittedRequest<T>,
+    ) -> Result<Settlement, EdgeRefusal>
+    where
+        T: Send + 'static,
+    {
+        let AdmittedRequest {
+            attempt,
+            request_id,
+            members,
+        } = request;
         if !self.is_ready() {
-            return self
-                .record_or_shed_unavailable(
-                    IngressRefusalReason::NotReady,
-                    EdgeShedReason::NotReady,
-                    &attempt,
-                    503,
-                    Some(Duration::from_secs(1)),
-                )
-                .await;
+            return Err(self
+                .record_edge_refusal(EdgeRefusal::NotReady, &attempt, request_id.as_ref())
+                .await);
         }
 
-        let permit = match self.tx.try_reserve() {
-            Ok(permit) => permit,
-            Err(TrySendError::Full(_)) => {
-                return self
-                    .record_or_shed_unavailable(
-                        IngressRefusalReason::BufferFull,
-                        EdgeShedReason::BufferFull,
-                        &attempt,
-                        503,
-                        Some(Duration::from_secs(1)),
-                    )
-                    .await;
+        let mut permits = Vec::with_capacity(members.len());
+        for _ in 0..members.len() {
+            match self.tx.try_reserve() {
+                Ok(permit) => permits.push(permit),
+                Err(TrySendError::Full(())) => {
+                    drop(permits);
+                    return Err(self
+                        .record_edge_refusal(EdgeRefusal::BufferFull, &attempt, request_id.as_ref())
+                        .await);
+                }
+                Err(TrySendError::Closed(())) => {
+                    drop(permits);
+                    return Err(self
+                        .record_edge_refusal(
+                            EdgeRefusal::ShuttingDown,
+                            &attempt,
+                            request_id.as_ref(),
+                        )
+                        .await);
+                }
             }
-            Err(TrySendError::Closed(_)) => {
-                return self
-                    .record_or_shed_unavailable(
-                        IngressRefusalReason::ChannelClosed,
-                        EdgeShedReason::ChannelClosed,
-                        &attempt,
-                        500,
-                        None,
-                    )
-                    .await;
-            }
-        };
+        }
 
-        let accepted_boundary = if let Some(boundary) = self.ingress_boundary() {
-            match boundary.on_ingress(&attempt) {
+        // FLOWIP-115d: the edge reserved capacity first, so buffer-full had
+        // precedence; admission is fail-fast and never waits for a token.
+        let accepted_boundary = match self.ingress_boundary() {
+            Some(boundary) => match boundary.on_ingress(&attempt) {
                 IngressAdmissionDecision::Accept => Some(boundary),
                 IngressAdmissionDecision::Reject { retry_after } => {
                     boundary.observe(&attempt, IngressAdmissionOutcome::RejectedBy);
-                    drop(permit);
-                    if self
-                        .record_refusal(
-                            IngressRefusalReason::RateLimited,
+                    drop(permits);
+                    return Err(self
+                        .record_edge_refusal(
+                            EdgeRefusal::RateLimited { retry_after },
                             &attempt,
-                            429,
-                            retry_after,
+                            request_id.as_ref(),
                         )
-                        .await
-                        .is_err()
-                    {
-                        return IngressSubmitOutcome::Shed {
-                            attempt_seq: attempt.attempt_seq,
-                            reason: EdgeShedReason::EvidenceUnavailable,
-                            retry_after: Some(Duration::from_secs(1)),
-                            event_count: attempt.event_count,
-                        };
-                    }
-                    return IngressSubmitOutcome::Rejected {
-                        attempt_seq: attempt.attempt_seq,
-                        reason: IngressRefusalReason::RateLimited,
-                        retry_after,
-                        event_count: attempt.event_count,
-                    };
+                        .await);
                 }
                 IngressAdmissionDecision::Shed {
                     reason,
                     retry_after,
                 } => {
                     boundary.observe(&attempt, IngressAdmissionOutcome::ShedBy);
-                    drop(permit);
-                    if let Some(refusal) = IngressRefusalReason::from_edge_shed(reason) {
-                        if self
-                            .record_refusal(refusal, &attempt, 503, retry_after)
-                            .await
-                            .is_err()
-                        {
-                            return IngressSubmitOutcome::Shed {
-                                attempt_seq: attempt.attempt_seq,
-                                reason: EdgeShedReason::EvidenceUnavailable,
-                                retry_after: Some(Duration::from_secs(1)),
-                                event_count: attempt.event_count,
-                            };
+                    drop(permits);
+                    let refusal = match reason {
+                        EdgeShedReason::NotReady => EdgeRefusal::NotReady,
+                        EdgeShedReason::BufferFull => EdgeRefusal::BufferFull,
+                        EdgeShedReason::ChannelClosed => EdgeRefusal::ShuttingDown,
+                        EdgeShedReason::ListenerOverloaded => {
+                            EdgeRefusal::Overloaded { retry_after }
                         }
-                    }
-                    return IngressSubmitOutcome::Shed {
-                        attempt_seq: attempt.attempt_seq,
-                        reason,
-                        retry_after,
-                        event_count: attempt.event_count,
+                        EdgeShedReason::EvidenceUnavailable => EdgeRefusal::EvidenceUnavailable,
                     };
+                    return Err(self
+                        .record_edge_refusal(refusal, &attempt, request_id.as_ref())
+                        .await);
                 }
-            }
-        } else {
-            None
+            },
+            None => None,
         };
 
-        submission.ingress_handoff = Some(SubmissionIngressContext {
-            accepted_at_ns: unix_now_nanos(),
-            ingress_key: self.ingress_key.clone(),
-            batch_index,
-            attempt_seq: attempt.attempt_seq,
-            payload_kind,
-        });
-        permit.send(submission);
+        let accepted_at_ns = unix_now_nanos();
+        let mut waiting = Vec::with_capacity(members.len());
+        for (permit, (position, batch_index, admitted)) in permits.into_iter().zip(members) {
+            let (receipt, answer) = oneshot::channel();
+            let context = IngressContext {
+                accepted_at_ns,
+                ingress_key: self.ingress_key().clone(),
+                batch_index,
+                attempt_seq: attempt.attempt_seq,
+                request: admitted.request,
+            };
+            permit.send(HostedSubmission::new(admitted.value, context, receipt));
+            waiting.push(SettlementMember {
+                position,
+                batch_index,
+                answer,
+            });
+        }
         if let Some(boundary) = accepted_boundary {
             boundary.observe(&attempt, IngressAdmissionOutcome::AcceptedForEnqueue);
         }
-        IngressSubmitOutcome::Accepted {
-            attempt_seq: attempt.attempt_seq,
-            event_count: attempt.event_count,
-        }
+        Ok(Settlement::spawn(
+            waiting,
+            self.evidence.clone(),
+            attempt,
+            request_id,
+        ))
     }
 
-    async fn record_or_shed_unavailable(
+    /// Record one whole-request edge refusal; a failed append fails closed.
+    async fn record_edge_refusal(
         &self,
-        refusal: IngressRefusalReason,
-        shed_reason: EdgeShedReason,
+        refusal: EdgeRefusal,
         attempt: &IngressAttemptContext,
-        http_status: u16,
-        retry_after: Option<Duration>,
-    ) -> IngressSubmitOutcome {
-        if self
-            .record_refusal(refusal, attempt, http_status, retry_after)
-            .await
-            .is_err()
-        {
-            return IngressSubmitOutcome::Shed {
-                attempt_seq: attempt.attempt_seq,
-                reason: EdgeShedReason::EvidenceUnavailable,
-                retry_after: Some(Duration::from_secs(1)),
-                event_count: attempt.event_count,
-            };
-        }
-        IngressSubmitOutcome::Shed {
-            attempt_seq: attempt.attempt_seq,
-            reason: shed_reason,
-            retry_after,
-            event_count: attempt.event_count,
+        request_id: Option<&IngressRequestId>,
+    ) -> EdgeRefusal {
+        let reason = match refusal {
+            EdgeRefusal::NotReady => IngressRefusalReason::NotReady,
+            EdgeRefusal::BufferFull => IngressRefusalReason::BufferFull,
+            EdgeRefusal::ShuttingDown => IngressRefusalReason::ChannelClosed,
+            EdgeRefusal::RateLimited { .. } => IngressRefusalReason::RateLimited,
+            EdgeRefusal::Overloaded { .. } => IngressRefusalReason::ListenerOverloaded,
+            // A failed append cannot itself be journalled.
+            EdgeRefusal::EvidenceUnavailable => return refusal,
+        };
+        let recorded = self
+            .evidence
+            .refusal(RefusalEvidence {
+                reason,
+                attempt,
+                http_status: refusal.status(),
+                retry_after: Some(refusal.retry_after()),
+                diagnostics: Vec::new(),
+                request_id,
+            })
+            .await;
+        match recorded {
+            Ok(()) => refusal,
+            Err(_) => EdgeRefusal::EvidenceUnavailable,
         }
     }
 }
@@ -586,15 +720,10 @@ fn normalize_base_path(base_path: &str) -> String {
     out
 }
 
-fn resolve_ingress_key(
-    ingress_key: Option<obzenflow_core::ingress::IngressKey>,
-    fallback_base_path: &str,
-) -> obzenflow_core::ingress::IngressKey {
+fn resolve_ingress_key(ingress_key: Option<IngressKey>, fallback_base_path: &str) -> IngressKey {
     match ingress_key {
-        Some(key) if !key.as_str().trim().is_empty() => {
-            obzenflow_core::ingress::IngressKey(key.as_str().trim().to_string())
-        }
-        _ => obzenflow_core::ingress::IngressKey(fallback_base_path.to_string()),
+        Some(key) if !key.as_str().trim().is_empty() => IngressKey(key.as_str().trim().to_string()),
+        _ => IngressKey(fallback_base_path.to_string()),
     }
 }
 
@@ -602,9 +731,18 @@ fn resolve_ingress_key(
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct Probe {
+        value: u32,
+    }
+
+    impl TypedPayload for Probe {
+        const EVENT_TYPE: &'static str = "probe";
+    }
+
     #[tokio::test]
     async fn watch_pipeline_state_toggles_ready_on_running() {
-        let (state, _rx) = IngestionState::new(IngestionConfig::default());
+        let (state, _) = IngestionState::<Probe>::new(IngestionConfig::default());
         assert!(!state.is_ready());
 
         let (tx, rx) = watch::channel(PipelineState::Created);

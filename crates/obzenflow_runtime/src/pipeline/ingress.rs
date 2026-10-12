@@ -10,14 +10,16 @@ use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::Journal;
 use std::sync::Arc;
 
+/// Records hosted-ingress attempt evidence: refusals and recognized
+/// duplicates (FLOWIP-115d, FLOWIP-084l).
 #[derive(Clone)]
-pub struct IngressRefusalWriter {
+pub struct IngressEvidenceWriter {
     pub(crate) journal: Arc<dyn Journal<SystemEvent>>,
     pub(crate) owner: Arc<PublicationScope>,
     pub(crate) writer: WriterId,
 }
 
-impl IngressRefusalWriter {
+impl IngressEvidenceWriter {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn for_test(journal: Arc<dyn Journal<SystemEvent>>) -> Self {
@@ -32,9 +34,12 @@ impl IngressRefusalWriter {
         }
     }
 
-    pub async fn record_ingress_refusal(&self, payload: SystemPayload) -> Result<(), BoxError> {
-        if !matches!(payload, SystemPayload::IngressRefusal { .. }) {
-            return Err(std::io::Error::other("Expected an ingress refusal command").into());
+    pub async fn record(&self, payload: SystemPayload) -> Result<(), BoxError> {
+        if !matches!(
+            payload,
+            SystemPayload::IngressRefusal { .. } | SystemPayload::IngressDuplicateRecognized { .. }
+        ) {
+            return Err(std::io::Error::other("Expected an ingress evidence command").into());
         }
         let journal = self.journal.clone();
         let event = SystemEvent::new(self.writer, payload);

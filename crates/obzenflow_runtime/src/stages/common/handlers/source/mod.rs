@@ -6,6 +6,7 @@
 
 pub(crate) mod continuation;
 mod erased;
+mod hosted;
 mod positioned;
 pub(crate) mod prepared;
 mod record_de;
@@ -25,11 +26,12 @@ pub use erased::{
     UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
     UnifiedInfiniteSourceHandler,
 };
+pub use hosted::{HostedIngressSource, HostedSubmission, IngressReceiptSender};
 pub use positioned::{PositionedFiniteReader, SeekableSource, SourceRecord};
 pub use record_de::RecordDeError;
 pub use traits::SourceError;
 pub use typed::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord, SourceObservationSink,
+    prove_journal_form, IngressDecodeError, IngressDecoder, IngressRecord, SourceObservationSink,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
 };

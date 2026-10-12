@@ -9,6 +9,7 @@
 //! types) has a single home under `obzenflow_core::ingress`.
 
 use super::admission::IngressAttemptSeq;
+use super::identity::IngressRequestIdentity;
 use super::IngressKey;
 use crate::EventType;
 use serde::{Deserialize, Serialize};
@@ -22,59 +23,15 @@ pub struct EventSubmission {
     /// Event payload (arbitrary JSON)
     pub data: serde_json::Value,
 
-    /// Optional metadata (arbitrary JSON)
+    /// Optional metadata (arbitrary JSON); never part of request identity.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
-
-    /// Framework-owned handoff data used while an accepted HTTP event crosses into `flow!`.
-    ///
-    /// This field is intentionally skipped from user JSON. It is populated by the ingress
-    /// endpoints after semantic checks pass and consumed by `HttpSource` when constructing the
-    /// first `ChainEvent`.
-    #[serde(skip)]
-    pub ingress_handoff: Option<SubmissionIngressContext>,
 }
 
 /// Batch submission payload (FLOWIP-084d).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchSubmission {
     pub events: Vec<EventSubmission>,
-}
-
-/// Response for event submission endpoints (FLOWIP-084d).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionResponse {
-    pub accepted: usize,
-    pub rejected: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub errors: Vec<String>,
-}
-
-/// Shape of the data crossing the framework-owned ingress handoff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmissionPayloadKind {
-    /// Data still has the external protocol shape and must pass through the
-    /// application-owned ingress decoder.
-    External,
-    /// Data was submitted as the decoder's typed output and only needs its
-    /// canonical serde representation restored.
-    TypedOutput,
-}
-
-/// Framework-owned handoff context carried on accepted submissions before they
-/// become `ChainEvent`s.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubmissionIngressContext {
-    pub accepted_at_ns: u64,
-    pub ingress_key: IngressKey,
-    pub batch_index: Option<usize>,
-    /// FLOWIP-115d: the per-attempt sequence, the cross-journal merge key against
-    /// `IngressRefusal` facts. A batch's accepted rows share one sequence and are
-    /// ordered within it by `batch_index`.
-    pub attempt_seq: IngressAttemptSeq,
-    /// Distinguishes hosted protocol data from a typed `IngressHandle`
-    /// submission without exposing a second decoding contract to applications.
-    pub payload_kind: SubmissionPayloadKind,
 }
 
 /// Provenance attached to accepted events when they enter the pipeline.
@@ -87,4 +44,7 @@ pub struct IngressContext {
     /// FLOWIP-115d: the per-attempt sequence carried onto the accepted source row,
     /// the merge key with system-journal `IngressRefusal` facts.
     pub attempt_seq: IngressAttemptSeq,
+    /// FLOWIP-084l: the sender's request identity, committed with the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<IngressRequestIdentity>,
 }

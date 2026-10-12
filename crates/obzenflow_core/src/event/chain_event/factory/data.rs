@@ -136,6 +136,7 @@ mod tests {
             ingress_key: "orders".into(),
             batch_index: Some(3),
             attempt_seq: crate::ingress::IngressAttemptSeq(0),
+            request: None,
         });
 
         let child = ChainEventFactory::derived_data_event(

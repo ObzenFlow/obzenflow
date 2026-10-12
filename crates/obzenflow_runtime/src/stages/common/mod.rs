@@ -21,12 +21,12 @@ pub use heartbeat::LivenessSnapshots;
 
 // Re-export handler traits for convenience
 pub use handlers::{
-    EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource, InferenceHandler,
-    IngressDecodeError, IngressDecoder, IngressRecord, InlineSink, ObserverHandler,
-    ResourceManaged, SinkConnector, SinkDescription, SinkWriter, SinkWriterInitContext,
-    SourceObservationSink, StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-    TypedStatefulHandler,
+    prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource,
+    HostedSubmission, InferenceHandler, IngressDecodeError, IngressDecoder, IngressReceiptSender,
+    IngressRecord, InlineSink, ObserverHandler, ResourceManaged, SinkConnector, SinkDescription,
+    SinkWriter, SinkWriterInitContext, SourceObservationSink, StatefulEmission, TransformHandler,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler, TypedStatefulHandler,
 };
 
 // Re-export handler error type so stage code can depend on a single error enum

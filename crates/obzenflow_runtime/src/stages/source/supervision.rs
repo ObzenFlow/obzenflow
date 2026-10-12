@@ -878,6 +878,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
+    committed: &mut Vec<EventId>,
     receive_control: impl std::future::Future<Output = Option<E>> + Send,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
@@ -906,6 +907,7 @@ where
             continue;
         }
 
+        let event_id = pending.event.id;
         match drain_one_pending_resolve(
             pending,
             stage_flow_context,
@@ -922,7 +924,7 @@ where
         )
         .await?
         {
-            DrainAttempt::Committed { .. } => {}
+            DrainAttempt::Committed { .. } => committed.push(event_id),
             DrainAttempt::BackedOff { bound, waker } => {
                 // Sources keep their out-of-band arm: the credit wait races
                 // the external-events channel, so drain, EOF, cancellation,
@@ -1435,6 +1437,7 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
                 None,
+                &mut Vec::new(),
                 receiver.recv(),
                 || TestEvent::ChannelClosed,
             )
@@ -1536,6 +1539,7 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
                 None,
+                &mut Vec::new(),
                 receiver.recv(),
                 || TestEvent::ChannelClosed,
             )

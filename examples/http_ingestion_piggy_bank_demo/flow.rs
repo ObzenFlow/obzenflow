@@ -22,8 +22,8 @@
 //!
 //! Accounts `acct-1` (Alice, $10.00) and `acct-2` (Bob, $0.00) open from
 //! `accounts.yaml` before any transaction joins. Post credits and debits:
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Credit","amount_cents":250,"note":"paycheck"}}'`
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "tx-0001"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Credit","amount_cents":250,"note":"paycheck"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "tx-0002"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'`
 //!
 //! Notes:
 //! - Accounts are fixed at startup. `joins::inner` hydrates every account before
@@ -32,10 +32,14 @@
 //! - A zero-amount or malformed entry is refused with `400`, and the system journal
 //!   records the refusal with the field it names.
 //! - Strict replay (`-- --replay-from <run-dir>`) reuses the archived accounts and
-//!   never reopens `accounts.yaml`.
+//!   never reopens `accounts.yaml`; transaction ingress answers `503 not_ready`
+//!   throughout.
 //! - Transaction ingress has its own rate limiter.
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
-//! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
+//! - A `202` names each entry's committed row (`outcome` `committed`). Resending the
+//!   same entry with the same `Idempotency-Key` answers `duplicate` with the original
+//!   `event_id`; other content under that key answers `422`. A `503 outcome_unknown`
+//!   means retry the identical request with the same key.
 //! - Ingress POSTs above stay unauthenticated in this example. Control-plane auth protects built-ins such as `/metrics`, `/api/topology`, and `/api/flow/*`.
 //! - With control-plane auth enabled, configure the client's `Authorization` header
 //!   through its protected credential configuration before querying `/metrics` or

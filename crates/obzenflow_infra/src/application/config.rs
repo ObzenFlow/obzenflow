@@ -4,6 +4,7 @@
 
 use crate::env::{env_bool, env_var};
 use clap::{ArgAction, Parser, ValueEnum};
+use obzenflow_core::ingress::{IngressTiming, InvalidIngressTiming, OUTCOME_UNKNOWN_RETRY_AFTER};
 use obzenflow_core::journal::RUN_MANIFEST_FILENAME;
 use obzenflow_core::web::AuthPolicy;
 use obzenflow_runtime::bootstrap::{BootstrapConfig, ReplayVerb};
@@ -248,6 +249,9 @@ pub(crate) struct ResolvedServerConfig {
     pub cors_mode: CorsModeArg,
     pub cors_allow_origin: Vec<String>,
     pub control_plane_auth: Option<AuthPolicy>,
+    /// FLOWIP-084l: acknowledgement deadline and idempotency window, applied
+    /// to hosted HTTP and in-process ingress alike.
+    pub ingress: IngressTiming,
 }
 
 /// FLOWIP-114d Studio registration settings, resolved and validated.
@@ -438,6 +442,53 @@ struct RawFileServerConfig {
     request_timeout_secs: Option<i64>,
     cors: RawFileCorsConfig,
     control_plane_auth: RawFileControlPlaneAuthConfig,
+    ingress: RawFileServerIngressConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawFileServerIngressConfig {
+    ack_deadline_secs: Option<i64>,
+    idempotency_window_secs: Option<i64>,
+}
+
+/// FLOWIP-084l: resolve `[server.ingress]`. The deadline must precede the
+/// host's plain 504 when the server enforces a timeout, and the window must
+/// cover the one retry `outcome_unknown` advises.
+fn resolve_ingress_timing(
+    file: &RawFileServerIngressConfig,
+    server_enabled: bool,
+    request_timeout_secs: u64,
+) -> Result<IngressTiming, ConfigError> {
+    let ack_deadline_secs =
+        parse_non_negative_u64(file.ack_deadline_secs, "server.ingress.ack_deadline_secs")?
+            .unwrap_or(IngressTiming::DEFAULT_ACK_DEADLINE.as_secs());
+    let idempotency_window_secs = parse_non_negative_u64(
+        file.idempotency_window_secs,
+        "server.ingress.idempotency_window_secs",
+    )?
+    .unwrap_or(IngressTiming::DEFAULT_IDEMPOTENCY_WINDOW.as_secs());
+    if server_enabled && request_timeout_secs != 0 && ack_deadline_secs >= request_timeout_secs {
+        return Err(ConfigError::global(format!(
+            "server.ingress.ack_deadline_secs ({ack_deadline_secs}) must be less than \
+             server.request_timeout_secs ({request_timeout_secs})"
+        )));
+    }
+    IngressTiming::new(
+        Duration::from_secs(ack_deadline_secs),
+        Duration::from_secs(idempotency_window_secs),
+    )
+    .map_err(|error| match error {
+        InvalidIngressTiming::DeadlineTooShort => {
+            ConfigError::global("server.ingress.ack_deadline_secs must be at least 1")
+        }
+        InvalidIngressTiming::WindowTooShort => ConfigError::global(format!(
+            "server.ingress.idempotency_window_secs ({idempotency_window_secs}) must be greater \
+             than server.ingress.ack_deadline_secs ({ack_deadline_secs}) plus the {}-second \
+             Retry-After of outcome_unknown",
+            OUTCOME_UNKNOWN_RETRY_AFTER.as_secs()
+        )),
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -793,6 +844,17 @@ impl FlowConfig {
         } else {
             file.server.cors.allow_origins.unwrap_or_default()
         };
+        let request_timeout_secs = resolve_scalar(
+            self.request_timeout_secs,
+            parse_non_negative_u64(
+                file.server.request_timeout_secs,
+                "server.request_timeout_secs",
+            )?,
+            None,
+            30,
+        );
+        let ingress =
+            resolve_ingress_timing(&file.server.ingress, server_enabled, request_timeout_secs)?;
 
         let server = ResolvedServerConfig {
             enabled: server_enabled,
@@ -817,20 +879,13 @@ impl FlowConfig {
                 None,
                 10 * 1024 * 1024,
             ),
-            request_timeout_secs: resolve_scalar(
-                self.request_timeout_secs,
-                parse_non_negative_u64(
-                    file.server.request_timeout_secs,
-                    "server.request_timeout_secs",
-                )?,
-                None,
-                30,
-            ),
+            request_timeout_secs,
             startup_mode,
             on_terminal,
             cors_mode,
             cors_allow_origin,
             control_plane_auth,
+            ingress,
         };
 
         if !server.cors_allow_origin.is_empty() && server.cors_mode != CorsModeArg::AllowList {
@@ -2423,5 +2478,77 @@ port = "abc"
         let err = cli.resolve(None, false).unwrap_err();
         let rendered = err.to_string();
         assert!(rendered.contains("failed to parse"));
+    }
+
+    fn ingress_error(contents: &str) -> String {
+        resolve_studio_file(contents, &[])
+            .expect_err("ingress timing refused")
+            .to_string()
+    }
+
+    #[test]
+    fn ingress_timing_defaults_satisfy_the_contract() {
+        let _lock = env_lock();
+        let resolved = resolve_studio_file("", &[]).unwrap();
+        assert_eq!(resolved.server.ingress, IngressTiming::default());
+        let resolved = resolve_studio_file(
+            "[server.ingress]\nack_deadline_secs = 3\nidempotency_window_secs = 600\n",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.server.ingress.ack_deadline(),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            resolved.server.ingress.idempotency_window(),
+            Duration::from_secs(600)
+        );
+    }
+
+    #[test]
+    fn ingress_window_must_cover_one_advised_retry() {
+        let _lock = env_lock();
+        assert_eq!(
+            ingress_error("[server.ingress]\nack_deadline_secs = 10\nidempotency_window_secs = 11\n"),
+            "config error: server.ingress.idempotency_window_secs (11) must be greater than \
+             server.ingress.ack_deadline_secs (10) plus the 1-second Retry-After of outcome_unknown"
+        );
+        assert!(resolve_studio_file(
+            "[server.ingress]\nack_deadline_secs = 10\nidempotency_window_secs = 12\n",
+            &[],
+        )
+        .is_ok());
+        // The in-process handle uses both values, so the check stands without a server.
+        assert!(ingress_error(
+            "[server]\nenabled = false\n[server.ingress]\nidempotency_window_secs = 5\n"
+        )
+        .contains("idempotency_window_secs (5)"));
+    }
+
+    #[test]
+    fn ingress_deadline_precedes_an_enforced_host_timeout() {
+        let _lock = env_lock();
+        assert_eq!(
+            ingress_error(
+                "[server]\nenabled = true\nrequest_timeout_secs = 30\n[server.ingress]\nack_deadline_secs = 40\n"
+            ),
+            "config error: server.ingress.ack_deadline_secs (40) must be less than \
+             server.request_timeout_secs (30)"
+        );
+        assert_eq!(
+            ingress_error("[server.ingress]\nack_deadline_secs = 0\n"),
+            "config error: server.ingress.ack_deadline_secs must be at least 1"
+        );
+        // A disabled host timeout leaves the deadline as the only bound; a
+        // build without a host refuses the server itself, never the deadline.
+        let result = resolve_studio_file(
+            "[server]\nenabled = true\nrequest_timeout_secs = 0\n[server.ingress]\nack_deadline_secs = 60\nidempotency_window_secs = 62\n",
+            &[],
+        );
+        assert_eq!(result.is_ok(), cfg!(feature = "warp-server"), "{result:?}");
+        if let Err(error) = result {
+            assert!(!error.to_string().contains("server.ingress"), "{error}");
+        }
     }
 }

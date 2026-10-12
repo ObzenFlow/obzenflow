@@ -17,7 +17,7 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::source::{EncodedSourcePosition, SourcePositionError};
-use obzenflow_core::{ChainEvent, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,6 +157,10 @@ pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync
     fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot>;
     async fn next_invocation(&mut self) -> ErasedSourceInvocation;
     async fn drain(&mut self) -> Result<(), SourceError>;
+    /// Rows the journal committed, so hosted receipts can resolve (FLOWIP-084l).
+    fn settle_committed(&mut self, _committed: &[EventId]) {}
+    /// One re-admitted row of this source, folded before the slot goes live.
+    fn fold_recorded_admission(&mut self, _event: &ChainEvent) {}
 }
 
 impl<T: FiniteSourceHandler + Send + Sync> sealed::Finite for T {}

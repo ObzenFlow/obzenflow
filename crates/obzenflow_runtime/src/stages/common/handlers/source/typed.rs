@@ -25,11 +25,11 @@ use crate::stages::source::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     InfiniteSourceConnector, SourceReaderInitContext,
 };
-use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
 use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 
+use super::hosted::{HostedAdmission, HostedSubmission};
 use obzenflow_core::event::payloads::execution_payload::{
     SourceContinuationRefusal, SourceInputPinnedFact,
 };
@@ -37,14 +37,11 @@ use obzenflow_core::event::{
     ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason, SourceErrorCode, StageFatalCode,
     StageFatalReason,
 };
-use obzenflow_core::ingress::{
-    EventSubmission, HostedIngressBindingSlot, IngressContext, SubmissionIngressContext,
-    SubmissionPayloadKind,
-};
+use obzenflow_core::ingress::{HostedIngressBindingSlot, IngressContext};
 use obzenflow_core::source::{
     EncodedSourcePosition, SourcePosition, SourcePositionError, SourceProgress,
 };
-use obzenflow_core::{ChainEvent, OneFactStageOutput, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, EventId, OneFactStageOutput, TypedPayload, WriterId};
 use serde::de::DeserializeOwned;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -58,7 +55,7 @@ fn configuration_fatal(detail: impl Into<String>) -> StageFatal {
     )
 }
 
-fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
+pub(super) fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
     StageFatal::new(
         StageFatalCode::Protocol,
         StageFatalReason::ProtocolInputIntegrity,
@@ -66,7 +63,7 @@ fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
     )
 }
 
-fn lower_outputs<O>(
+pub(super) fn lower_outputs<O>(
     writer_id: WriterId,
     outputs: Vec<(O, Option<IngressContext>)>,
 ) -> Result<Vec<ChainEvent>, StageFatal>
@@ -334,7 +331,7 @@ impl fmt::Debug for SourceRuntimeRegistration {
 }
 
 impl SourceRuntimeRegistration {
-    fn hosted(slot: HostedIngressBindingSlot) -> Self {
+    pub(super) fn hosted(slot: HostedIngressBindingSlot) -> Self {
         Self {
             hosted_ingress_slot: slot,
         }
@@ -344,22 +341,25 @@ impl SourceRuntimeRegistration {
 /// One typed async-infinite invocation before runtime envelope lowering.
 #[doc(hidden)]
 pub struct TypedAsyncInfiniteSourceInvocation<O> {
-    outputs: Vec<(O, Option<IngressContext>)>,
+    outputs: InvocationOutputs<O>,
+}
+
+enum InvocationOutputs<O> {
+    Facts(Vec<O>),
+    /// Admitted hosted members with their receipts (FLOWIP-084l).
+    Hosted(Vec<HostedSubmission<O>>),
 }
 
 impl<O> TypedAsyncInfiniteSourceInvocation<O> {
     fn facts_only(outputs: Vec<O>) -> Self {
         Self {
-            outputs: outputs.into_iter().map(|output| (output, None)).collect(),
+            outputs: InvocationOutputs::Facts(outputs),
         }
     }
 
-    fn hosted(outputs: Vec<(O, IngressContext)>) -> Self {
+    pub(super) fn hosted(submissions: Vec<HostedSubmission<O>>) -> Self {
         Self {
-            outputs: outputs
-                .into_iter()
-                .map(|(output, context)| (output, Some(context)))
-                .collect(),
+            outputs: InvocationOutputs::Hosted(submissions),
         }
     }
 }
@@ -466,11 +466,9 @@ impl fmt::Debug for IngressRecord<'_> {
 /// The decoder value owns the source's `Output` contract. The default method
 /// deserializes the record with serde; applications override it for an
 /// external representation or a record-local rule, rejecting with a typed
-/// [`IngressDecodeError`]. Implementations must be deterministic, side-effect
-/// free, and behaviourally equivalent across clones: hosted HTTP ingress invokes
-/// the decoder once for admission validation and again when the accepted
-/// submission reaches the source. Typed `IngressHandle` submissions already have
-/// the `Output` shape and bypass this external-representation mapping.
+/// [`IngressDecodeError`]. Hosted admission runs it exactly once per
+/// submission, before anything is queued (FLOWIP-084l B4). Typed
+/// `IngressHandle` submissions already have the `Output` shape and bypass it.
 pub trait IngressDecoder: Clone + Send + Sync + 'static {
     type Output: TypedPayload + Send + Sync + 'static;
 
@@ -479,142 +477,26 @@ pub trait IngressDecoder: Clone + Send + Sync + 'static {
     }
 }
 
-/// Runtime-owned typed hosted-ingress queue core.
-pub struct HostedIngressSource<D> {
-    rx: tokio::sync::mpsc::Receiver<EventSubmission>,
-    slot: HostedIngressBindingSlot,
-    max_batch_size: usize,
-    decoder: D,
-}
-
-impl<D> fmt::Debug for HostedIngressSource<D>
-where
-    D: IngressDecoder,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HostedIngressSource")
-            .field("decoder", &std::any::type_name::<D>())
-            .field("output", &std::any::type_name::<D::Output>())
-            .field("ingress_key", self.slot.ingress_key())
-            .field("max_batch_size", &self.max_batch_size)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<D> HostedIngressSource<D> {
-    pub fn new(
-        decoder: D,
-        rx: tokio::sync::mpsc::Receiver<EventSubmission>,
-        slot: HostedIngressBindingSlot,
-    ) -> Self {
-        Self {
-            rx,
-            slot,
-            max_batch_size: 1000,
-            decoder,
-        }
-    }
-
-    pub fn with_max_batch_size(mut self, max_batch_size: usize) -> Self {
-        self.max_batch_size = max_batch_size.max(1);
-        self
-    }
-}
-
-impl<D> SourceTyping for HostedIngressSource<D>
-where
-    D: IngressDecoder,
-{
-    type Output = D::Output;
-}
-
-impl<D> HostedIngressSource<D>
-where
-    D: IngressDecoder,
-{
-    async fn receive_batch(&mut self) -> Result<Vec<(D::Output, IngressContext)>, SourceError> {
-        let rx = &mut self.rx;
-        let first = rx.recv().await.ok_or(SourceError::Transport(
-            SourceDiagnosticReason::InputClosed.into(),
-        ))?;
-        let mut submissions = vec![first];
-        while submissions.len() < self.max_batch_size {
-            match rx.try_recv() {
-                Ok(submission) => submissions.push(submission),
-                Err(_) => break,
-            }
-        }
-
-        let expected_key = self.slot.ingress_key();
-        let mut decoded = Vec::with_capacity(submissions.len());
-        for submission in submissions {
-            // Ingress invariants carry no input text; 084l makes them fatal.
-            let invariant = || SourceError::Validation(SourceDiagnosticReason::Unclassified.into());
-            if !D::Output::matches_event_type(submission.event_type.as_str()) {
-                return Err(invariant());
-            }
-            let SubmissionIngressContext {
-                accepted_at_ns,
-                ingress_key,
-                batch_index,
-                attempt_seq,
-                payload_kind,
-            } = submission.ingress_handoff.ok_or_else(invariant)?;
-            if &ingress_key != expected_key {
-                return Err(invariant());
-            }
-            let record = IngressRecord::new(&submission.data);
-            let value = match payload_kind {
-                SubmissionPayloadKind::External => self.decoder.decode(record),
-                SubmissionPayloadKind::TypedOutput => record.deserialize(),
-            }
-            .map_err(|error| SourceError::Validation(error.into_diagnostic()))?;
-            decoded.push((
-                value,
-                IngressContext {
-                    accepted_at_ns,
-                    ingress_key,
-                    batch_index,
-                    attempt_seq,
-                },
-            ));
-        }
-        Ok(decoded)
-    }
-}
-
-#[async_trait]
-impl<D> TypedAsyncInfiniteSourceHandler for HostedIngressSource<D>
-where
-    D: IngressDecoder,
-{
-    type Output = D::Output;
-
-    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        Ok(self
-            .receive_batch()
-            .await?
-            .into_iter()
-            .map(|(output, _)| output)
-            .collect())
-    }
-
-    async fn drain(&mut self) -> Result<(), SourceError> {
-        self.rx.close();
-        Ok(())
-    }
-
-    fn runtime_registration(&self) -> Option<SourceRuntimeRegistration> {
-        Some(SourceRuntimeRegistration::hosted(self.slot.clone()))
-    }
-
-    async fn next_invocation(
-        &mut self,
-    ) -> Result<TypedAsyncInfiniteSourceInvocation<Self::Output>, SourceError> {
-        self.receive_batch()
-            .await
-            .map(TypedAsyncInfiniteSourceInvocation::hosted)
-    }
+/// Prove that `value`'s journal form decodes as its own type, returning the
+/// decoded copy so the queued value is exactly what replay reconstructs
+/// (FLOWIP-084l B4). A failure is `UnrepresentableValue` at the failing field.
+pub fn prove_journal_form<T: TypedPayload>(value: T) -> Result<T, IngressDecodeError> {
+    let unrepresentable = || {
+        IngressDecodeError(SourceDiagnostic::new(
+            SourceDiagnosticReason::UnrepresentableValue,
+        ))
+    };
+    let payload = value.into_chain_payload().map_err(|_| unrepresentable())?;
+    let body = payload.contract_body().map_err(|_| unrepresentable())?;
+    IngressRecord::new(&body)
+        .deserialize::<T>()
+        .map_err(|error| {
+            IngressDecodeError(
+                error
+                    .into_diagnostic()
+                    .with_reason(SourceDiagnosticReason::UnrepresentableValue),
+            )
+        })
 }
 
 /// Runtime adapter for a synchronous typed finite source.
@@ -1074,6 +956,8 @@ pub struct TypedAsyncInfiniteSourceHandlerAdapter<H> {
     observation_sink: SourceObservationSink,
     recorder: Arc<dyn ObservationRecorder>,
     hosted_slot: Option<HostedIngressBindingSlot>,
+    /// Hosted ingress only: the single writer's identity index (FLOWIP-084l).
+    admission: Option<HostedAdmission>,
 }
 
 impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<H> {
@@ -1094,12 +978,14 @@ impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<
         hosted_slot: Option<HostedIngressBindingSlot>,
     ) -> Self {
         let observation_sink = SourceObservationSink::new();
+        let admission = hosted_slot.clone().map(HostedAdmission::new);
         Self {
             reader,
             writer_id: None,
             observation_sink,
             recorder: Arc::new(NoObservations),
             hosted_slot,
+            admission,
         }
     }
 }
@@ -1214,15 +1100,27 @@ where
                 )]
             })
             .unwrap_or_default();
-        match result {
-            Ok(invocation) => match lower_outputs(writer_id, invocation.outputs) {
-                Ok(events) => ErasedSourceInvocation::completed(
-                    ErasedSourceCompletion::Batch(events),
-                    observations,
+        let lowered = match result {
+            Ok(invocation) => match (invocation.outputs, self.admission.as_mut()) {
+                (InvocationOutputs::Facts(outputs), _) => lower_outputs(
+                    writer_id,
+                    outputs.into_iter().map(|output| (output, None)).collect(),
                 ),
-                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
+                (InvocationOutputs::Hosted(submissions), Some(admission)) => {
+                    admission.admit(writer_id, submissions)
+                }
+                (InvocationOutputs::Hosted(_), None) => Err(configuration_fatal(
+                    "hosted ingress submissions reached a source without a hosted registration",
+                )),
             },
-            Err(error) => ErasedSourceInvocation::handler_error(error, observations),
+            Err(error) => return ErasedSourceInvocation::handler_error(error, observations),
+        };
+        match lowered {
+            Ok(events) => ErasedSourceInvocation::completed(
+                ErasedSourceCompletion::Batch(events),
+                observations,
+            ),
+            Err(fatal) => ErasedSourceInvocation::fatal(fatal),
         }
     }
 
@@ -1230,6 +1128,18 @@ where
         match self.reader.get_mut() {
             Some(handler) => handler.drain().await,
             None => Ok(()),
+        }
+    }
+
+    fn settle_committed(&mut self, committed: &[EventId]) {
+        if let Some(admission) = self.admission.as_mut() {
+            admission.settle(committed);
+        }
+    }
+
+    fn fold_recorded_admission(&mut self, event: &ChainEvent) {
+        if let Some(admission) = self.admission.as_mut() {
+            admission.fold(event);
         }
     }
 }
@@ -1241,7 +1151,6 @@ mod tests {
     use crate::execution::{RuntimeExecution, RuntimeMode};
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::ChainPayload;
-    use obzenflow_core::ingress::{IngressAttemptSeq, IngressKey};
     use obzenflow_core::{FlowId, OneFactStageOutput, StageId, StageOutputFacts, TypedPayload};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1251,13 +1160,6 @@ mod tests {
 
     impl TypedPayload for Row {
         const EVENT_TYPE: &'static str = "typed_source.row";
-    }
-
-    #[derive(Clone, Debug)]
-    struct RowIngress;
-
-    impl IngressDecoder for RowIngress {
-        type Output = Row;
     }
 
     #[derive(Clone)]
@@ -1275,12 +1177,6 @@ mod tests {
             }
             Ok(Row(row + self.offset))
         }
-    }
-
-    fn assert_row_output<S>(_source: &S)
-    where
-        S: SourceTyping<Output = Row>,
-    {
     }
 
     #[derive(Clone, Debug)]
@@ -1494,134 +1390,18 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    fn hosted_submission(
-        row: u32,
-        accepted_at_ns: u64,
-        ingress_key: &str,
-        batch_index: Option<usize>,
-        attempt_seq: u64,
-    ) -> EventSubmission {
-        EventSubmission {
-            event_type: Row::event_type_name().into(),
-            data: serde_json::json!(row),
-            metadata: None,
-            ingress_handoff: Some(SubmissionIngressContext {
-                accepted_at_ns,
-                ingress_key: IngressKey::from(ingress_key),
-                batch_index,
-                attempt_seq: IngressAttemptSeq(attempt_seq),
-                payload_kind: SubmissionPayloadKind::External,
-            }),
-        }
-    }
-
-    #[tokio::test]
-    async fn hosted_ingress_rejoins_exact_single_and_batch_context_at_runtime_lowering() {
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let slot = HostedIngressBindingSlot::new("bank.accounts");
-        let source = HostedIngressSource::new(RowIngress, rx, slot.clone());
-        let writer_id = WriterId::from(StageId::new());
-        let mut adapter = TypedAsyncInfiniteSourceHandlerAdapter::new(source);
-
-        let registered = UnifiedAsyncInfiniteSourceHandler::hosted_ingress_slot(&adapter)
-            .expect("hosted registration is sampled by the adapter");
-        assert_eq!(registered.ingress_key(), slot.ingress_key());
-        UnifiedAsyncInfiniteSourceHandler::install_writer_id(&mut adapter, writer_id);
-
-        tx.send(hosted_submission(7, 101, "bank.accounts", None, 11))
-            .await
-            .expect("single submission queued");
-        let (outcome, observations) =
-            UnifiedAsyncInfiniteSourceHandler::next_invocation(&mut adapter)
-                .await
-                .into_parts();
-        let ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(single)) = outcome else {
-            panic!("single hosted submission lowers to one batch")
-        };
-        assert!(observations.is_empty());
-        assert_eq!(single.len(), 1);
-        assert_eq!(single[0].writer_id, writer_id);
-        assert_eq!(single[0].event_type(), Row::event_type_name());
-        assert_eq!(Row::from_event(&single[0]), Some(Row(7)));
+    #[test]
+    fn decoder_rejections_keep_a_typed_diagnostic_without_input_text() {
+        let decoder = OffsetIngress { offset: 40 };
         assert_eq!(
-            single[0].ingress_context,
-            Some(IngressContext {
-                accepted_at_ns: 101,
-                ingress_key: IngressKey::from("bank.accounts"),
-                batch_index: None,
-                attempt_seq: IngressAttemptSeq(11),
-            })
+            decoder.decode(IngressRecord::new(&serde_json::json!(2))),
+            Ok(Row(42))
         );
 
-        tx.send(hosted_submission(8, 202, "bank.accounts", Some(0), 12))
-            .await
-            .expect("first batch row queued");
-        tx.send(hosted_submission(9, 203, "bank.accounts", Some(1), 12))
-            .await
-            .expect("second batch row queued");
-        let (outcome, observations) =
-            UnifiedAsyncInfiniteSourceHandler::next_invocation(&mut adapter)
-                .await
-                .into_parts();
-        let ErasedSourceOutcome::Completed(ErasedSourceCompletion::Batch(batch)) = outcome else {
-            panic!("hosted batch lowers atomically")
-        };
-        assert!(observations.is_empty());
-        assert_eq!(batch.len(), 2);
-        assert_eq!(Row::from_event(&batch[0]), Some(Row(8)));
-        assert_eq!(Row::from_event(&batch[1]), Some(Row(9)));
-        assert_eq!(
-            batch
-                .iter()
-                .map(|event| event.ingress_context.clone().expect("context retained"))
-                .collect::<Vec<_>>(),
-            vec![
-                IngressContext {
-                    accepted_at_ns: 202,
-                    ingress_key: IngressKey::from("bank.accounts"),
-                    batch_index: Some(0),
-                    attempt_seq: IngressAttemptSeq(12),
-                },
-                IngressContext {
-                    accepted_at_ns: 203,
-                    ingress_key: IngressKey::from("bank.accounts"),
-                    batch_index: Some(1),
-                    attempt_seq: IngressAttemptSeq(12),
-                },
-            ]
-        );
-        assert!(batch.iter().all(|event| event.writer_id == writer_id));
-    }
-
-    #[tokio::test]
-    async fn hosted_ingress_decoder_value_owns_and_decodes_output() {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let slot = HostedIngressBindingSlot::new("bank.offset");
-        let mut source = HostedIngressSource::new(OffsetIngress { offset: 40 }, rx, slot);
-        assert_row_output(&source);
-
-        let source_debug = format!("{source:?}");
-        assert!(source_debug.contains("OffsetIngress"));
-        assert!(!source_debug.contains("offset: 40"));
-
-        tx.send(hosted_submission(2, 301, "bank.offset", None, 21))
-            .await
-            .expect("submission queued");
-        assert_eq!(source.next().await.expect("decoded batch"), vec![Row(42)]);
-    }
-
-    #[tokio::test]
-    async fn hosted_ingress_rejection_keeps_the_decoder_diagnostic() {
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
-        let slot = HostedIngressBindingSlot::new("bank.offset");
-        let mut source = HostedIngressSource::new(OffsetIngress { offset: 40 }, rx, slot);
-
-        tx.send(hosted_submission(0, 301, "bank.offset", None, 21))
-            .await
-            .expect("rule-breaking submission queued");
-        let Err(SourceError::Validation(rule)) = source.next().await else {
-            panic!("a decoder rejection is a record-local validation error");
-        };
+        let rule = decoder
+            .decode(IngressRecord::new(&serde_json::json!(0)))
+            .unwrap_err()
+            .into_diagnostic();
         assert_eq!(rule.reason(), SourceDiagnosticReason::InvalidValue);
         assert_eq!(
             rule.location().field_path(),
@@ -1630,45 +1410,68 @@ mod tests {
             )]
         );
 
-        let mut malformed = hosted_submission(1, 302, "bank.offset", None, 22);
-        malformed.data = serde_json::json!("SECRET_VALUE");
-        tx.send(malformed)
-            .await
-            .expect("malformed submission queued");
-        let Err(SourceError::Validation(malformed)) = source.next().await else {
-            panic!("a malformed body is a record-local validation error");
-        };
+        let malformed = decoder
+            .decode(IngressRecord::new(&serde_json::json!("SECRET_VALUE")))
+            .unwrap_err()
+            .into_diagnostic();
         assert_eq!(malformed.reason(), SourceDiagnosticReason::InvalidValue);
         assert!(!format!("{malformed} {malformed:?}").contains("SECRET"));
     }
 
-    #[tokio::test]
-    async fn hosted_ingress_rejects_a_mixed_batch_atomically() {
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
-        let slot = HostedIngressBindingSlot::new("bank.accounts");
-        let source = HostedIngressSource::new(RowIngress, rx, slot);
-        let mut adapter = TypedAsyncInfiniteSourceHandlerAdapter::new(source);
-        UnifiedAsyncInfiniteSourceHandler::install_writer_id(
-            &mut adapter,
-            WriterId::from(StageId::new()),
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Tagged {
+        name: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+    }
+
+    impl TypedPayload for Tagged {
+        const EVENT_TYPE: &'static str = "typed_source.tagged";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Measured {
+        value: f64,
+    }
+
+    impl TypedPayload for Measured {
+        const EVENT_TYPE: &'static str = "typed_source.measured";
+    }
+
+    #[test]
+    fn journal_form_proof_returns_the_decoded_copy() {
+        let tagged = Tagged {
+            name: "a".into(),
+            tags: vec!["x".into()],
+        };
+        assert_eq!(prove_journal_form(tagged.clone()), Ok(tagged));
+    }
+
+    #[test]
+    fn unrepresentable_values_name_the_failing_field() {
+        let skipped = prove_journal_form(Tagged {
+            name: "a".into(),
+            tags: Vec::new(),
+        })
+        .unwrap_err()
+        .into_diagnostic();
+        assert_eq!(
+            skipped.reason(),
+            SourceDiagnosticReason::UnrepresentableValue
+        );
+        assert_eq!(
+            skipped.location().field_path(),
+            [obzenflow_core::event::FieldSegment::Field(
+                obzenflow_core::event::FieldName::new("tags")
+            )]
         );
 
-        tx.send(hosted_submission(1, 301, "bank.accounts", Some(0), 21))
-            .await
-            .expect("valid row queued");
-        let mut invalid = hosted_submission(2, 302, "bank.accounts", Some(1), 21);
-        invalid.event_type = OtherRow::event_type_name().into();
-        tx.send(invalid).await.expect("invalid row queued");
-
-        let (outcome, observations) =
-            UnifiedAsyncInfiniteSourceHandler::next_invocation(&mut adapter)
-                .await
-                .into_parts();
-        assert!(matches!(
-            outcome,
-            ErasedSourceOutcome::HandlerError(SourceError::Validation(ref diagnostic))
-                if diagnostic.reason() == SourceDiagnosticReason::Unclassified
-        ));
-        assert!(observations.is_empty(), "no partial batch may escape");
+        let non_finite = prove_journal_form(Measured { value: f64::NAN })
+            .unwrap_err()
+            .into_diagnostic();
+        assert_eq!(
+            non_finite.reason(),
+            SourceDiagnosticReason::UnrepresentableValue
+        );
     }
 }

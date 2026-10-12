@@ -13,6 +13,10 @@
 //! (I1 to I10, over every archive and the lineage it belongs to). Each
 //! scenario keeps its archives, gateway ledger and receipts under
 //! `target/durable-execution-contract/<scenario>`.
+//!
+//! FLOWIP-084l adds HTTP rows: the web channel becomes hosted ingress, the
+//! parent keeps a sender ledger that survives the server, and I11 checks
+//! every answer against the journal.
 
 #![cfg(unix)]
 
@@ -25,13 +29,16 @@ use gateway_demo::domain::{
     PaymentMethodState,
 };
 use gateway_demo::gateway::AuthorizePaymentOutcome;
+use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
 use obzenflow::application::FlowApplication;
 use obzenflow::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, StageCompletion,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::flow::backpressure::enforced;
-use obzenflow::flow::{effectful_transform, flow, sink, source, stateful, FlowDefinition};
+use obzenflow::flow::{
+    async_infinite_source, effectful_transform, flow, sink, source, stateful, FlowDefinition,
+};
 use obzenflow::journal::disk_journals;
 use obzenflow::journal::read::{
     open_disk_run, ChainPayload, ExecutionPayload, PipelineLifecycleEvent, RunJournalKind,
@@ -44,7 +51,8 @@ use obzenflow::stages::sinks::{
     SinkRedeliverySafety, SinkWriteFailure, SinkWritePhase,
 };
 use obzenflow::stages::sources::{
-    SourcePollErrorKind, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+    HostedIngressSource, IngressDecoder, SourcePollErrorKind, YamlDecodeError, YamlDecoder,
+    YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
 use obzenflow::stages::transforms::EffectfulTransformHandler;
@@ -77,6 +85,16 @@ const DECLINES: [(&str, &str); 3] = [
 ];
 const AUTHORIZED: &str = "authorized";
 const DECLINED: &str = "declined";
+const HTTP_BASE: &str = "/api/orders";
+/// Refused at admission in the run that receives it (I2).
+const INVALID_HTTP_ORDER: &str = "W-BAD";
+/// How long a sender probing for a stall waits before it gives up. Every
+/// other send waits for the server's answer, which a resumed run may delay
+/// until its catch-up frees the web edge's window.
+const PATIENCE: Duration = Duration::from_secs(1);
+/// The server answers by its acknowledgement deadline; this only bounds a
+/// server that never answers.
+const ANSWER: Duration = Duration::from_secs(IngressTiming::DEFAULT_ACK_DEADLINE.as_secs() + 5);
 
 // ---------------------------------------------------------------------------
 // Workload: 6 web orders that finish early, 23 store orders and one invalid
@@ -92,6 +110,11 @@ fn store_ids() -> Vec<String> {
 
 fn valid_ids() -> BTreeSet<String> {
     web_ids().into_iter().chain(store_ids()).collect()
+}
+
+/// Enough HTTP orders to fill the web edge's window twice before the last run.
+fn http_ids() -> Vec<String> {
+    (1..=14).map(|n| format!("W-{n:02}")).collect()
 }
 
 fn decision(order_id: &str) -> &'static str {
@@ -147,6 +170,49 @@ impl YamlDecoder for OrderYaml {
     fn decode(&self, record: YamlRecord<'_>) -> Result<CustomerOrderPlaced, YamlDecodeError> {
         record.deserialize()
     }
+}
+
+fn orders(path: PathBuf, pointer: &str) -> YamlSource<OrderYaml> {
+    YamlSource::builder(OrderYaml)
+        .path(path)
+        .selection(YamlSelection::SequenceAt(pointer.into()))
+        .batch_size(1)
+        .build()
+        .expect("the order channel is configured")
+}
+
+#[derive(Clone, Debug)]
+struct HttpOrders;
+
+impl IngressDecoder for HttpOrders {
+    type Output = CustomerOrderPlaced;
+}
+
+/// One posted order; the invalid one carries an amount that cannot decode.
+fn http_order(order_id: &str) -> serde_json::Value {
+    let amount_cents = if order_id == INVALID_HTTP_ORDER {
+        json!("not-a-number")
+    } else {
+        json!(1_000)
+    };
+    json!({
+        "event_type": CustomerOrderPlaced::event_type_name(),
+        "data": {
+            "order_id": order_id,
+            "customer_id": format!("C-{order_id}"),
+            "channel": "Web",
+            "amount_cents": amount_cents,
+            "payment_method_state": "Valid",
+            "phase": "Warmup",
+        },
+    })
+}
+
+/// The web channel: a YAML file in 134i's histories, hosted HTTP ingress in
+/// 084l's.
+enum WebOrders {
+    Yaml(YamlSource<OrderYaml>),
+    Http(HostedIngressSource<HttpOrders>),
 }
 
 // ---------------------------------------------------------------------------
@@ -409,16 +475,7 @@ impl InlineSink for ReceiptFile {
     }
 }
 
-fn build_flow(scenario: &Scenario, hold: Option<String>) -> FlowDefinition {
-    let orders = |path: PathBuf, pointer: &str| {
-        YamlSource::builder(OrderYaml)
-            .path(path)
-            .selection(YamlSelection::SequenceAt(pointer.into()))
-            .batch_size(1)
-            .build()
-            .expect("the order channel is configured")
-    };
-    let web_orders_input = orders(scenario.web_input(), "/web_orders");
+fn build_flow(scenario: &Scenario, hold: Option<String>, web: WebOrders) -> FlowDefinition {
     let store_orders_input = orders(scenario.store_input(), "/store_orders");
     let authorize = Authorize {
         gateway: Gateway {
@@ -434,30 +491,58 @@ fn build_flow(scenario: &Scenario, hold: Option<String>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let ledger = StatefulWithEmission::new(Settle, OnEOF);
         let settled_ledger = DiscardSink::<SettlementLedger>::new();
-        Ok(flow! {
-            name: "durable_execution_contract",
-            journals: disk_journals(journals),
-            backpressure: enforced(4).stall_timeout_ms(120_000),
+        // The graphs differ only in how `web_orders` is hosted.
+        Ok(match web {
+            WebOrders::Yaml(web_orders_input) => flow! {
+                name: "durable_execution_contract",
+                journals: disk_journals(journals),
+                backpressure: enforced(4).stall_timeout_ms(120_000),
 
-            stages: {
-                web_orders = source!(CustomerOrderPlaced => web_orders_input);
-                store_orders = source!(CustomerOrderPlaced => store_orders_input);
-                authorize_payment = effectful_transform!(
-                    CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined }
-                        uses AuthorizePayment => authorize
-                );
-                settlement = stateful!(PaymentAuthorized -> SettlementLedger => ledger);
-                settled = sink!(SettlementLedger => settled_ledger);
-                receipts = sink!(PaymentAuthorized => receipt_file);
+                stages: {
+                    web_orders = source!(CustomerOrderPlaced => web_orders_input);
+                    store_orders = source!(CustomerOrderPlaced => store_orders_input);
+                    authorize_payment = effectful_transform!(
+                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined }
+                            uses AuthorizePayment => authorize
+                    );
+                    settlement = stateful!(PaymentAuthorized -> SettlementLedger => ledger);
+                    settled = sink!(SettlementLedger => settled_ledger);
+                    receipts = sink!(PaymentAuthorized => receipt_file);
+                },
+
+                topology: {
+                    web_orders |> authorize_payment;
+                    store_orders |> authorize_payment;
+                    authorize_payment |> settlement;
+                    settlement |> settled;
+                    authorize_payment |> receipts;
+                }
             },
+            WebOrders::Http(web_orders_input) => flow! {
+                name: "durable_execution_contract",
+                journals: disk_journals(journals),
+                backpressure: enforced(4).stall_timeout_ms(120_000),
 
-            topology: {
-                web_orders |> authorize_payment;
-                store_orders |> authorize_payment;
-                authorize_payment |> settlement;
-                settlement |> settled;
-                authorize_payment |> receipts;
-            }
+                stages: {
+                    web_orders = async_infinite_source!(CustomerOrderPlaced => web_orders_input);
+                    store_orders = source!(CustomerOrderPlaced => store_orders_input);
+                    authorize_payment = effectful_transform!(
+                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined }
+                            uses AuthorizePayment => authorize
+                    );
+                    settlement = stateful!(PaymentAuthorized -> SettlementLedger => ledger);
+                    settled = sink!(SettlementLedger => settled_ledger);
+                    receipts = sink!(PaymentAuthorized => receipt_file);
+                },
+
+                topology: {
+                    web_orders |> authorize_payment;
+                    store_orders |> authorize_payment;
+                    authorize_payment |> settlement;
+                    settlement |> settled;
+                    authorize_payment |> receipts;
+                }
+            },
         })
     })
 }
@@ -478,10 +563,18 @@ fn durable_execution_contract_child() {
     let plan: Plan = serde_json::from_str(&std::env::var(PLAN).expect("the parent passes a plan"))
         .expect("the plan parses");
     let args = std::iter::once("obzenflow".to_string()).chain(plan.args);
-    if let Err(error) = FlowApplication::builder()
-        .with_cli_args(args)
-        .run_blocking(build_flow(&plan.scenario, plan.hold))
-    {
+    let mut app = FlowApplication::builder().with_cli_args(args);
+    let web = match plan.scenario.http {
+        Some(_) => WebOrders::Http(app.http_ingress(
+            HttpOrders,
+            IngestionConfig {
+                base_path: HTTP_BASE.into(),
+                ..IngestionConfig::default()
+            },
+        )),
+        None => WebOrders::Yaml(orders(plan.scenario.web_input(), "/web_orders")),
+    };
+    if let Err(error) = app.run_blocking(build_flow(&plan.scenario, plan.hold, web)) {
         eprintln!("{error}");
         std::process::exit(2);
     }
@@ -493,6 +586,8 @@ fn durable_execution_contract_child() {
 struct Scenario {
     root: PathBuf,
     inputs: PathBuf,
+    /// The port of an HTTP history's server; every run of it serves there.
+    http: Option<u16>,
 }
 
 impl Scenario {
@@ -506,11 +601,25 @@ impl Scenario {
     }
 
     fn fresh(name: &str) -> Self {
+        let scenario = Self::create(name, None);
+        std::fs::write(scenario.web_input(), web_input()).expect("write web orders");
+        scenario
+    }
+
+    /// Web orders arrive over HTTP; only the store channel reads a file.
+    fn over_http(name: &str) -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("an ephemeral port")
+            .port();
+        Self::create(name, Some(port))
+    }
+
+    fn create(name: &str, http: Option<u16>) -> Self {
         let root = Self::directory(name);
         let inputs = root.join("inputs");
         std::fs::create_dir(&inputs).expect("create the inputs");
-        let scenario = Self { root, inputs };
-        std::fs::write(scenario.web_input(), web_input()).expect("write web orders");
+        let scenario = Self { root, inputs, http };
         std::fs::write(scenario.store_input(), store_input()).expect("write store orders");
         scenario
     }
@@ -522,6 +631,7 @@ impl Scenario {
         let scenario = Self {
             root: Self::directory(name),
             inputs: from.inputs.clone(),
+            http: from.http,
         };
         let copy = scenario
             .journals()
@@ -564,6 +674,14 @@ impl Scenario {
 
     fn release(&self) -> PathBuf {
         self.root.join("release")
+    }
+
+    fn sender_ledger(&self) -> PathBuf {
+        self.root.join("sender-ledger.jsonl")
+    }
+
+    fn answers(&self) -> Vec<Sent> {
+        read_lines(&self.sender_ledger())
     }
 
     fn runs(&self) -> BTreeSet<PathBuf> {
@@ -622,7 +740,10 @@ struct Child {
 static CHILDREN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl Child {
-    fn spawn(scenario: &Scenario, args: Vec<String>, hold: Option<&str>) -> Self {
+    fn spawn(scenario: &Scenario, mut args: Vec<String>, hold: Option<&str>) -> Self {
+        if let Some(port) = scenario.http {
+            args.extend(["--server".into(), "--server-port".into(), port.to_string()]);
+        }
         let before = scenario.runs();
         let number = CHILDREN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let log_path = scenario.root.join(format!("child-{number}.log"));
@@ -693,22 +814,192 @@ impl Child {
     }
 }
 
+/// Wait until `holds` is true of the running archive, with `store_orders`
+/// still short of its end.
+async fn cut(run: &Path, name: &str, holds: impl Fn(&Archive) -> bool) {
+    until(run, name, |archive| {
+        assert!(
+            archive.eof("store_orders").is_none(),
+            "{name}: store_orders reached its end before the cut"
+        );
+        holds(archive)
+    })
+    .await;
+}
+
 /// Wait until `holds` is true of the running archive. The deadline only
 /// fails a fixture whose cut never comes; it never decides correctness.
-async fn cut(run: &Path, name: &str, holds: impl Fn(&Archive) -> bool) {
+async fn until(run: &Path, name: &str, holds: impl Fn(&Archive) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(archive) = Archive::try_read(run).await {
-            assert!(
-                archive.eof("store_orders").is_none(),
-                "{name}: store_orders reached its end before the cut"
-            );
-            if holds(&archive) {
-                return;
-            }
+        if Archive::try_read(run)
+            .await
+            .is_some_and(|archive| holds(&archive))
+        {
+            return;
         }
         assert!(Instant::now() < deadline, "{name}: the cut never held");
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sender: the test parent's HTTP client. Its ledger survives the server.
+
+fn request_key(order_id: &str) -> String {
+    format!("order:{order_id}")
+}
+
+/// One answer, as the sender recorded it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "answer", rename_all = "snake_case")]
+enum Answer {
+    Committed {
+        event_id: EventId,
+    },
+    Duplicate {
+        event_id: EventId,
+    },
+    Rejected {
+        code: String,
+    },
+    /// `outcome_unknown`, a refusal before admission, or no answer at all.
+    Unknown,
+}
+
+impl Answer {
+    fn read(status: u16, body: &serde_json::Value) -> Self {
+        let result = &body["results"][0];
+        let event_id =
+            || serde_json::from_value(result["event_id"].clone()).expect("an answered event id");
+        match (status, result["outcome"].as_str()) {
+            (202, Some("committed")) => Self::Committed {
+                event_id: event_id(),
+            },
+            (202, Some("duplicate")) => Self::Duplicate {
+                event_id: event_id(),
+            },
+            (400 | 422, Some("rejected")) => Self::Rejected {
+                code: result["code"].as_str().unwrap_or_default().into(),
+            },
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Sent {
+    order_id: String,
+    /// The run that received the request.
+    run: PathBuf,
+    #[serde(flatten)]
+    answer: Answer,
+}
+
+struct Sender {
+    client: reqwest::Client,
+    scenario: Scenario,
+}
+
+impl Sender {
+    fn new(scenario: &Scenario) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            scenario: scenario.clone(),
+        }
+    }
+
+    fn url(&self, endpoint: &str) -> String {
+        let port = self.scenario.http.expect("an HTTP scenario");
+        format!("http://127.0.0.1:{port}{HTTP_BASE}/{endpoint}")
+    }
+
+    /// Wait until the run's hosted ingress admits, past any catch-up.
+    async fn live(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let health = self.client.get(self.url("health")).send().await;
+            if health.is_ok_and(|response| response.status() == reqwest::StatusCode::OK) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the ingress never went live");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// POST one order under its stable key, wait for the server's answer and
+    /// record it.
+    async fn send(&self, run: &Path, order_id: &str) -> Answer {
+        self.post(run, order_id, ANSWER).await
+    }
+
+    /// POST one order, giving up after `wait`, and record the answer.
+    async fn post(&self, run: &Path, order_id: &str, wait: Duration) -> Answer {
+        let response = self
+            .client
+            .post(self.url("events"))
+            .header("Idempotency-Key", format!("\"{}\"", request_key(order_id)))
+            .json(&http_order(order_id))
+            .timeout(wait)
+            .send()
+            .await;
+        let answer = match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                Answer::read(status, &response.json().await.unwrap_or_default())
+            }
+            Err(_) => Answer::Unknown,
+        };
+        append_line(
+            &self.scenario.sender_ledger(),
+            &Sent {
+                order_id: order_id.into(),
+                run: run.into(),
+                answer: answer.clone(),
+            },
+        )
+        .expect("record the answer");
+        answer
+    }
+
+    /// Resend every order whose last answer is unknown, returning the answers.
+    async fn resend_unknown(&self, run: &Path) -> Vec<(String, Answer)> {
+        let mut last: Vec<(String, Answer)> = Vec::new();
+        for sent in self.scenario.answers() {
+            match last.iter_mut().find(|(order, _)| *order == sent.order_id) {
+                Some(entry) => entry.1 = sent.answer,
+                None => last.push((sent.order_id, sent.answer)),
+            }
+        }
+        let mut resent = Vec::new();
+        for (order, _) in last
+            .into_iter()
+            .filter(|(_, answer)| *answer == Answer::Unknown)
+        {
+            let answer = self.send(run, &order).await;
+            resent.push((order, answer));
+        }
+        resent
+    }
+
+    /// Send orders until one stalls behind backpressure: its sender gives up
+    /// and the journal holds no row for it.
+    async fn until_stalled(&self, run: &Path, pool: &mut impl Iterator<Item = String>) -> String {
+        for order in pool.by_ref() {
+            match self.post(run, &order, PATIENCE).await {
+                Answer::Committed { .. } => {}
+                Answer::Unknown => {
+                    let admitted = Archive::read(run).await.admitted();
+                    assert!(
+                        admitted.iter().all(|(admitted, _)| *admitted != order),
+                        "{order} committed after its sender gave up"
+                    );
+                    return order;
+                }
+                other => panic!("{order}: {other:?}"),
+            }
+        }
+        panic!("the web channel never stalled");
     }
 }
 
@@ -859,6 +1150,60 @@ impl Archive {
             .count()
     }
 
+    /// Each hosted admission's request ID and row.
+    fn requests(&self) -> Vec<(String, EventId)> {
+        self.facts::<CustomerOrderPlaced>("web_orders")
+            .filter_map(|(row, _)| {
+                let event = row.authored();
+                let request = event.ingress_context.as_ref()?.request.as_ref()?;
+                Some((request.id.as_str().to_string(), *row.id()))
+            })
+            .collect()
+    }
+
+    fn system(&self) -> impl Iterator<Item = &SystemPayload> {
+        self.records
+            .iter()
+            .filter_map(|record| match &record.record {
+                RunRecordData::System(row) => Some(&row.payload),
+                RunRecordData::Chain(_) => None,
+            })
+    }
+
+    /// Hosted ingress refusals of invalid content.
+    fn http_rejections(&self) -> usize {
+        self.system()
+            .filter(|payload| {
+                matches!(
+                    payload,
+                    SystemPayload::IngressRefusal {
+                        reason: IngressRefusalReason::Validation,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// Recognized duplicates per request ID, each naming its original rows.
+    fn duplicates(&self) -> BTreeMap<String, Vec<Vec<EventId>>> {
+        let mut duplicates: BTreeMap<String, Vec<Vec<EventId>>> = BTreeMap::new();
+        for payload in self.system() {
+            if let SystemPayload::IngressDuplicateRecognized {
+                request_id,
+                originals,
+                ..
+            } = payload
+            {
+                duplicates
+                    .entry(request_id.as_str().to_string())
+                    .or_default()
+                    .push(originals.iter().map(|original| original.event_id).collect());
+            }
+        }
+        duplicates
+    }
+
     fn reconstruction_completed(&self) -> bool {
         self.records.iter().any(|record| {
             matches!(
@@ -912,7 +1257,11 @@ impl Archive {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ended {
     Natural,
-    Interrupted { killed: bool },
+    Interrupted {
+        killed: bool,
+    },
+    /// Stopped gracefully once every outcome committed: an HTTP history's end.
+    Stopped,
     Replay,
 }
 
@@ -949,10 +1298,36 @@ impl History {
             .0
     }
 
-    /// I1 to I8 over every archive of this history, against the control.
-    fn check(&self, control: &Archive) {
+    fn valid(&self) -> BTreeSet<String> {
+        match self.scenario.http {
+            Some(_) => http_ids().into_iter().chain(store_ids()).collect(),
+            None => valid_ids(),
+        }
+    }
+
+    /// Orders the gateway called without an outcome in `run` were in flight
+    /// when it was cut.
+    fn in_flight_at(&mut self, run: &Path) {
+        let outcomes = self.archive(run).outcomes();
+        let calls = self.scenario.calls();
+        self.in_flight.extend(
+            calls
+                .into_iter()
+                .map(|call| call.order_id)
+                .filter(|order| !outcomes.contains_key(order)),
+        );
+    }
+
+    /// I1 to I8 over every archive of this history. `control` is the natural
+    /// run whose business result I5 compares; an HTTP history has none.
+    fn check(&self, control: Option<&Archive>) {
         let name = self.name;
-        let valid = valid_ids();
+        let valid = self.valid();
+        let answers = self.scenario.answers();
+        let http_refused_in = answers
+            .iter()
+            .find(|sent| sent.order_id == INVALID_HTTP_ORDER)
+            .map(|sent| sent.run.clone());
         let mut identities: BTreeMap<String, BTreeSet<EventId>> = BTreeMap::new();
         for (archive, ended) in &self.runs {
             let dir = archive.dir.display();
@@ -966,11 +1341,13 @@ impl History {
                 );
                 identities.entry(order.clone()).or_default().insert(*id);
             }
-            // I2: the invalid record is never admitted.
-            assert!(
-                !seen.contains(INVALID_ORDER),
-                "{name} {dir}: the invalid order was admitted"
-            );
+            // I2: the invalid records are never admitted.
+            for invalid in [INVALID_ORDER, INVALID_HTTP_ORDER] {
+                assert!(
+                    !seen.contains(invalid),
+                    "{name} {dir}: {invalid} was admitted"
+                );
+            }
             // I3: one committed outcome per order.
             let outcomes = archive.outcomes();
             for (order, committed) in &outcomes {
@@ -981,8 +1358,8 @@ impl History {
                 );
                 assert_eq!(committed[0], decision(order), "{name} {dir}: {order}");
             }
-            match ended {
-                Ended::Natural | Ended::Replay => {
+            match (ended, control) {
+                (Ended::Natural | Ended::Replay, Some(control)) => {
                     assert_eq!(seen, valid, "{name} {dir}: every valid order is admitted");
                     // I5: the business result equals the control's.
                     assert_eq!(outcomes, control.outcomes(), "{name} {dir}: outcomes");
@@ -993,17 +1370,32 @@ impl History {
                     );
                     assert!(archive.snapshot().is_some(), "{name} {dir}: a final ledger");
                 }
-                // I6: an interrupted archive is honest about completion.
-                Ended::Interrupted { .. } => {
+                // An HTTP history never reaches natural EOF, so I5 is dropped:
+                // I3 checks every outcome and a stop never finalizes the ledger.
+                (Ended::Stopped | Ended::Replay, None) => {
+                    assert_eq!(seen, valid, "{name} {dir}: every valid order is admitted");
                     assert!(
-                        !matches!(
-                            archive.eof("store_orders"),
-                            Some(EofKind::Natural | EofKind::Poison)
-                        ),
-                        "{name} {dir}: store_orders stopped before its end"
+                        outcomes.keys().eq(valid.iter()),
+                        "{name} {dir}: every valid order has its outcome"
                     );
                     assert_eq!(archive.snapshot(), None, "{name} {dir}: no final ledger");
                 }
+                // I6: an interrupted archive is honest about completion.
+                (Ended::Interrupted { .. }, _) => {
+                    let channel = match self.scenario.http {
+                        Some(_) => "web_orders",
+                        None => "store_orders",
+                    };
+                    assert!(
+                        !matches!(
+                            archive.eof(channel),
+                            Some(EofKind::Natural | EofKind::Poison)
+                        ),
+                        "{name} {dir}: {channel} stopped before its end"
+                    );
+                    assert_eq!(archive.snapshot(), None, "{name} {dir}: no final ledger");
+                }
+                (ended, _) => panic!("{name} {dir}: {ended:?} does not end this history"),
             }
             // I2: its rejection lives in the run that read it, found by links.
             // A lineage that never read past the invalid record holds none.
@@ -1017,15 +1409,27 @@ impl History {
             {
                 lineage.push(link);
             }
-            let rejections: usize = lineage
-                .iter()
-                .filter_map(|run| self.runs.iter().find(|(archive, _)| &archive.dir == run))
-                .map(|(archive, _)| archive.rejections())
-                .sum();
+            let along = || {
+                lineage
+                    .iter()
+                    .filter_map(|run| self.runs.iter().find(|(archive, _)| &archive.dir == run))
+                    .map(|(archive, _)| archive)
+            };
+            let rejections: usize = along().map(Archive::rejections).sum();
             assert_eq!(
                 rejections,
                 usize::from(read_past),
                 "{name} {dir}: rejections along {lineage:?}"
+            );
+            // The invalid HTTP order's refusal lives in the run that received it.
+            let refused = http_refused_in
+                .as_ref()
+                .is_some_and(|received| lineage.contains(received));
+            let refusals: usize = along().map(Archive::http_rejections).sum();
+            assert_eq!(
+                refusals,
+                usize::from(refused),
+                "{name} {dir}: HTTP refusals along {lineage:?}"
             );
         }
         for (order, ids) in &identities {
@@ -1038,7 +1442,10 @@ impl History {
 
         // I4: one decision per order at the gateway; replays only in flight.
         let calls = self.scenario.calls();
-        let completed = self.runs.iter().any(|(_, ended)| *ended == Ended::Natural);
+        let completed = self
+            .runs
+            .iter()
+            .any(|(_, ended)| matches!(ended, Ended::Natural | Ended::Stopped));
         for order in &valid {
             let decided: Vec<Call> = calls
                 .iter()
@@ -1102,6 +1509,63 @@ impl History {
             for order in valid.iter().filter(|order| decision(order) == AUTHORIZED) {
                 assert!(lines.contains_key(order), "{name}: {order} has no receipt");
             }
+        }
+        if self.scenario.http.is_some() {
+            self.check_answers(&answers);
+        }
+    }
+
+    /// I11: every answer the sender recorded agrees with the journal.
+    fn check_answers(&self, answers: &[Sent]) {
+        let name = self.name;
+        let mut rows: BTreeMap<String, BTreeSet<EventId>> = BTreeMap::new();
+        for (archive, _) in &self.runs {
+            for (key, id) in archive.requests() {
+                rows.entry(key).or_default().insert(id);
+            }
+        }
+        let mut last = BTreeMap::new();
+        for sent in answers {
+            let order = &sent.order_id;
+            let named = rows.get(&request_key(order));
+            match &sent.answer {
+                // No 202 lacks a row, and each names the key's one row.
+                Answer::Committed { event_id } | Answer::Duplicate { event_id } => assert_eq!(
+                    named,
+                    Some(&BTreeSet::from([*event_id])),
+                    "{name}: {order} answered {:?}",
+                    sent.answer
+                ),
+                Answer::Rejected { code } => {
+                    assert_eq!(order, INVALID_HTTP_ORDER, "{name}: {order} rejected");
+                    assert_eq!(code, "validation_failed", "{name}: {order}");
+                    assert_eq!(named, None, "{name}: a rejected order has no row");
+                }
+                Answer::Unknown => {}
+            }
+            last.insert(order, &sent.answer);
+        }
+        // Every unknown is resent until it resolves.
+        for (order, answer) in last {
+            assert_ne!(answer, &Answer::Unknown, "{name}: {order} never resolved");
+        }
+        // Each duplicate has one duplicate fact, naming that row, in its run.
+        for (archive, _) in &self.runs {
+            let mut answered: BTreeMap<String, Vec<Vec<EventId>>> = BTreeMap::new();
+            for sent in answers.iter().filter(|sent| sent.run == archive.dir) {
+                if let Answer::Duplicate { event_id } = sent.answer {
+                    answered
+                        .entry(request_key(&sent.order_id))
+                        .or_default()
+                        .push(vec![event_id]);
+                }
+            }
+            assert_eq!(
+                archive.duplicates(),
+                answered,
+                "{name} {}: duplicate facts",
+                archive.dir.display()
+            );
         }
     }
 
@@ -1203,7 +1667,7 @@ async fn durable_execution_contract() {
     control.record(&run, Ended::Natural).await;
     strict_replay(&mut control, &run).await;
     let reference = Archive::read(&run).await;
-    control.check(&reference);
+    control.check(Some(&reference));
     control.report();
 
     // S2: SIGTERM at the cut, the hold then released; resume. S3: replay.
@@ -1225,7 +1689,7 @@ async fn durable_execution_contract() {
     let resumed = Child::spawn(&s2, resume(&run), None).completed().await;
     stopped.record(&resumed, Ended::Natural).await;
     strict_replay(&mut stopped, &resumed).await;
-    stopped.check(&reference);
+    stopped.check(Some(&reference));
     stopped.report();
 
     // S4: SIGKILL at the cut with the held order uncommitted. Its archive
@@ -1329,10 +1793,10 @@ async fn durable_execution_contract() {
 
     // S6, S6b: strict replays, once neither history needs the shared inputs.
     strict_replay(&mut after_rebuild, &rebuilt_head).await;
-    after_rebuild.check(&reference);
+    after_rebuild.check(Some(&reference));
     after_rebuild.report();
     strict_replay(&mut before_rebuild, &head).await;
-    before_rebuild.check(&reference);
+    before_rebuild.check(Some(&reference));
     before_rebuild.report();
 
     // S8, S8b: store_orders' open is held on a FIFO until every web outcome
@@ -1416,7 +1880,7 @@ async fn durable_execution_contract() {
             web_calls, web_calls_after,
             "{name}: web orders call no gateway"
         );
-        never_pinned.check(&reference);
+        never_pinned.check(Some(&reference));
         assert_eq!(
             never_pinned.archive(&run).rejections(),
             0,
@@ -1424,4 +1888,132 @@ async fn durable_execution_contract() {
         );
         never_pinned.report();
     }
+}
+
+/// FLOWIP-084l B5: the HTTP rows. One lineage over the mixed store and HTTP
+/// graph takes each cut in its own run, then stops gracefully; I7 strictly
+/// replays that stopped archive.
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_execution_contract_over_http() {
+    let scenario = Scenario::over_http("http");
+    let sender = Sender::new(&scenario);
+    let mut history = History::new("HTTP", &scenario);
+    let mut pool = http_ids().into_iter();
+
+    // H1, before commit: the held store order and backpressure stall the web
+    // channel, so a request sits uncommitted until the server is killed.
+    let child = Child::spawn(&scenario, Vec::new(), Some(FIRST_CUT));
+    let first = child.run().await;
+    sender.live().await;
+    cut(&first, "H1", |archive| {
+        scenario
+            .calls()
+            .iter()
+            .any(|call| call.order_id == FIRST_CUT)
+            && !archive.outcomes().contains_key(FIRST_CUT)
+    })
+    .await;
+    let uncommitted = sender.until_stalled(&first, &mut pool).await;
+    child.signal(Signal::Kill);
+    assert!(!child.exit().await.success());
+    history
+        .record(&first, Ended::Interrupted { killed: true })
+        .await;
+    history.in_flight_at(&first);
+
+    // H2, lost response after commit: a held web order stalls the channel, a
+    // sender gives up, then the hold is released and the server is killed
+    // once that request's row commits.
+    let held = pool.next().expect("an order to hold");
+    let child = Child::spawn(&scenario, resume(&first), Some(&held));
+    let second = child.run().await;
+    sender.live().await;
+    assert!(matches!(
+        sender.resend_unknown(&second).await.as_slice(),
+        [(order, Answer::Committed { .. })] if *order == uncommitted
+    ));
+    assert!(matches!(
+        sender.send(&second, &held).await,
+        Answer::Committed { .. }
+    ));
+    until(&second, "H2", |archive| {
+        scenario.calls().iter().any(|call| call.order_id == held)
+            && !archive.outcomes().contains_key(&held)
+    })
+    .await;
+    let lost = sender.until_stalled(&second, &mut pool).await;
+    std::fs::write(scenario.release(), b"").expect("release the held order");
+    until(&second, "H2", |archive| {
+        archive.admitted().iter().any(|(order, _)| *order == lost)
+    })
+    .await;
+    child.signal(Signal::Kill);
+    assert!(!child.exit().await.success());
+    history
+        .record(&second, Ended::Interrupted { killed: true })
+        .await;
+    history.in_flight_at(&second);
+
+    // H3, after acknowledgement: the lost response resolves to its row, then
+    // a new order's 202 arrives and the server is killed.
+    let child = Child::spawn(&scenario, resume(&second), None);
+    let third = child.run().await;
+    sender.live().await;
+    assert!(matches!(
+        sender.resend_unknown(&third).await.as_slice(),
+        [(order, Answer::Duplicate { .. })] if *order == lost
+    ));
+    let acknowledged = pool.next().expect("an order to acknowledge");
+    assert!(matches!(
+        sender.send(&third, &acknowledged).await,
+        Answer::Committed { .. }
+    ));
+    child.signal(Signal::Kill);
+    assert!(!child.exit().await.success());
+    history
+        .record(&third, Ended::Interrupted { killed: true })
+        .await;
+    history.in_flight_at(&third);
+
+    // H4: the last resume refuses an invalid order, sends the rest and stops
+    // once every outcome and receipt has committed.
+    let child = Child::spawn(&scenario, resume(&third), None);
+    let last = child.run().await;
+    sender.live().await;
+    assert!(sender.resend_unknown(&last).await.is_empty());
+    assert_eq!(
+        sender.send(&last, INVALID_HTTP_ORDER).await,
+        Answer::Rejected {
+            code: "validation_failed".into()
+        }
+    );
+    for order in pool {
+        let answer = sender.send(&last, &order).await;
+        assert!(
+            matches!(answer, Answer::Committed { .. }),
+            "{order}: {answer:?}"
+        );
+    }
+    let valid = history.valid();
+    until(&last, "H4", |archive| {
+        let receipts: BTreeSet<String> = read_lines::<Receipt>(&scenario.receipts())
+            .into_iter()
+            .map(|receipt| receipt.order_id)
+            .collect();
+        archive.outcomes().keys().eq(valid.iter())
+            && valid
+                .iter()
+                .filter(|order| decision(order) == AUTHORIZED)
+                .all(|order| receipts.contains(order))
+    })
+    .await;
+    child.signal(Signal::Term);
+    assert!(
+        child.exit().await.success(),
+        "H4: a stopped run exits cleanly"
+    );
+    history.record(&last, Ended::Stopped).await;
+    strict_replay(&mut history, &last).await;
+    history.check(None);
+    history.report();
 }

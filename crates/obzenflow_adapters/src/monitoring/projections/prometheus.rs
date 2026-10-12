@@ -2102,29 +2102,6 @@ impl PrometheusProjection {
             writeln!(output)?;
         }
 
-        // FLOWIP-115d: hosted-ingress refusal totals projected from `IngressRefusal`
-        // facts, keyed by (ingress_key, reason). Folded from journal facts, so it is
-        // replay-faithful, unlike the former in-memory ingestion reject counters.
-        if !snapshot.ingestion_refusal_totals.is_empty() {
-            writeln!(
-                output,
-                "# HELP http_ingestion_refusals_total Hosted-ingress refusals by reason (projected from journal facts)"
-            )?;
-            writeln!(output, "# TYPE http_ingestion_refusals_total counter")?;
-            let mut rows: Vec<_> = snapshot.ingestion_refusal_totals.iter().collect();
-            rows.sort_by(|a, b| a.0.cmp(b.0));
-            for ((ingress_key, reason), count) in rows {
-                writeln!(
-                    output,
-                    "http_ingestion_refusals_total{{ingress=\"{}\",reason=\"{}\"}} {}",
-                    escape_label(ingress_key.as_str()),
-                    escape_label(reason),
-                    count
-                )?;
-            }
-            writeln!(output)?;
-        }
-
         // HTTP pull telemetry (FLOWIP-084e).
         if !snapshot.http_pull_metrics.is_empty() {
             writeln!(
@@ -2965,39 +2942,15 @@ mod tests {
     }
 
     #[test]
-    fn test_http_ingestion_refusal_metrics_rendered() {
-        let exporter = PrometheusProjection::new();
-
-        // Refusal totals are projected from `IngressRefusal` facts on the app
-        // snapshot, keyed by (ingress_key, reason).
-        let mut app = AppMetricsSnapshot::default();
-        app.ingestion_refusal_totals
-            .insert(("orders".into(), "rate_limited".to_string()), 3);
-        app.ingestion_refusal_totals
-            .insert(("orders".into(), "validation".to_string()), 5);
+    fn ingress_evidence_is_journal_only() {
+        // FLOWIP-084l: ingress attempts are read through journal facts; no
+        // `http_ingestion_*` series claims to count them.
         let view = MetricsReadView {
-            app: Some(std::sync::Arc::new(app)),
+            app: Some(std::sync::Arc::new(AppMetricsSnapshot::default())),
             ..Default::default()
         };
-
-        let output = exporter.render(&view).unwrap();
-        let ingress = escape_label("orders");
-
-        // Refusals render by reason from the projected facts.
-        assert!(output.contains("# TYPE http_ingestion_refusals_total counter"));
-        assert!(output.contains(&format!(
-            "http_ingestion_refusals_total{{ingress=\"{ingress}\",reason=\"rate_limited\"}} 3"
-        )));
-        assert!(output.contains(&format!(
-            "http_ingestion_refusals_total{{ingress=\"{ingress}\",reason=\"validation\"}} 5"
-        )));
-
-        // The former ingestion telemetry sidecar and counters are gone.
-        assert!(!output.contains("http_ingestion_channel_depth"));
-        assert!(!output.contains("http_ingestion_channel_capacity"));
-        assert!(!output.contains("http_ingestion_requests_total"));
-        assert!(!output.contains("http_ingestion_events_rejected_total"));
-        assert!(!output.contains("http_ingestion_events_accepted_total"));
+        let output = PrometheusProjection::new().render(&view).unwrap();
+        assert!(!output.contains("http_ingestion_"), "{output}");
     }
 
     #[test]

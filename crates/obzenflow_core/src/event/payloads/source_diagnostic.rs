@@ -40,6 +40,9 @@ pub enum SourceDiagnosticReason {
     UnknownField,
     InvalidValue,
     InvalidRecord,
+    /// A decoded value whose journal form does not decode as its own type
+    /// (FLOWIP-084l B4).
+    UnrepresentableValue,
     #[serde(other)]
     Unclassified,
 }
@@ -65,6 +68,7 @@ impl SourceDiagnosticReason {
             Self::UnknownField => "unknown field",
             Self::InvalidValue => "invalid value",
             Self::InvalidRecord => "invalid record",
+            Self::UnrepresentableValue => "the decoded value cannot be recorded faithfully",
             Self::Unclassified => "unclassified source failure",
         }
     }
@@ -206,6 +210,13 @@ impl SourceLocation {
         &self.field_path.0
     }
 
+    /// The schema path as display text, when it names a field or index.
+    pub fn field_path_text(&self) -> Option<String> {
+        self.field_path
+            .names_something()
+            .then(|| self.field_path.to_string())
+    }
+
     pub fn is_unknown(&self) -> bool {
         self.record_index.is_none() && self.position.is_none() && self.field_path.is_empty()
     }
@@ -335,6 +346,12 @@ impl SourceDiagnostic {
 
     pub fn code(mut self, code: SourceErrorCode) -> Self {
         self.code = Some(code);
+        self
+    }
+
+    /// The same location under another reason.
+    pub fn with_reason(mut self, reason: SourceDiagnosticReason) -> Self {
+        self.reason = reason;
         self
     }
 

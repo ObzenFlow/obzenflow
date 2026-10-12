@@ -8,27 +8,21 @@ use obzenflow_core::ingress::EventSubmission;
 use obzenflow_core::EventType;
 use obzenflow_runtime::stages::{IngressDecodeError, IngressRecord};
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// A schema check run in addition to the decoder (FLOWIP-084l B4); it never
+/// replaces it. Hosted ingress admits one event type, the decoder's output.
 #[derive(Debug, Clone)]
 pub enum ValidationConfig {
-    /// Single event type - all submissions must match this schema.
+    /// Every submission must match this schema.
     Single { validator: Arc<dyn SchemaValidator> },
-    /// Multiple event types - lookup by event_type field (exact match).
-    Registry {
-        validators: HashMap<EventType, Arc<dyn SchemaValidator>>,
-        reject_unknown: bool,
-    },
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ValidationError {
     #[error("expected event_type '{expected}', got '{actual}'")]
     EventTypeMismatch { expected: String, actual: String },
-    #[error("unknown event_type: '{event_type}'")]
-    UnknownEventType { event_type: String },
     #[error("validation failed for '{event_type}': {diagnostic}")]
     ValidationFailed {
         event_type: String,
@@ -44,7 +38,7 @@ impl ValidationError {
     /// The journalled form; event type strings stay in the HTTP response.
     pub fn diagnostic(&self) -> SourceDiagnostic {
         match self {
-            Self::EventTypeMismatch { .. } | Self::UnknownEventType { .. } => {
+            Self::EventTypeMismatch { .. } => {
                 let diagnostic = SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord);
                 match SourceErrorCode::try_new("ingress", "event_type") {
                     Ok(code) => diagnostic.code(code),
@@ -99,29 +93,13 @@ pub fn validate_submission(
     submission: &EventSubmission,
     config: &ValidationConfig,
 ) -> Result<(), ValidationError> {
-    let validator = match config {
-        ValidationConfig::Single { validator } => {
-            if submission.event_type != validator.event_type() {
-                return Err(ValidationError::EventTypeMismatch {
-                    expected: validator.event_type().to_string(),
-                    actual: submission.event_type.to_string(),
-                });
-            }
-            validator
-        }
-        ValidationConfig::Registry {
-            validators,
-            reject_unknown,
-        } => match validators.get(&submission.event_type) {
-            Some(v) => v,
-            None if *reject_unknown => {
-                return Err(ValidationError::UnknownEventType {
-                    event_type: submission.event_type.to_string(),
-                });
-            }
-            None => return Ok(()),
-        },
-    };
+    let ValidationConfig::Single { validator } = config;
+    if submission.event_type != validator.event_type() {
+        return Err(ValidationError::EventTypeMismatch {
+            expected: validator.event_type().to_string(),
+            actual: submission.event_type.to_string(),
+        });
+    }
 
     validator
         .validate(&submission.data)
@@ -152,7 +130,6 @@ mod tests {
             event_type: "test.event".into(),
             data: serde_json::json!({}),
             metadata: None,
-            ingress_handoff: None,
         };
         let config = ValidationConfig::Single {
             validator: Arc::new(validator),
@@ -178,7 +155,6 @@ mod tests {
             event_type: "SECRET.event".into(),
             data: serde_json::json!({"required": "x"}),
             metadata: None,
-            ingress_handoff: None,
         };
         let err = validate_submission(&submission, &config).unwrap_err();
         let diagnostic = err.diagnostic();

@@ -501,7 +501,7 @@ impl PipelineBuilder {
                 stage_journals,
                 system_journals,
                 metrics_journals: self.metrics_journals.clone(),
-                ingress_refusals: Some(super::ingress::IngressRefusalWriter {
+                ingress_evidence: Some(super::ingress::IngressEvidenceWriter {
                     journal: self.system_journal.clone(),
                     owner: publications,
                     writer: system_id.into(),

@@ -21,7 +21,6 @@ use obzenflow_core::event::provenance::RuntimeProvenance;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{SinkOperationPhase, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
-use obzenflow_core::ingress::IngressKey;
 use obzenflow_core::metrics::{
     BoundaryMetricsView, ContractMetricEdgeKey, ContractMetricsSnapshot, Percentile, StageMetadata,
 };
@@ -268,9 +267,6 @@ pub struct MetricsStore {
     // Hosted web surface metrics (FLOWIP-093a)
     pub http_surface_metrics:
         HashMap<(String, HttpMethod, String, String), HttpSurfaceRouteMetricsSnapshot>,
-
-    /// Reserved historical refusal totals. The live reader leaves these absent.
-    pub ingestion_refusals_total: HashMap<(IngressKey, String), u64>,
 
     // HTTP pull telemetry (FLOWIP-084e)
     pub http_pull_metrics: HashMap<StageId, HttpPullMetricsSnapshot>,
@@ -807,10 +803,6 @@ impl MetricsAggregatorResources {
                 ))
         });
         snapshot.http_surface_metrics = http_surface_metrics;
-
-        // FLOWIP-115d: hosted-ingress refusal totals projected from `IngressRefusal`
-        // facts, keyed by (ingress_key, reason).
-        snapshot.ingestion_refusal_totals = store.ingestion_refusals_total.clone();
 
         // FLOWIP-084e: HTTP pull telemetry (wide events)
         snapshot.http_pull_metrics = store.http_pull_metrics.clone();

@@ -9,7 +9,9 @@ use crate::event::types::DurationMs;
 use crate::event::vector_clock::VectorClock;
 use crate::event::vocabulary;
 use crate::id::{StageId, StageKey};
-use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
+use crate::ingress::{
+    IngressAttemptSeq, IngressKey, IngressOriginal, IngressRefusalReason, IngressRequestId,
+};
 use crate::metrics::FlowLifecycleMetricsSnapshot;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -112,12 +114,12 @@ pub enum SystemPayload {
     #[serde(rename = "metrics_coordination")]
     MetricsCoordination(MetricsCoordinationEvent),
 
-    /// Durable hosted-ingress refusal fact (FLOWIP-115d).
+    /// Durable hosted-ingress refusal fact (FLOWIP-115d), journalled as
+    /// `runtime.ingress.attempt_refused` (FLOWIP-084l).
     ///
     /// A rejected or shed submission attempt is a domain fact, so the hosted
     /// endpoint appends one of these to `system.log` before returning the
-    /// protocol refusal, and the metrics aggregator projects the per-`(ingress_key,
-    /// reason)` refusal count from it (`state = fold(facts)`). It records an ingress admission outcome. The `attempt_seq` is the cross-journal merge key with
+    /// protocol refusal. The `attempt_seq` is the cross-journal merge key with
     /// accepted source rows. It carries no raw body or credential-bearing header.
     #[serde(rename = "ingress_refusal")]
     IngressRefusal {
@@ -144,6 +146,22 @@ pub enum SystemPayload {
         /// `/batch` diagnostic's record index is the event's batch position.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         diagnostics: Vec<SourceDiagnostic>,
+        /// The sender's request ID, set for every identified attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<IngressRequestId>,
+    },
+
+    /// An identified attempt whose members already have committed rows
+    /// (FLOWIP-084l), journalled as `runtime.ingress.duplicate_recognized`.
+    #[serde(rename = "ingress_duplicate_recognized")]
+    IngressDuplicateRecognized {
+        ingress_key: IngressKey,
+        stage_id: StageId,
+        stage_key: StageKey,
+        attempt_seq: IngressAttemptSeq,
+        request_id: IngressRequestId,
+        /// One per recognized member, naming its committed original row.
+        originals: Vec<IngressOriginal>,
     },
 }
 
@@ -356,7 +374,10 @@ impl SystemPayload {
             Self::SupervisorRegistered { descriptor } => descriptor.registered_event_type().into(),
             Self::PipelineLifecycle(event) => event.event_type().into(),
             Self::MetricsCoordination(event) => event.event_type().into(),
-            Self::IngressRefusal { .. } => "system.ingress.refusal".into(),
+            Self::IngressRefusal { .. } => vocabulary::ingress::ATTEMPT_REFUSED.into(),
+            Self::IngressDuplicateRecognized { .. } => {
+                vocabulary::ingress::DUPLICATE_RECOGNIZED.into()
+            }
         }
     }
 }
