@@ -347,10 +347,14 @@ impl LivenessSnapshots {
         Self::default()
     }
 
+    /// Every lock holder is a short synchronous section, so waiting is bounded;
+    /// skipping on contention dropped whole ticks for heartbeats in lockstep.
     pub fn upsert(&self, stage_id: StageId, snapshot: StageLivenessSnapshot) {
-        if let Ok(mut guard) = self.inner.try_write() {
-            guard.insert(stage_id, snapshot);
-        }
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(stage_id, snapshot);
     }
 
     pub fn get(&self, stage_id: StageId) -> Option<StageLivenessSnapshot> {
@@ -583,6 +587,48 @@ mod tests {
 
     fn live_execution() -> RuntimeExecution {
         RuntimeExecution::new(RuntimeMode::Live, None)
+    }
+
+    #[test]
+    fn an_upsert_during_a_read_is_recorded_not_dropped() {
+        let snapshots = LivenessSnapshots::new();
+        let stage = StageId::new();
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+        let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let reader = {
+            let snapshots = snapshots.clone();
+            std::thread::spawn(move || {
+                snapshots.with_read(|_| {
+                    holding_tx.send(()).unwrap();
+                    // A non-waiting writer returns here; a waiting one times out.
+                    let _ = written_rx.recv_timeout(Duration::from_millis(200));
+                });
+            })
+        };
+        holding_rx.recv().unwrap();
+        let writer = {
+            let snapshots = snapshots.clone();
+            std::thread::spawn(move || {
+                snapshots.upsert(
+                    stage,
+                    StageLivenessSnapshot {
+                        stage_id: stage,
+                        stage_name: "postgres".into(),
+                        heartbeat_seq: SeqNo(1),
+                        activity: StageActivity::Polling,
+                        handler_blocked_ms: None,
+                        edges: Vec::new(),
+                    },
+                );
+                let _ = written_tx.send(());
+            })
+        };
+        reader.join().unwrap();
+        writer.join().unwrap();
+        assert!(
+            snapshots.get(stage).is_some(),
+            "a heartbeat that met a reader must still publish"
+        );
     }
 
     #[tokio::test]
