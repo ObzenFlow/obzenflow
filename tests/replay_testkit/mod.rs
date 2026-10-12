@@ -320,6 +320,30 @@ impl<T: obzenflow_core::TypedPayload + Send + Sync + 'static>
     }
 }
 
+/// A resume fixture's infinite reader as a connector. Direct handlers refuse
+/// interrupted input, so a fixture that resumes declares what an interruption
+/// costs it: `AtMostOnce`, which understates a reader that resumes from the
+/// commit point (FLOWIP-122i).
+#[derive(Clone, Debug)]
+pub struct ReattachingSource<R>(pub R);
+
+impl<R> obzenflow_runtime::stages::source::InfiniteSourceConnector for ReattachingSource<R>
+where
+    R: obzenflow_runtime::stages::source::TypedInfiniteSourceHandler + Clone + 'static,
+{
+    type Output = R::Output;
+    type Reader = R;
+    type Continuation =
+        obzenflow_runtime::stages::source::Reattach<obzenflow_runtime::stages::source::AtMostOnce>;
+
+    fn open(
+        &self,
+        _context: obzenflow_runtime::stages::source::SourceReaderInitContext,
+    ) -> Result<R, obzenflow_runtime::stages::SourceError> {
+        Ok(self.0.clone())
+    }
+}
+
 /// Count physical deliveries, including deliveries admitted during replay.
 pub struct CountDeliveries<T> {
     counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,

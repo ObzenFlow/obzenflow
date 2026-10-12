@@ -16,10 +16,11 @@ pub(super) mod sealed {
     pub trait Admitted<Family: ?Sized, Kind> {}
 }
 
-/// Select the existing runtime adapter for a direct handler or cold connector.
+/// Select the existing runtime adapter for a direct handler, cold connector or
+/// Runtime-owned hosted ingress.
 ///
-/// `Family` is the requested erased source contract. `Kind` distinguishes direct
-/// handlers from connectors without requiring either authoring trait to change.
+/// `Family` is the requested erased source contract. `Kind` distinguishes the
+/// three without requiring either authoring trait to change.
 #[doc(hidden)]
 pub trait AdmitSource<Family: ?Sized, Kind>:
     sealed::Admitted<Family, Kind> + Send + Sync + 'static
@@ -36,6 +37,10 @@ pub trait AdmitSource<Family: ?Sized, Kind>:
 pub enum DirectSource {}
 #[doc(hidden)]
 pub enum ConnectorSource {}
+/// Hosted ingress, admitted by Runtime because only its single writer
+/// acknowledges after commit (FLOWIP-122i B3).
+#[doc(hidden)]
+pub enum HostedSource {}
 
 pub(super) type SyncSourceReader<H> = SourceReader<H, SyncReaderOpener<H>>;
 pub(super) type AsyncSourceReader<H> = SourceReader<H, AsyncReaderOpener<H>>;

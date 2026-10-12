@@ -124,6 +124,30 @@ fn replay_wire_names_identify_the_recorded_occurrence() {
     }
 }
 
+/// FLOWIP-122i B2: the approved reattachment spellings. The envelope names the
+/// stage, so the payload carries none.
+#[test]
+fn reattachment_wire_names_and_values_match_the_approved_spellings() {
+    let stage = StageId::new();
+    for guarantee in ["sender_redelivers", "latest_state", "at_most_once"] {
+        let wire =
+            json!({"execution_type":"source_reattached", "generation":1, "guarantee":guarantee});
+        let payload: ExecutionPayload = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&payload).unwrap(), wire);
+        assert_chain(
+            ChainEventFactory::execution_event(stage.into(), payload),
+            "runtime.source.reattached",
+            "execution",
+        );
+    }
+    for invalid in [
+        json!({"execution_type":"source_reattached", "generation":1, "guarantee":"at_least_once"}),
+        json!({"execution_type":"source_reattached", "generation":1, "guarantee":"latest_state", "stage":"tx"}),
+    ] {
+        assert!(serde_json::from_value::<ExecutionPayload>(invalid).is_err());
+    }
+}
+
 #[test]
 fn stage_and_middleware_wire_names_match_the_contract() {
     let stage = StageId::new();

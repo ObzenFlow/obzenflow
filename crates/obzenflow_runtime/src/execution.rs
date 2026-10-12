@@ -382,11 +382,11 @@ impl ResumeControl {
         recorded_eof: Option<EofKind>,
     ) {
         let exhaustion = match continuation {
-            SourceContinuation::Reattach => SourceReplayExhaustion::ContinueLive,
+            SourceContinuation::Reattach { .. } => SourceReplayExhaustion::ContinueLive,
             SourceContinuation::Seek { .. } if recorded_eof != Some(EofKind::Natural) => {
                 SourceReplayExhaustion::ContinueLive
             }
-            SourceContinuation::Seek { .. } | SourceContinuation::Refuse => {
+            SourceContinuation::Seek { .. } | SourceContinuation::Refuse { .. } => {
                 SourceReplayExhaustion::Terminate
             }
         };
@@ -752,6 +752,8 @@ impl RuntimeExecution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stages::source::RefusedBy;
+    use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
     use obzenflow_core::MiddlewareExecutionScope as Scope;
 
     fn at() -> ExecutionPosition {
@@ -862,7 +864,9 @@ mod tests {
         };
         for (continuation, recorded_eof, expected) in [
             (
-                SourceContinuation::Refuse,
+                SourceContinuation::Refuse {
+                    by: RefusedBy::Handler,
+                },
                 Some(EofKind::Natural),
                 SourceReplayExhaustion::Terminate,
             ),
@@ -878,7 +882,9 @@ mod tests {
             ),
             (seek, None, SourceReplayExhaustion::ContinueLive),
             (
-                SourceContinuation::Reattach,
+                SourceContinuation::Reattach {
+                    guarantee: ReattachGuarantee::AtMostOnce,
+                },
                 Some(EofKind::Truncated),
                 SourceReplayExhaustion::ContinueLive,
             ),

@@ -31,7 +31,15 @@ use obzenflow_runtime::stages::common::handlers::source::traits::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,
 };
-use obzenflow_runtime::stages::common::handlers::source::{SourceContinuation, SourceError};
+use obzenflow_runtime::stages::common::handlers::source::{
+    RefusedBy, SourceContinuation, SourceError,
+};
+
+/// A placeholder stands in for a handler, which declares no continuation
+/// (FLOWIP-122i).
+const PLACEHOLDER_REFUSES: SourceContinuation = SourceContinuation::Refuse {
+    by: RefusedBy::Handler,
+};
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkInputOrder,
     SinkWriteFailure, StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
@@ -794,7 +802,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
         handler: PlaceholderFiniteSource::<PrimaryOutput>::new(message),
-        continuation: SourceContinuation::Refuse,
+        continuation: PLACEHOLDER_REFUSES,
         source_policies,
         ingress_policy,
         observers,
@@ -824,7 +832,7 @@ where
     let mut descriptor = AsyncFiniteSourceDescriptor::new(
         name,
         PlaceholderAsyncSource::<PrimaryOutput>::new(message),
-        SourceContinuation::Refuse,
+        PLACEHOLDER_REFUSES,
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
@@ -854,7 +862,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
         handler: PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
-        continuation: SourceContinuation::Reattach,
+        continuation: PLACEHOLDER_REFUSES,
         source_policies,
         ingress_policy,
         observers,
@@ -884,7 +892,7 @@ where
     let mut descriptor = AsyncInfiniteSourceDescriptor::new(
         name,
         PlaceholderAsyncSource::<PrimaryOutput>::new(message),
-        SourceContinuation::Reattach,
+        PLACEHOLDER_REFUSES,
     );
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;

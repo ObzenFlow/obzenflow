@@ -43,8 +43,10 @@
 //! Each connector declares how its interrupted input continues on resume
 //! (FLOWIP-134i B8): [`Refuse`] when it cannot, so resuming an unfinished source
 //! refuses before any run starts, or [`Reattach`], for infinite connectors, to
-//! continue live at the committed handoff. Direct handlers declare nothing: a
-//! finite handler lowers to `Refuse` and an infinite one to `Reattach`.
+//! continue live at the committed handoff. A reattachment names what the
+//! interruption could cost, [`LatestState`] or [`AtMostOnce`], and the source
+//! records it in its journal (FLOWIP-122i). Direct handlers declare nothing and
+//! lower to `Refuse`; hosted ingress is admitted by Runtime instead.
 
 pub mod boundary;
 mod connector;
@@ -61,13 +63,14 @@ pub use boundary::{
 
 #[doc(hidden)]
 pub use crate::stages::common::handlers::source::{
-    sources_refusing_resume, ResumeRefusal, SourceContinuation,
+    sources_refusing_resume, RefusedBy, ResumeRefusal, SourceContinuation,
 };
 pub use crate::stages::common::handlers::source::{
-    AsyncFiniteContinuation, AsyncInfiniteContinuation, FiniteContinuation, InfiniteContinuation,
-    PositionedFiniteReader, Reattach, RecordDeError, Refuse, Seek, SeekableSource, SourceError,
-    SourceRecord, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    AsyncFiniteContinuation, AsyncInfiniteContinuation, AtMostOnce, FiniteContinuation,
+    InfiniteContinuation, LatestState, LiveGuarantee, PositionedFiniteReader, Reattach,
+    RecordDeError, Refuse, Seek, SeekableSource, SourceError, SourceRecord,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
 pub use connector::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,

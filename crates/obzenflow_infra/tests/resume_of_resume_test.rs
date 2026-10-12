@@ -45,6 +45,7 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::ffi::OsString;
@@ -155,7 +156,7 @@ fn build_flow(
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let ticker = BoundedTicker::new(first_n, count);
+        let ticker = ReattachingSource(BoundedTicker::new(first_n, count));
         let double = DoubleTransform::new();
         let counting_sink = CountingSink { delivered };
 

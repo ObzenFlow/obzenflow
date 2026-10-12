@@ -50,6 +50,7 @@ event_names! {
         INPUT_PINNED => "input_pinned",
         POSITIONED => "positioned",
         STARTED_ON_RESUME => "started_on_resume",
+        REATTACHED => "reattached",
         CONTINUATION_REFUSED => "continuation_refused",
         SEEK_FAILED => "seek_failed",
     },

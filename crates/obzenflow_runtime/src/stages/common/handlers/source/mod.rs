@@ -15,10 +15,10 @@ pub mod traits;
 pub(crate) mod typed;
 
 #[doc(hidden)]
-pub use continuation::{sources_refusing_resume, ResumeRefusal, SourceContinuation};
+pub use continuation::{sources_refusing_resume, RefusedBy, ResumeRefusal, SourceContinuation};
 pub use continuation::{
-    AsyncFiniteContinuation, AsyncInfiniteContinuation, FiniteContinuation, InfiniteContinuation,
-    Reattach, Refuse, Seek,
+    AsyncFiniteContinuation, AsyncInfiniteContinuation, AtMostOnce, FiniteContinuation,
+    InfiniteContinuation, LatestState, LiveGuarantee, Reattach, Refuse, Seek,
 };
 #[doc(hidden)]
 pub use erased::{

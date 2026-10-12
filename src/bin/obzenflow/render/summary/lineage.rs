@@ -8,7 +8,9 @@
 
 use super::*;
 use continuation::{RecordingEnd, SourceContinuation};
-use obzenflow_core::event::payloads::execution_payload::SourceContinuationRefusal;
+use obzenflow_core::event::payloads::execution_payload::{
+    ReattachGuarantee, SourceContinuationRefusal,
+};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use std::path::PathBuf;
 
@@ -177,14 +179,29 @@ fn continuation_text(continued: Option<&SourceContinuation>) -> String {
         Some(SourceContinuation::Started { generation }) => {
             format!("started in generation {generation} (the interrupted run failed to open it)")
         }
-        Some(SourceContinuation::Reattached { generation }) => {
-            format!("reattached live in generation {generation}")
+        Some(SourceContinuation::Reattached {
+            generation,
+            guarantee,
+        }) => {
+            format!(
+                "reattached live in generation {generation} ({})",
+                guarantee_label(*guarantee)
+            )
         }
         Some(SourceContinuation::Refused(refusal)) => {
             format!("refused: {}", refusal_text(refusal))
         }
         Some(SourceContinuation::SeekFailed) => "failed to seek past its committed input".into(),
         None => "catch-up incomplete".into(),
+    }
+}
+
+/// The condition an operator checks when input goes missing (FLOWIP-122i B2).
+fn guarantee_label(guarantee: ReattachGuarantee) -> &'static str {
+    match guarantee {
+        ReattachGuarantee::SenderRedelivers => "sender redelivers",
+        ReattachGuarantee::LatestState => "latest state",
+        ReattachGuarantee::AtMostOnce => "at most once",
     }
 }
 
@@ -298,6 +315,19 @@ mod tests {
             continuation_text(Some(&SourceContinuation::Started { generation: 1 })),
             "started in generation 1 (the interrupted run failed to open it)"
         );
+        for (guarantee, label) in [
+            (ReattachGuarantee::SenderRedelivers, "sender redelivers"),
+            (ReattachGuarantee::LatestState, "latest state"),
+            (ReattachGuarantee::AtMostOnce, "at most once"),
+        ] {
+            assert_eq!(
+                continuation_text(Some(&SourceContinuation::Reattached {
+                    generation: 1,
+                    guarantee
+                })),
+                format!("reattached live in generation 1 ({label})")
+            );
+        }
         assert_eq!(continuation_text(None), "catch-up incomplete");
     }
 }

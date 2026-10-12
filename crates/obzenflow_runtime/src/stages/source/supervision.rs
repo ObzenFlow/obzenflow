@@ -111,7 +111,7 @@ use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, SourceCleanupFailedFact, SourceCleanupPhase, SourceCleanupSucceededFact,
     SourceCleanupTrigger, SourceContinuationRefusal, SourceContinuationRefusedFact,
     SourceOpenIntent, SourcePollErrorKind, SourcePollKind, SourceReaderAcquiredFact,
-    SourceSeekFailedFact,
+    SourceReattachedFact, SourceSeekFailedFact,
 };
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
@@ -431,6 +431,34 @@ pub(crate) async fn commit_catch_up_markers(
         .await
         .map_err(|error| -> BoxError { error.to_string().into() })?;
     }
+    Ok(())
+}
+
+/// Commit a reattaching source's declared guarantee behind its catch-up
+/// markers and before its first live record (FLOWIP-122i). Only a `Reattach`
+/// source continues live without a position.
+pub(crate) async fn commit_source_reattached(
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_flow_context: &FlowContext,
+    continuation: SourceContinuation,
+    generation: obzenflow_core::ReaderGeneration,
+) -> Result<(), BoxError> {
+    let SourceContinuation::Reattach { guarantee } = continuation else {
+        return Err(format!(
+            "source '{}' continued live without a declared reattachment",
+            stage_flow_context.stage_name
+        )
+        .into());
+    };
+    commit_source_fact(
+        data_journal,
+        stage_flow_context,
+        ExecutionPayload::SourceReattached(SourceReattachedFact {
+            generation: generation.0,
+            guarantee,
+        }),
+    )
+    .await?;
     Ok(())
 }
 

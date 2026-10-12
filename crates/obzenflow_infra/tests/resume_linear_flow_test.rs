@@ -39,6 +39,7 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
 use obzenflow_runtime::stages::SourceError;
+use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -164,7 +165,7 @@ fn build_flow_with_observer(
     observer_calls: Option<Arc<AtomicU64>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = BoundedTicker::new(first_n, count);
+        let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink { delivered };
         let transformed = match observer_calls {
@@ -266,7 +267,7 @@ async fn run_until_delivered_with_observer(
 /// consume a located archive as input).
 fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = BoundedTicker::new(first_n, count);
+        let source_handler = ReattachingSource(BoundedTicker::new(first_n, count));
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink { delivered };
 

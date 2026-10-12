@@ -21,7 +21,7 @@ use obzenflow_dsl::{
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::source::{
-    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, AtMostOnce, FiniteSourceConnector,
     InfiniteSourceConnector, Reattach, Refuse, SourceReaderInitContext,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
@@ -121,7 +121,7 @@ impl AsyncFiniteSourceConnector for FailsToOpenAsyncFinite {
 impl InfiniteSourceConnector for FailsToOpenInfinite {
     type Output = Row;
     type Reader = RowThenTerminal;
-    type Continuation = Reattach;
+    type Continuation = Reattach<AtMostOnce>;
     fn open(&self, _: SourceReaderInitContext) -> Result<RowThenTerminal, SourceError> {
         Err(unavailable())
     }
@@ -131,7 +131,7 @@ impl InfiniteSourceConnector for FailsToOpenInfinite {
 impl AsyncInfiniteSourceConnector for FailsToOpenAsyncInfinite {
     type Output = Row;
     type Reader = RowThenTerminal;
-    type Continuation = Reattach;
+    type Continuation = Reattach<AtMostOnce>;
     async fn open(&self, _: SourceReaderInitContext) -> Result<RowThenTerminal, SourceError> {
         Err(unavailable())
     }

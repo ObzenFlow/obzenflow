@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Architecture and raw-erasure census guard for FLOWIP-134g.
+//! Architecture and raw-erasure census guard for FLOWIP-134g, and FLOWIP-122i's
+//! guard that only hosted ingress records that its sender redelivers.
 
 use proc_macro2::{TokenStream, TokenTree};
 use std::collections::{BTreeMap, BTreeSet};
@@ -222,6 +223,93 @@ fn raw_source_implementations_match_the_checked_in_allowlist() {
     assert!(
         unexpected.is_empty() && stale.is_empty(),
         "raw source-handler allowlist drifted\nunexpected: {unexpected:#?}\nstale: {stale:#?}"
+    );
+}
+
+/// Finds production expressions naming `ReattachGuarantee::SenderRedelivers`;
+/// matching it as a pattern reads evidence and records nothing.
+#[derive(Default)]
+struct SenderRedeliversVisitor {
+    records: bool,
+}
+
+fn is_test_only(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("test")
+            || (attribute.path().is_ident("cfg")
+                && attribute
+                    .meta
+                    .require_list()
+                    .is_ok_and(|list| list.tokens.to_string() == "test"))
+    })
+}
+
+impl<'ast> Visit<'ast> for SenderRedeliversVisitor {
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        if !is_test_only(&module.attrs) {
+            syn::visit::visit_item_mod(self, module);
+        }
+    }
+
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        if !is_test_only(&function.attrs) {
+            syn::visit::visit_item_fn(self, function);
+        }
+    }
+
+    // syn visits a path pattern as an expression path.
+    fn visit_pat(&mut self, _pattern: &'ast syn::Pat) {}
+
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        let segments: Vec<String> = expression
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        if segments.ends_with(&["ReattachGuarantee".into(), "SenderRedelivers".into()]) {
+            self.records = true;
+        }
+        syn::visit::visit_expr_path(self, expression);
+    }
+}
+
+/// FLOWIP-122i B3: only Runtime's hosted-ingress admission records that a
+/// sender redelivers. No connector, adapter, DSL or application code can
+/// declare it, because only the source's single writer acknowledges after
+/// commit.
+#[test]
+fn only_hosted_ingress_records_that_its_sender_redelivers() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut recorders = BTreeSet::new();
+
+    for source_path in workspace_rust_sources(&root) {
+        let relative = source_path
+            .strip_prefix(&root)
+            .expect("workspace-relative source")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.split('/').any(|part| part == "tests") {
+            continue;
+        }
+        let source = fs::read_to_string(&source_path).expect("read Rust source");
+        if !source.contains("SenderRedelivers") {
+            continue;
+        }
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", source_path.display()));
+        let mut visitor = SenderRedeliversVisitor::default();
+        visitor.visit_file(&syntax);
+        if visitor.records {
+            recorders.insert(relative);
+        }
+    }
+
+    assert_eq!(
+        recorders,
+        BTreeSet::from([
+            "crates/obzenflow_runtime/src/stages/common/handlers/source/hosted.rs".to_string()
+        ])
     );
 }
 

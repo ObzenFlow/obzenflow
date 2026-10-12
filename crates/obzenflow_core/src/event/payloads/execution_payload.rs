@@ -87,6 +87,7 @@ pub enum ExecutionPayload {
     SourceInputPinned(SourceInputPinnedFact),
     SourcePositioned(SourceResumeFact),
     SourceStartedOnResume(SourceResumeFact),
+    SourceReattached(SourceReattachedFact),
     SourceContinuationRefused(SourceContinuationRefusedFact),
     SourceSeekFailed(SourceSeekFailedFact),
     HttpPullState(HttpPullStateFact),
@@ -538,6 +539,29 @@ pub struct SourceResumeFact {
     pub generation: u64,
 }
 
+/// What a source's live reattachment can cost the input it read but had not
+/// committed when the run stopped (FLOWIP-122i).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReattachGuarantee {
+    /// The sender redelivers what was never acknowledged; only hosted ingress,
+    /// which acknowledges after commit, records it.
+    SenderRedelivers,
+    /// Each observation supersedes the last; re-seen rows are expected.
+    LatestState,
+    /// Input read but not committed at the interruption is lost.
+    AtMostOnce,
+}
+
+/// A source reattached live in `generation`, committed after its catch-up
+/// watermark and before its first live record (FLOWIP-122i).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceReattachedFact {
+    pub generation: u64,
+    pub guarantee: ReattachGuarantee,
+}
+
 /// Why a resume cannot continue a source's interrupted input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "refusal", rename_all = "snake_case")]
@@ -622,6 +646,7 @@ impl ExecutionPayload {
             Self::SourceInputPinned(_) => vocabulary::source::INPUT_PINNED,
             Self::SourcePositioned(_) => vocabulary::source::POSITIONED,
             Self::SourceStartedOnResume(_) => vocabulary::source::STARTED_ON_RESUME,
+            Self::SourceReattached(_) => vocabulary::source::REATTACHED,
             Self::SourceContinuationRefused(_) => vocabulary::source::CONTINUATION_REFUSED,
             Self::SourceSeekFailed(_) => vocabulary::source::SEEK_FAILED,
             Self::HttpPullState(_) => "source.http_pull_state",
@@ -670,6 +695,7 @@ impl ExecutionPayload {
             | Self::SourceInputPinned(_)
             | Self::SourcePositioned(_)
             | Self::SourceStartedOnResume(_)
+            | Self::SourceReattached(_)
             | Self::SourceContinuationRefused(_)
             | Self::SourceSeekFailed(_)
             | Self::HttpPullState(_)

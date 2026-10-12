@@ -11,7 +11,9 @@ use obzenflow_adapters::sources::{
     simple_poll, HttpPollConfig, HttpPollSource, HttpPullConfig, HttpPullSource,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::execution_payload::SourcePollErrorKind;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, ReattachGuarantee, SourcePollErrorKind, SourceReattachedFact,
+};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, ReplayLifecycleEvent, SourceDiagnosticReason,
@@ -738,10 +740,44 @@ async fn resume_initializes_only_after_the_recorded_prefix_crosses_continue_live
             .count(),
         RECORDED + 1
     );
-    assert!(events.iter().any(|event| {
-        matches!(
-            &event.payload,
-            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
-        )
-    }));
+    // FLOWIP-122i: polling reattaches with `LatestState`, recorded after the
+    // catch-up watermark and before the first live record.
+    let catch_up = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.payload,
+                ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+            )
+        })
+        .expect("the resumed source commits its watermark");
+    let reattached: Vec<(usize, &SourceReattachedFact)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceReattached(fact)) => {
+                Some((index, fact))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(at, fact)] = reattached.as_slice() else {
+        panic!("one reattachment: {reattached:?}");
+    };
+    assert_eq!(
+        **fact,
+        SourceReattachedFact {
+            generation: 1,
+            guarantee: ReattachGuarantee::LatestState,
+        }
+    );
+    assert!(catch_up < *at);
+    assert_eq!(
+        events[..*at]
+            .iter()
+            .filter(|event| event.consumes_data_credit())
+            .count(),
+        RECORDED,
+        "no live record precedes the reattachment"
+    );
 }

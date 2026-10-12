@@ -35,6 +35,7 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -257,8 +258,8 @@ fn build_flow(
     let b_first = ranges.b_first;
     let b_count = ranges.b_count;
     FlowDefinition::materialize(move |_runtime_config| {
-        let source_a_handler = ChannelTicker::new("a", a_first, a_count);
-        let source_b_handler = ChannelTicker::new("b", b_first, b_count);
+        let source_a_handler = ReattachingSource(ChannelTicker::new("a", a_first, a_count));
+        let source_b_handler = ReattachingSource(ChannelTicker::new("b", b_first, b_count));
         let merge_handler = MergeTransform::new();
         let effectful_handler = EffectfulTail { calls };
         let collect_handler = CountingSink { delivered };

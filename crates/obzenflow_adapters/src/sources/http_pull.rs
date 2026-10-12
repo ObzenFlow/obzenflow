@@ -12,7 +12,7 @@ use obzenflow_runtime::stages::common::handlers::{
     SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::source::{
-    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, Reattach, Refuse,
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, LatestState, Reattach, Refuse,
     SourceReaderInitContext,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -1185,11 +1185,13 @@ impl<D: PullDecoder> HttpPollSource<D> {
     }
 }
 
+/// Every cycle restarts from an empty cursor and observes the endpoint's
+/// current state, so a resumed run reattaches with `LatestState` (FLOWIP-122i).
 #[async_trait]
 impl<D: PullDecoder> AsyncInfiniteSourceConnector for HttpPollSource<D> {
     type Output = D::Output;
     type Reader = HttpPollReader<D>;
-    type Continuation = Reattach;
+    type Continuation = Reattach<LatestState>;
 
     async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         Ok(HttpPollReader::new(

@@ -19,7 +19,7 @@ use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::sink::SinkWriteFailure;
 use obzenflow_runtime::stages::source::{
-    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, AtMostOnce, FiniteSourceConnector,
     InfiniteSourceConnector, Reattach, Refuse, SourceReaderInitContext,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
@@ -750,7 +750,7 @@ struct SyncInfiniteConnector(Arc<Counters>);
 impl InfiniteSourceConnector for SyncInfiniteConnector {
     type Output = SourceFact;
     type Reader = SyncInfinite;
-    type Continuation = Reattach;
+    type Continuation = Reattach<AtMostOnce>;
     fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         assert_eq!(context.flow_name, "typed_source_journal_parity");
         assert!(!context.stage_name.is_empty());
@@ -771,7 +771,7 @@ struct AsyncInfiniteConnector(Arc<Counters>);
 impl AsyncInfiniteSourceConnector for AsyncInfiniteConnector {
     type Output = SourceFact;
     type Reader = AsyncInfinite;
-    type Continuation = Reattach;
+    type Continuation = Reattach<AtMostOnce>;
     async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
         assert_eq!(context.flow_name, "typed_source_journal_parity");
         assert!(!context.stage_name.is_empty());
