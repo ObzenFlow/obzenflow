@@ -69,11 +69,13 @@ pub struct FlowResolutionContext {
 
 /// Immutable per-flow resolution: knob key path -> point address ->
 /// resolved value. The point address is where the value applies; the
-/// value's meta carries the WINNING scope (which may be coarser).
+/// value's meta carries the WINNING scope (which may be coarser). It also
+/// carries the build's extracted `[app]` settings as evidence.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FlowEffectiveConfig {
     values: BTreeMap<String, BTreeMap<ResolutionPoint, Resolved<ConfigValue>>>,
     warnings: Vec<String>,
+    app: Option<serde_json::Value>,
 }
 
 impl FlowEffectiveConfig {
@@ -81,7 +83,17 @@ impl FlowEffectiveConfig {
         values: BTreeMap<String, BTreeMap<ResolutionPoint, Resolved<ConfigValue>>>,
         warnings: Vec<String>,
     ) -> Self {
-        Self { values, warnings }
+        Self {
+            values,
+            warnings,
+            app: None,
+        }
+    }
+
+    /// Record the settings the build extracted from `[app]` (FLOWIP-010t).
+    pub fn with_app_settings(mut self, app: Option<serde_json::Value>) -> Self {
+        self.app = app;
+        self
     }
 
     pub fn get(&self, key_path: &str, point: &ConfigScope) -> Option<&Resolved<ConfigValue>> {
@@ -319,7 +331,7 @@ impl FlowEffectiveConfig {
                 .then_with(|| a.value.to_string().cmp(&b.value.to_string()))
         });
         docs.dedup();
-        EffectiveConfigEvidence::new(docs)
+        EffectiveConfigEvidence::new(docs).with_app(self.app.clone())
     }
 
     /// Per-stage docs: every knob resolved AT this stage's point address

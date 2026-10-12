@@ -8,8 +8,10 @@ use obzenflow_core::ingress::{IngressTiming, InvalidIngressTiming, OUTCOME_UNKNO
 use obzenflow_core::journal::RUN_MANIFEST_FILENAME;
 use obzenflow_core::web::AuthPolicy;
 use obzenflow_runtime::bootstrap::{BootstrapConfig, ReplayVerb};
+use obzenflow_runtime::runtime_config::AppTable;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -376,6 +378,71 @@ pub(crate) struct RawFileStartupConfig {
     pub(crate) sinks: RawFileSinksConfig,
     /// FLOWIP-114d: Studio phonebook registration (010h startup layer).
     studio: RawFileStudioConfig,
+    /// FLOWIP-010t: the application's own table, the only open one. The
+    /// framework carries it untyped and never interprets a key.
+    app: Option<RawAppTable>,
+}
+
+/// The `[app]` table as parsed. `Debug` shows keys only: a value may be a
+/// mistyped secret.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+struct RawAppTable(toml::Value);
+
+impl std::fmt::Debug for RawAppTable {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let keys: Vec<&String> = self
+            .0
+            .as_table()
+            .map(|table| table.keys().collect())
+            .unwrap_or_default();
+        f.debug_tuple("RawAppTable").field(&keys).finish()
+    }
+}
+
+/// The `[app]` table in format-neutral form, with the file it came from.
+/// Datetimes become their TOML text; JSON has no NaN or infinity.
+fn app_table(raw: Option<RawAppTable>, origin: &Path) -> Result<AppTable, ConfigError> {
+    let Some(RawAppTable(raw)) = raw else {
+        return Ok(AppTable::default());
+    };
+    let toml::Value::Table(table) = raw else {
+        return Err(ConfigError::at("app", "expected a table"));
+    };
+    let mut entries = serde_json::Map::new();
+    for (key, value) in table {
+        let value = app_value(value, &format!("app.{key}"))?;
+        entries.insert(key, value);
+    }
+    Ok(AppTable::new(origin, entries))
+}
+
+fn app_value(value: toml::Value, at: &str) -> Result<serde_json::Value, ConfigError> {
+    use serde_json::Value;
+    Ok(match value {
+        toml::Value::String(text) => Value::String(text),
+        toml::Value::Integer(integer) => Value::from(integer),
+        toml::Value::Float(float) => serde_json::Number::from_f64(float)
+            .map(Value::Number)
+            .ok_or_else(|| ConfigError::at(at, "nan and infinite floats are not supported"))?,
+        toml::Value::Boolean(boolean) => Value::Bool(boolean),
+        toml::Value::Datetime(datetime) => Value::String(datetime.to_string()),
+        toml::Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| app_value(item, &format!("{at}[{index}]")))
+                .collect::<Result<_, _>>()?,
+        ),
+        toml::Value::Table(table) => {
+            let mut entries = serde_json::Map::new();
+            for (key, value) in table {
+                let value = app_value(value, &format!("{at}.{key}"))?;
+                entries.insert(key, value);
+            }
+            Value::Object(entries)
+        }
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -726,17 +793,25 @@ pub(crate) struct RawFileReplayConfig {
 }
 
 impl FlowConfig {
+    /// `env_config_file` is `OBZENFLOW_CONFIG` as the host read it, once.
     pub(crate) fn parse_and_resolve(
         builder_config_file: Option<PathBuf>,
+        env_config_file: Option<OsString>,
         enable_autodiscovery: bool,
         console: ConsoleDefaults,
     ) -> Result<ResolvedStartupConfig, ConfigError> {
-        Self::parse().resolve_with_console(builder_config_file, enable_autodiscovery, console)
+        Self::parse().resolve_with_console(
+            builder_config_file,
+            env_config_file,
+            enable_autodiscovery,
+            console,
+        )
     }
 
     pub(crate) fn parse_and_resolve_from<I, T>(
         args: I,
         builder_config_file: Option<PathBuf>,
+        env_config_file: Option<OsString>,
         enable_autodiscovery: bool,
         console: ConsoleDefaults,
     ) -> Result<ResolvedStartupConfig, ConfigError>
@@ -746,7 +821,12 @@ impl FlowConfig {
     {
         Self::try_parse_from(args)
             .map_err(|err| ConfigError::global(err.to_string()))?
-            .resolve_with_console(builder_config_file, enable_autodiscovery, console)
+            .resolve_with_console(
+                builder_config_file,
+                env_config_file,
+                enable_autodiscovery,
+                console,
+            )
     }
 
     #[cfg(test)]
@@ -757,6 +837,7 @@ impl FlowConfig {
     ) -> Result<ResolvedStartupConfig, ConfigError> {
         self.resolve_with_console(
             builder_config_file,
+            None,
             enable_autodiscovery,
             ConsoleDefaults::default(),
         )
@@ -765,6 +846,7 @@ impl FlowConfig {
     fn resolve_with_console(
         self,
         builder_config_file: Option<PathBuf>,
+        env_config_file: Option<OsString>,
         enable_autodiscovery: bool,
         console: ConsoleDefaults,
     ) -> Result<ResolvedStartupConfig, ConfigError> {
@@ -774,17 +856,20 @@ impl FlowConfig {
                 "removed; Prometheus is the supported format, use OBZENFLOW_METRICS_ENABLED to enable or disable reporting",
             ));
         }
-        let file_path = self
-            .config
-            .clone()
-            .or(builder_config_file)
-            .or_else(|| autodiscover_config(enable_autodiscovery));
-        let file = load_file_config(file_path.as_deref())?;
+        let (file_path, selection) = select_config_file(
+            self.config.clone(),
+            env_config_file,
+            builder_config_file,
+            enable_autodiscovery,
+        )?;
+        let (file, app) = load_file_config(file_path.as_deref(), selection)?;
         // FLOWIP-010 Phase A: the runtime config snapshot resolves from the
         // same raw inputs, once, and rides the resolved startup config so
-        // the host owns it for the run (§7 carrier).
+        // the host owns it for the run (§7 carrier). The `[app]` table rides
+        // it untyped (FLOWIP-010t).
         let runtime_config = std::sync::Arc::new(
-            super::runtime_config_sources::build_runtime_config_snapshot(&self, &file)?,
+            super::runtime_config_sources::build_runtime_config_snapshot(&self, &file)?
+                .with_app(app),
         );
         let control_plane_auth = self.resolve_control_plane_auth(&file)?;
         let tokio_console = resolve_console(
@@ -1181,15 +1266,33 @@ pub(crate) fn autodiscover_config(enabled: bool) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-pub(crate) fn load_file_config(path: Option<&Path>) -> Result<RawFileStartupConfig, ConfigError> {
+/// Where the selected config file came from, for read diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFileSelection {
+    /// `OBZENFLOW_CONFIG` named it; read failures name the variable.
+    Environment,
+    /// `--config`, the builder default or the working-directory search.
+    Other,
+}
+
+/// Parse the selected file. The `[app]` table comes back separately, tied
+/// to the file it came from (FLOWIP-010t).
+fn load_file_config(
+    path: Option<&Path>,
+    selection: ConfigFileSelection,
+) -> Result<(RawFileStartupConfig, AppTable), ConfigError> {
     let Some(path) = path else {
-        return Ok(RawFileStartupConfig::default());
+        return Ok((RawFileStartupConfig::default(), AppTable::default()));
     };
 
-    let text = std::fs::read_to_string(path)
-        .map_err(|err| ConfigError::global(format!("failed to read {}: {err}", path.display())))?;
-    let raw: toml::Value = toml::from_str(&text)
-        .map_err(|err| ConfigError::global(format!("failed to parse {}: {err}", path.display())))?;
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        let message = format!("failed to read {}: {err}", path.display());
+        match selection {
+            ConfigFileSelection::Environment => ConfigError::at(CONFIG_FILE_ENV, message),
+            ConfigFileSelection::Other => ConfigError::global(message),
+        }
+    })?;
+    let raw: toml::Value = toml::from_str(&text).map_err(|err| syntax_error(path, &text, &err))?;
     if raw
         .get("metrics")
         .and_then(|metrics| metrics.get("exporter"))
@@ -1200,8 +1303,75 @@ pub(crate) fn load_file_config(path: Option<&Path>) -> Result<RawFileStartupConf
             "removed; Prometheus is the supported format, use metrics.enabled to enable or disable reporting",
         ));
     }
-    raw.try_into()
-        .map_err(|err| ConfigError::global(format!("failed to parse {}: {err}", path.display())))
+    let mut file: RawFileStartupConfig = raw
+        .try_into()
+        .map_err(|err| ConfigError::global(format!("failed to parse {}: {err}", path.display())))?;
+    let app = app_table(file.app.take(), path)?;
+    Ok((file, app))
+}
+
+/// A syntax error shows the file, line, column and grammar message only.
+/// The parser's own rendering prints the offending source line, where an
+/// unquoted or badly escaped secret lands, and its `Debug` holds the whole
+/// document, so it is rendered here and dropped (FLOWIP-010t B8).
+fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError {
+    let message = error
+        .message()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    match error.span() {
+        Some(span) => {
+            let mut start = span.start.min(text.len());
+            while !text.is_char_boundary(start) {
+                start -= 1;
+            }
+            let before = &text[..start];
+            let line = before.matches('\n').count() + 1;
+            let column = before
+                .rsplit_once('\n')
+                .map_or(before, |(_, tail)| tail)
+                .chars()
+                .count()
+                + 1;
+            ConfigError::global(format!(
+                "failed to parse {}:{line}:{column}: {message}",
+                path.display()
+            ))
+        }
+        None => ConfigError::global(format!("failed to parse {}: {message}", path.display())),
+    }
+}
+
+/// The environment variable that selects the config file (FLOWIP-010t B3).
+pub(crate) const CONFIG_FILE_ENV: &str = "OBZENFLOW_CONFIG";
+
+/// `--config`, then `OBZENFLOW_CONFIG`, then the builder's compiled default,
+/// then the working-directory search: operators override code (010 §2).
+fn select_config_file(
+    cli: Option<PathBuf>,
+    env: Option<OsString>,
+    builder: Option<PathBuf>,
+    enable_autodiscovery: bool,
+) -> Result<(Option<PathBuf>, ConfigFileSelection), ConfigError> {
+    if let Some(path) = cli {
+        return Ok((Some(path), ConfigFileSelection::Other));
+    }
+    if let Some(value) = env {
+        if value.is_empty() {
+            return Err(ConfigError::at(
+                CONFIG_FILE_ENV,
+                "is set but empty; name a config file or unset it",
+            ));
+        }
+        return Ok((Some(PathBuf::from(value)), ConfigFileSelection::Environment));
+    }
+    Ok((
+        builder.or_else(|| autodiscover_config(enable_autodiscovery)),
+        ConfigFileSelection::Other,
+    ))
 }
 
 fn validate_replay(replay: &ResolvedReplayConfig) -> Result<(), ConfigError> {
@@ -2550,5 +2720,206 @@ port = "abc"
         if let Err(error) = result {
             assert!(!error.to_string().contains("server.ingress"), "{error}");
         }
+    }
+
+    const SENTINEL: &str = "sk_live_51HSENTINEL";
+
+    fn write_config(contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("obzenflow.toml");
+        fs::write(&path, contents).unwrap();
+        (tempdir, path)
+    }
+
+    fn resolve_file(path: &Path) -> Result<ResolvedStartupConfig, ConfigError> {
+        FlowConfig::try_parse_from(["obzenflow", "--config", path.to_str().unwrap()])
+            .unwrap()
+            .resolve(None, false)
+    }
+
+    fn resolve_selected(
+        args: &[&str],
+        builder: Option<PathBuf>,
+        env: Option<&str>,
+    ) -> Result<ResolvedStartupConfig, ConfigError> {
+        let mut argv = vec!["obzenflow"];
+        argv.extend_from_slice(args);
+        FlowConfig::try_parse_from(argv)
+            .unwrap()
+            .resolve_with_console(
+                builder,
+                env.map(OsString::from),
+                false,
+                ConsoleDefaults::default(),
+            )
+    }
+
+    #[test]
+    fn the_app_table_loads_untyped_and_every_other_unknown_key_still_fails() {
+        let _lock = env_lock();
+        let (_dir, path) = write_config(
+            "[server]\nenabled = false\n\n[app]\naccounts_file = \"accounts.yaml\"\n\n\
+             [app.window]\nopens = 1979-05-27T07:32:00Z\nratio = 0.5\nlimits = [1, 2]\n",
+        );
+        let resolved = resolve_file(&path).unwrap();
+        let app = resolved.runtime_config.app();
+        assert_eq!(app.origin(), Some(path.as_path()));
+        let context =
+            obzenflow_runtime::run_context::FlowBuildContext::new(resolved.runtime_config.clone());
+        let table: serde_json::Value = context.extract_app_settings().unwrap();
+        assert_eq!(
+            table,
+            serde_json::json!({
+                "accounts_file": "accounts.yaml",
+                "window": {"opens": "1979-05-27T07:32:00Z", "ratio": 0.5, "limits": [1, 2]},
+            })
+        );
+
+        let (_dir, path) = write_config("[apps]\naccounts_file = \"accounts.yaml\"\n");
+        let rendered = resolve_file(&path).unwrap_err().to_string();
+        assert!(rendered.contains("unknown field `apps`"), "{rendered}");
+
+        let (_dir, path) = write_config(&format!("app = \"{SENTINEL}\"\n"));
+        assert_eq!(
+            resolve_file(&path).unwrap_err().to_string(),
+            "config error at app: expected a table"
+        );
+
+        let (_dir, path) = write_config("[app.limits]\nratio = nan\n");
+        assert_eq!(
+            resolve_file(&path).unwrap_err().to_string(),
+            "config error at app.limits.ratio: nan and infinite floats are not supported"
+        );
+    }
+
+    #[test]
+    fn syntax_errors_name_the_position_and_never_the_source_text() {
+        let _lock = env_lock();
+        for (contents, position) in [
+            (format!("[app]\npartner_api_key_env = {SENTINEL}\n"), "2:23"),
+            (
+                format!("[app]\npartner_api_key_env = \"{SENTINEL}\\q\"\n"),
+                "2:45",
+            ),
+            (format!("[app]\npartner = {{ key = {SENTINEL} }}\n"), "2:19"),
+            (format!("[app]\nkeys = [\"ok\", {SENTINEL}]\n"), "2:15"),
+            (format!("[ai.models]\napi_key_env = {SENTINEL}\n"), "2:15"),
+        ] {
+            let (_dir, path) = write_config(&contents);
+            let error = resolve_file(&path).unwrap_err();
+            let rendered = format!("{error} {error:?}");
+            assert!(!rendered.contains(SENTINEL), "{rendered}");
+            assert!(
+                error.to_string().starts_with(&format!(
+                    "config error: failed to parse {}:{position}: ",
+                    path.display()
+                )),
+                "{error}"
+            );
+        }
+
+        let (_dir, path) = write_config("[app]\naccounts_file = \"a\"\naccounts_file = \"b\"\n");
+        assert_eq!(
+            resolve_file(&path).unwrap_err().to_string(),
+            format!(
+                "config error: failed to parse {}:3:1: duplicate key `accounts_file` in table `app`",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn secret_references_admit_only_environment_variable_names() {
+        let _lock = env_lock();
+        let refused = "config error at ai.models.api_key_env: expected an environment variable \
+                       name: uppercase letters, digits and underscores, not starting with a digit";
+
+        let (_dir, path) = write_config(&format!("[ai.models]\napi_key_env = \"{SENTINEL}\"\n"));
+        let error = resolve_file(&path).unwrap_err();
+        assert_eq!(error.to_string(), refused);
+        assert!(!format!("{error:?}").contains(SENTINEL));
+
+        let guard = EnvGuard::new(&["OBZENFLOW_AI_MODELS_API_KEY_ENV"]);
+        guard.set("OBZENFLOW_AI_MODELS_API_KEY_ENV", SENTINEL);
+        let error = FlowConfig::try_parse_from(["obzenflow"])
+            .unwrap()
+            .resolve(None, false)
+            .unwrap_err();
+        assert_eq!(error.to_string(), refused);
+        assert!(!format!("{error:?}").contains(SENTINEL));
+        guard.set("OBZENFLOW_AI_MODELS_API_KEY_ENV", "PARTNER_API_KEY");
+        let resolved = FlowConfig::try_parse_from(["obzenflow"])
+            .unwrap()
+            .resolve(None, false)
+            .unwrap();
+        assert_eq!(
+            resolved
+                .runtime_config
+                .ai_models()
+                .api_key_env
+                .value
+                .env_name(),
+            "PARTNER_API_KEY"
+        );
+
+        // `toml`'s own message carries no refused text; its Display, which
+        // prints the source line, is never used for a config file.
+        let error = toml::from_str::<BTreeMap<String, obzenflow_core::config::SecretRef>>(
+            &format!("partner_api_key_env = \"{SENTINEL}\""),
+        )
+        .unwrap_err();
+        assert!(!error.message().contains(SENTINEL), "{}", error.message());
+    }
+
+    #[test]
+    fn obzenflow_config_ranks_below_the_cli_and_above_the_builder_default() {
+        let _lock = env_lock();
+        let (_builder_dir, builder) = write_config("[server]\nenabled = false\nport = 1111\n");
+        let (_env_dir, env) = write_config("[server]\nenabled = false\nport = 2222\n");
+        let (_cli_dir, cli) = write_config("[server]\nenabled = false\nport = 3333\n");
+        let env = env.to_str().unwrap();
+
+        let selected = resolve_selected(&[], Some(builder.clone()), Some(env)).unwrap();
+        assert_eq!(selected.server.port, 2222);
+        let selected = resolve_selected(
+            &["--config", cli.to_str().unwrap()],
+            Some(builder.clone()),
+            Some(env),
+        )
+        .unwrap();
+        assert_eq!(selected.server.port, 3333);
+        let selected = resolve_selected(&[], Some(builder), None).unwrap();
+        assert_eq!(selected.server.port, 1111);
+    }
+
+    #[test]
+    fn an_obzenflow_config_path_that_cannot_be_used_fails_naming_the_variable() {
+        let _lock = env_lock();
+        let tempdir = tempfile::tempdir().unwrap();
+        let missing = tempdir.path().join("missing.toml");
+        let error = resolve_selected(&[], None, Some(missing.to_str().unwrap())).unwrap_err();
+        assert!(
+            error.to_string().starts_with(&format!(
+                "config error at OBZENFLOW_CONFIG: failed to read {}: ",
+                missing.display()
+            )),
+            "{error}"
+        );
+
+        let unreadable = tempdir.path().to_str().unwrap();
+        let error = resolve_selected(&[], None, Some(unreadable)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("config error at OBZENFLOW_CONFIG: failed to read "),
+            "{error}"
+        );
+
+        assert_eq!(
+            resolve_selected(&[], None, Some(""))
+                .unwrap_err()
+                .to_string(),
+            "config error at OBZENFLOW_CONFIG: is set but empty; name a config file or unset it"
+        );
     }
 }

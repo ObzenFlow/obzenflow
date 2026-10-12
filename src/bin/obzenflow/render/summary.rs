@@ -9,6 +9,8 @@ use super::*;
 
 #[path = "summary/clocks.rs"]
 mod clocks;
+#[path = "summary/configuration.rs"]
+mod configuration;
 #[path = "summary/events.rs"]
 mod events;
 #[path = "summary/lineage.rs"]
@@ -31,6 +33,7 @@ impl Renderer {
             manifest,
             progress,
             lineage,
+            config_changes,
         } = observed;
         self.flush_pending(output)?;
         if self.jsonl {
@@ -54,6 +57,7 @@ impl Renderer {
                 }
                 self.manifest_summary(output, manifest)?;
                 self.lineage_summary(output, &lineage)?;
+                self.configuration_summary(output, &config_changes)?;
                 self.continuation_summary(output, manifest)?;
                 self.journal_summary(output, manifest)?;
                 self.clock_summary(output, progress)?;

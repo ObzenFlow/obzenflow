@@ -46,8 +46,11 @@ The digest uses a local mock news endpoint by default; prefix its command with
 [the PostgreSQL config](hn_ai_digest_demo/obzenflow.postgres.toml) and supply a
 connection as described in the [local PostgreSQL guide](../dev/postgres/README.md).
 
-The bank example opens its accounts from [accounts.yaml](http_ingestion_piggy_bank_demo/accounts.yaml)
-at startup; transactions arrive over HTTP. It also includes an
+The bank example opens its accounts at startup from the file its
+[config](http_ingestion_piggy_bank_demo/obzenflow.toml) names under `[app] accounts_file`,
+[accounts.yaml](http_ingestion_piggy_bank_demo/accounts.yaml) by default; transactions
+arrive over HTTP. To open other accounts, pass a copy of the config that names another
+file, with `--config <file>` or `OBZENFLOW_CONFIG=<file>`. It also includes an
 [authenticated control-plane config](http_ingestion_piggy_bank_demo/obzenflow.auth.toml);
 see [managed web authentication](../crates/obzenflow_infra/src/web/README.md) for setup.
 

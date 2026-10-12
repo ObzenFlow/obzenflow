@@ -6,19 +6,14 @@
 //!
 //! The application builder hosts HTTP ingress and returns the typed source for
 //! `flow!`. Readiness, telemetry and shutdown wiring stay with the builder. The
-//! accounts source is cold configuration; the file opens only for a live run.
+//! accounts file is application configuration, read by the flow from `[app]`.
 
-use super::flow::{self, AccountYaml, LedgerIngress};
+use super::flow::{self, LedgerIngress};
 use anyhow::Result;
 use obzenflow::application::ingress::IngestionConfig;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
-use obzenflow::stages::sources::{YamlSelection, YamlSource};
 
 const TX_BASE_PATH: &str = "/api/bank/tx";
-const ACCOUNTS_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/examples/http_ingestion_piggy_bank_demo/accounts.yaml"
-);
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/http_ingestion_piggy_bank_demo/obzenflow.toml"
@@ -38,22 +33,19 @@ pub fn run_example() -> Result<()> {
                 "Stream-table join: accounts load from YAML, transactions post over \
                  HTTP against them, balances fold into a live checkbook.",
             )
-            .config("accounts", "accounts.yaml, fixed at startup")
+            .config("accounts", "[app] accounts_file, fixed at startup")
             .config("transactions", format!("POST {TX_BASE_PATH}/events")),
     );
 
-    let accounts_source = YamlSource::builder(AccountYaml)
-        .path(ACCOUNTS_FILE)
-        .selection(YamlSelection::SequenceAt("/accounts".into()))
-        .build()?;
-
+    // The compiled config path is a default: `--config` or `OBZENFLOW_CONFIG`
+    // selects another file, and with it other accounts.
     let mut app = FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation);
     let tx_source = app.http_ingress(LedgerIngress, ingress_config(TX_BASE_PATH));
 
-    app.run_blocking(flow::build_flow(accounts_source, tx_source))?;
+    app.run_blocking(flow::build_flow(tx_source))?;
 
     Ok(())
 }

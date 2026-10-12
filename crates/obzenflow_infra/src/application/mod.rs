@@ -8,6 +8,7 @@
 //! CLI parsing, server management, and graceful shutdown handling.
 
 pub(crate) mod config;
+mod config_report;
 mod error;
 mod flow_application;
 pub(crate) mod lifecycle_observation;

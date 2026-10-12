@@ -123,6 +123,13 @@ enum AuthoringHalt {
     /// A replay reached a cursor its recording holds no outcome for
     /// (FLOWIP-134i B13).
     RecordingEnded(EffectCursor),
+    /// The recorded effect's identity is not the one this run computes, so
+    /// its history cannot be rebuilt (FLOWIP-120a, FLOWIP-010t B6).
+    DescriptorMismatch {
+        cursor: EffectCursor,
+        expected: EffectDescriptorHash,
+        recorded: EffectDescriptorHash,
+    },
 }
 
 impl AuthoringHalt {
@@ -133,6 +140,15 @@ impl AuthoringHalt {
             },
             Self::RecordingEnded(cursor) => EffectError::RecordingEnded {
                 cursor: cursor.clone(),
+            },
+            Self::DescriptorMismatch {
+                cursor,
+                expected,
+                recorded,
+            } => EffectError::DescriptorMismatch {
+                cursor: cursor.clone(),
+                expected: expected.clone(),
+                recorded: recorded.clone(),
             },
         }
     }
@@ -145,6 +161,13 @@ impl AuthoringHalt {
                 obzenflow_core::event::StageFatalReason::RecordingEnded,
                 self.error().to_string(),
             ),
+            Self::DescriptorMismatch { .. } => {
+                crate::stages::common::handler_error::StageFatal::new(
+                    obzenflow_core::event::StageFatalCode::Replay,
+                    obzenflow_core::event::StageFatalReason::ReplayDivergence,
+                    self.error().to_string(),
+                )
+            }
         }
     }
 }
@@ -205,6 +228,32 @@ impl EffectsCore {
 
     fn latch_binding_fault(&mut self, fault: BindingAuthorityFault) -> EffectError {
         self.latch(AuthoringHalt::Binding(fault))
+    }
+
+    /// A descriptor mismatch fails the stage whatever the handler does with
+    /// the error, as a recording that ended does.
+    fn latch_descriptor_mismatch(
+        &mut self,
+        cursor: EffectCursor,
+        expected: EffectDescriptorHash,
+        recorded: EffectDescriptorHash,
+    ) -> EffectError {
+        self.latch(AuthoringHalt::DescriptorMismatch {
+            cursor,
+            expected,
+            recorded,
+        })
+    }
+
+    fn latch_if_descriptor_mismatch(&mut self, error: EffectError) -> EffectError {
+        match error {
+            EffectError::DescriptorMismatch {
+                cursor,
+                expected,
+                recorded,
+            } => self.latch_descriptor_mismatch(cursor, expected, recorded),
+            other => other,
+        }
     }
 
     /// The refusal for a cursor without any recorded attempt, or `None` when
@@ -653,28 +702,30 @@ impl EffectsCore {
                     if started.descriptor_hash != descriptor_hash
                         || started.effect_type.as_str() != E::EFFECT_TYPE
                     {
-                        return Err(EffectError::DescriptorMismatch {
-                            cursor: cursor.clone(),
-                            expected: descriptor_hash.clone(),
-                            recorded: started.descriptor_hash.clone(),
-                        });
+                        return Err(self.latch_descriptor_mismatch(
+                            cursor.clone(),
+                            descriptor_hash.clone(),
+                            started.descriptor_hash.clone(),
+                        ));
                     }
                 }
                 let record_refs = records.iter().collect::<Vec<_>>();
                 for record in &record_refs {
                     if record.descriptor_hash != descriptor_hash {
-                        return Err(EffectError::DescriptorMismatch {
-                            cursor: cursor.clone(),
-                            expected: descriptor_hash.clone(),
-                            recorded: record.descriptor_hash.clone(),
-                        });
+                        return Err(self.latch_descriptor_mismatch(
+                            cursor.clone(),
+                            descriptor_hash.clone(),
+                            record.descriptor_hash.clone(),
+                        ));
                     }
                 }
-                let output_result = self.replay_records_output::<E>(
-                    &record_refs,
-                    cursor.clone(),
-                    descriptor_hash.clone(),
-                );
+                let output_result = self
+                    .replay_records_output::<E>(
+                        &record_refs,
+                        cursor.clone(),
+                        descriptor_hash.clone(),
+                    )
+                    .map_err(|error| self.latch_if_descriptor_mismatch(error));
                 if output_result
                     .as_ref()
                     .is_err_and(|error| !matches!(error, EffectError::RecordedFailure { .. }))
@@ -729,11 +780,11 @@ impl EffectsCore {
                     if started.descriptor_hash != descriptor_hash
                         || started.effect_type.as_str() != E::EFFECT_TYPE
                     {
-                        return Err(EffectError::DescriptorMismatch {
-                            cursor: cursor.clone(),
-                            expected: descriptor_hash.clone(),
-                            recorded: started.descriptor_hash.clone(),
-                        });
+                        return Err(self.latch_descriptor_mismatch(
+                            cursor.clone(),
+                            descriptor_hash.clone(),
+                            started.descriptor_hash.clone(),
+                        ));
                     }
                 }
                 let highest_started_attempt = attempts
@@ -1687,7 +1738,7 @@ impl EffectsCore {
             effect_ordinal,
         );
 
-        if let Some(history) = &self.ctx.effect_history {
+        if let Some(history) = self.ctx.effect_history.clone() {
             if let Some(records) = history.find_group(&cursor) {
                 let frontier = history.cursor_history(&cursor).causal;
                 self.causal
@@ -1695,8 +1746,9 @@ impl EffectsCore {
                     .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
                 crate::supervised_base::publication::incorporate(&frontier)
                     .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
-                let output_result =
-                    self.replay_capture_output(&records, cursor.clone(), descriptor_hash.clone());
+                let output_result = self
+                    .replay_capture_output(&records, cursor.clone(), descriptor_hash.clone())
+                    .map_err(|error| self.latch_if_descriptor_mismatch(error));
                 let output = match output_result {
                     Ok(output) => output,
                     Err(err @ EffectError::RecordedFailure { .. }) => {

@@ -5975,6 +5975,16 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
         .expect_err("descriptor mismatch must fail replay");
 
     assert!(matches!(err, EffectError::DescriptorMismatch { .. }));
+    // However the handler maps the error, the stage fails (FLOWIP-010t B6).
+    let fatal = replay
+        .authoring_halt_fatal()
+        .expect("a descriptor mismatch latches a stage failure");
+    assert_eq!(fatal.code, obzenflow_core::event::StageFatalCode::Replay);
+    assert_eq!(
+        fatal.reason,
+        obzenflow_core::event::StageFatalReason::ReplayDivergence
+    );
+    assert!(fatal.detail.starts_with("effect descriptor mismatch"));
 }
 
 #[tokio::test]

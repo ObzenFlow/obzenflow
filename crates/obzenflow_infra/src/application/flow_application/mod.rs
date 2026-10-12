@@ -138,15 +138,23 @@ fn resolve_startup_config(
     cli_args: Option<Vec<OsString>>,
     console_defaults: ConsoleDefaults,
 ) -> Result<ResolvedStartupConfig, ApplicationError> {
+    // FLOWIP-010t B3: read once here, so resolution never reads the variable.
+    let env_config_file = std::env::var_os(super::config::CONFIG_FILE_ENV);
     let result = if let Some(cli_args) = cli_args {
         FlowConfig::parse_and_resolve_from(
             cli_args,
             builder_config_file,
+            env_config_file,
             enable_autodiscovery,
             console_defaults,
         )
     } else {
-        FlowConfig::parse_and_resolve(builder_config_file, enable_autodiscovery, console_defaults)
+        FlowConfig::parse_and_resolve(
+            builder_config_file,
+            env_config_file,
+            enable_autodiscovery,
+            console_defaults,
+        )
     };
 
     result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
@@ -678,6 +686,7 @@ impl FlowApplication {
             print!("{}", rendered.text);
         }
 
+        let mut config_changes = Vec::new();
         let (result, flow_name, run_state, stopped) = 'run: {
             if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server.enabled {
                 break 'run (
@@ -697,9 +706,11 @@ impl FlowApplication {
             // journal is created.
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
-                if config.server.enabled {
+                if config.server.enabled || config.replay.is_some() {
                     // The host releases automatic Run only after policy admission
-                    // and a real socket bind. The supervisor must not race ahead.
+                    // and a real socket bind, and after a replay or resume names
+                    // its configuration differences (FLOWIP-010t). The supervisor
+                    // must not race ahead.
                     bootstrap_config.startup_mode =
                         obzenflow_runtime::bootstrap::StartupMode::Manual;
                 }
@@ -801,6 +812,11 @@ impl FlowApplication {
                         | obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
                             ApplicationError::ResumeRefused(failure.error.to_string())
                         }
+                        // FLOWIP-010t: an `[app]` table the build could not use is
+                        // a startup configuration error, like any other config key.
+                        obzenflow_dsl::FlowBuildError::ApplicationSettings(error) => {
+                            ApplicationError::InvalidConfiguration(error.to_string())
+                        }
                         other => ApplicationError::FlowBuildFailed(other.to_string()),
                     };
                     break 'run (Err(error), None, failure.run, false);
@@ -808,6 +824,13 @@ impl FlowApplication {
             };
 
             application.protect_flow(&flow_handle);
+
+            // FLOWIP-010t B6, B9: name the configuration that differs from the
+            // runs this replay or resume rebuilds, before Run is released.
+            config_changes = super::config_report::rebuilt_config_changes(&flow_handle);
+            for line in super::config_report::startup_lines(&config_changes) {
+                println!("{line}");
+            }
 
             // The selected run substrate (FLOWIP-120u): durable with its locator,
             // or ephemeral with none. An ephemeral resume never reaches here;
@@ -1102,6 +1125,19 @@ impl FlowApplication {
                     }
                     _ => err,
                 };
+                // FLOWIP-010t B6: a stage that refused its recorded history
+                // repeats the configuration keys that changed.
+                let changed_configuration = match (
+                    super::config_report::descriptor_mismatch_line(&config_changes),
+                    run_state.as_ref().and_then(|s| s.locator()),
+                ) {
+                    (Some(line), Some(locator))
+                        if super::config_report::refused_by_divergence(locator.path()).await =>
+                    {
+                        Some(line)
+                    }
+                    _ => None,
+                };
                 if let Some(presentation) = &presentation {
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(RunPresentationOutcome::Failed {
@@ -1122,6 +1158,9 @@ impl FlowApplication {
                             println!("{footer}");
                         }
                     }
+                }
+                if let Some(line) = changed_configuration {
+                    println!("{line}");
                 }
                 Err(err)
             }

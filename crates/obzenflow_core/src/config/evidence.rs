@@ -65,6 +65,10 @@ pub struct EffectiveConfigEvidence {
     /// Sorted by `(key_path, resolved_for, scope)` for deterministic golden
     /// tests without collapsing equal inherited effect values.
     pub values: Vec<ResolvedValueDoc>,
+    /// The application's `[app]` settings as its type serialized them,
+    /// defaults included (FLOWIP-010t). Absent when the build extracted none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<serde_json::Value>,
 }
 
 impl EffectiveConfigEvidence {
@@ -78,7 +82,13 @@ impl EffectiveConfigEvidence {
         Self {
             schema_version: EVIDENCE_SCHEMA_VERSION,
             values,
+            app: None,
         }
+    }
+
+    pub fn with_app(mut self, app: Option<serde_json::Value>) -> Self {
+        self.app = app;
+        self
     }
 }
 
@@ -169,6 +179,21 @@ mod tests {
             evidence.values[0].resolved_for.as_ref(),
             Some(ResolvedForDoc::Effect { effect_type, .. }) if effect_type == "payments.authorize"
         ));
+    }
+
+    #[test]
+    fn the_app_section_is_omitted_when_absent_and_optional_for_readers() {
+        let without = EffectiveConfigEvidence::new(Vec::new());
+        assert!(!serde_json::to_string(&without).unwrap().contains("app"));
+
+        let with = EffectiveConfigEvidence::new(Vec::new())
+            .with_app(Some(serde_json::json!({"accounts_file": "accounts.yaml"})));
+        let wire = serde_json::to_value(&with).unwrap();
+        assert_eq!(wire["app"]["accounts_file"], "accounts.yaml");
+
+        let archived: EffectiveConfigEvidence =
+            serde_json::from_str(r#"{"schema_version": 2, "values": []}"#).unwrap();
+        assert_eq!(archived.app, None);
     }
 
     #[test]

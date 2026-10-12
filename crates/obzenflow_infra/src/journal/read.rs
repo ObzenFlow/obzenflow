@@ -16,8 +16,11 @@ use obzenflow_core::journal::{JournalError, JournalReader, RunManifest};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
+mod config_changes;
 mod lineage;
+pub use config_changes::{compare_with_runs, read_config_changes, ConfigChanges, RunConfigChanges};
 pub use lineage::{read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing};
+pub use obzenflow_runtime::runtime_config::ConfigDifference;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalReadError {
@@ -256,6 +259,10 @@ impl RunTail {
     /// The run's place in its history, read now from manifests and claims.
     pub fn lineage(&self) -> Result<RunLineage, JournalReadError> {
         read_run_lineage(&self.state.run_dir)
+    }
+    /// How the run's configuration differs from the runs it rebuilt.
+    pub fn config_changes(&self) -> Result<Vec<RunConfigChanges>, JournalReadError> {
+        read_config_changes(&self.state.run_dir)
     }
     pub async fn read_next(&mut self) -> Result<TailRead, JournalReadError> {
         Ok(match self.state.next(false).await? {

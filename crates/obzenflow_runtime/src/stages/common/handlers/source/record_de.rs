@@ -4,16 +4,15 @@
 
 //! Serde over one source record, with typed and safe errors (FLOWIP-084n B6).
 //!
-//! [`RecordDeError`] classifies by which serde hook fired and drops serde's
+//! [`RecordDeError`] is the record policy of the shared classified
+//! deserializer: it classifies by which serde hook fired and drops serde's
 //! text and rejected values. Field names come only from serde's static struct
 //! and variant lists, so input-controlled map keys are redacted. Record
-//! deserializers share it; the JSON one for ingress bodies lives here.
+//! deserializers share it; ingress bodies decode through [`deserialize_json`].
 
+use crate::classified_de::ClassifiedError;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
-use serde::de::value::StrDeserializer;
-use serde::de::{
-    self, DeserializeOwned, DeserializeSeed, Expected, Unexpected, VariantAccess, Visitor,
-};
+use serde::de::{self, DeserializeOwned, Expected, Unexpected};
 use serde_json::Value;
 use std::fmt;
 use std::num::NonZeroU32;
@@ -97,228 +96,20 @@ impl de::Error for RecordDeError {
     }
 }
 
+impl ClassifiedError for RecordDeError {
+    fn within_key(self, key: &str, known: Option<&'static [&'static str]>) -> Self {
+        RecordDeError::within_key(self, key, known)
+    }
+
+    fn within_index(self, index: usize) -> Self {
+        RecordDeError::within_index(self, index)
+    }
+}
+
 /// Deserializes one JSON value; a failure names a reason and a static path.
 pub(crate) fn deserialize_json<T: DeserializeOwned>(value: &Value) -> Result<T, SourceDiagnostic> {
-    T::deserialize(JsonDeserializer(value)).map_err(RecordDeError::into_diagnostic)
-}
-
-struct JsonDeserializer<'a>(&'a Value);
-
-impl<'a> JsonDeserializer<'a> {
-    fn map(&self, known: Option<&'static [&'static str]>) -> Option<JsonMapAccess<'a>> {
-        match self.0 {
-            Value::Object(entries) => Some(JsonMapAccess {
-                entries: entries.iter(),
-                known,
-                pending: None,
-            }),
-            _ => None,
-        }
-    }
-}
-
-impl<'de, 'a> de::Deserializer<'de> for JsonDeserializer<'a> {
-    type Error = RecordDeError;
-
-    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, RecordDeError> {
-        match self.0 {
-            Value::Null => visitor.visit_unit(),
-            Value::Bool(value) => visitor.visit_bool(*value),
-            Value::Number(number) => match (number.as_u64(), number.as_i64(), number.as_f64()) {
-                (Some(unsigned), _, _) => visitor.visit_u64(unsigned),
-                (None, Some(signed), _) => visitor.visit_i64(signed),
-                (None, None, Some(float)) => visitor.visit_f64(float),
-                (None, None, None) => Err(RecordDeError::new(SourceDiagnosticReason::InvalidValue)),
-            },
-            Value::String(value) => visitor.visit_str(value),
-            Value::Array(items) => visitor.visit_seq(JsonSeqAccess {
-                items: items.iter().enumerate(),
-            }),
-            Value::Object(_) => match self.map(None) {
-                Some(access) => visitor.visit_map(access),
-                None => Err(RecordDeError::new(SourceDiagnosticReason::InvalidRecord)),
-            },
-        }
-    }
-
-    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, RecordDeError> {
-        match self.0 {
-            Value::Null => visitor.visit_none(),
-            _ => visitor.visit_some(self),
-        }
-    }
-
-    fn deserialize_newtype_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, RecordDeError> {
-        visitor.visit_newtype_struct(self)
-    }
-
-    fn deserialize_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        fields: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, RecordDeError> {
-        match self.map(Some(fields)) {
-            Some(access) => visitor.visit_map(access),
-            None => self.deserialize_any(visitor),
-        }
-    }
-
-    fn deserialize_enum<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        variants: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, RecordDeError> {
-        match self.0 {
-            Value::String(variant) => {
-                visitor.visit_enum(StrDeserializer::<RecordDeError>::new(variant))
-            }
-            Value::Object(entries) if entries.len() == 1 => match entries.iter().next() {
-                Some((variant, value)) => visitor
-                    .visit_enum(JsonEnumAccess { variant, value })
-                    .map_err(|error| error.within_key(variant, Some(variants))),
-                None => Err(RecordDeError::new(SourceDiagnosticReason::InvalidValue)),
-            },
-            _ => Err(RecordDeError::new(SourceDiagnosticReason::InvalidValue)),
-        }
-    }
-
-    fn deserialize_ignored_any<V: Visitor<'de>>(
-        self,
-        visitor: V,
-    ) -> Result<V::Value, RecordDeError> {
-        visitor.visit_unit()
-    }
-
-    serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
-        byte_buf unit unit_struct seq tuple tuple_struct map identifier
-    }
-}
-
-struct JsonSeqAccess<'a> {
-    items: std::iter::Enumerate<std::slice::Iter<'a, Value>>,
-}
-
-impl<'de, 'a> de::SeqAccess<'de> for JsonSeqAccess<'a> {
-    type Error = RecordDeError;
-
-    fn next_element_seed<T: DeserializeSeed<'de>>(
-        &mut self,
-        seed: T,
-    ) -> Result<Option<T::Value>, RecordDeError> {
-        match self.items.next() {
-            Some((index, value)) => seed
-                .deserialize(JsonDeserializer(value))
-                .map(Some)
-                .map_err(|error| error.within_index(index)),
-            None => Ok(None),
-        }
-    }
-
-    fn size_hint(&self) -> Option<usize> {
-        Some(self.items.len())
-    }
-}
-
-struct JsonMapAccess<'a> {
-    entries: serde_json::map::Iter<'a>,
-    known: Option<&'static [&'static str]>,
-    pending: Option<(&'a str, &'a Value)>,
-}
-
-impl<'de, 'a> de::MapAccess<'de> for JsonMapAccess<'a> {
-    type Error = RecordDeError;
-
-    fn next_key_seed<K: DeserializeSeed<'de>>(
-        &mut self,
-        seed: K,
-    ) -> Result<Option<K::Value>, RecordDeError> {
-        let Some((key, value)) = self.entries.next() else {
-            return Ok(None);
-        };
-        self.pending = Some((key, value));
-        // A key error, such as an unknown field, already names its subject.
-        seed.deserialize(StrDeserializer::<RecordDeError>::new(key))
-            .map(Some)
-    }
-
-    fn next_value_seed<V: DeserializeSeed<'de>>(
-        &mut self,
-        seed: V,
-    ) -> Result<V::Value, RecordDeError> {
-        let (key, value) = self
-            .pending
-            .take()
-            .ok_or_else(|| RecordDeError::new(SourceDiagnosticReason::InvalidRecord))?;
-        seed.deserialize(JsonDeserializer(value))
-            .map_err(|error| error.within_key(key, self.known))
-    }
-
-    fn size_hint(&self) -> Option<usize> {
-        Some(self.entries.len())
-    }
-}
-
-struct JsonEnumAccess<'a> {
-    variant: &'a str,
-    value: &'a Value,
-}
-
-impl<'de, 'a> de::EnumAccess<'de> for JsonEnumAccess<'a> {
-    type Error = RecordDeError;
-    type Variant = JsonVariantAccess<'a>;
-
-    fn variant_seed<V: DeserializeSeed<'de>>(
-        self,
-        seed: V,
-    ) -> Result<(V::Value, Self::Variant), RecordDeError> {
-        let variant = seed.deserialize(StrDeserializer::<RecordDeError>::new(self.variant))?;
-        Ok((variant, JsonVariantAccess { value: self.value }))
-    }
-}
-
-struct JsonVariantAccess<'a> {
-    value: &'a Value,
-}
-
-impl<'de, 'a> VariantAccess<'de> for JsonVariantAccess<'a> {
-    type Error = RecordDeError;
-
-    fn unit_variant(self) -> Result<(), RecordDeError> {
-        match self.value {
-            Value::Null => Ok(()),
-            _ => Err(RecordDeError::new(SourceDiagnosticReason::InvalidValue)),
-        }
-    }
-
-    fn newtype_variant_seed<T: DeserializeSeed<'de>>(
-        self,
-        seed: T,
-    ) -> Result<T::Value, RecordDeError> {
-        seed.deserialize(JsonDeserializer(self.value))
-    }
-
-    fn tuple_variant<V: Visitor<'de>>(
-        self,
-        _len: usize,
-        visitor: V,
-    ) -> Result<V::Value, RecordDeError> {
-        de::Deserializer::deserialize_seq(JsonDeserializer(self.value), visitor)
-    }
-
-    fn struct_variant<V: Visitor<'de>>(
-        self,
-        fields: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, RecordDeError> {
-        de::Deserializer::deserialize_struct(JsonDeserializer(self.value), "", fields, visitor)
-    }
+    crate::classified_de::from_value::<T, RecordDeError>(value)
+        .map_err(RecordDeError::into_diagnostic)
 }
 
 #[cfg(test)]

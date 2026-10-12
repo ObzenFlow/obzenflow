@@ -208,6 +208,7 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
                 manifest: &manifest,
                 progress: &RunReadProgress::default(),
                 lineage: Ok(RunLineage::default()),
+                config_changes: Ok(Vec::new()),
             },
             ObservationEnd::Snapshot,
         )
@@ -309,6 +310,7 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
                     manifest: &manifest,
                     progress: &RunReadProgress::default(),
                     lineage: Ok(RunLineage::default()),
+                    config_changes: Ok(Vec::new()),
                 },
                 ObservationEnd::Snapshot,
             )

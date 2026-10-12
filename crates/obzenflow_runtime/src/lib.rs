@@ -7,6 +7,7 @@
 // Core modules
 pub mod backpressure;
 pub mod bootstrap;
+pub(crate) mod classified_de;
 pub mod contracts;
 pub mod control_plane;
 pub mod effects;

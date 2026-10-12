@@ -303,20 +303,16 @@ mod tests {
     #[test]
     fn hosted_construction_and_registration_defer_and_hide_the_secret() {
         let secret_name = "FLOWIP_128B_MISSING_EMBEDDING_KEY";
-        let contract =
-            EmbeddingEffectBinding::openai("text-embedding", SecretRef::new(secret_name))
-                .expect("binding construction does not resolve its secret");
+        let api_key = SecretRef::new(secret_name).expect("an environment variable name");
+        let contract = EmbeddingEffectBinding::openai("text-embedding", api_key.clone())
+            .expect("binding construction does not resolve its secret");
 
         let encoded_target = serde_json::to_string(contract.evidence().target()).unwrap();
         assert!(!encoded_target.contains(secret_name));
 
         let endpoint = Url::parse("https://user:password@example.com/v1").unwrap();
-        let error = EmbeddingEffectBinding::openai_compatible(
-            "text-embedding",
-            SecretRef::new(secret_name),
-            endpoint,
-        )
-        .unwrap_err();
+        let error = EmbeddingEffectBinding::openai_compatible("text-embedding", api_key, endpoint)
+            .unwrap_err();
         assert_eq!(error, EmbeddingEffectBindingError::CredentialedBaseUrl);
     }
 }

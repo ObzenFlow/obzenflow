@@ -59,13 +59,14 @@ impl ObservationEnd {
     }
 }
 
-/// The admitted run the summary describes, with its place in its history
-/// read when the summary renders.
+/// The admitted run the summary describes, with its place in its history and
+/// its configuration changes read when the summary renders.
 pub(super) struct Observed<'a> {
     pub run: &'a RunIdentity,
     pub manifest: &'a RunManifest,
     pub progress: &'a RunReadProgress,
     pub lineage: Result<RunLineage, JournalReadError>,
+    pub config_changes: Result<Vec<RunConfigChanges>, JournalReadError>,
 }
 
 impl<'a> Observed<'a> {
@@ -75,6 +76,7 @@ impl<'a> Observed<'a> {
             manifest: tail.manifest(),
             progress: tail.progress(),
             lineage: tail.lineage(),
+            config_changes: tail.config_changes(),
         }
     }
 }

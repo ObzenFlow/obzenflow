@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! HTTP Ingestion Piggy Bank Demo (FLOWIP-084d, FLOWIP-084n)
+//! HTTP Ingestion Piggy Bank Demo (FLOWIP-084d, FLOWIP-084n, FLOWIP-010t)
 //!
 //! A curl-friendly end-to-end demo that uses:
-//! - A finite YAML source (accounts, read once from `accounts.yaml`)
+//! - A finite YAML source (accounts, read once from the file `[app] accounts_file` names)
 //! - HTTP ingestion (push-based transactions)
 //! - Join stage (accounts as reference catalog; ledger entries as stream)
 //! - Stateful stage (materializes a checkbook snapshot per posted entry)
@@ -20,6 +20,11 @@
 //! guide at `crates/obzenflow_infra/src/web/README.md` explains the authentication scopes.
 //! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
 //!
+//! The accounts file is application configuration: `[app] accounts_file` in the
+//! config file names it, relative to the working directory. Another config file,
+//! passed with `--config` or named by `OBZENFLOW_CONFIG`, opens other accounts
+//! without a code change, and each run records the path it used.
+//!
 //! Accounts `acct-1` (Alice, $10.00) and `acct-2` (Bob, $0.00) open from
 //! `accounts.yaml` before any transaction joins. Post credits and debits:
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "tx-0001"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Credit","amount_cents":250,"note":"paycheck"}}'`
@@ -32,7 +37,7 @@
 //! - A zero-amount or malformed entry is refused with `400`, and the system journal
 //!   records the refusal with the field it names.
 //! - Strict replay (`-- --replay-from <run-dir>`) reuses the archived accounts and
-//!   never reopens `accounts.yaml`; transaction ingress answers `503 not_ready`
+//!   never reopens the accounts file; transaction ingress answers `503 not_ready`
 //!   throughout.
 //! - Transaction ingress has its own rate limiter.
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
@@ -44,22 +49,34 @@
 //! - With control-plane auth enabled, configure the client's `Authorization` header
 //!   through its protected credential configuration before querying `/metrics` or
 //!   `/api/topology`. Keep credential values out of command arguments and shell history.
-//! - In this example, `runner.rs` owns the HTTP ingress bundle, hosting shell and
-//!   accounts file, while `build_flow(...)` stays pipeline-only and accepts the
-//!   typed sources. That split is intentional: hosting concerns stay outside `flow!`.
+//! - In this example, `runner.rs` owns the HTTP ingress bundle and hosting shell,
+//!   and `build_flow(...)` takes the typed ingress source. The flow builds the
+//!   accounts source from its settings, so hosting stays outside `flow!` and the
+//!   accounts path stays configuration.
 
 use super::domain::*;
 use super::handlers::Checkbook;
-use obzenflow::flow::{async_infinite_source, flow, join, sink, source, stateful, FlowDefinition};
+use obzenflow::flow::{
+    async_infinite_source, flow, join, sink, source, stateful, FlowBuildError, FlowDefinition,
+};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{
     HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord, YamlDecodeError,
-    YamlDecoder, YamlRecord, YamlSource,
+    YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow::stages::{joins, sinks};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// The demo's own settings, read from the config file's `[app]` table.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PiggyBankSettings {
+    /// Relative to the working directory, as any path a program reads.
+    accounts_file: PathBuf,
+}
 
 /// Decodes one entry of `accounts.yaml`; a negative opening balance rejects
 /// only that account.
@@ -94,13 +111,17 @@ impl IngressDecoder for LedgerIngress {
     }
 }
 
-pub fn build_flow(
-    accounts_source: YamlSource<AccountYaml>,
-    tx_source: HostedIngressSource<LedgerIngress>,
-) -> FlowDefinition {
-    // This function takes only typed sources, not `HttpIngress<D>` bundles.
-    // The runner owns HTTP hosting; the flow owns pipeline topology.
-    FlowDefinition::materialize(move |_runtime_config| {
+pub fn build_flow(tx_source: HostedIngressSource<LedgerIngress>) -> FlowDefinition {
+    // This function takes the typed ingress source, not the `HttpIngress<D>`
+    // bundle: the runner owns HTTP hosting, and the flow owns pipeline topology
+    // and the file source its settings name. The source is cold configuration;
+    // the file opens only for a live run.
+    FlowDefinition::materialize_with(move |_runtime_config, settings: PiggyBankSettings| {
+        let accounts_source = YamlSource::builder(AccountYaml)
+            .path(settings.accounts_file)
+            .selection(YamlSelection::SequenceAt("/accounts".into()))
+            .build()
+            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
         let post_entry = joins::inner(
             |account: &AccountOpened| account.account_id.clone(),
             |entry: &LedgerEntry| entry.account_id.clone(),

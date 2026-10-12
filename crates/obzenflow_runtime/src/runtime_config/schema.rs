@@ -11,7 +11,9 @@
 
 use super::candidates::ConfigValue;
 use super::flow_view::BackpressureMode;
-use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSubject};
+use obzenflow_core::config::{
+    is_env_name, ConfigAddress, ConfigScope, ConfigSubject, InvalidSecretRef,
+};
 
 pub const SINK_HANDLER_KEY: &str = "sinks.handler";
 pub const CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY: &str =
@@ -91,6 +93,9 @@ pub enum KnobType {
         allowed: &'static [&'static str],
     },
     Path,
+    /// An environment-variable name, the visible half of a secret reference
+    /// (FLOWIP-010t B5). Refusals never echo the text.
+    EnvName,
 }
 
 impl KnobType {
@@ -129,6 +134,13 @@ impl KnobType {
             }
             (Self::Text, ConfigValue::Text(_)) => Ok(()),
             (Self::Path, ConfigValue::Text(_)) => Ok(()),
+            (Self::EnvName, ConfigValue::Text(v)) => {
+                if is_env_name(v) {
+                    Ok(())
+                } else {
+                    Err(InvalidSecretRef.to_string())
+                }
+            }
             (Self::Token { allowed }, ConfigValue::Text(v)) => {
                 if allowed.contains(&v.as_str()) {
                     Ok(())
@@ -165,6 +177,16 @@ pub enum Mutability {
     Immutable,
 }
 
+/// What a knob's value describes (FLOWIP-010t B9). The configuration
+/// difference a replay or resume reports compares configuration only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnobRole {
+    Configuration,
+    /// A replay or resume launch flag. It places a run in its history, so it
+    /// differs from the run being rebuilt by construction.
+    Invocation,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Redaction {
     Plain,
@@ -194,6 +216,7 @@ pub struct KnobSpec {
     pub target: KnobTarget,
     pub default: KnobDefault,
     pub mutability: Mutability,
+    pub role: KnobRole,
     pub redaction: Redaction,
     pub env: EnvBinding,
 }
@@ -301,10 +324,11 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             KnobSpec {
                 key_path: "ai.models.api_key_env",
                 file_path: None,
-                value_type: KnobType::Text,
+                value_type: KnobType::EnvName,
                 target: KnobTarget::Global,
                 default: KnobDefault::Value(ConfigValue::Text("OPENAI_API_KEY".to_string())),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 // The reference NAME is the non-secret shape (§13).
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
@@ -316,6 +340,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -326,6 +351,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -338,6 +364,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::Value(ConfigValue::Text("ollama".to_string())),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -350,6 +377,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::Value(ConfigValue::Text("abort".to_string())),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -363,6 +391,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -376,6 +405,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -389,6 +419,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -402,6 +433,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -414,6 +446,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -427,6 +460,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -440,6 +474,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -450,6 +485,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -463,6 +499,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -476,6 +513,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -486,6 +524,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -496,6 +535,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -506,6 +546,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageOrEffect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -519,6 +560,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -532,6 +574,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -544,6 +587,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -557,6 +601,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -570,6 +615,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -590,6 +636,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                     BackpressureMode::Off.as_token().to_string(),
                 )),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -607,6 +654,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 // materialization pass.
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -624,6 +672,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 // materialization pass.
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -634,6 +683,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Flow,
                 default: KnobDefault::Value(ConfigValue::U64(30)),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -647,6 +697,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Stage,
                 default: KnobDefault::Value(ConfigValue::U64(1000)),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -662,6 +713,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                     obzenflow_core::config::DEFAULT_MAX_LINEAGE_DEPTH as u64,
                 )),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -675,6 +727,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::Value(ConfigValue::U64(5000)),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -690,6 +743,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                     DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
                 )),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -703,6 +757,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Flow,
                 default: KnobDefault::Value(ConfigValue::U64(1000)),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -715,11 +770,13 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::FlowAndStage,
                 default: KnobDefault::Value(ConfigValue::Text("every_record".into())),
                 mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
             // The runtime.resume.* view over the 010h [replay] parse
             // (absorption without moving the parse; Immutable: run identity).
+            // Launch flags, so invocation knobs (FLOWIP-010t B9).
             KnobSpec {
                 key_path: "runtime.resume.allow_duplicate_sink_delivery",
                 file_path: Some("replay.allow_duplicate_sink_delivery"),
@@ -727,6 +784,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_ALLOW_DUPLICATE_SINK_DELIVERY"),
             },
@@ -737,6 +795,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE"),
             },
@@ -747,6 +806,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_REPLAY_FROM"),
             },
@@ -757,6 +817,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_RESUME_FROM"),
             },
@@ -767,6 +828,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Global,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Immutable,
+                role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_REPLAY_VERIFY"),
             },
@@ -778,6 +840,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::StageConsumer,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Immutable,
+                role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -873,6 +936,7 @@ pub fn schema_view() -> Vec<KnobSchemaDoc> {
                     KnobType::Text => "text".to_string(),
                     KnobType::Token { allowed } => format!("token ({})", allowed.join(" | ")),
                     KnobType::Path => "path".to_string(),
+                    KnobType::EnvName => "env_name".to_string(),
                 },
                 target: target.to_string(),
                 admissible_scopes: admissible_scopes.into_iter().map(str::to_string).collect(),
@@ -935,6 +999,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn invocation_knobs_are_exactly_the_replay_and_resume_launch_flags() {
+        let invocation: Vec<&str> = knob_registry()
+            .iter()
+            .filter(|spec| spec.role == KnobRole::Invocation)
+            .map(|spec| spec.key_path)
+            .collect();
+        assert_eq!(
+            invocation,
+            [
+                "runtime.resume.allow_duplicate_sink_delivery",
+                "runtime.resume.allow_incomplete_archive",
+                "runtime.resume.replay_from",
+                "runtime.resume.resume_from",
+                "runtime.resume.verify",
+            ]
+        );
+    }
+
+    #[test]
+    fn api_key_env_admits_only_environment_variable_names_without_echoing() {
+        let spec = knob("ai.models.api_key_env").unwrap();
+        assert_eq!(spec.value_type, KnobType::EnvName);
+        assert!(spec
+            .value_type
+            .validate(&ConfigValue::Text("PARTNER_API_KEY".to_string()))
+            .is_ok());
+        let sentinel = "sk_live_51HSENTINEL";
+        let message = spec
+            .value_type
+            .validate(&ConfigValue::Text(sentinel.to_string()))
+            .unwrap_err();
+        assert_eq!(
+            message,
+            "expected an environment variable name: uppercase letters, digits and \
+             underscores, not starting with a digit"
+        );
     }
 
     #[test]

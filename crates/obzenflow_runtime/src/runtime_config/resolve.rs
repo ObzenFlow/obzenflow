@@ -524,7 +524,7 @@ pub fn materialize_flow_config(
 mod tests {
     use super::*;
     use crate::runtime_config::candidates::{DslCandidates, ScopedCandidate};
-    use crate::runtime_config::schema::{EnvBinding, KnobType, Mutability, Redaction};
+    use crate::runtime_config::schema::{EnvBinding, KnobRole, KnobType, Mutability, Redaction};
     use std::collections::BTreeSet;
 
     fn admit(
@@ -764,6 +764,7 @@ mod tests {
             },
             default: KnobDefault::Required,
             mutability: Mutability::Restartful,
+            role: KnobRole::Configuration,
             redaction: Redaction::Plain,
             env: EnvBinding::Canonical,
         };

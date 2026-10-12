@@ -718,9 +718,11 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             KnobType::F64 { .. } | KnobType::F64Range { .. } => env_var::<f64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::F64),
-            KnobType::Text | KnobType::Token { .. } | KnobType::Path => env_var::<String>(&name)
-                .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
-                .map(ConfigValue::Text),
+            KnobType::Text | KnobType::Token { .. } | KnobType::Path | KnobType::EnvName => {
+                env_var::<String>(&name)
+                    .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
+                    .map(ConfigValue::Text)
+            }
         };
         if let Some(value) = value {
             admit(

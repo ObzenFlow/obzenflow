@@ -201,12 +201,21 @@ where
     // FLOWIP-010 §7: the resolved snapshot arrives as build input.
     let __runtime_config = build_ctx.runtime_config().clone();
     let metrics_exporter = build_ctx.metrics_exporter().cloned();
+    // FLOWIP-010t B4: every factory has run, so any `[app]` extraction is
+    // recorded; the flow's evidence carries it.
+    let __app_settings = build_ctx.app_settings_evidence().cloned();
 
     // FLOWIP-120u F2: pair the build result with the substrate state known
     // at the failure point. Set once at the factory seam; None means the
     // build failed before substrate selection, so no run directory exists.
     let mut __run_state: Option<obzenflow_core::journal::factory::RunSubstrateState> = None;
     let __build_result: Result<_, FlowBuildError> = async {
+        // FLOWIP-010t B10: a non-empty `[app]` table that no build extracted
+        // refuses before a run directory, manifest or continuation claim.
+        build_ctx
+            .ensure_app_settings_extracted()
+            .map_err(FlowBuildError::ApplicationSettings)?;
+
         // FLOWIP-010o: handler sets are build-only. Resolve the framework's
         // non-secret stage selection and replace each carrier with exactly one
         // ordinary typed sink descriptor before topology or lifecycle work.
@@ -689,7 +698,8 @@ where
                     &__runtime_config,
                     __resolution_ctx,
                 )
-                .map_err(FlowBuildError::ConfigResolution)?,
+                .map_err(FlowBuildError::ConfigResolution)?
+                .with_app_settings(__app_settings.clone()),
             )
         };
 

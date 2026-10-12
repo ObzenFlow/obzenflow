@@ -226,6 +226,12 @@ pub enum FlowBuildError {
     #[error("{0}")]
     ConfigResolution(#[source] obzenflow_runtime::runtime_config::ConfigResolveError),
 
+    /// FLOWIP-010t: the config file's `[app]` table did not fit the
+    /// application's settings type, was extracted twice, or is non-empty in
+    /// a build that extracts none. The message names keys, never values.
+    #[error("{0}")]
+    ApplicationSettings(#[source] obzenflow_runtime::runtime_config::ApplicationSettingsError),
+
     /// A `handler_set!` sink has no resolved framework configuration value.
     #[error(
         "config error at sinks.stages.{stage_name}.handler: a handler_set! sink requires one of {expected}"
