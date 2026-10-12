@@ -153,7 +153,10 @@ fn lineage_lines(
         lines.push(("Evidence", format!("{held}{missing}")));
     }
     if let Standing::Continued { head } = &lineage.standing {
-        lines.push(("Continued", format!("by {}", head.display())));
+        lines.push((
+            "Continued",
+            format!("by a later run; resume {} instead", head.display()),
+        ));
     }
     lines
 }
@@ -266,6 +269,21 @@ mod tests {
                 "Rebuild    incomplete (generation 2); resume requires /runs/r1",
                 "Evidence   /runs/r0 holds generation 0, missing",
             ]
+        );
+    }
+
+    #[test]
+    fn a_continued_run_names_its_history_head_not_its_successor() {
+        // r0 was continued by r1, which r2 continued; only r2 resumes.
+        let continued = RunLineage {
+            standing: Standing::Continued {
+                head: "/runs/r2".into(),
+            },
+            ..RunLineage::default()
+        };
+        assert_eq!(
+            rendered(&continued, None),
+            ["Continued  by a later run; resume /runs/r2 instead"]
         );
     }
 

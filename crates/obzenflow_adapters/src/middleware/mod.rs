@@ -88,7 +88,35 @@ mod middleware_safety;
 /// policies are inert for data-path accounting, so a replay transcript never
 /// reads like live policy activity.
 pub(crate) fn strict_replay_active() -> bool {
-    obzenflow_runtime::bootstrap::replay_bootstrap().is_some()
+    is_strict_replay(obzenflow_runtime::bootstrap::replay_bootstrap().as_ref())
+}
+
+/// A resume also installs an archive, but its policies enforce live input after
+/// catch-up, so only the replay verb is strict.
+fn is_strict_replay(replay: Option<&obzenflow_runtime::bootstrap::ReplayBootstrap>) -> bool {
+    replay.is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Replay)
+}
+
+#[cfg(test)]
+mod strict_replay_tests {
+    use super::is_strict_replay;
+    use obzenflow_runtime::bootstrap::{ReplayBootstrap, ReplayVerb};
+
+    fn archive(verb: ReplayVerb) -> ReplayBootstrap {
+        ReplayBootstrap {
+            archive_path: "archive".into(),
+            allow_incomplete_archive: false,
+            allow_duplicate_sink_delivery: false,
+            verb,
+        }
+    }
+
+    #[test]
+    fn only_the_replay_verb_is_strict_replay() {
+        assert!(!is_strict_replay(None));
+        assert!(is_strict_replay(Some(&archive(ReplayVerb::Replay))));
+        assert!(!is_strict_replay(Some(&archive(ReplayVerb::Resume))));
+    }
 }
 
 // Common middleware utilities

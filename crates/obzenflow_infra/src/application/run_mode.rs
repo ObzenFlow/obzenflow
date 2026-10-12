@@ -38,6 +38,9 @@ pub struct ReplayRunContext {
     pub archive_path: PathBuf,
     /// The recorded run's flow id, when the archive manifest is readable.
     pub archive_flow_id: Option<String>,
+    /// Whether `--verify` compares this replay with the archive once it ends,
+    /// so the footer does not suggest it again. Always false for a resume.
+    pub verify: bool,
 }
 
 impl RunMode {
@@ -45,11 +48,12 @@ impl RunMode {
         matches!(self, RunMode::Replay(_))
     }
 
-    pub(crate) fn replay_from_archive(archive_path: PathBuf) -> Self {
+    pub(crate) fn replay_from_archive(archive_path: PathBuf, verify: bool) -> Self {
         let archive_flow_id = peek_archive_flow_id(&archive_path);
         RunMode::Replay(ReplayRunContext {
             archive_path,
             archive_flow_id,
+            verify,
         })
     }
 
@@ -58,6 +62,7 @@ impl RunMode {
         RunMode::Resume(ReplayRunContext {
             archive_path,
             archive_flow_id,
+            verify: false,
         })
     }
 }
@@ -90,12 +95,13 @@ mod tests {
     #[test]
     fn replay_from_archive_tolerates_missing_manifest() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mode = RunMode::replay_from_archive(temp.path().to_path_buf());
+        let mode = RunMode::replay_from_archive(temp.path().to_path_buf(), true);
         match mode {
             RunMode::Replay(ctx) => {
                 assert!(ctx.archive_flow_id.is_none());
                 assert_eq!(ctx.archive_path, temp.path());
                 assert_eq!(ctx.source_label(), temp.path().display().to_string());
+                assert!(ctx.verify);
             }
             other => panic!("expected replay mode, got {other:?}"),
         }
@@ -109,13 +115,14 @@ mod tests {
             RunMode::Resume(ctx) => {
                 assert!(ctx.archive_flow_id.is_none());
                 assert_eq!(ctx.archive_path, temp.path());
+                assert!(!ctx.verify, "a resume continues live and is never verified");
             }
             other => panic!("expected resume mode, got {other:?}"),
         }
     }
 
     #[test]
-    fn banner_peek_does_not_deserialise_an_old_manifest() {
+    fn banner_peek_does_not_deserialize_an_old_manifest() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             temp.path().join(RUN_MANIFEST_FILENAME),

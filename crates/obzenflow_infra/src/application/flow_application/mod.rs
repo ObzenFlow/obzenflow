@@ -632,7 +632,10 @@ impl FlowApplication {
         let run_mode = match &config.replay {
             Some(replay) => match replay.verb {
                 obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
-                    super::run_mode::RunMode::replay_from_archive(replay.from.clone())
+                    super::run_mode::RunMode::replay_from_archive(
+                        replay.from.clone(),
+                        replay.verify,
+                    )
                 }
                 obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
                     super::run_mode::RunMode::resume_from_archive(replay.from.clone())
