@@ -10,6 +10,7 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::EffectAttemptStarted;
+use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_dsl::infinite_source;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_runtime::bootstrap::{
@@ -626,6 +627,20 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
     }
 }
 
+/// Aborting the run's task only requests cancellation; its stages close their
+/// journals as they unwind, where a killed process would release them at once.
+async fn wait_for_writers_released(archive: &Path) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Err(ReplayError::StillRunning { .. }) =
+            DiskReplayArchive::open_for_resume(archive.to_path_buf(), true).await
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the aborted run releases its journal writers");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     let temp = tempfile::tempdir().unwrap();
@@ -680,6 +695,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     let _ = live_task.await;
 
     let in_doubt_archive = latest_run_dir(&journal_base);
+    wait_for_writers_released(&in_doubt_archive).await;
     let in_doubt_events = stage_events(&in_doubt_archive, "embedding").await;
     assert_eq!(
         in_doubt_events
