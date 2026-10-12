@@ -436,7 +436,8 @@ pub struct Reattach<G: LiveGuarantee>(PhantomData<fn() -> G>);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LatestState;
 
-/// Input read but not committed at an interruption is lost.
+/// No input is admitted twice. Input not committed at an interruption, and
+/// input that arrived while no reader was attached, may be lost.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AtMostOnce;
 
@@ -480,7 +481,7 @@ pub enum RefusedBy {
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeRefusal {
-    /// The source stopped before the end of its input, and its connector or
+    /// The source stopped with its input unfinished, and its connector or
     /// handler cannot continue interrupted input (B8).
     UnfinishedInput { by: RefusedBy },
     /// The source recorded its input without positions (B22).

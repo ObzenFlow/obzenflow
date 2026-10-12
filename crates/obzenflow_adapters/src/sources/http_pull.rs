@@ -1187,6 +1187,8 @@ impl<D: PullDecoder> HttpPollSource<D> {
 
 /// Every cycle restarts from an empty cursor and observes the endpoint's
 /// current state, so a resumed run reattaches with `LatestState` (FLOWIP-122i).
+/// An interruption costs what a long gap between polls costs, so rows that
+/// leave a windowed endpoint while no reader polls are never observed.
 #[async_trait]
 impl<D: PullDecoder> AsyncInfiniteSourceConnector for HttpPollSource<D> {
     type Output = D::Output;

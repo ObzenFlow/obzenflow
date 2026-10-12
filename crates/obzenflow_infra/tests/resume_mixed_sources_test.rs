@@ -19,7 +19,7 @@
 //!
 //! FLOWIP-122i: a reattaching connector records its declared guarantee after
 //! its watermark and before its first live record, and an interrupted infinite
-//! direct handler refuses at admission.
+//! direct handler refuses at admission until it is rebuilt as a connector.
 
 #[path = "../../../tests/replay_testkit/mod.rs"]
 mod replay_testkit;
@@ -856,7 +856,7 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
     assert!(failure
         .error
         .to_string()
-        .contains("source 'fin' stopped before the end of its input"));
+        .contains("source 'fin' stopped with its input unfinished"));
     assert_eq!(
         std::fs::read_dir(journal_base.join("flows"))?.count(),
         runs_before,
@@ -922,12 +922,46 @@ fn build_ticker_flow(
     })
 }
 
+/// The ticker flow with its stage rebuilt as a connector, the remedy the
+/// direct-handler refusal names. It continues at 3.
+fn build_reattaching_ticker_flow(
+    journal_base: PathBuf,
+    polls: Arc<AtomicUsize>,
+    delivered: Arc<AtomicU64>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let ticker_handler = ReattachingSource(PolledTicker {
+            ticks: InfiniteChannelSource::new("t", 3, 1),
+            polls,
+        });
+        let merge_handler = MergeTransform::new();
+        let collect_handler = MergedSink { delivered };
+
+        Ok(flow! {
+            name: "resume_direct_ticker",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                ticker = infinite_source!(ChannelTick => ticker_handler);
+                merge = transform!(ChannelTick -> Merged => merge_handler);
+                collect = sink!(Merged => collect_handler);
+            },
+
+            topology: {
+                ticker |> merge;
+                merge |> collect;
+            }
+        })
+    })
+}
+
 /// FLOWIP-122i: an infinite direct handler declares no continuation. Stopped,
 /// it refuses the resume at admission, named as a handler, before any run
 /// directory exists or any source polls; only connectors and hosted ingress
-/// reattach.
+/// reattach. The refusal's remedy holds: the same stage rebuilt as a
+/// connector resumes the refused archive.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_interrupted_infinite_direct_handler_refuses_the_resume() -> Result<()> {
+async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
 
@@ -981,7 +1015,7 @@ async fn an_interrupted_infinite_direct_handler_refuses_the_resume() -> Result<(
     }
     assert!(
         failure.error.to_string().contains(
-            "source 'ticker' stopped before the end of its input, and its handler cannot \
+            "source 'ticker' stopped with its input unfinished, and its handler cannot \
              continue interrupted input."
         ),
         "{}",
@@ -994,6 +1028,46 @@ async fn an_interrupted_infinite_direct_handler_refuses_the_resume() -> Result<(
     );
     assert_eq!(resumed_polls.load(Ordering::SeqCst), 0);
     assert!(!recorded_run.join("run_continuation.json").exists());
+
+    let delivered = Arc::new(AtomicU64::new(0));
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
+        );
+        let handle = build_reattaching_ticker_flow(
+            journal_base.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            delivered.clone(),
+        )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow!("the rebuilt flow must resume the refused archive: {e:?}"))?;
+        wait_for_running(&handle).await?;
+        // The sink re-consumes the recorded prefix during catch-up.
+        wait_for_count(&delivered, 3).await?;
+        handle.stop_graceful(Duration::from_secs(5)).await?;
+        tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the resumed run to stop"))??;
+    }
+    let resumed_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(recorded_run, resumed_run);
+
+    let mut expected = tick_rows("t", 1..=2);
+    expected.push(MixedRow::CatchUp {
+        stage_key: "ticker".to_string(),
+        generation: 1,
+    });
+    expected.push(MixedRow::Reattached(SourceReattachedFact {
+        generation: 1,
+        guarantee: ReattachGuarantee::AtMostOnce,
+    }));
+    expected.extend(tick_rows("t", 3..=3));
+    expected.push(MixedRow::Eof);
+    assert_eq!(
+        mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "ticker").await),
+        expected
+    );
 
     Ok(())
 }

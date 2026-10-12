@@ -217,7 +217,8 @@
 //! [`CsvSource`] and [`YamlSource`] do; [`Reattach`] reattaches an infinite
 //! input live and names what the interruption could cost: [`LatestState`] when
 //! each observation supersedes the last, as for [`HttpPollSource`], or
-//! [`AtMostOnce`] when input read but not committed is lost, as for
+//! [`AtMostOnce`] when no input is admitted twice but uncommitted input, or
+//! input that arrived while no reader was attached, may be lost, as for
 //! [`ChannelSource`]. The resumed run records the guarantee, and
 //! `obzenflow show` reports it.
 //!

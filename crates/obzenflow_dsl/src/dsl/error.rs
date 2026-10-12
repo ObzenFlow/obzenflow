@@ -31,7 +31,7 @@ fn unfinished_sources_refusal(archive: &Path, sources: &[String], by: RefusedBy)
         ("sources", "their", format!("their {refuser}s cannot"))
     };
     format!(
-        "cannot resume {}: {subject} {named} stopped before the end of {their} input, and \
+        "cannot resume {}: {subject} {named} stopped with {their} input unfinished, and \
          {refusers} continue interrupted input.\nUse a connector that continues \
          interrupted input, or implement one.",
         archive.display()
@@ -496,8 +496,8 @@ mod tests {
         let archive = Path::new("/runs/interrupted");
         assert_eq!(
             unfinished_sources_refusal(archive, &["web_orders".to_string()], RefusedBy::Connector),
-            "cannot resume /runs/interrupted: source 'web_orders' stopped before the end of \
-             its input, and its connector cannot continue interrupted input.\nUse a connector \
+            "cannot resume /runs/interrupted: source 'web_orders' stopped with its input \
+             unfinished, and its connector cannot continue interrupted input.\nUse a connector \
              that continues interrupted input, or implement one."
         );
         assert!(unfinished_sources_refusal(
@@ -506,8 +506,8 @@ mod tests {
             RefusedBy::Connector
         )
         .starts_with(
-            "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped before the end \
-             of their input, and their connectors cannot continue interrupted input."
+            "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped with their \
+             input unfinished, and their connectors cannot continue interrupted input."
         ));
     }
 
@@ -518,8 +518,8 @@ mod tests {
         let archive = Path::new("/runs/interrupted");
         assert_eq!(
             unfinished_sources_refusal(archive, &["local_orders".to_string()], RefusedBy::Handler),
-            "cannot resume /runs/interrupted: source 'local_orders' stopped before the end of \
-             its input, and its handler cannot continue interrupted input.\nUse a connector \
+            "cannot resume /runs/interrupted: source 'local_orders' stopped with its input \
+             unfinished, and its handler cannot continue interrupted input.\nUse a connector \
              that continues interrupted input, or implement one."
         );
         let refusals = vec![

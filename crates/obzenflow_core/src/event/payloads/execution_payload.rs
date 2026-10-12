@@ -549,7 +549,8 @@ pub enum ReattachGuarantee {
     SenderRedelivers,
     /// Each observation supersedes the last; re-seen rows are expected.
     LatestState,
-    /// Input read but not committed at the interruption is lost.
+    /// No input is admitted twice. Input not committed at the interruption, and
+    /// input that arrived while no reader was attached, may be lost.
     AtMostOnce,
 }
 
