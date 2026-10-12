@@ -1113,22 +1113,31 @@ impl Archive {
             .last()
     }
 
-    /// Committed successful deliveries per order, through the consumed fact.
-    fn delivered(&self) -> BTreeMap<String, usize> {
+    /// Each committed successful delivery's order, through the consumed fact,
+    /// or `None` when this read does not hold that payment.
+    fn receipt_orders(&self) -> Vec<Option<String>> {
         let orders: BTreeMap<EventId, String> = self
             .facts::<PaymentAuthorized>("authorize_payment")
             .map(|(row, payment)| (*row.id(), payment.order_id))
             .collect();
-        let mut delivered = BTreeMap::new();
-        for row in self.rows("receipts", RunJournalKind::Data) {
-            if let ChainPayload::Delivery(delivery) = &row.payload {
-                if matches!(delivery.result, DeliveryResult::Success { .. }) {
-                    let order = orders
-                        .get(&delivery.subject.input.event_id)
-                        .expect("a receipt names a payment of its run");
-                    *delivered.entry(order.clone()).or_default() += 1;
+        self.rows("receipts", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Delivery(delivery)
+                    if matches!(delivery.result, DeliveryResult::Success { .. }) =>
+                {
+                    Some(orders.get(&delivery.subject.input.event_id).cloned())
                 }
-            }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Committed successful deliveries per order, for a run that has ended.
+    fn delivered(&self) -> BTreeMap<String, usize> {
+        let mut delivered = BTreeMap::new();
+        for order in self.receipt_orders() {
+            let order = order.expect("a receipt names a payment of its run");
+            *delivered.entry(order).or_default() += 1;
         }
         delivered
     }
@@ -1887,7 +1896,10 @@ async fn durable_execution_contract() {
         loop {
             if let Some(archive) = Archive::try_read(&run).await {
                 let outcomes: BTreeSet<String> = archive.outcomes().into_keys().collect();
-                let delivered: BTreeSet<String> = archive.delivered().into_keys().collect();
+                // A live run is read as independent per-journal prefixes, so a
+                // receipt can be read before its payment; the next poll holds both.
+                let delivered: BTreeSet<String> =
+                    archive.receipt_orders().into_iter().flatten().collect();
                 if archive.eof("web_orders") == Some(EofKind::Natural)
                     && outcomes == web
                     && delivered == web
