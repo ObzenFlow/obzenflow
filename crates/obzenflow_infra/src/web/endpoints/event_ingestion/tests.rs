@@ -848,8 +848,18 @@ async fn a_valid_webhook_signature_passes_authentication() {
 
 /// Acknowledgement follows the source commit, never delivery, so tests read
 /// admissions from the source journal and the sink only completes the graph.
-#[derive(Debug, Clone, Copy)]
-struct DiscardSink;
+/// A held sink keeps its run from completing until released.
+#[derive(Debug, Clone, Default)]
+struct DiscardSink {
+    hold: Option<Hold>,
+}
+
+/// Signals each arriving row, then waits for the release.
+#[derive(Debug, Clone, Default)]
+struct Hold {
+    arrived: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
 
 #[async_trait]
 impl InlineSink for DiscardSink {
@@ -861,6 +871,10 @@ impl InlineSink for DiscardSink {
     }
 
     async fn write(&mut self, _event: Order) -> Result<(), SinkWriteFailure> {
+        if let Some(hold) = &self.hold {
+            hold.arrived.notify_one();
+            hold.release.notified().await;
+        }
         Ok(())
     }
 }
@@ -891,18 +905,32 @@ fn unique_journal_dir(prefix: &str) -> PathBuf {
     PathBuf::from("target").join(format!("{prefix}_{suffix}"))
 }
 
-async fn wait_for_running(handle: &FlowHandle) {
-    let mut rx = handle.state_receiver();
+fn take_endpoint(
+    endpoints: &mut Vec<Box<dyn HttpEndpoint>>,
+    suffix: &str,
+) -> Box<dyn HttpEndpoint> {
+    let position = endpoints
+        .iter()
+        .position(|endpoint| endpoint.path().ends_with(suffix))
+        .expect("endpoint");
+    endpoints.remove(position)
+}
+
+/// Wait until health answers ready: the readiness watcher, a separate task,
+/// has seen `Running` and the hosted source is live.
+async fn wait_until_ready(health: &dyn HttpEndpoint) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if matches!(*rx.borrow(), PipelineState::Running) {
+            let request = Request::new(HttpMethod::Get, health.path().to_string());
+            let response = unary(health.handle(request).await.expect("health response"));
+            if response.status == 200 {
                 return;
             }
-            rx.changed().await.expect("pipeline state channel closed");
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("timed out waiting for running");
+    .expect("timed out waiting for ingress readiness");
 }
 
 /// The hosted source feeding a discarding sink, on disk when `journals_root`
@@ -910,8 +938,8 @@ async fn wait_for_running(handle: &FlowHandle) {
 async fn ingress_flow(
     source: HostedIngressSource<TestIngress<Order>>,
     journals_root: Option<PathBuf>,
+    sink: DiscardSink,
 ) -> FlowHandle {
-    let sink = DiscardSink;
     FlowDefinition::materialize(move |_runtime_config| {
         Ok(match journals_root {
             Some(root) => flow! {
@@ -970,25 +998,18 @@ impl RunningIngress {
         let submit = ingress.handle();
         let (source, http) = ingress.into_parts();
         let (_, mut endpoints, wiring, _) = http.into_surface().into_parts();
-        let take = |suffix: &str, endpoints: &mut Vec<Box<dyn HttpEndpoint>>| {
-            let position = endpoints
-                .iter()
-                .position(|endpoint| endpoint.path().ends_with(suffix))
-                .expect("endpoint");
-            endpoints.remove(position)
-        };
-        let events = take("/events", &mut endpoints);
-        let batch = take("/batch", &mut endpoints);
+        let events = take_endpoint(&mut endpoints, "/events");
+        let batch = take_endpoint(&mut endpoints, "/batch");
+        let health = take_endpoint(&mut endpoints, "/health");
 
-        let handle = ingress_flow(source, journals_root).await;
+        let handle = ingress_flow(source, journals_root, DiscardSink::default()).await;
         let wired = wiring.expect("ingress surface wiring")(WebSurfaceWiringContext {
             pipeline_state: handle.state_receiver(),
             ingress_evidence: handle.ingress_evidence(),
         })
         .expect("wire ingress surface");
         handle.start().await.expect("start flow");
-        wait_for_running(&handle).await;
-        tokio::task::yield_now().await;
+        wait_until_ready(health.as_ref()).await;
         Self {
             handle,
             events,
@@ -1229,7 +1250,11 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         .into_iter()
         .find(|endpoint| endpoint.path().ends_with("/events"))
         .expect("events endpoint");
-    let handle = ingress_flow(source, Some(root)).await;
+    let hold = Hold::default();
+    let sink = DiscardSink {
+        hold: Some(hold.clone()),
+    };
+    let handle = ingress_flow(source, Some(root), sink).await;
     let wired = wiring.expect("ingress surface wiring")(WebSurfaceWiringContext {
         pipeline_state: handle.state_receiver(),
         ingress_evidence: handle.ingress_evidence(),
@@ -1245,9 +1270,14 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         }
     };
 
-    handle.start().await.expect("start the replay");
+    // The replay starts itself and its sink holds the replayed row, so the
+    // request lands mid-replay.
+    tokio::time::timeout(Duration::from_secs(5), hold.arrived.notified())
+        .await
+        .expect("the replay delivers its row");
     refuse("during", "not_ready").await;
     let system = handle.system_journal().expect("system journal");
+    hold.release.notify_one();
     tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
         .await
         .expect("timed out waiting for the replay")
@@ -1368,12 +1398,10 @@ async fn a_hosted_rate_limiter_refuses_through_a_running_flow() {
     );
     let slot = ingress.handle().ingress_slot();
     let (source, http) = ingress.into_parts();
-    let (_, endpoints, wiring, _) = http.into_surface().into_parts();
-    let events = endpoints
-        .into_iter()
-        .find(|endpoint| endpoint.path().ends_with("/events"))
-        .expect("events endpoint");
-    let sink = DiscardSink;
+    let (_, mut endpoints, wiring, _) = http.into_surface().into_parts();
+    let events = take_endpoint(&mut endpoints, "/events");
+    let health = take_endpoint(&mut endpoints, "/health");
+    let sink = DiscardSink::default();
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         Ok(flow! {
             name: "flowip_084l_limited_ingress",
@@ -1402,8 +1430,7 @@ async fn a_hosted_rate_limiter_refuses_through_a_running_flow() {
     })
     .expect("wire ingress surface");
     handle.start().await.expect("start flow");
-    wait_for_running(&handle).await;
-    tokio::task::yield_now().await;
+    wait_until_ready(health.as_ref()).await;
 
     let first = unary(
         events

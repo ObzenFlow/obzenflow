@@ -29,7 +29,7 @@ use gateway_demo::domain::{
     PaymentMethodState,
 };
 use gateway_demo::gateway::AuthorizePaymentOutcome;
-use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason};
+use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
 use obzenflow::application::FlowApplication;
 use obzenflow::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, StageCompletion,
@@ -88,9 +88,13 @@ const DECLINED: &str = "declined";
 const HTTP_BASE: &str = "/api/orders";
 /// Refused at admission in the run that receives it (I2).
 const INVALID_HTTP_ORDER: &str = "W-BAD";
-/// How long the sender waits before an answer counts as unknown. A request
-/// that commits answers in milliseconds; only a stalled one waits this long.
+/// How long a sender probing for a stall waits before it gives up. Every
+/// other send waits for the server's answer, which a resumed run may delay
+/// until its catch-up frees the web edge's window.
 const PATIENCE: Duration = Duration::from_secs(1);
+/// The server answers by its acknowledgement deadline; this only bounds a
+/// server that never answers.
+const ANSWER: Duration = Duration::from_secs(IngressTiming::DEFAULT_ACK_DEADLINE.as_secs() + 5);
 
 // ---------------------------------------------------------------------------
 // Workload: 6 web orders that finish early, 23 store orders and one invalid
@@ -923,14 +927,20 @@ impl Sender {
         }
     }
 
-    /// POST one order under its stable key and record the answer.
+    /// POST one order under its stable key, wait for the server's answer and
+    /// record it.
     async fn send(&self, run: &Path, order_id: &str) -> Answer {
+        self.post(run, order_id, ANSWER).await
+    }
+
+    /// POST one order, giving up after `wait`, and record the answer.
+    async fn post(&self, run: &Path, order_id: &str, wait: Duration) -> Answer {
         let response = self
             .client
             .post(self.url("events"))
             .header("Idempotency-Key", format!("\"{}\"", request_key(order_id)))
             .json(&http_order(order_id))
-            .timeout(PATIENCE)
+            .timeout(wait)
             .send()
             .await;
         let answer = match response {
@@ -976,7 +986,7 @@ impl Sender {
     /// and the journal holds no row for it.
     async fn until_stalled(&self, run: &Path, pool: &mut impl Iterator<Item = String>) -> String {
         for order in pool.by_ref() {
-            match self.send(run, &order).await {
+            match self.post(run, &order, PATIENCE).await {
                 Answer::Committed { .. } => {}
                 Answer::Unknown => {
                     let admitted = Archive::read(run).await.admitted();
