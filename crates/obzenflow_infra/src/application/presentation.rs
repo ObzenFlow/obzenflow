@@ -425,7 +425,7 @@ impl RunPresentationOutcome {
                 source = ctx.source_label(),
             ),
             _ => format!(
-                "{flow_name} {verb}. Journal: {location}\nTo verify with a bounded replay, add: --replay-from {location}\nTo continue this run live from where it left off, add: --resume-from {location}\n(Source config env vars are ignored during replay and catch-up)",
+                "{flow_name} {verb}. Journal: {location}\nTo verify with a bounded replay, add: --replay-from {location}\nTo continue this run live from where it left off, add: --resume-from {location}\n(Source settings are ignored during replay and catch-up)",
             ),
         }
     }
@@ -812,7 +812,7 @@ mod tests {
         };
         assert_eq!(
             completed_with_journal.default_footer(),
-            "flow completed. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\nTo continue this run live from where it left off, add: --resume-from tmp/run\n(Source config env vars are ignored during replay and catch-up)"
+            "flow completed. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\nTo continue this run live from where it left off, add: --resume-from tmp/run\n(Source settings are ignored during replay and catch-up)"
         );
 
         // FLOWIP-120n: a stopped run's footer offers both verbs with the
@@ -884,7 +884,7 @@ mod tests {
             "replay footer must offer replay-of-replay on the new journal: {footer}"
         );
         assert!(
-            !footer.contains("(Source config env vars are ignored during replay)"),
+            !footer.contains("(Source settings are ignored during replay)"),
             "replay footer must not reuse the live-run hint copy: {footer}"
         );
 

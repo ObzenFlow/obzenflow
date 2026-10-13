@@ -574,10 +574,13 @@ fn build_flow(
 fn probed_disk_journals(
     base_path: PathBuf,
     probe: AppendProbe,
-) -> impl Fn(FlowId) -> Result<ProbedDiskJournalFactory, JournalError> {
-    move |flow_id| {
+) -> impl Fn(FlowId, Option<&Path>) -> Result<ProbedDiskJournalFactory, JournalError> {
+    move |flow_id, root| {
         Ok(ProbedDiskJournalFactory {
-            inner: DiskJournalFactory::new(base_path.clone(), flow_id)?,
+            inner: DiskJournalFactory::new(
+                root.map_or_else(|| base_path.clone(), Path::to_path_buf),
+                flow_id,
+            )?,
             probe: probe.clone(),
         })
     }

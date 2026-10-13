@@ -5,51 +5,34 @@
 use super::domain::{
     due_bucket, plan_sla_cap_hours, triage_ticket, Customer, EnrichedTicket, Ticket, TriagedTicket,
 };
-use super::fixtures;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use obzenflow::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow::error::HandlerError;
-use obzenflow::flow::{flow, join, sink, source, transform, FlowDefinition};
+use obzenflow::flow::{flow, join, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
 use obzenflow::stages::sources::{CsvDecoder, CsvSource};
 use obzenflow::stages::transforms::TypedTransformHandler;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-#[derive(Clone)]
-pub struct DemoPaths {
+/// The compiled default; `journal.root` relocates it (FLOWIP-010t B14).
+pub const DEMO_JOURNAL_ROOT: &str = "target/csv-demo-support-sla/logs";
+const CONFIG_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/csv_demo_support_sla/obzenflow.toml"
+);
+
+/// The demo's `[app]` settings (FLOWIP-010t). Building the sources opens no
+/// file, so strict replay starts with both inputs absent.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportSlaSettings {
     pub customers_csv: PathBuf,
     pub tickets_csv: PathBuf,
     pub output_csv: PathBuf,
-    pub journals_dir: PathBuf,
-}
-
-impl DemoPaths {
-    pub fn resolve() -> Result<Self> {
-        Self::resolve_in(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("examples/csv_demo_support_sla/fixtures"),
-            Path::new("target/csv-demo-support-sla"),
-        )
-    }
-
-    pub fn resolve_in(fixtures_dir: &Path, out_root: &Path) -> Result<Self> {
-        let journals_dir = out_root.join("logs");
-        let outputs_dir = out_root.join("outputs");
-        std::fs::create_dir_all(&outputs_dir)
-            .with_context(|| format!("create outputs dir {}", outputs_dir.display()))?;
-
-        let fixture_paths = fixtures::paths(fixtures_dir);
-
-        Ok(Self {
-            customers_csv: fixture_paths.customers_csv,
-            tickets_csv: fixture_paths.tickets_csv,
-            output_csv: outputs_dir.join("enriched_tickets.csv"),
-            journals_dir,
-        })
-    }
 }
 
 /// A source decoder owns the domain type it emits, just as a transform handler
@@ -149,19 +132,67 @@ impl CsvProjection for EnrichedTicketCsv {
     }
 }
 
-fn build_flow(
-    customers: CsvSource<CustomerCsv>,
-    tickets: CsvSource<TicketCsv>,
-    output_sink: CsvSink<EnrichedTicketCsv>,
-    journals_dir: PathBuf,
-) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
+fn resources_failed(error: impl std::fmt::Display) -> FlowBuildError {
+    FlowBuildError::StageResourcesFailed(error.to_string())
+}
+
+fn build_flow() -> FlowDefinition {
+    FlowDefinition::materialize_with(move |_runtime_config, settings: SupportSlaSettings| {
+        let customers = CsvSource::builder(CustomerCsv)
+            .path(&settings.customers_csv)
+            .build()
+            .map_err(resources_failed)?;
+        let tickets = CsvSource::builder(TicketCsv)
+            .path(&settings.tickets_csv)
+            .chunk_size(25)
+            .build()
+            .map_err(resources_failed)?;
+
+        if let Some(outputs) = settings
+            .output_csv
+            .parent()
+            .filter(|outputs| !outputs.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(outputs).map_err(|error| {
+                resources_failed(format!("create outputs dir {}: {error}", outputs.display()))
+            })?;
+        }
+        let output_sink = CsvSink::builder(EnrichedTicketCsv)
+            .path(&settings.output_csv)
+            .columns([
+                "ticket_id",
+                "customer_id",
+                "plan",
+                "region",
+                "created_at",
+                "priority",
+                "category",
+                "priority_sla_hours",
+                "effective_sla_hours",
+                "due_bucket",
+            ])
+            .headers([
+                "Ticket ID",
+                "Customer ID",
+                "Plan",
+                "Region",
+                "Created At",
+                "Priority",
+                "Category",
+                "Priority SLA (h)",
+                "Effective SLA (h)",
+                "Due Bucket",
+            ])
+            .auto_flush(true)
+            .build()
+            .map_err(resources_failed)?;
+
         let join_handler = SupportSlaJoin;
         let triage_handler = TicketTriage::new();
 
         Ok(flow! {
             name: "csv_demo_support_sla",
-            journals: disk_journals(journals_dir),
+            journals: disk_journals(PathBuf::from(DEMO_JOURNAL_ROOT)),
 
             stages: {
                 customers = source!(Customer => customers);
@@ -183,58 +214,18 @@ fn build_flow(
     })
 }
 
+/// Run the demo. The compiled config path is a default: `--config` or
+/// `OBZENFLOW_CONFIG` selects another file, and with it other inputs.
 pub fn run_example(
-    paths: DemoPaths,
     presentation: Presentation,
     cli_args: impl IntoIterator<Item = OsString>,
 ) -> Result<()> {
-    let customers = CsvSource::builder(CustomerCsv)
-        .path(&paths.customers_csv)
-        .build()?;
-    let tickets = CsvSource::builder(TicketCsv)
-        .path(&paths.tickets_csv)
-        .chunk_size(25)
-        .build()?;
-
-    let output_sink = CsvSink::builder(EnrichedTicketCsv)
-        .path(&paths.output_csv)
-        .columns([
-            "ticket_id",
-            "customer_id",
-            "plan",
-            "region",
-            "created_at",
-            "priority",
-            "category",
-            "priority_sla_hours",
-            "effective_sla_hours",
-            "due_bucket",
-        ])
-        .headers([
-            "Ticket ID",
-            "Customer ID",
-            "Plan",
-            "Region",
-            "Created At",
-            "Priority",
-            "Category",
-            "Priority SLA (h)",
-            "Effective SLA (h)",
-            "Due Bucket",
-        ])
-        .auto_flush(true)
-        .build()?;
-
     FlowApplication::builder()
+        .with_config_file(CONFIG_FILE)
         .with_cli_args(cli_args)
         .with_presentation(presentation)
         .with_log_level(LogLevel::Info)
-        .run_blocking(build_flow(
-            customers,
-            tickets,
-            output_sink,
-            paths.journals_dir,
-        ))?;
+        .run_blocking(build_flow())?;
 
     Ok(())
 }

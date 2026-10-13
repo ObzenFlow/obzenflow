@@ -17,3 +17,12 @@ model = "llama3.1:8b"
 
 [sinks]
 handler = "postgres_sink"
+
+# The demo's own settings, as in obzenflow.toml.
+[app]
+source = "mock"
+max_stories = 60
+poll_timeout_secs = 120
+
+[app.digest]
+group_max_stories = 10

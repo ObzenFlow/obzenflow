@@ -817,6 +817,9 @@ impl FlowApplication {
                         obzenflow_dsl::FlowBuildError::ApplicationSettings(error) => {
                             ApplicationError::InvalidConfiguration(error.to_string())
                         }
+                        obzenflow_dsl::FlowBuildError::JournalRootUnused { .. } => {
+                            ApplicationError::InvalidConfiguration(failure.error.to_string())
+                        }
                         other => ApplicationError::FlowBuildFailed(other.to_string()),
                     };
                     break 'run (Err(error), None, failure.run, false);
@@ -824,6 +827,14 @@ impl FlowApplication {
             };
 
             application.protect_flow(&flow_handle);
+
+            // FLOWIP-010t B13: the extracted settings, as the run records them.
+            for line in super::config_report::settings_lines(
+                &flow_handle,
+                config.runtime_config.app().origin(),
+            ) {
+                println!("{line}");
+            }
 
             // FLOWIP-010t B6, B9: name the configuration that differs from the
             // runs this replay or resume rebuilds, before Run is released.
@@ -840,7 +851,7 @@ impl FlowApplication {
             let print_replay_hint = |locator: &CurrentRunLocator| {
                 println!("FlowApplication complete!");
                 println!("To replay, add: --replay-from {locator}");
-                println!("(Source config env vars are ignored during replay)");
+                println!("(Source settings are ignored during replay)");
             };
 
             let flow_handle = Arc::new(flow_handle);

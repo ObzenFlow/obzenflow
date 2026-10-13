@@ -1,0 +1,7 @@
+# The demo's own settings. Relative paths resolve against the working
+# directory, so run from the repository root. Strict replay opens neither
+# input file.
+[app]
+customers_csv = "examples/csv_demo_support_sla/fixtures/customers.csv"
+tickets_csv = "examples/csv_demo_support_sla/fixtures/tickets.csv"
+output_csv = "target/csv-demo-support-sla/outputs/enriched_tickets.csv"

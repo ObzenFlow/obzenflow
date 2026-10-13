@@ -1,8 +1,18 @@
 # Backpressure remains operator-owned. The topology and effect policy stay in
-# Rust; this file configures only the runtime transport envelope.
+# Rust; this file configures the runtime transport envelope and the demo's
+# simulated warehouse.
 
 [runtime.backpressure.flow]
 mode = "enforce"
 window = 64
 stall_timeout_ms = 30000
 
+# The demo's own settings. The warehouse id is binding evidence for every
+# warehouse effect, so replaying or resuming a run with a different id refuses
+# at the first recorded effect.
+[app.warehouse]
+id = "warehouse-demo"
+# One slow reservation opens the reserve breaker; 0 keeps it closed.
+reserve_latency_ms = 20
+# true makes every reservation fail as unavailable.
+reserve_unavailable = false

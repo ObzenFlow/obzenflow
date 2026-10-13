@@ -23,7 +23,7 @@ pub mod schema;
 
 pub use app::{AppTable, ApplicationSettingsError, ConfigDeError};
 pub use candidates::{CandidateSet, ConfigValue, DslCandidates, DslConfigDefault, ScopedCandidate};
-pub use difference::{config_differences, ConfigDifference};
+pub use difference::{app_leaves, config_differences, ConfigDifference};
 pub use error::ConfigResolveError;
 pub use flow_view::{
     BackpressureMode, ExactConfigView, FlowEffectiveConfig, FlowResolutionContext,
@@ -40,7 +40,7 @@ pub use schema::{
     CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD_KEY, CIRCUIT_BREAKER_MINIMUM_CALLS_KEY,
     CIRCUIT_BREAKER_MODE_KEY, CIRCUIT_BREAKER_OPEN_FOR_MS_KEY, CIRCUIT_BREAKER_PROBES_KEY,
     CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY, CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY,
-    CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
+    CIRCUIT_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY, JOURNAL_ROOT_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
     RATE_LIMITER_COST_PER_ATTEMPT_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
     RETRY_ATTEMPT_START_WINDOW_MS_KEY, RETRY_FIXED_DELAY_MS_KEY, RETRY_KIND_KEY,
     RETRY_MAX_ATTEMPTS_KEY, RETRY_MAX_BACKOFF_MS_KEY, SINK_HANDLER_KEY,

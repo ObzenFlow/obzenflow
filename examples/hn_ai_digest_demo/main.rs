@@ -36,14 +36,15 @@
 //! third-party licenses/terms (including model weight licenses and hosted-provider ToS/usage limits).
 //! When using a hosted provider, your prompts and story text will be sent to that provider.
 //!
-//! Run against the real HN Firebase API (requires network):
-//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
+//! Run against the real HN Firebase API (requires network) by setting `source = "live"`
+//! under `[app]` in a copy of the config and passing the copy with `--config`.
 //!
-//! Optional env vars (HN fetch):
-//! - `HN_MAX_STORIES=60` (default 60)
-//! - `HN_LIVE=1` (default 0)
-//! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
-//! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)
+//! Application settings (`[app]` in the selected TOML file; the run prints them at startup):
+//! - `source = "mock"` (default) or `"live"`
+//! - `max_stories = 60` (default 60)
+//! - `poll_timeout_secs = 120` (default 120)
+//! - The HN source's pacing (default 10.0 events/sec) is ordinary middleware configuration:
+//!   `events_per_second` under `[middleware.stages.hn_stories.rate_limiter]`.
 //! - The HN HTTP source also has a fixed source circuit breaker: 3 failures, 2s cooldown.
 //!
 //! Digest output configuration:
@@ -69,10 +70,12 @@
 //! - Strict replay resolves the same non-secret target but reads no secret and constructs no
 //!   client.
 //!
-//! Optional env vars (AI prompt/chunk policy):
-//! - `HN_AI_INTERESTS="rust, ai, security"` (optional personalization)
-//! - `HN_AI_GROUP_BUDGET_TOKENS=2500` (optional; per-chunk input budget used for map-reduce splitting)
-//! - `HN_AI_GROUP_MAX_STORIES=10` (optional; cap stories per chunk; set `0` for unlimited)
+//! Application settings (AI prompt/chunk policy):
+//! - `interests = "rust, ai, security"` (optional personalization). It is part of every chat
+//!   effect's identity, so replaying or resuming a run with different interests refuses.
+//! - `group_budget_tokens = 2500` under `[app.digest]` (optional; per-chunk input budget used for
+//!   map-reduce splitting)
+//! - `group_max_stories = 10` under `[app.digest]` (cap stories per chunk; set `0` for unlimited)
 
 mod config;
 mod decoder;

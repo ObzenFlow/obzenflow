@@ -28,6 +28,8 @@ pub const CIRCUIT_BREAKER_MINIMUM_CALLS_KEY: &str = "middleware.circuit_breaker.
 pub const CIRCUIT_BREAKER_MODE_KEY: &str = "middleware.circuit_breaker.mode";
 pub const CIRCUIT_BREAKER_OPEN_FOR_MS_KEY: &str = "middleware.circuit_breaker.open_for_ms";
 pub const CIRCUIT_BREAKER_PROBES_KEY: &str = "middleware.circuit_breaker.probes";
+/// Where a durable run records its location (FLOWIP-010t B14).
+pub const JOURNAL_ROOT_KEY: &str = "journal.root";
 pub const CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY: &str =
     "middleware.circuit_breaker.rate_limited_counts_as_failure";
 pub const CIRCUIT_BREAKER_SLOW_CALL_DURATION_MS_KEY: &str =
@@ -182,8 +184,8 @@ pub enum Mutability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnobRole {
     Configuration,
-    /// A replay or resume launch flag. It places a run in its history, so it
-    /// differs from the run being rebuilt by construction.
+    /// Places a run without changing what it does: a replay or resume launch
+    /// flag places it in its history, and `journal.root` in storage (B14).
     Invocation,
 }
 
@@ -378,6 +380,19 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 default: KnobDefault::Value(ConfigValue::Text("abort".to_string())),
                 mutability: Mutability::Restartful,
                 role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            // Outranks the root a flow passes to its journal provider; absent,
+            // the provider's root applies (FLOWIP-010t B14).
+            KnobSpec {
+                key_path: JOURNAL_ROOT_KEY,
+                file_path: None,
+                value_type: KnobType::Path,
+                target: KnobTarget::Global,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Invocation,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
@@ -1002,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn invocation_knobs_are_exactly_the_replay_and_resume_launch_flags() {
+    fn invocation_knobs_are_the_launch_flags_and_the_journal_root() {
         let invocation: Vec<&str> = knob_registry()
             .iter()
             .filter(|spec| spec.role == KnobRole::Invocation)
@@ -1011,6 +1026,7 @@ mod tests {
         assert_eq!(
             invocation,
             [
+                "journal.root",
                 "runtime.resume.allow_duplicate_sink_delivery",
                 "runtime.resume.allow_incomplete_archive",
                 "runtime.resume.replay_from",
@@ -1058,6 +1074,7 @@ mod tests {
             canonical_env_name("runtime.backpressure.window"),
             "OBZENFLOW_RUNTIME_BACKPRESSURE_WINDOW"
         );
+        assert_eq!(canonical_env_name(JOURNAL_ROOT_KEY), "OBZENFLOW_JOURNAL_ROOT");
     }
 
     #[test]

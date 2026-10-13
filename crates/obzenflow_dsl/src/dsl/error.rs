@@ -71,6 +71,21 @@ fn resume_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> Strin
     paragraphs.join("\n")
 }
 
+fn journal_root_unused(root: &Path, located: Option<&Path>) -> String {
+    match located {
+        None => format!(
+            "journal.root is {}, but this flow records to memory journals, which keep no run \
+             location; unset journal.root or record the flow with disk_journals",
+            root.display()
+        ),
+        Some(located) => format!(
+            "journal.root is {}, but the flow's journal provider placed this run at {}",
+            root.display(),
+            located.display()
+        ),
+    }
+}
+
 // Verb-aware refusal copy for the archive sink delivery-safety gate
 // (FLOWIP-120n F16, extended to both archive verbs by FLOWIP-120v): one
 // variant pair serves both verbs.
@@ -231,6 +246,14 @@ pub enum FlowBuildError {
     /// a build that extracts none. The message names keys, never values.
     #[error("{0}")]
     ApplicationSettings(#[source] obzenflow_runtime::runtime_config::ApplicationSettingsError),
+
+    /// FLOWIP-010t B14: `journal.root` is set, but the flow's journal
+    /// provider keeps no run location under it.
+    #[error("{}", journal_root_unused(.root, .located.as_deref()))]
+    JournalRootUnused {
+        root: PathBuf,
+        located: Option<PathBuf>,
+    },
 
     /// A `handler_set!` sink has no resolved framework configuration value.
     #[error(

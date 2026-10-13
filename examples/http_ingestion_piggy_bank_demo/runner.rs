@@ -33,7 +33,6 @@ pub fn run_example() -> Result<()> {
                 "Stream-table join: accounts load from YAML, transactions post over \
                  HTTP against them, balances fold into a live checkbook.",
             )
-            .config("accounts", "[app] accounts_file, fixed at startup")
             .config("transactions", format!("POST {TX_BASE_PATH}/events")),
     );
 

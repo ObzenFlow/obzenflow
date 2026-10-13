@@ -373,6 +373,7 @@ pub(crate) struct RawFileStartupConfig {
     /// encoded in the struct shapes (§4c layout), so `deny_unknown_fields`
     /// rejects wrong-scope entries at parse.
     pub(crate) contracts: RawFileContractsConfig,
+    pub(crate) journal: RawFileJournalConfig,
     pub(crate) middleware: RawFileMiddlewareConfig,
     pub(crate) ai: RawFileAiConfig,
     pub(crate) sinks: RawFileSinksConfig,
@@ -695,6 +696,13 @@ pub(crate) struct RawBackpressureStageScope {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawFileContractsConfig {
     pub(crate) source_contract_strict_mode: Option<String>,
+}
+
+/// `[journal]`: where new runs record (FLOWIP-010t B14).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawFileJournalConfig {
+    pub(crate) root: Option<PathBuf>,
 }
 
 /// `[middleware]`: shared family settings at global, flow, stage and effect scope.

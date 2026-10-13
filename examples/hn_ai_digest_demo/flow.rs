@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{HnDigestPostgresConfig, HnRunInputs, PreparedHnRun};
+use super::config::{HnDigestPostgresConfig, HnRunInputs, HnSettings};
 use super::decoder::hn_story_decoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
@@ -394,6 +394,16 @@ impl Default for HnFlowOptions {
     }
 }
 
+/// The shipped demo: its run inputs come from `[app]` (FLOWIP-010t).
+pub(crate) fn settings_flow_definition() -> FlowDefinition {
+    FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {
+        Ok(build_flow_definition(
+            settings.into_inputs()?,
+            HnFlowOptions::default(),
+        ))
+    })
+}
+
 pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
         let HnRunInputs {
@@ -452,7 +462,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?
             .max_batch_size(10)
-            .poll_timeout(Duration::from_secs(poll_timeout_secs as u64))
+            .poll_timeout(Duration::from_secs(poll_timeout_secs))
             .build()
             .map_err(|error| {
                 FlowBuildError::StageResourcesFailed(format!(
@@ -542,17 +552,11 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
     })
 }
 
-pub async fn run_example(prepared: PreparedHnRun, presentation: Presentation) -> Result<()> {
-    let PreparedHnRun {
-        inputs,
-        mock_server,
-    } = prepared;
-    let outcome = FlowApplication::builder()
+pub async fn run_example(presentation: Presentation) -> Result<()> {
+    FlowApplication::builder()
         .with_presentation(presentation)
-        .run_async(build_flow_definition(inputs, HnFlowOptions::default()))
-        .await;
-    drop(mock_server);
-    outcome?;
+        .run_async(settings_flow_definition())
+        .await?;
     Ok(())
 }
 
@@ -561,25 +565,17 @@ pub fn run_demo_blocking() -> Result<()> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(async {
-        let prepared = PreparedHnRun::from_env().await?;
-        let presentation = build_presentation(&prepared.inputs);
-        run_example(prepared, presentation).await
-    })
+    runtime.block_on(run_example(build_presentation()))
 }
 
-pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
+/// The run's settings print after the build, so the banner shows only what
+/// the code fixes.
+pub(crate) fn build_presentation() -> Presentation {
     Presentation::new(
         Banner::new("HN AI Digest Demo")
             .description(
                 "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms.",
             )
-            .config("mode", &config.mode_label)
-            .config("base_url", config.base_url.to_string())
-            .config("max_stories", config.max_stories)
-            .config("poll_timeout", format!("{}s", config.poll_timeout_secs))
-            .config("group_max_stories", config.group_max_stories_label())
-            .config("source_rate_limit", format!("{} events/sec", config.source_rate_limit))
             .config(
                 "source_breaker",
                 format!(
@@ -594,7 +590,7 @@ pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
         if is_success {
             footer.paragraph(
                 "The generated digest was delivered by the configured sink handler.\n\
-                 Re-run with HN_LIVE=1 to fetch from the real Hacker News API."
+                 Set source = \"live\" under [app] to fetch from the real Hacker News API."
             )
         } else {
             footer

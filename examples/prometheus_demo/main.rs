@@ -14,7 +14,7 @@
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host
 //!
-//! Event volume is operator-tunable via `PROMETHEUS_EVENT_COUNT` (default
+//! Event volume is operator-tunable through `[app] event_count` (default
 //! 100000), so varying the load needs no code change.
 //! With the `tokio-console` feature, the framework's `--tokio-console` flag enables
 //! Tokio Console diagnostics. Diagnostics are disabled by default.
@@ -26,9 +26,8 @@
 
 use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
-use obzenflow::env::env_var_or;
 use obzenflow::flow::backpressure::enforced;
-use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
 use obzenflow::schema::TypedPayload;
@@ -44,10 +43,31 @@ const CONFIG_FILE: &str = concat!(
     "/examples/prometheus_demo/obzenflow.toml"
 );
 
-/// Default event volume; override with `PROMETHEUS_EVENT_COUNT`.
+/// Default event volume; override with `[app] event_count`.
 const DEFAULT_EVENT_COUNT: usize = 100_000;
 const SOURCE_OUTAGE_INTERVAL: usize = 20_000;
 const SOURCE_BREAKER_COOLDOWN: Duration = Duration::from_secs(5);
+const JOURNAL_ROOT: &str = "target/prometheus_demo_journal";
+
+/// The demo's `[app]` settings (FLOWIP-010t).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PrometheusDemoSettings {
+    /// Inputs the source generates.
+    #[serde(default = "default_event_count")]
+    event_count: usize,
+    /// Keeps the 1,000/s source limiter; false omits it for measurement.
+    #[serde(default = "keep_source_rate_limit")]
+    source_rate_limit: bool,
+}
+
+fn default_event_count() -> usize {
+    DEFAULT_EVENT_COUNT
+}
+
+fn keep_source_rate_limit() -> bool {
+    true
+}
 
 // ============================================================================
 // FLOWIP-082a: Strongly-Typed Domain Events
@@ -180,26 +200,13 @@ impl TypedPayload for EventCountState {
 }
 
 fn main() -> Result<()> {
-    // Operator-tunable event volume through the framework env helpers, so the
-    // load varies without a code change (default 100k).
-    let total_events = env_var_or::<usize>("PROMETHEUS_EVENT_COUNT", DEFAULT_EVENT_COUNT)?;
-    let source_rate_limit = match std::env::var_os("PROMETHEUS_RATE_LIMIT").as_deref() {
-        None => SourceRateLimit::Enabled,
-        Some(value) if value == "1" => SourceRateLimit::Enabled,
-        Some(value) if value == "0" => SourceRateLimit::Disabled,
-        Some(_) => anyhow::bail!("PROMETHEUS_RATE_LIMIT must be unset, 0, or 1"),
-    };
-
     let presentation = Presentation::new(
         Banner::new("Prometheus Demo")
             .description("Configurable event volume (default 100k) with circuit breaking, rate limiting, and backpressure.")
             .bullets(
                 "Demonstrating",
                 [
-                    match source_rate_limit {
-                        SourceRateLimit::Enabled => "Source-intake rate limiting at 1,000/s",
-                        SourceRateLimit::Disabled => "Source-intake rate limiter omitted for measurement",
-                    },
+                    "Source-intake rate limiting at 1,000/s, unless [app] source_rate_limit = false",
                     "Source outages with five-second circuit-breaker cooldowns",
                     "Enforced backpressure (64 events per edge)",
                     "Counting successfully processed events",
@@ -208,7 +215,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "Usage",
-                "Default:     cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nVolume:      PROMETHEUS_EVENT_COUNT=1000 cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nCustom port: cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host -- --server-port 8080",
+                "Default:     cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nVolume:      set event_count under [app] in a copy of the config, then pass the copy with --config\nCustom port: cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host -- --server-port 8080",
             ),
     )
     .with_footer(|outcome| {
@@ -218,23 +225,30 @@ fn main() -> Result<()> {
     });
 
     // Use FlowApplication builder - handles runtime, observability, and features automatically.
-    let application = FlowApplication::builder()
+    FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
-        .with_presentation(presentation);
-    let journal_root = std::path::PathBuf::from("target/prometheus_demo_journal");
-    let definition = match source_rate_limit {
-        SourceRateLimit::Enabled => flow_definition(total_events, journal_root),
-        SourceRateLimit::Disabled => flow_definition_with_options(
-            total_events,
-            journal_root,
-            SOURCE_OUTAGE_INTERVAL,
-            SourceRateLimit::Disabled,
-        ),
-    };
-    application.run_blocking(definition)?;
+        .with_presentation(presentation)
+        .run_blocking(demo_flow())?;
 
     Ok(())
+}
+
+/// The shipped demo, with its volume and source limiter read from `[app]`.
+fn demo_flow() -> FlowDefinition {
+    FlowDefinition::materialize_with(|_runtime_config, settings: PrometheusDemoSettings| {
+        let journal_root = std::path::PathBuf::from(JOURNAL_ROOT);
+        Ok(if settings.source_rate_limit {
+            flow_definition(settings.event_count, journal_root)
+        } else {
+            flow_definition_with_options(
+                settings.event_count,
+                journal_root,
+                SOURCE_OUTAGE_INTERVAL,
+                SourceRateLimit::Disabled,
+            )
+        })
+    })
 }
 
 /// The example's flow, also exercised by its journal integration test.
@@ -272,65 +286,79 @@ fn flow_definition_with_options(
     outage_interval: usize,
     source_rate_limit: SourceRateLimit,
 ) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        prometheus_flow(
+            total_events,
+            journal_root,
+            outage_interval,
+            source_rate_limit,
+        )
+    })
+}
+
+fn prometheus_flow(
+    total_events: usize,
+    journal_root: std::path::PathBuf,
+    outage_interval: usize,
+    source_rate_limit: SourceRateLimit,
+) -> Result<FlowDefinition, FlowBuildError> {
     assert!(
         outage_interval > 0,
         "source outage interval must be positive"
     );
-    FlowDefinition::materialize(move |_runtime_config| {
-        let high_volume_source_handler = HighVolumeSource {
-            next_id: 0,
-            total_events,
-            outage_interval,
-            outage_failures: 0,
-        };
-        let error_processor_handler = error_prone_transform();
-        let event_counter_handler = stateful::reduce(
-            EventCountState::default(),
-            |state: &mut EventCountState, _event: &ProcessedEvent| {
-                state.event_count += 1;
-                if state.event_count.is_multiple_of(10_000) {
-                    println!("📊 Counted {} events so far...", state.event_count);
-                }
-            },
-        )
-        .emit_on_eof();
-        let summary_sink_handler = ConsoleSink::new(format_summary);
-
-        Ok(flow! {
-            name: "prometheus_demo",
-            journals: disk_journals(journal_root),
-            // Explicit demo defaults; operator configuration can override them.
-            backpressure: enforced(64).stall_timeout_ms(30_000),
-
-            stages: {
-                // The simulated service outage belongs at the live source boundary.
-                // Pure transform errors still follow their existing error-journal path.
-                high_volume_source = match source_rate_limit {
-                    SourceRateLimit::Enabled => source!(DataRequest => high_volume_source_handler with {
-                        circuit_breaker()
-                            .consecutive_failures(1)
-                            .open_for(SOURCE_BREAKER_COOLDOWN)
-                            .probes(1),
-                        rate_limit(1000.0)
-                    }),
-                    SourceRateLimit::Disabled => source!(DataRequest => high_volume_source_handler with {
-                        circuit_breaker()
-                            .consecutive_failures(1)
-                            .open_for(SOURCE_BREAKER_COOLDOWN)
-                            .probes(1)
-                    }),
-                };
-                error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
-                event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
-                summary_sink = sink!(EventCountState => summary_sink_handler);
-            },
-
-            topology: {
-                high_volume_source |> error_processor;
-                error_processor |> event_counter;
-                event_counter |> summary_sink;
+    let high_volume_source_handler = HighVolumeSource {
+        next_id: 0,
+        total_events,
+        outage_interval,
+        outage_failures: 0,
+    };
+    let error_processor_handler = error_prone_transform();
+    let event_counter_handler = stateful::reduce(
+        EventCountState::default(),
+        |state: &mut EventCountState, _event: &ProcessedEvent| {
+            state.event_count += 1;
+            if state.event_count.is_multiple_of(10_000) {
+                println!("📊 Counted {} events so far...", state.event_count);
             }
-        })
+        },
+    )
+    .emit_on_eof();
+    let summary_sink_handler = ConsoleSink::new(format_summary);
+
+    Ok(flow! {
+        name: "prometheus_demo",
+        journals: disk_journals(journal_root),
+        // Explicit demo defaults; operator configuration can override them.
+        backpressure: enforced(64).stall_timeout_ms(30_000),
+
+        stages: {
+            // The simulated service outage belongs at the live source boundary.
+            // Pure transform errors still follow their existing error-journal path.
+            high_volume_source = match source_rate_limit {
+                SourceRateLimit::Enabled => source!(DataRequest => high_volume_source_handler with {
+                    circuit_breaker()
+                        .consecutive_failures(1)
+                        .open_for(SOURCE_BREAKER_COOLDOWN)
+                        .probes(1),
+                    rate_limit(1000.0)
+                }),
+                SourceRateLimit::Disabled => source!(DataRequest => high_volume_source_handler with {
+                    circuit_breaker()
+                        .consecutive_failures(1)
+                        .open_for(SOURCE_BREAKER_COOLDOWN)
+                        .probes(1)
+                }),
+            };
+            error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
+            event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
+            summary_sink = sink!(EventCountState => summary_sink_handler);
+        },
+
+        topology: {
+            high_volume_source |> error_processor;
+            error_processor |> event_counter;
+            event_counter |> summary_sink;
+        }
     })
 }
 

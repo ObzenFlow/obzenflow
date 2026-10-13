@@ -96,6 +96,11 @@ impl FlowEffectiveConfig {
         self
     }
 
+    /// The extracted `[app]` settings as the run records them.
+    pub fn app_settings(&self) -> Option<&serde_json::Value> {
+        self.app.as_ref()
+    }
+
     pub fn get(&self, key_path: &str, point: &ConfigScope) -> Option<&Resolved<ConfigValue>> {
         let point = match point {
             ConfigScope::Global => ResolutionPoint::Global,
@@ -208,6 +213,13 @@ impl FlowEffectiveConfig {
     pub fn metrics_drain_timeout_ms(&self) -> u64 {
         self.u64_at("runtime.metrics_drain_timeout_ms", &ConfigScope::Global)
             .expect("registry default guarantees metrics_drain_timeout_ms")
+    }
+
+    /// The operator's `journal.root`, when set (FLOWIP-010t B14).
+    pub fn journal_root(&self) -> Option<&std::path::Path> {
+        self.get(super::schema::JOURNAL_ROOT_KEY, &ConfigScope::Global)
+            .and_then(|r| r.value.as_text())
+            .map(std::path::Path::new)
     }
 
     /// `contracts.source_contract_strict_mode` token: `abort` or `warn`.

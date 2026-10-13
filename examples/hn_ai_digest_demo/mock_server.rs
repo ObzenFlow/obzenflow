@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 pub struct MockHnServer {
     addr: SocketAddr,
     requests: Arc<AtomicUsize>,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MockHnServer {
@@ -28,17 +28,28 @@ impl MockHnServer {
     pub fn request_count(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
     }
+
+    /// Keep serving for the rest of the runtime's life, and return the endpoint.
+    pub fn detach(mut self) -> Url {
+        self.task.take();
+        self.base_url()
+    }
 }
 
 impl Drop for MockHnServer {
     fn drop(&mut self) {
-        tracing::debug!(requests = self.request_count(), "stopping mock HN server");
-        self.task.abort();
+        if let Some(task) = self.task.take() {
+            tracing::debug!(requests = self.request_count(), "stopping mock HN server");
+            task.abort();
+        }
     }
 }
 
-pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+/// Bind a loopback port and serve the fixture from the current runtime.
+pub fn spawn_mock_hn_server() -> Result<MockHnServer> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let listener = TcpListener::from_std(listener)?;
     let addr = listener.local_addr()?;
 
     let (items, topstories) = build_mock_hn_payloads();
@@ -84,7 +95,7 @@ pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
     Ok(MockHnServer {
         addr,
         requests,
-        task,
+        task: Some(task),
     })
 }
 

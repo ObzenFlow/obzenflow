@@ -7,14 +7,9 @@ mod support;
 use obzenflow::application::{Banner, Presentation};
 
 fn main() -> anyhow::Result<()> {
-    let paths = support::flow::DemoPaths::resolve()?;
+    // The input and output paths come from `[app]` in obzenflow.toml, and the
+    // run prints them at startup.
+    let presentation = Presentation::new(Banner::new("CSV Demo: Support SLA"));
 
-    let presentation = Presentation::new(
-        Banner::new("CSV Demo: Support SLA")
-            .config("customers_csv", paths.customers_csv.display())
-            .config("tickets_csv", paths.tickets_csv.display())
-            .config("output_csv", paths.output_csv.display()),
-    );
-
-    support::flow::run_example(paths, presentation, std::env::args_os())
+    support::flow::run_example(presentation, std::env::args_os())
 }

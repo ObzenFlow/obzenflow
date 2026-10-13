@@ -1,0 +1,18 @@
+# Fault-injection variant of the product catalog example: select with
+#   --config examples/product_catalog_enrichment/obzenflow.bad_payment.toml
+# It matches obzenflow.toml except that one order names an unknown payment
+# method, so StrictJoin triggers the Jonestown Protocol: it preserves the valid
+# committed prefix, then emits a sealed Poison EOF.
+
+[server]
+# The documented default command is a terminal run and must not require the
+# optional web-host feature. Pass --server (with that feature enabled) to
+# opt into the control plane; the CLI flag takes precedence over this value.
+enabled = false
+startup_mode = "manual"
+
+[server.cors]
+mode = "allow-any-origin"
+
+[app]
+inject_bad_payment = true

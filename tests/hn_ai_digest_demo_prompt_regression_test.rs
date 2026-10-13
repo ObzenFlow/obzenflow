@@ -8,8 +8,8 @@ fn hn_ai_digest_demo_prompt_discourages_story_echo_and_supports_group_caps() {
     let config_source = include_str!("../examples/hn_ai_digest_demo/config.rs");
 
     assert!(
-        config_source.contains("HN_AI_GROUP_MAX_STORIES"),
-        "hn_ai_digest_demo should expose HN_AI_GROUP_MAX_STORIES"
+        config_source.contains("group_max_stories"),
+        "hn_ai_digest_demo should expose [app.digest] group_max_stories"
     );
     assert!(
         flow_source.contains("IMPORTANT: Do not repeat the input story list."),

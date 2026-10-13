@@ -90,7 +90,7 @@ fn point(resolved_for: Option<&ResolvedForDoc>, scope: &str) -> Option<String> {
 
 /// Each leaf of the recorded settings under its `app.` path; arrays and
 /// empty tables are leaves.
-fn app_leaves(app: Option<&Value>) -> BTreeMap<String, Value> {
+pub fn app_leaves(app: Option<&Value>) -> BTreeMap<String, Value> {
     fn walk(path: String, value: &Value, leaves: &mut BTreeMap<String, Value>) {
         match value {
             Value::Object(entries) if !entries.is_empty() => {

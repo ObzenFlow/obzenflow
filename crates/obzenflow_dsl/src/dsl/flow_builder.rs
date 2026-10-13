@@ -158,7 +158,7 @@ pub async fn build_flow<J, P>(
 ) -> Result<FlowBuildOutput, crate::FlowBuildFailure>
 where
     J: FlowJournalFactory,
-    P: FnOnce(FlowId) -> Result<J, JournalError> + Send,
+    P: FnOnce(FlowId, Option<&std::path::Path>) -> Result<J, JournalError> + Send,
 {
     let LoweredFlow {
         stages,
@@ -963,8 +963,10 @@ where
         let pipeline_system_id = obzenflow_core::SystemId::new();
         let pipeline_id = pipeline_system_id;
 
-        // Get the journal factory for this specific flow
-        let mut journal_factory = journal_factory_provider(flow_id)
+        // Get the journal factory for this specific flow. The operator's
+        // `journal.root` outranks the provider's own root (FLOWIP-010t B14).
+        let __journal_root = __flow_effective.journal_root();
+        let mut journal_factory = journal_factory_provider(flow_id, __journal_root)
             .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
 
         // FLOWIP-120u: capture the substrate declaration, then run the
@@ -972,6 +974,18 @@ where
         let __substrate =
             obzenflow_core::journal::factory::FlowJournalFactory::run_state(&journal_factory);
         __run_state = Some(__substrate.clone());
+
+        // FLOWIP-010t B14: a configured root the run did not record under is
+        // refused before any journal exists.
+        if let Some(root) = __journal_root {
+            let located = __substrate.locator().map(|locator| locator.path());
+            if !located.is_some_and(|path| path.starts_with(root)) {
+                return Err(FlowBuildError::JournalRootUnused {
+                    root: root.to_path_buf(),
+                    located: located.map(std::path::Path::to_path_buf),
+                });
+            }
+        }
         obzenflow_core::journal::factory::FlowJournalFactory::resource_preflight(
             &journal_factory,
             &obzenflow_core::journal::factory::RunResourcePlan {

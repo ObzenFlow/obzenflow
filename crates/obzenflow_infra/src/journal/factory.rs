@@ -23,7 +23,7 @@ use obzenflow_runtime::runtime_resource_limits::{
     env_try_raise_nofile, estimate_disk_journal_fds, preflight_nofile_for_disk_journals,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -215,15 +215,20 @@ fn seed_admission_sequencer(sequencer: &AtomicU64, archive: &dyn ReplayArchive) 
     );
 }
 
-/// Simple factory functions for the DSL
+/// Disk journals under `base_path`, or under the operator's `journal.root`
+/// when set (FLOWIP-010t B14).
 pub fn disk_journals(
     base_path: PathBuf,
-) -> impl Fn(FlowId) -> Result<DiskJournalFactory, JournalError> {
-    move |flow_id| DiskJournalFactory::new(base_path.clone(), flow_id)
+) -> impl Fn(FlowId, Option<&Path>) -> Result<DiskJournalFactory, JournalError> {
+    move |flow_id, root| {
+        DiskJournalFactory::new(root.map_or_else(|| base_path.clone(), Path::to_path_buf), flow_id)
+    }
 }
 
-pub fn memory_journals() -> impl Fn(FlowId) -> Result<MemoryJournalFactory, JournalError> {
-    move |flow_id| Ok(MemoryJournalFactory::new(flow_id))
+/// Memory journals keep no location, so the build refuses a `journal.root`.
+pub fn memory_journals() -> impl Fn(FlowId, Option<&Path>) -> Result<MemoryJournalFactory, JournalError>
+{
+    move |flow_id, _| Ok(MemoryJournalFactory::new(flow_id))
 }
 
 impl FlowJournalFactory for DiskJournalFactory {

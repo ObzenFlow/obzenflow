@@ -2,16 +2,46 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Start-up and failure-footer lines for a replay or resume whose
-//! configuration differs from the runs it rebuilds (FLOWIP-010t B6, B9, B12).
-//! Projections over the manifests and journalled refusals; they change nothing.
+//! Start-up lines for the extracted `[app]` settings (FLOWIP-010t B13), and
+//! start-up and failure-footer lines for a replay or resume whose
+//! configuration differs from the runs it rebuilds (B6, B9, B12).
+//! Projections over the recorded evidence and journalled refusals; they
+//! change nothing.
 
 use crate::journal::read::{
     compare_with_runs, read_configuration_refusals, read_logic_version_changes, ConfigChanges,
     LogicVersionChange, RunConfigChanges,
 };
 use obzenflow_runtime::pipeline::FlowHandle;
+use obzenflow_runtime::runtime_config::app_leaves;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
+
+/// The settings this build extracted, as its evidence records them, under
+/// the file they came from; empty when the build extracted none.
+pub(super) fn settings_lines(flow: &FlowHandle, origin: Option<&Path>) -> Vec<String> {
+    flow.flow_effective_config()
+        .map(|effective| render_settings(effective.app_settings(), origin))
+        .unwrap_or_default()
+}
+
+fn render_settings(app: Option<&Value>, origin: Option<&Path>) -> Vec<String> {
+    let Some(app) = app.filter(|app| !app.as_object().is_some_and(|table| table.is_empty()))
+    else {
+        return Vec::new();
+    };
+    let heading = match origin {
+        Some(origin) => format!("Application settings from {}:", origin.display()),
+        None => "Application settings (defaults; no [app] table):".to_string(),
+    };
+    std::iter::once(heading)
+        .chain(
+            app_leaves(Some(app))
+                .into_iter()
+                .map(|(key, value)| format!("  {key} = {value}")),
+        )
+        .collect()
+}
 
 /// This run's configuration against the archive it reads and, for a resume,
 /// every ancestor it merges: the runs its manifest links.
@@ -131,6 +161,37 @@ mod tests {
                     .collect(),
             ),
         }
+    }
+
+    #[test]
+    fn settings_print_each_recorded_leaf_under_their_file() {
+        let recorded = json!({
+            "accounts_file": "accounts.yaml",
+            "partner": { "api_key_env": "PARTNER_API_KEY", "retries": 3 },
+            "regions": ["ca", "us"],
+        });
+        assert_eq!(
+            render_settings(Some(&recorded), Some(Path::new("deploy/staging.toml"))),
+            [
+                "Application settings from deploy/staging.toml:",
+                "  app.accounts_file = \"accounts.yaml\"",
+                "  app.partner.api_key_env = \"PARTNER_API_KEY\"",
+                "  app.partner.retries = 3",
+                "  app.regions = [\"ca\",\"us\"]",
+            ]
+        );
+        assert_eq!(
+            render_settings(Some(&json!({ "mode": "mock" })), None),
+            [
+                "Application settings (defaults; no [app] table):",
+                "  app.mode = \"mock\"",
+            ]
+        );
+        assert!(render_settings(None, None).is_empty(), "nothing extracted");
+        assert!(
+            render_settings(Some(&json!({})), Some(Path::new("shared.toml"))).is_empty(),
+            "a type with no settings prints nothing"
+        );
     }
 
     #[test]

@@ -4,7 +4,8 @@
 # are rate-limited to 1000/sec, with backpressure and four ten-second source
 # outages demonstrating breaker reopening and recovery. Parallel "running"
 # badges and drain-then-depart stay observable past the heartbeat lag.
-# Shorten with PROMETHEUS_EVENT_COUNT; <= 20k inputs skip the source outages.
+# Shorten with event_count under [app] in a copy of this file; <= 20k inputs
+# skip the source outages.
 # --config wins over the example's built-in with_config_file(obzenflow.toml).
 
 [server]
