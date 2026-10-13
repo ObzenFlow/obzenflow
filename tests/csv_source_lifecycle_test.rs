@@ -61,6 +61,51 @@ fn csv_configuration_is_cold_and_opens_independent_readers() -> anyhow::Result<(
     Ok(())
 }
 
+#[derive(Clone)]
+struct DemoRun {
+    config: PathBuf,
+    customers_csv: PathBuf,
+    tickets_csv: PathBuf,
+    output_csv: PathBuf,
+    journals_dir: PathBuf,
+}
+
+impl DemoRun {
+    fn new(fixtures: &Path, out_root: &Path) -> anyhow::Result<Self> {
+        let run = Self {
+            config: out_root.join("obzenflow.toml"),
+            customers_csv: fixtures.join("customers.csv"),
+            tickets_csv: fixtures.join("tickets.csv"),
+            output_csv: out_root.join("outputs/enriched_tickets.csv"),
+            journals_dir: out_root.join("logs"),
+        };
+        std::fs::create_dir_all(out_root.join("outputs"))?;
+        let quoted = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
+        std::fs::write(
+            &run.config,
+            format!(
+                "[journal]\nroot = {}\n\n[app]\ncustomers_csv = {}\ntickets_csv = {}\noutput_csv = {}\n",
+                quoted(&run.journals_dir),
+                quoted(&run.customers_csv),
+                quoted(&run.tickets_csv),
+                quoted(&run.output_csv),
+            ),
+        )?;
+        Ok(run)
+    }
+
+    fn args(&self, extra: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+        [
+            OsString::from("csv_demo_support_sla"),
+            OsString::from("--config"),
+            self.config.clone().into_os_string(),
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect()
+    }
+}
+
 fn latest_run(base: &Path) -> anyhow::Result<PathBuf> {
     let mut runs = std::fs::read_dir(base.join("flows"))?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -107,13 +152,12 @@ async fn csv_example_replays_through_application_entry_without_either_input() ->
         include_str!("../examples/csv_demo_support_sla/fixtures/tickets.csv"),
     )?;
 
-    let paths = example::flow::DemoPaths::resolve_in(&fixtures, &outputs)?;
-    let live_paths = paths.clone();
+    let paths = DemoRun::new(&fixtures, &outputs)?;
+    let live_args = paths.args([]);
     tokio::task::spawn_blocking(move || {
         example::flow::run_example(
-            live_paths,
             Presentation::new(Banner::new("CSV lifecycle proof")),
-            [OsString::from("csv_demo_support_sla")],
+            live_args,
         )
     })
     .await??;
@@ -132,19 +176,14 @@ async fn csv_example_replays_through_application_entry_without_either_input() ->
 
     std::fs::remove_file(&paths.customers_csv)?;
     std::fs::remove_file(&paths.tickets_csv)?;
-    // Resolve and wire again exactly as main does, with identical paths. Any
-    // attempted file/header read would fail before replay could complete.
-    let replay_paths = example::flow::DemoPaths::resolve_in(&fixtures, &outputs)?;
-    let archive = live.clone();
+    let replay_args = paths.args([
+        OsString::from("--replay-from"),
+        live.clone().into_os_string(),
+    ]);
     tokio::task::spawn_blocking(move || {
         example::flow::run_example(
-            replay_paths,
             Presentation::new(Banner::new("CSV lifecycle proof")),
-            [
-                OsString::from("csv_demo_support_sla"),
-                OsString::from("--replay-from"),
-                archive.into_os_string(),
-            ],
+            replay_args,
         )
     })
     .await??;
@@ -168,8 +207,6 @@ async fn csv_example_replays_through_application_entry_without_either_input() ->
 // three times slower than a developer machine; the stop still lands early.
 const LONG_TICKETS: usize = 1_000;
 const TICKETS_AT_CUT: usize = 100;
-const CHILD_FIXTURES: &str = "OBZENFLOW_134I_CSV_FIXTURES";
-const CHILD_OUTPUTS: &str = "OBZENFLOW_134I_CSV_OUTPUTS";
 
 /// The shipped customers, and the shipped tickets repeated under fresh ids
 /// until the stream is long enough for a stop to land partway through it.
@@ -192,18 +229,33 @@ fn write_long_fixtures(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_example_with(
-    paths: example::flow::DemoPaths,
-    args: Vec<OsString>,
-) -> anyhow::Result<()> {
+async fn run_example_with(paths: &DemoRun, args: Vec<OsString>) -> anyhow::Result<()> {
+    let args = paths.args(args);
     tokio::task::spawn_blocking(move || {
         example::flow::run_example(
-            paths,
             Presentation::new(Banner::new("CSV interruption proof")),
-            std::iter::once(OsString::from("csv_demo_support_sla")).chain(args),
+            args,
         )
     })
     .await?
+}
+
+fn spawn_child(
+    paths: &DemoRun,
+    shutdown_timeout_secs: Option<&str>,
+) -> std::io::Result<tokio::process::Child> {
+    let mut command = tokio::process::Command::new(std::env::current_exe()?);
+    command
+        .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])
+        .env("OBZENFLOW_CONFIG", &paths.config);
+    if let Some(seconds) = shutdown_timeout_secs {
+        command.env("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS", seconds);
+    }
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
 }
 
 /// Tickets a running archive has committed, read through the supported reader.
@@ -249,10 +301,11 @@ async fn source_eofs(run: &Path, stage: &str) -> anyhow::Result<Vec<EofKind>> {
 #[test]
 #[ignore = "subprocess fixture; run by the interruption tests below"]
 fn csv_example_child() {
-    let fixtures = PathBuf::from(std::env::var_os(CHILD_FIXTURES).expect("the parent's fixtures"));
-    let outputs = PathBuf::from(std::env::var_os(CHILD_OUTPUTS).expect("the parent's outputs"));
+    assert!(
+        std::env::var_os("OBZENFLOW_CONFIG").is_some(),
+        "the parent selects the config"
+    );
     example::flow::run_example(
-        example::flow::DemoPaths::resolve_in(&fixtures, &outputs).expect("the example's paths"),
         Presentation::new(Banner::new("CSV interruption proof")),
         [OsString::from("csv_demo_support_sla")],
     )
@@ -269,23 +322,15 @@ async fn csv_example_resumes_an_interrupted_run() -> anyhow::Result<()> {
 
     let control_fixtures = temp.path().join("control/fixtures");
     write_long_fixtures(&control_fixtures)?;
-    let control_paths =
-        example::flow::DemoPaths::resolve_in(&control_fixtures, &temp.path().join("control"))?;
-    run_example_with(control_paths.clone(), Vec::new()).await?;
+    let control_paths = DemoRun::new(&control_fixtures, &temp.path().join("control"))?;
+    run_example_with(&control_paths, Vec::new()).await?;
     let control = latest_run(&control_paths.journals_dir)?;
 
     let fixtures = temp.path().join("interrupted/fixtures");
     let outputs = temp.path().join("interrupted");
     write_long_fixtures(&fixtures)?;
-    let paths = example::flow::DemoPaths::resolve_in(&fixtures, &outputs)?;
-    let mut child = tokio::process::Command::new(std::env::current_exe()?)
-        .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])
-        .env(CHILD_FIXTURES, &fixtures)
-        .env(CHILD_OUTPUTS, &outputs)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+    let paths = DemoRun::new(&fixtures, &outputs)?;
+    let mut child = spawn_child(&paths, None)?;
     // The journal decides the cut; the deadline only fails a fixture that
     // never reaches it.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -323,7 +368,7 @@ async fn csv_example_resumes_an_interrupted_run() -> anyhow::Result<()> {
     );
 
     run_example_with(
-        paths.clone(),
+        &paths,
         vec![
             OsString::from("--resume-from"),
             interrupted.clone().into_os_string(),
@@ -361,21 +406,13 @@ async fn csv_example_exits_while_an_open_is_held() -> anyhow::Result<()> {
         fixtures.join("customers.csv"),
         include_str!("../examples/csv_demo_support_sla/fixtures/customers.csv"),
     )?;
-    let paths = example::flow::DemoPaths::resolve_in(&fixtures, &outputs)?;
+    let paths = DemoRun::new(&fixtures, &outputs)?;
     // Opening a FIFO for reading blocks until a writer appears; none does.
     assert!(std::process::Command::new("mkfifo")
         .arg(&paths.tickets_csv)
         .status()?
         .success());
-    let mut child = tokio::process::Command::new(std::env::current_exe()?)
-        .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])
-        .env(CHILD_FIXTURES, &fixtures)
-        .env(CHILD_OUTPUTS, &outputs)
-        .env("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+    let mut child = spawn_child(&paths, Some("1"))?;
     // Both sources start together; the customers finish while the tickets
     // open waits on the FIFO.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -445,7 +482,7 @@ async fn csv_example_exits_while_its_output_is_blocked() -> anyhow::Result<()> {
     let fixtures = temp.path().join("fixtures");
     let outputs = temp.path().join("blocked");
     write_long_fixtures(&fixtures)?;
-    let paths = example::flow::DemoPaths::resolve_in(&fixtures, &outputs)?;
+    let paths = DemoRun::new(&fixtures, &outputs)?;
     assert!(std::process::Command::new("mkfifo")
         .arg(&paths.output_csv)
         .status()?
@@ -456,15 +493,7 @@ async fn csv_example_exits_while_its_output_is_blocked() -> anyhow::Result<()> {
         .read(true)
         .write(true)
         .open(&paths.output_csv)?;
-    let mut child = tokio::process::Command::new(std::env::current_exe()?)
-        .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])
-        .env(CHILD_FIXTURES, &fixtures)
-        .env(CHILD_OUTPUTS, &outputs)
-        .env("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+    let mut child = spawn_child(&paths, Some("1"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let run = loop {
         if let Ok(run) = latest_run(&paths.journals_dir) {

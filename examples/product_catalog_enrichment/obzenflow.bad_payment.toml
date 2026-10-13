@@ -1,0 +1,14 @@
+# Fault-injection variant of obzenflow.toml, selected with --config. One order
+# names an unknown payment method, so StrictJoin triggers the Jonestown Protocol.
+
+[server]
+# The default run needs no web-host feature; --server (with that feature)
+# enables the control plane and takes precedence over this value.
+enabled = false
+startup_mode = "manual"
+
+[server.cors]
+mode = "allow-any-origin"
+
+[app]
+inject_bad_payment = true

@@ -412,30 +412,53 @@ async fn measure_demo_process_completion() -> Result<()> {
         "Console must be 0 or 1"
     );
     let directory = tempfile::tempdir()?;
-    let log = std::fs::File::create(directory.path().join("demo.log"))?;
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .current_dir(directory.path())
-        .args([
-            "--config",
-            root.join("examples/prometheus_demo/obzenflow.studio.toml")
-                .to_str()
-                .unwrap(),
-            "--startup-mode",
-            "auto",
-            "--server-port",
-            "0",
-        ])
-        .env("PROMETHEUS_EVENT_COUNT", count.to_string())
-        .env("PROMETHEUS_RATE_LIMIT", "0")
-        .arg(format!("--tokio-console={}", console == "1"))
-        .args(["--tokio-console-bind", "127.0.0.1:0"])
-        .env("TOKIO_WORKER_THREADS", "2")
-        .env("RUST_LOG", "info")
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .kill_on_drop(true);
+    let journals = directory.path().join("journals");
+    let studio: toml::Value = toml::from_str(&std::fs::read_to_string(
+        root.join("examples/prometheus_demo/obzenflow.studio.toml"),
+    )?)?;
+    let settings = |event_count: u64| -> Result<std::path::PathBuf> {
+        let mut config = studio.clone();
+        let table = config.as_table_mut().context("the config is a table")?;
+        let mut app = toml::Table::new();
+        app.insert(
+            "event_count".into(),
+            toml::Value::Integer(i64::try_from(event_count)?),
+        );
+        app.insert("source_rate_limit".into(), toml::Value::Boolean(false));
+        table.insert("app".into(), toml::Value::Table(app));
+        let mut journal = toml::Table::new();
+        journal.insert(
+            "root".into(),
+            toml::Value::String(journals.display().to_string()),
+        );
+        table.insert("journal".into(), toml::Value::Table(journal));
+        let path = directory
+            .path()
+            .join(format!("prometheus-{event_count}.toml"));
+        std::fs::write(&path, toml::to_string(&config)?)?;
+        Ok(path)
+    };
+    let demo = |config: &Path, log: std::fs::File| -> Result<tokio::process::Command> {
+        let mut command = tokio::process::Command::new(&binary);
+        command
+            .current_dir(directory.path())
+            .arg("--config")
+            .arg(config)
+            .args(["--startup-mode", "auto", "--server-port", "0"])
+            .arg(format!("--tokio-console={}", console == "1"))
+            .args(["--tokio-console-bind", "127.0.0.1:0"])
+            .env("TOKIO_WORKER_THREADS", "2")
+            .env("RUST_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .kill_on_drop(true);
+        Ok(command)
+    };
+    let mut command = demo(
+        &settings(count)?,
+        std::fs::File::create(directory.path().join("demo.log"))?,
+    )?;
     let start = Instant::now();
     let mut child = command.spawn()?;
     let status = match tokio::time::timeout(Duration::from_secs(180), child.wait()).await {
@@ -451,12 +474,7 @@ async fn measure_demo_process_completion() -> Result<()> {
         "demo exited unsuccessfully: {status}; {}",
         std::fs::read_to_string(directory.path().join("demo.log"))?
     );
-    let runs = std::fs::read_dir(
-        directory
-            .path()
-            .join("target/prometheus_demo_journal/flows"),
-    )?
-    .collect::<std::io::Result<Vec<_>>>()?;
+    let runs = std::fs::read_dir(journals.join("flows"))?.collect::<std::io::Result<Vec<_>>>()?;
     ensure!(runs.len() == 1, "expected one demo archive");
     let archive = runs[0].path();
     let mut report = inspect_archive(&archive, count).await?;
@@ -471,15 +489,15 @@ async fn measure_demo_process_completion() -> Result<()> {
     // This is outside the live completion interval. A zero-input live source
     // cannot reproduce the cohort if replay accidentally invokes it.
     if count == 5000 {
-        let replay_log = std::fs::File::create(directory.path().join("replay.log"))?;
-        command
+        let mut replay = demo(
+            &settings(0)?,
+            std::fs::File::create(directory.path().join("replay.log"))?,
+        )?;
+        let mut replay = replay
             .arg("--replay-from")
             .arg(&archive)
             .arg("--verify")
-            .env("PROMETHEUS_EVENT_COUNT", "0")
-            .stdout(replay_log.try_clone()?)
-            .stderr(replay_log);
-        let mut replay = command.spawn()?;
+            .spawn()?;
         let status = match tokio::time::timeout(Duration::from_secs(180), replay.wait()).await {
             Ok(result) => result?,
             Err(_) => {

@@ -320,7 +320,7 @@ mod tests {
             base_url: base_url.map(|base_url| resolved("ai.models.base_url", base_url.to_string())),
             api_key_env: resolved(
                 "ai.models.api_key_env",
-                SecretRef::new("FLOWIP_128G_TEST_API_KEY"),
+                SecretRef::new("FLOWIP_128G_TEST_API_KEY").expect("an environment variable name"),
             ),
         }
     }
@@ -415,14 +415,14 @@ mod tests {
     fn programmatic_constructors_defer_secrets_and_reject_url_credentials() {
         ChatEffectBinding::openai(
             "fixture-model",
-            SecretRef::new("FLOWIP_128B_MISSING_OPENAI_KEY"),
+            SecretRef::new("FLOWIP_128B_MISSING_OPENAI_KEY").expect("an environment variable name"),
         )
         .expect("constructing a binding does not resolve its secret");
 
         let endpoint = Url::parse("https://user:password@example.com/v1").unwrap();
         let error = ChatEffectBinding::openai_compatible(
             "fixture-model",
-            SecretRef::new("FLOWIP_128B_MISSING_COMPAT_KEY"),
+            SecretRef::new("FLOWIP_128B_MISSING_COMPAT_KEY").expect("an environment variable name"),
             endpoint,
         )
         .unwrap_err();

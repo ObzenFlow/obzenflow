@@ -10,6 +10,8 @@ use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::ResolvedRuntimeConfig;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use super::FlowBuildError;
 
@@ -109,6 +111,42 @@ impl FlowDefinition {
         })
     }
 
+    /// [`Self::materialize`] whose factory receives `T`, deserialized from the
+    /// config file's `[app]` table before it runs; an absent table reads as empty.
+    ///
+    /// The run records `T` as serialized in its config evidence, so a secret
+    /// belongs in a [`SecretRef`](obzenflow_core::config::SecretRef) field. A
+    /// table that does not fit `T` fails startup naming the key, and a build
+    /// extracts its settings once.
+    ///
+    /// ```rust,ignore
+    /// #[derive(Deserialize, Serialize)]
+    /// #[serde(deny_unknown_fields)]
+    /// struct Settings {
+    ///     accounts_file: PathBuf,
+    /// }
+    ///
+    /// FlowDefinition::materialize_with(move |_, settings: Settings| {
+    ///     let accounts = build_accounts_source(&settings.accounts_file)?;
+    ///     Ok(flow! { /* `accounts` is in ordinary Rust scope here. */ })
+    /// })
+    /// ```
+    pub fn materialize_with<T, F>(factory: F) -> Self
+    where
+        T: DeserializeOwned + Serialize,
+        F: FnOnce(&ResolvedRuntimeConfig, T) -> Result<FlowDefinition, FlowBuildError>
+            + Send
+            + 'static,
+    {
+        Self::new(move |ctx| async move {
+            let settings = ctx
+                .extract_app_settings::<T>()
+                .map_err(FlowBuildError::ApplicationSettings)?;
+            let flow = factory(ctx.runtime_config().as_ref(), settings)?;
+            flow.build(ctx).await
+        })
+    }
+
     /// Build the flow against an explicit per-run context.
     pub fn build(self, ctx: FlowBuildContext) -> BuildFuture {
         (self.build)(ctx)
@@ -124,7 +162,9 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use obzenflow_runtime::run_context::FlowBuildContext;
-    use obzenflow_runtime::runtime_config::ResolvedRuntimeConfig;
+    use obzenflow_runtime::runtime_config::{
+        AppTable, ApplicationSettingsError, ResolvedRuntimeConfig,
+    };
 
     use super::{FlowBuildFailure, FlowDefinition};
     use crate::dsl::FlowBuildError;
@@ -223,6 +263,121 @@ mod tests {
 
         assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
         assert!(failure.run.is_none());
+    }
+
+    #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Settings {
+        accounts_file: String,
+        #[serde(default)]
+        max_retries: u32,
+    }
+
+    const SENTINEL: &str = "sk_live_51HSENTINEL";
+
+    fn context_with_app(app: serde_json::Value) -> FlowBuildContext {
+        let serde_json::Value::Object(table) = app else {
+            panic!("[app] is a table");
+        };
+        FlowBuildContext::new(Arc::new(
+            ResolvedRuntimeConfig::builtin_defaults()
+                .with_app(AppTable::new("deploy/staging.toml", table)),
+        ))
+    }
+
+    fn inner_sentinel() -> FlowBuildFailure {
+        FlowBuildFailure::from(FlowBuildError::StageResourcesFailed(
+            "inner sentinel".to_string(),
+        ))
+    }
+
+    async fn build_failure(flow: FlowDefinition, ctx: FlowBuildContext) -> FlowBuildFailure {
+        match flow.build(ctx).await {
+            Ok(_) => panic!("the focused build must fail"),
+            Err(failure) => failure,
+        }
+    }
+
+    #[tokio::test]
+    async fn materialize_with_hands_the_factory_its_settings_and_records_them() {
+        let flow = FlowDefinition::materialize_with(move |_, settings: Settings| {
+            assert_eq!(
+                settings,
+                Settings {
+                    accounts_file: "accounts.yaml".to_string(),
+                    max_retries: 0,
+                }
+            );
+            Ok(FlowDefinition::new(|ctx| async move {
+                assert_eq!(
+                    ctx.app_settings_evidence(),
+                    Some(&serde_json::json!({"accounts_file": "accounts.yaml", "max_retries": 0}))
+                );
+                Err(inner_sentinel())
+            }))
+        });
+
+        let failure = build_failure(
+            flow,
+            context_with_app(serde_json::json!({"accounts_file": "accounts.yaml"})),
+        )
+        .await;
+        assert!(matches!(
+            failure.error,
+            FlowBuildError::StageResourcesFailed(ref message) if message == "inner sentinel"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_extraction_names_the_key_and_never_runs_the_factory() {
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&factory_calls);
+        let flow = FlowDefinition::materialize_with(move |_, _: Settings| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(FlowDefinition::new(|_| async { Err(inner_sentinel()) }))
+        });
+
+        let failure = build_failure(
+            flow,
+            context_with_app(
+                serde_json::json!({"accounts_file": "accounts.yaml", "max_retries": SENTINEL}),
+            ),
+        )
+        .await;
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(failure.run.is_none());
+        assert!(matches!(
+            failure.error,
+            FlowBuildError::ApplicationSettings(ApplicationSettingsError::Invalid(_))
+        ));
+        assert_eq!(
+            failure.to_string(),
+            "app.max_retries: found a string, expected u32"
+        );
+        assert!(!format!("{failure:?}").contains(SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn a_second_extraction_in_one_build_fails() {
+        let flow = FlowDefinition::materialize_with(move |_, _: Settings| {
+            Ok(FlowDefinition::materialize_with(|_, _: Settings| {
+                Ok(FlowDefinition::new(|_| async { Err(inner_sentinel()) }))
+            }))
+        });
+
+        let failure = build_failure(
+            flow,
+            context_with_app(serde_json::json!({"accounts_file": "accounts.yaml"})),
+        )
+        .await;
+        assert!(matches!(
+            failure.error,
+            FlowBuildError::ApplicationSettings(ApplicationSettingsError::AlreadyExtracted)
+        ));
+        assert_eq!(
+            failure.to_string(),
+            "application settings were already extracted for this build"
+        );
     }
 
     #[tokio::test]

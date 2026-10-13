@@ -14,8 +14,6 @@
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host
 //!
-//! Event volume is operator-tunable via `PROMETHEUS_EVENT_COUNT` (default
-//! 100000), so varying the load needs no code change.
 //! With the `tokio-console` feature, the framework's `--tokio-console` flag enables
 //! Tokio Console diagnostics. Diagnostics are disabled by default.
 //!
@@ -26,7 +24,6 @@
 
 use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
-use obzenflow::env::env_var_or;
 use obzenflow::flow::backpressure::enforced;
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
@@ -44,10 +41,27 @@ const CONFIG_FILE: &str = concat!(
     "/examples/prometheus_demo/obzenflow.toml"
 );
 
-/// Default event volume; override with `PROMETHEUS_EVENT_COUNT`.
 const DEFAULT_EVENT_COUNT: usize = 100_000;
 const SOURCE_OUTAGE_INTERVAL: usize = 20_000;
 const SOURCE_BREAKER_COOLDOWN: Duration = Duration::from_secs(5);
+const JOURNAL_ROOT: &str = "target/prometheus_demo_journal";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PrometheusDemoSettings {
+    #[serde(default = "default_event_count")]
+    event_count: usize,
+    #[serde(default = "keep_source_rate_limit")]
+    source_rate_limit: bool,
+}
+
+fn default_event_count() -> usize {
+    DEFAULT_EVENT_COUNT
+}
+
+fn keep_source_rate_limit() -> bool {
+    true
+}
 
 // ============================================================================
 // FLOWIP-082a: Strongly-Typed Domain Events
@@ -180,26 +194,13 @@ impl TypedPayload for EventCountState {
 }
 
 fn main() -> Result<()> {
-    // Operator-tunable event volume through the framework env helpers, so the
-    // load varies without a code change (default 100k).
-    let total_events = env_var_or::<usize>("PROMETHEUS_EVENT_COUNT", DEFAULT_EVENT_COUNT)?;
-    let source_rate_limit = match std::env::var_os("PROMETHEUS_RATE_LIMIT").as_deref() {
-        None => SourceRateLimit::Enabled,
-        Some(value) if value == "1" => SourceRateLimit::Enabled,
-        Some(value) if value == "0" => SourceRateLimit::Disabled,
-        Some(_) => anyhow::bail!("PROMETHEUS_RATE_LIMIT must be unset, 0, or 1"),
-    };
-
     let presentation = Presentation::new(
         Banner::new("Prometheus Demo")
             .description("Configurable event volume (default 100k) with circuit breaking, rate limiting, and backpressure.")
             .bullets(
                 "Demonstrating",
                 [
-                    match source_rate_limit {
-                        SourceRateLimit::Enabled => "Source-intake rate limiting at 1,000/s",
-                        SourceRateLimit::Disabled => "Source-intake rate limiter omitted for measurement",
-                    },
+                    "Source-intake rate limiting at 1,000/s, unless [app] source_rate_limit = false",
                     "Source outages with five-second circuit-breaker cooldowns",
                     "Enforced backpressure (64 events per edge)",
                     "Counting successfully processed events",
@@ -208,7 +209,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "Usage",
-                "Default:     cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nVolume:      PROMETHEUS_EVENT_COUNT=1000 cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nCustom port: cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host -- --server-port 8080",
+                "Default:     cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nVolume:      set event_count under [app] in a copy of the config, then pass the copy with --config\nCustom port: cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host -- --server-port 8080",
             ),
     )
     .with_footer(|outcome| {
@@ -218,23 +219,29 @@ fn main() -> Result<()> {
     });
 
     // Use FlowApplication builder - handles runtime, observability, and features automatically.
-    let application = FlowApplication::builder()
+    FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
-        .with_presentation(presentation);
-    let journal_root = std::path::PathBuf::from("target/prometheus_demo_journal");
-    let definition = match source_rate_limit {
-        SourceRateLimit::Enabled => flow_definition(total_events, journal_root),
-        SourceRateLimit::Disabled => flow_definition_with_options(
-            total_events,
-            journal_root,
-            SOURCE_OUTAGE_INTERVAL,
-            SourceRateLimit::Disabled,
-        ),
-    };
-    application.run_blocking(definition)?;
+        .with_presentation(presentation)
+        .run_blocking(demo_flow())?;
 
     Ok(())
+}
+
+fn demo_flow() -> FlowDefinition {
+    FlowDefinition::materialize_with(|_runtime_config, settings: PrometheusDemoSettings| {
+        let journal_root = std::path::PathBuf::from(JOURNAL_ROOT);
+        Ok(if settings.source_rate_limit {
+            flow_definition(settings.event_count, journal_root)
+        } else {
+            flow_definition_with_options(
+                settings.event_count,
+                journal_root,
+                SOURCE_OUTAGE_INTERVAL,
+                SourceRateLimit::Disabled,
+            )
+        })
+    })
 }
 
 /// The example's flow, also exercised by its journal integration test.

@@ -36,16 +36,6 @@
 //! third-party licenses/terms (including model weight licenses and hosted-provider ToS/usage limits).
 //! When using a hosted provider, your prompts and story text will be sent to that provider.
 //!
-//! Run against the real HN Firebase API (requires network):
-//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
-//!
-//! Optional env vars (HN fetch):
-//! - `HN_MAX_STORIES=60` (default 60)
-//! - `HN_LIVE=1` (default 0)
-//! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
-//! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)
-//! - The HN HTTP source also has a fixed source circuit breaker: 3 failures, 2s cooldown.
-//!
 //! Digest output configuration:
 //! - `obzenflow.toml` selects `console_sink`.
 //! - `obzenflow.postgres.toml` selects `postgres_sink`.
@@ -68,11 +58,6 @@
 //!   preflight occurs.
 //! - Strict replay resolves the same non-secret target but reads no secret and constructs no
 //!   client.
-//!
-//! Optional env vars (AI prompt/chunk policy):
-//! - `HN_AI_INTERESTS="rust, ai, security"` (optional personalization)
-//! - `HN_AI_GROUP_BUDGET_TOKENS=2500` (optional; per-chunk input budget used for map-reduce splitting)
-//! - `HN_AI_GROUP_MAX_STORIES=10` (optional; cap stories per chunk; set `0` for unlimited)
 
 mod config;
 mod decoder;

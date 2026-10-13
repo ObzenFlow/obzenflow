@@ -1,4 +1,4 @@
-# FLOWIP-140h deterministic witness: PROMETHEUS_EVENT_COUNT=100.
+# A deterministic witness of 100 inputs, without hosting or metrics.
 [server]
 enabled = false
 host = "127.0.0.1"
@@ -8,3 +8,7 @@ on_terminal = "exit"
 
 [metrics]
 enabled = false
+
+# The demo's own settings. 100 inputs finish before the first simulated outage.
+[app]
+event_count = 100

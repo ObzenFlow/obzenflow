@@ -7,6 +7,7 @@
 //! surface as `Arc` handles. Rebuild-and-swap is the only mutation model
 //! (§7 snapshot lock); nothing here mutates in place.
 
+use super::app::AppTable;
 use super::candidates::{CandidateSet, ConfigValue};
 use super::error::ConfigResolveError;
 use super::schema::{knob, knob_registry, KnobDefault, KnobSpec, Redaction};
@@ -51,10 +52,12 @@ impl RuntimeConfigOverlay {
 /// (empty) overlay. Global- and flow-rung views resolve on demand through
 /// the one ladder; per-stage and per-edge resolution happens at flow build
 /// (`materialize_flow_config`), where the DSL tier and the topology exist.
+/// The `[app]` table rides along untyped; only a build extracts it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedRuntimeConfig {
     candidates: CandidateSet,
     overlay: RuntimeConfigOverlay,
+    app: AppTable,
 }
 
 impl ResolvedRuntimeConfig {
@@ -62,7 +65,18 @@ impl ResolvedRuntimeConfig {
         Self {
             candidates,
             overlay: RuntimeConfigOverlay::default(),
+            app: AppTable::default(),
         }
+    }
+
+    /// Carry the config file's `[app]` table.
+    pub fn with_app(mut self, app: AppTable) -> Self {
+        self.app = app;
+        self
+    }
+
+    pub fn app(&self) -> &AppTable {
+        &self.app
     }
 
     /// Built-in defaults only; the explicit test-harness construction
@@ -184,7 +198,8 @@ impl ResolvedRuntimeConfig {
                 let resolved =
                     text("ai.models.api_key_env").expect("api_key_env has a built-in default");
                 Resolved {
-                    value: SecretRef::new(resolved.value),
+                    value: SecretRef::new(resolved.value)
+                        .expect("api_key_env admits only environment-variable names"),
                     meta: resolved.meta,
                 }
             },
@@ -295,7 +310,7 @@ mod tests {
     use super::*;
     use crate::runtime_config::candidates::ScopedCandidate;
     use crate::runtime_config::schema::{
-        EdgeEndpoint, EnvBinding, KnobTarget, KnobType, Mutability,
+        EdgeEndpoint, EnvBinding, KnobRole, KnobTarget, KnobType, Mutability,
     };
 
     #[test]
@@ -342,6 +357,7 @@ mod tests {
             target: KnobTarget::StageOrEffect,
             default: KnobDefault::OptionalAbsent,
             mutability: Mutability::Restartful,
+            role: KnobRole::Configuration,
             redaction: Redaction::SecretValue,
             env: EnvBinding::None,
         };

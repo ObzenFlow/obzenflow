@@ -18,7 +18,6 @@ mod catalog_presentation;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "long-running end-to-end flow; enable when validating example behavior"]
 async fn product_catalog_enrichment_completes() {
-    std::env::remove_var("INJECT_BAD_PAYMENT");
     let temp = tempfile::tempdir().unwrap();
     FlowApplication::builder()
         .with_cli_args([OsString::from("product_catalog_enrichment")])
@@ -88,7 +87,6 @@ async fn projection(run: &Path) -> Projection {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "current-schema live/replay journal proof for the rate-limited shipped example"]
 async fn explicit_join_topology_current_schema_live_replay_and_rejected_control() {
-    std::env::remove_var("INJECT_BAD_PAYMENT");
     let temp = tempfile::tempdir().unwrap();
     let control_root = temp.path().join("control");
     let control = ProofProbe {
@@ -211,12 +209,12 @@ mod presentation_tests {
 
         assert!(replay.contains("strict replay"));
         assert!(replay.contains("flow_01SOURCE"));
-        assert!(replay.contains("environment variables are ignored"));
-        assert!(!replay.contains("INJECT_BAD_PAYMENT is set"));
+        assert!(replay.contains("Source settings are ignored"));
+        assert!(!replay.contains("inject_bad_payment"));
     }
 
     #[test]
-    fn replay_footer_does_not_recommend_an_ignored_environment_variable() {
+    fn replay_footer_does_not_recommend_an_ignored_source_setting() {
         let replay = footer_for(RunPresentationOutcome::Completed {
             flow_name: "product_catalog_enrichment".to_string(),
             location: None,
@@ -225,7 +223,7 @@ mod presentation_tests {
         .finish();
 
         assert!(replay.contains("separate live run"));
-        assert!(!replay.contains("INJECT_BAD_PAYMENT"));
+        assert!(!replay.contains("bad_payment"));
     }
 
     #[test]
@@ -237,6 +235,7 @@ mod presentation_tests {
         })
         .finish();
 
-        assert!(live.contains("INJECT_BAD_PAYMENT=1"));
+        assert!(live
+            .contains("--config examples/product_catalog_enrichment/obzenflow.bad_payment.toml"));
     }
 }

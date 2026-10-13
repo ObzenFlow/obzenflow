@@ -1,4 +1,4 @@
-# FLOWIP-140h deterministic witness: PROMETHEUS_EVENT_COUNT=100.
+# Hosts /metrics and waits for Play, then processes the default 100,000 inputs.
 [server]
 enabled = true
 host = "127.0.0.1"

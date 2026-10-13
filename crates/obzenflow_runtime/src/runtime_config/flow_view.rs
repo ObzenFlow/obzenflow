@@ -69,11 +69,13 @@ pub struct FlowResolutionContext {
 
 /// Immutable per-flow resolution: knob key path -> point address ->
 /// resolved value. The point address is where the value applies; the
-/// value's meta carries the WINNING scope (which may be coarser).
+/// value's meta carries the WINNING scope (which may be coarser). It also
+/// carries the build's extracted `[app]` settings as evidence.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FlowEffectiveConfig {
     values: BTreeMap<String, BTreeMap<ResolutionPoint, Resolved<ConfigValue>>>,
     warnings: Vec<String>,
+    app: Option<serde_json::Value>,
 }
 
 impl FlowEffectiveConfig {
@@ -81,7 +83,22 @@ impl FlowEffectiveConfig {
         values: BTreeMap<String, BTreeMap<ResolutionPoint, Resolved<ConfigValue>>>,
         warnings: Vec<String>,
     ) -> Self {
-        Self { values, warnings }
+        Self {
+            values,
+            warnings,
+            app: None,
+        }
+    }
+
+    /// Record the settings the build extracted from `[app]`.
+    pub fn with_app_settings(mut self, app: Option<serde_json::Value>) -> Self {
+        self.app = app;
+        self
+    }
+
+    /// The extracted `[app]` settings as the run records them.
+    pub fn app_settings(&self) -> Option<&serde_json::Value> {
+        self.app.as_ref()
     }
 
     pub fn get(&self, key_path: &str, point: &ConfigScope) -> Option<&Resolved<ConfigValue>> {
@@ -196,6 +213,13 @@ impl FlowEffectiveConfig {
     pub fn metrics_drain_timeout_ms(&self) -> u64 {
         self.u64_at("runtime.metrics_drain_timeout_ms", &ConfigScope::Global)
             .expect("registry default guarantees metrics_drain_timeout_ms")
+    }
+
+    /// The operator's `journal.root`, when set.
+    pub fn journal_root(&self) -> Option<&std::path::Path> {
+        self.get(super::schema::JOURNAL_ROOT_KEY, &ConfigScope::Global)
+            .and_then(|r| r.value.as_text())
+            .map(std::path::Path::new)
     }
 
     /// `contracts.source_contract_strict_mode` token: `abort` or `warn`.
@@ -319,7 +343,7 @@ impl FlowEffectiveConfig {
                 .then_with(|| a.value.to_string().cmp(&b.value.to_string()))
         });
         docs.dedup();
-        EffectiveConfigEvidence::new(docs)
+        EffectiveConfigEvidence::new(docs).with_app(self.app.clone())
     }
 
     /// Per-stage docs: every knob resolved AT this stage's point address

@@ -12,6 +12,8 @@
 //! resolved secret values redact, reference names stay visible. The
 //! overlay and diff routes are truthfully empty in this slice (gap 12;
 //! FLOWIP-010b owns mutation).
+//! The effective and flow routes also carry the flow's extracted `[app]`
+//! settings; the base view never does.
 
 use async_trait::async_trait;
 use obzenflow_core::web::{
@@ -86,16 +88,22 @@ impl ConfigReadModel {
     }
 
     fn effective(&self) -> serde_json::Value {
-        let values = match &self.flow_effective {
-            Some(effective) => effective.manifest_evidence().values,
-            None => self.snapshot.global_view(),
+        let (values, app) = match &self.flow_effective {
+            Some(effective) => {
+                let evidence = effective.manifest_evidence();
+                (evidence.values, evidence.app)
+            }
+            None => (self.snapshot.global_view(), None),
         };
-        json!({
-            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
-            "flow": self.flow_name,
-            "flow_id": self.flow_id,
-            "values": values,
-        })
+        with_app(
+            json!({
+                "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
+                "flow": self.flow_name,
+                "flow_id": self.flow_id,
+                "values": values,
+            }),
+            app,
+        )
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -125,13 +133,17 @@ impl ConfigReadModel {
                 "flow '{flow_id}' has no build-materialized configuration"
             ));
         };
-        Ok(json!({
-            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
-            "flow": self.flow_name,
-            "flow_id": self.flow_id,
-            "values": effective.manifest_evidence().values,
-            "warnings": effective.warnings(),
-        }))
+        let evidence = effective.manifest_evidence();
+        Ok(with_app(
+            json!({
+                "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
+                "flow": self.flow_name,
+                "flow_id": self.flow_id,
+                "values": evidence.values,
+                "warnings": effective.warnings(),
+            }),
+            evidence.app,
+        ))
     }
 
     /// `Err` carries a not-found message rendered as a 404 JSON body.
@@ -174,6 +186,13 @@ impl ConfigReadModel {
             ))
         }
     }
+}
+
+fn with_app(mut body: serde_json::Value, app: Option<serde_json::Value>) -> serde_json::Value {
+    if let (Some(app), Some(body)) = (app, body.as_object_mut()) {
+        body.insert("app".to_string(), app);
+    }
+    body
 }
 
 /// Which of the seven config routes one endpoint instance serves.
@@ -284,8 +303,8 @@ mod tests {
     use obzenflow_core::event::EffectType;
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::runtime_config::{
-        materialize_flow_config, CandidateSet, ConfigValue, DslCandidates, FlowResolutionContext,
-        ScopedCandidate, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+        materialize_flow_config, AppTable, CandidateSet, ConfigValue, DslCandidates,
+        FlowResolutionContext, ScopedCandidate, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
     };
     use obzenflow_topology::TopologyBuilder;
     use std::collections::{BTreeMap, BTreeSet};
@@ -300,7 +319,12 @@ mod tests {
                 ConfigValue::U64(7),
             ))
             .expect("candidate admits");
-        let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
+        let snapshot = Arc::new(
+            ResolvedRuntimeConfig::new(candidates).with_app(AppTable::new(
+                "obzenflow.toml",
+                serde_json::Map::from_iter([("accounts_file".to_string(), json!("accounts.yaml"))]),
+            )),
+        );
 
         let mut builder = TopologyBuilder::new();
         let src = obzenflow_core::StageId::new().to_topology_id();
@@ -343,8 +367,11 @@ mod tests {
             )]),
             dsl,
         };
-        let effective =
-            Arc::new(materialize_flow_config(&snapshot, ctx).expect("flow config materializes"));
+        let effective = Arc::new(
+            materialize_flow_config(&snapshot, ctx)
+                .expect("flow config materializes")
+                .with_app_settings(Some(app_settings())),
+        );
 
         ConfigReadModel::new(
             snapshot,
@@ -353,6 +380,26 @@ mod tests {
             "config_http".to_string(),
             "flow-1".to_string(),
         )
+    }
+
+    fn app_settings() -> serde_json::Value {
+        json!({"accounts_file": "accounts.yaml", "partner_api_key_env": "PARTNER_API_KEY"})
+    }
+
+    #[test]
+    fn effective_and_flow_routes_carry_app_settings_and_no_other_view_does() {
+        let model = model_with_file_value();
+        assert_eq!(model.effective()["app"], app_settings());
+        assert_eq!(model.flow("flow-1").unwrap()["app"], app_settings());
+        for body in [
+            model.base(),
+            model.overlay(),
+            model.schema(),
+            model.diff(),
+            model.stage("flow-1", "src").unwrap(),
+        ] {
+            assert!(body.get("app").is_none(), "{body}");
+        }
     }
 
     #[test]

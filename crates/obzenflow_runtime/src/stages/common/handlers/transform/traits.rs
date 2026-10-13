@@ -11,7 +11,6 @@ use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventDescriptor, WriterId};
 use std::fmt;
 use std::sync::Arc;
@@ -349,31 +348,15 @@ where
             return Err(HandlerError::Fatal(fatal));
         }
         match handler_result {
-            Ok(_completion) => {
-                if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
-                    return Err(HandlerError::Fatal(
-                        crate::stages::common::handler_error::StageFatal::new(
-                            StageFatalCode::Replay,
-                            StageFatalReason::ReplayDivergence,
-                            divergence.to_string(),
-                        ),
-                    ));
-                }
-                Ok(Vec::new())
-            }
+            Ok(_completion) => match fx.settlement_divergence().await {
+                Some(divergence) => Err(HandlerError::Fatal(divergence)),
+                None => Ok(Vec::new()),
+            },
             Err(error) if error.is_fatal() => Err(error),
-            Err(error) => {
-                if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
-                    return Err(HandlerError::Fatal(
-                        crate::stages::common::handler_error::StageFatal::new(
-                            StageFatalCode::Replay,
-                            StageFatalReason::ReplayDivergence,
-                            divergence.to_string(),
-                        ),
-                    ));
-                }
-                Err(error)
-            }
+            Err(error) => match fx.settlement_divergence().await {
+                Some(divergence) => Err(HandlerError::Fatal(divergence)),
+                None => Err(error),
+            },
         }
     }
 

@@ -8,10 +8,18 @@ use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::{joins, stateful};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSettings {
+    #[serde(default)]
+    inject_bad_payment: bool,
+}
+
 pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
+    FlowDefinition::materialize_with(move |_runtime_config, settings: CatalogSettings| {
         let sku_products_handler = joins::inner(
             |p: &Product| p.product_id.clone(),
             |s: &Sku| s.product_id.clone(),
@@ -47,7 +55,7 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
         let skus_handler = skus_source();
         let promotions_handler = promotions_source();
         let payment_methods_handler = payment_methods_source();
-        let orders_handler = orders_source();
+        let orders_handler = orders_source(settings.inject_bad_payment);
         let per_order_printer_handler = ConsoleSink::new(console::format_order);
         let catalog_stats_handler = stateful::reduce(
             CatalogAnalyticsSummary::default(),

@@ -138,15 +138,22 @@ fn resolve_startup_config(
     cli_args: Option<Vec<OsString>>,
     console_defaults: ConsoleDefaults,
 ) -> Result<ResolvedStartupConfig, ApplicationError> {
+    let env_config_file = std::env::var_os(super::config::CONFIG_FILE_ENV);
     let result = if let Some(cli_args) = cli_args {
         FlowConfig::parse_and_resolve_from(
             cli_args,
             builder_config_file,
+            env_config_file,
             enable_autodiscovery,
             console_defaults,
         )
     } else {
-        FlowConfig::parse_and_resolve(builder_config_file, enable_autodiscovery, console_defaults)
+        FlowConfig::parse_and_resolve(
+            builder_config_file,
+            env_config_file,
+            enable_autodiscovery,
+            console_defaults,
+        )
     };
 
     result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
@@ -678,6 +685,7 @@ impl FlowApplication {
             print!("{}", rendered.text);
         }
 
+        let mut config_changes = Vec::new();
         let (result, flow_name, run_state, stopped) = 'run: {
             if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server.enabled {
                 break 'run (
@@ -697,9 +705,7 @@ impl FlowApplication {
             // journal is created.
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
-                if config.server.enabled {
-                    // The host releases automatic Run only after policy admission
-                    // and a real socket bind. The supervisor must not race ahead.
+                if config.server.enabled || config.replay.is_some() {
                     bootstrap_config.startup_mode =
                         obzenflow_runtime::bootstrap::StartupMode::Manual;
                 }
@@ -801,6 +807,12 @@ impl FlowApplication {
                         | obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
                             ApplicationError::ResumeRefused(failure.error.to_string())
                         }
+                        obzenflow_dsl::FlowBuildError::ApplicationSettings(error) => {
+                            ApplicationError::InvalidConfiguration(error.to_string())
+                        }
+                        obzenflow_dsl::FlowBuildError::JournalRootUnused { .. } => {
+                            ApplicationError::InvalidConfiguration(failure.error.to_string())
+                        }
                         other => ApplicationError::FlowBuildFailed(other.to_string()),
                     };
                     break 'run (Err(error), None, failure.run, false);
@@ -808,6 +820,18 @@ impl FlowApplication {
             };
 
             application.protect_flow(&flow_handle);
+
+            for line in super::config_report::settings_lines(
+                &flow_handle,
+                config.runtime_config.app().origin(),
+            ) {
+                println!("{line}");
+            }
+
+            config_changes = super::config_report::rebuilt_config_changes(&flow_handle);
+            for line in super::config_report::startup_lines(&config_changes) {
+                println!("{line}");
+            }
 
             // The selected run substrate (FLOWIP-120u): durable with its locator,
             // or ephemeral with none. An ephemeral resume never reaches here;
@@ -817,7 +841,7 @@ impl FlowApplication {
             let print_replay_hint = |locator: &CurrentRunLocator| {
                 println!("FlowApplication complete!");
                 println!("To replay, add: --replay-from {locator}");
-                println!("(Source config env vars are ignored during replay)");
+                println!("(Source settings are ignored during replay)");
             };
 
             let flow_handle = Arc::new(flow_handle);
@@ -1102,6 +1126,12 @@ impl FlowApplication {
                     }
                     _ => err,
                 };
+                let refusal_footer = match run_state.as_ref().and_then(|s| s.locator()) {
+                    Some(locator) if !config_changes.is_empty() => {
+                        super::config_report::refusal_footer(locator.path(), &config_changes).await
+                    }
+                    _ => Vec::new(),
+                };
                 if let Some(presentation) = &presentation {
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(RunPresentationOutcome::Failed {
@@ -1122,6 +1152,9 @@ impl FlowApplication {
                             println!("{footer}");
                         }
                     }
+                }
+                for line in refusal_footer {
+                    println!("{line}");
                 }
                 Err(err)
             }

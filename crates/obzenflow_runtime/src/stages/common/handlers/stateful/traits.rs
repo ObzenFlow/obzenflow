@@ -537,14 +537,8 @@ where
         if decide_result.as_ref().is_err_and(HandlerError::is_fatal) {
             return decide_result.map(|_| ());
         }
-        if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
-            return Err(HandlerError::Fatal(
-                crate::stages::common::handler_error::StageFatal::new(
-                    obzenflow_core::event::StageFatalCode::Replay,
-                    obzenflow_core::event::StageFatalReason::ReplayDivergence,
-                    divergence.to_string(),
-                ),
-            ));
+        if let Some(divergence) = fx.settlement_divergence().await {
+            return Err(HandlerError::Fatal(divergence));
         }
         decide_result.map(|_| ())
     }

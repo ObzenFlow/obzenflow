@@ -158,7 +158,7 @@ pub async fn build_flow<J, P>(
 ) -> Result<FlowBuildOutput, crate::FlowBuildFailure>
 where
     J: FlowJournalFactory,
-    P: FnOnce(FlowId) -> Result<J, JournalError> + Send,
+    P: FnOnce(FlowId, Option<&std::path::Path>) -> Result<J, JournalError> + Send,
 {
     let LoweredFlow {
         stages,
@@ -201,12 +201,17 @@ where
     // FLOWIP-010 §7: the resolved snapshot arrives as build input.
     let __runtime_config = build_ctx.runtime_config().clone();
     let metrics_exporter = build_ctx.metrics_exporter().cloned();
+    let __app_settings = build_ctx.app_settings_evidence().cloned();
 
     // FLOWIP-120u F2: pair the build result with the substrate state known
     // at the failure point. Set once at the factory seam; None means the
     // build failed before substrate selection, so no run directory exists.
     let mut __run_state: Option<obzenflow_core::journal::factory::RunSubstrateState> = None;
     let __build_result: Result<_, FlowBuildError> = async {
+        build_ctx
+            .ensure_app_settings_extracted()
+            .map_err(FlowBuildError::ApplicationSettings)?;
+
         // FLOWIP-010o: handler sets are build-only. Resolve the framework's
         // non-secret stage selection and replace each carrier with exactly one
         // ordinary typed sink descriptor before topology or lifecycle work.
@@ -689,7 +694,8 @@ where
                     &__runtime_config,
                     __resolution_ctx,
                 )
-                .map_err(FlowBuildError::ConfigResolution)?,
+                .map_err(FlowBuildError::ConfigResolution)?
+                .with_app_settings(__app_settings.clone()),
             )
         };
 
@@ -953,8 +959,8 @@ where
         let pipeline_system_id = obzenflow_core::SystemId::new();
         let pipeline_id = pipeline_system_id;
 
-        // Get the journal factory for this specific flow
-        let mut journal_factory = journal_factory_provider(flow_id)
+        let __journal_root = __flow_effective.journal_root();
+        let mut journal_factory = journal_factory_provider(flow_id, __journal_root)
             .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
 
         // FLOWIP-120u: capture the substrate declaration, then run the
@@ -962,6 +968,16 @@ where
         let __substrate =
             obzenflow_core::journal::factory::FlowJournalFactory::run_state(&journal_factory);
         __run_state = Some(__substrate.clone());
+
+        if let Some(root) = __journal_root {
+            let located = __substrate.locator().map(|locator| locator.path());
+            if !located.is_some_and(|path| path.starts_with(root)) {
+                return Err(FlowBuildError::JournalRootUnused {
+                    root: root.to_path_buf(),
+                    located: located.map(std::path::Path::to_path_buf),
+                });
+            }
+        }
         obzenflow_core::journal::factory::FlowJournalFactory::resource_preflight(
             &journal_factory,
             &obzenflow_core::journal::factory::RunResourcePlan {

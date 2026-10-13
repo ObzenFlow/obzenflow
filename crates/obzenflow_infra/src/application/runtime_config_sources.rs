@@ -17,7 +17,7 @@ use crate::env::{env_bool, env_var};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
 use obzenflow_runtime::runtime_config::{
     knob_registry, CandidateSet, ConfigResolveError, ConfigValue, KnobType, ResolvedRuntimeConfig,
-    ScopedCandidate, SINK_HANDLER_KEY,
+    ScopedCandidate, JOURNAL_ROOT_KEY, SINK_HANDLER_KEY,
 };
 
 const STAGE_SINK_HANDLER_ENV_PREFIX: &str = "OBZENFLOW_SINKS_STAGES_";
@@ -421,6 +421,20 @@ fn admit_file_candidates(
         )?;
     }
 
+    if let Some(root) = &file.journal.root {
+        if root.as_os_str().is_empty() {
+            return Err(ConfigError::at(JOURNAL_ROOT_KEY, "must name a directory"));
+        }
+        admit(
+            set,
+            JOURNAL_ROOT_KEY,
+            ConfigScope::Global,
+            ConfigSource::File,
+            ConfigValue::Text(root.display().to_string()),
+            JOURNAL_ROOT_KEY,
+        )?;
+    }
+
     // [middleware] global/flow/stages.
     admit_middleware_fields(
         set,
@@ -718,9 +732,11 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             KnobType::F64 { .. } | KnobType::F64Range { .. } => env_var::<f64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::F64),
-            KnobType::Text | KnobType::Token { .. } | KnobType::Path => env_var::<String>(&name)
-                .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
-                .map(ConfigValue::Text),
+            KnobType::Text | KnobType::Token { .. } | KnobType::Path | KnobType::EnvName => {
+                env_var::<String>(&name)
+                    .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
+                    .map(ConfigValue::Text)
+            }
         };
         if let Some(value) = value {
             admit(
@@ -1408,6 +1424,40 @@ mod tests {
             .unwrap();
         assert_eq!(lineage.value, serde_json::json!(42));
         assert_eq!(lineage.source, "env");
+    }
+
+    #[test]
+    fn journal_root_comes_from_the_file_or_its_canonical_variable() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["OBZENFLOW_JOURNAL_ROOT"]);
+        let root = |snapshot: &ResolvedRuntimeConfig| {
+            snapshot
+                .global_view()
+                .into_iter()
+                .find(|doc| doc.key_path == JOURNAL_ROOT_KEY)
+                .map(|doc| (doc.value, doc.source))
+        };
+        assert_eq!(root(&snapshot("", &[])), None, "absent by default");
+
+        guard.set("OBZENFLOW_JOURNAL_ROOT", "/var/lib/obzenflow");
+        assert_eq!(
+            root(&snapshot("", &[])),
+            Some((serde_json::json!("/var/lib/obzenflow"), "env".to_string()))
+        );
+        assert_eq!(
+            root(&snapshot("[journal]\nroot = \"deploy/journals\"", &[])),
+            Some((serde_json::json!("deploy/journals"), "file".to_string())),
+            "the file outranks the environment"
+        );
+        guard.remove("OBZENFLOW_JOURNAL_ROOT");
+
+        let err = build_runtime_config_snapshot(&cli(&[]), &parse_file("[journal]\nroot = \"\""))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "config error at journal.root: must name a directory"
+        );
+        assert!(toml::from_str::<RawFileStartupConfig>("[journal]\ndir = \"x\"").is_err());
     }
 
     #[test]

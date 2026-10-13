@@ -15,3 +15,19 @@ model = "llama3.1:8b"
 # `postgres_sink`; deployment configuration chooses one binding by name.
 [sinks]
 handler = "console_sink"
+
+# `source = "live"` reads the Hacker News API; "mock" serves a loopback fixture.
+# Pacing is `events_per_second` under [middleware.stages.hn_stories.rate_limiter].
+[app]
+source = "mock"
+max_stories = 60
+poll_timeout_secs = 120
+# Interests personalize both prompts and form part of every chat effect's
+# identity, so a replay or resume with different interests refuses.
+# interests = "rust, ai, security"
+
+[app.digest]
+# Per-chunk input budget; absent, 2500 tokens for Ollama and 6000 otherwise.
+# group_budget_tokens = 2500
+# Stories per chunk; 0 for unlimited.
+group_max_stories = 10

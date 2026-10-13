@@ -52,7 +52,7 @@ pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> F
         let skus_handler = skus_source();
         let promotions_handler = promotions_source();
         let payment_methods_handler = payment_methods_source();
-        let orders_handler = orders_source();
+        let orders_handler = orders_source(false);
         let (
             categories_handler,
             products_handler,

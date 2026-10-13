@@ -52,9 +52,7 @@ mod tests {
     use obzenflow::journal::JournalOwner;
     use obzenflow::journal::ProcessingStatus;
     use obzenflow::journal::StageFatalRecorded;
-    use obzenflow::journal::{
-        EffectOutcomePayload, EffectRecord, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
-    };
+    use obzenflow::journal::{EffectOutcomePayload, EffectRecord};
     use obzenflow::schema::ChainEvent;
     use obzenflow::schema::{StageId, TypedPayload};
     use std::ffi::OsString;
@@ -226,7 +224,7 @@ mod tests {
 
         let policy_rejections = events
             .iter()
-            .filter(|event| event.event_type() == EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE)
+            .filter(|event| event.event_type() == "effect.execution_rejected")
             .map(|event| {
                 serde_json::from_value::<EffectRecord>(
                     event.payload.contract_body().expect("effect record body"),
@@ -369,6 +367,96 @@ mod tests {
             assert_ne!(replay, baseline);
             assert_propagated_without_reservation_failure(&replay, "recorded effect failure").await;
         }
+    }
+
+    fn warehouse_settings(dir: &Path, id: &str) -> PathBuf {
+        let path = dir.join(format!("{id}.toml"));
+        std::fs::write(
+            &path,
+            format!(
+                "[app.warehouse]\nid = \"{id}\"\nreserve_latency_ms = 0\nreserve_unavailable = false\n"
+            ),
+        )
+        .expect("settings are written");
+        path
+    }
+
+    async fn run_shipped(
+        settings: &Path,
+        journal_root: PathBuf,
+        replay_from: Option<&Path>,
+        stats: Arc<warehouse::WarehouseStats>,
+    ) -> Result<(), String> {
+        let mut args = vec![
+            OsString::from("flash_sale_allocation"),
+            OsString::from("--config"),
+            settings.as_os_str().to_os_string(),
+        ];
+        if let Some(archive) = replay_from {
+            args.push(OsString::from("--replay-from"));
+            args.push(archive.as_os_str().to_os_string());
+        }
+        FlowApplication::builder()
+            .with_log_level(super::LogLevel::Error)
+            .with_cli_args(args)
+            .run_async(flow::settings_flow(one_order(), stats, journal_root))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_changed_warehouse_id_refuses_replay_without_calling_the_warehouse() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let journal_root = temp.path().join("journals");
+        let recorded = warehouse_settings(temp.path(), "warehouse-a");
+        let live_stats = Arc::new(warehouse::WarehouseStats::default());
+        run_shipped(&recorded, journal_root.clone(), None, live_stats.clone())
+            .await
+            .expect("the live run completes");
+        assert_eq!(live_stats.reserve_calls(), 1);
+        let baseline = latest_run_dir(&journal_root);
+        assert_eq!(
+            archive_manifest(&baseline)["effective_config"]["app"]["warehouse"]["id"],
+            "warehouse-a",
+            "the run records the warehouse it used"
+        );
+
+        let moved = warehouse_settings(temp.path(), "warehouse-b");
+        let replay_stats = Arc::new(warehouse::WarehouseStats::default());
+        let refused = run_shipped(
+            &moved,
+            journal_root.clone(),
+            Some(&baseline),
+            replay_stats.clone(),
+        )
+        .await;
+        assert!(refused.is_err(), "the replay fails its allocator");
+        assert_eq!(replay_stats.reserve_calls(), 0);
+        let replay = latest_run_dir(&journal_root);
+        assert_ne!(replay, baseline);
+        let events: Vec<ChainEvent> = allocation_events(&replay)
+            .await
+            .into_iter()
+            .chain(allocation_error_events(&replay).await)
+            .collect();
+        assert!(
+            events.iter().filter_map(StageFatalRecorded::from_event).any(
+                |fatal| fatal.reason == obzenflow::error::StageFatalReason::DescriptorMismatch
+            ),
+            "the allocator fails with descriptor_mismatch"
+        );
+        assert_eq!(count::<StockReserved>(&events), 0, "no divergent fact");
+
+        let reverted_stats = Arc::new(warehouse::WarehouseStats::default());
+        run_shipped(
+            &recorded,
+            journal_root.clone(),
+            Some(&baseline),
+            reverted_stats.clone(),
+        )
+        .await
+        .expect("the recorded warehouse replays");
+        assert_eq!(reverted_stats.reserve_calls(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

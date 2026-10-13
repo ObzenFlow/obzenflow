@@ -21,3 +21,9 @@ enabled = true
 mode = "periodic"
 interval_ms = 250
 export_interval_ms = 250
+
+# The demo's own settings, at their defaults. source_rate_limit = false omits
+# the 1,000/s source limiter for measurement.
+[app]
+event_count = 100000
+source_rate_limit = true

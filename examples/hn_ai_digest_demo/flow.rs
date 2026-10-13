@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{HnDigestPostgresConfig, HnRunInputs, PreparedHnRun};
+use super::config::{HnDigestPostgresConfig, HnRunInputs, HnSettings};
 use super::decoder::hn_story_decoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
@@ -119,14 +119,6 @@ fn build_digest_postgres_sink(
         .batch_size(1)?
         .redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)
         .build()?)
-}
-
-#[cfg(test)]
-pub(crate) fn describe_digest_postgres_sink(
-    config: HnDigestPostgresConfig,
-) -> Result<obzenflow::stages::sinks::SinkDescription> {
-    let sink = build_digest_postgres_sink(config)?;
-    Ok(obzenflow::stages::sinks::SinkConnector::describe(&sink))
 }
 
 struct DigestMapCtx {
@@ -394,6 +386,15 @@ impl Default for HnFlowOptions {
     }
 }
 
+pub(crate) fn settings_flow_definition() -> FlowDefinition {
+    FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {
+        let inputs = settings
+            .into_inputs()
+            .map_err(|error| FlowBuildError::StageResourcesFailed(format!("{error:#}")))?;
+        Ok(build_flow_definition(inputs, HnFlowOptions::default()))
+    })
+}
+
 pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
         let HnRunInputs {
@@ -452,7 +453,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?
             .max_batch_size(10)
-            .poll_timeout(Duration::from_secs(poll_timeout_secs as u64))
+            .poll_timeout(Duration::from_secs(poll_timeout_secs))
             .build()
             .map_err(|error| {
                 FlowBuildError::StageResourcesFailed(format!(
@@ -542,17 +543,11 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
     })
 }
 
-pub async fn run_example(prepared: PreparedHnRun, presentation: Presentation) -> Result<()> {
-    let PreparedHnRun {
-        inputs,
-        mock_server,
-    } = prepared;
-    let outcome = FlowApplication::builder()
+pub async fn run_example(presentation: Presentation) -> Result<()> {
+    FlowApplication::builder()
         .with_presentation(presentation)
-        .run_async(build_flow_definition(inputs, HnFlowOptions::default()))
-        .await;
-    drop(mock_server);
-    outcome?;
+        .run_async(settings_flow_definition())
+        .await?;
     Ok(())
 }
 
@@ -561,25 +556,15 @@ pub fn run_demo_blocking() -> Result<()> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(async {
-        let prepared = PreparedHnRun::from_env().await?;
-        let presentation = build_presentation(&prepared.inputs);
-        run_example(prepared, presentation).await
-    })
+    runtime.block_on(run_example(build_presentation()))
 }
 
-pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
+pub(crate) fn build_presentation() -> Presentation {
     Presentation::new(
         Banner::new("HN AI Digest Demo")
             .description(
                 "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms.",
             )
-            .config("mode", &config.mode_label)
-            .config("base_url", config.base_url.to_string())
-            .config("max_stories", config.max_stories)
-            .config("poll_timeout", format!("{}s", config.poll_timeout_secs))
-            .config("group_max_stories", config.group_max_stories_label())
-            .config("source_rate_limit", format!("{} events/sec", config.source_rate_limit))
             .config(
                 "source_breaker",
                 format!(
@@ -594,7 +579,7 @@ pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
         if is_success {
             footer.paragraph(
                 "The generated digest was delivered by the configured sink handler.\n\
-                 Re-run with HN_LIVE=1 to fetch from the real Hacker News API."
+                 Set source = \"live\" under [app] to fetch from the real Hacker News API."
             )
         } else {
             footer
@@ -830,6 +815,35 @@ mod tests {
              ### Links\n\n\
              [^1]: [First](<https://news.ycombinator.com/item?id=100>)\n\
              [^2]: [Second \\[story\\]](<https://example.com/second%20story>) · [HN discussion](<https://news.ycombinator.com/item?id=101>)"
+        );
+    }
+
+    #[test]
+    fn postgres_sink_description_is_truthful_without_selection_instrumentation() {
+        let connection = obzenflow::stages::sinks::postgres::PostgresConnection::from_url(
+            "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
+            obzenflow::stages::sinks::postgres::PostgresTransport::VerifiedTls,
+        )
+        .expect("cold verified-TLS fixture URL is valid without I/O");
+        let sink = build_digest_postgres_sink(HnDigestPostgresConfig {
+            connection,
+            schema: "hn_digest_fixture".to_string(),
+        })
+        .expect("the locked PostgreSQL sink operation builds");
+        let description = obzenflow::stages::sinks::SinkConnector::describe(&sink);
+        assert_eq!(
+            description.destination_name(),
+            Some("postgres.hn_digest_fixture.hn_digest_summaries")
+        );
+        assert_eq!(
+            description.default_method(),
+            &obzenflow::stages::sinks::DeliveryMethod::DatabaseInsert {
+                table: "hn_digest_fixture.hn_digest_summaries".to_string(),
+            }
+        );
+        assert_eq!(
+            description.redelivery_safety(),
+            Some(SinkRedeliverySafety::DuplicateSensitive)
         );
     }
 

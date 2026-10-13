@@ -23,6 +23,9 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     let ingress_example =
         fs::read_to_string(root.join("examples/http_ingestion_piggy_bank_demo/runner.rs"))
             .expect("read hosted ingress example");
+    let yaml_example =
+        fs::read_to_string(root.join("examples/http_ingestion_piggy_bank_demo/flow.rs"))
+            .expect("read YAML example");
     let yaml = fs::read_to_string(root.join("crates/obzenflow_adapters/src/sources/yaml/mod.rs"))
         .expect("read YAML source");
 
@@ -57,6 +60,6 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     assert!(yaml.contains("type Output: OneFactStageOutput"));
     assert!(yaml.contains("pub fn builder(decoder: D)"));
 
-    assert!(ingress_example.contains("YamlSource::builder(AccountYaml)"));
+    assert!(yaml_example.contains("YamlSource::builder(AccountYaml)"));
     assert!(ingress_example.contains("http_ingress(LedgerIngress,"));
 }

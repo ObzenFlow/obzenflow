@@ -2018,6 +2018,43 @@ fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
     ));
 }
 
+#[test]
+fn a_torn_run_without_effects_keeps_its_ancestors_root() {
+    let record = EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
+        cursor: EffectCursor::new("root_flow", "effect_stage", 1, 0_u32),
+        descriptor_hash: EffectDescriptorHash::new("archived-descriptor"),
+        descriptor: EffectDescriptor::new(
+            CountingEffect::EFFECT_TYPE,
+            "archived",
+            CountingEffect::SCHEMA_VERSION,
+            "test-v1",
+            "archived-input",
+        ),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": 10 }),
+        },
+        origin: None,
+    };
+    let ancestor = EffectHistory::from_records("root_flow", vec![record.clone()])
+        .expect("ancestor history indexes");
+    let torn = EffectHistory::from_records("torn_flow", Vec::new()).expect("empty torn history");
+
+    let joined = ancestor.joined_with(&torn).expect("histories join");
+
+    assert_eq!(joined.recorded_flow_id().as_str(), "root_flow");
+    assert!(joined.find_group(&record.cursor).is_some());
+
+    let empty = EffectHistory::from_records("older_flow", Vec::new()).expect("empty ancestor");
+    let unjoined = empty.joined_with(&torn).expect("empty histories join");
+    assert_eq!(
+        unjoined.recorded_flow_id().as_str(),
+        "torn_flow",
+        "with no evidence anywhere the head keeps naming the root"
+    );
+}
+
 #[tokio::test]
 async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     let stage_id = StageId::new();
@@ -2230,6 +2267,10 @@ async fn affine_scope_matrix_histories(
             .await,
         Err(EffectError::Journal(_))
     ));
+    assert!(
+        in_doubt.authoring_halt_fatal().is_none(),
+        "a journal failure keeps its retry disposition (FLOWIP-010t B11)"
+    );
     let in_doubt_cursor = cursor_started_in(&in_doubt_journal);
     let in_doubt_history = archive_current_cursor(&in_doubt_journal, &in_doubt_cursor).await;
 
@@ -4183,8 +4224,8 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
         hit,
         crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
             if fatal.code == obzenflow_core::event::StageFatalCode::Replay
-                && fatal.reason == obzenflow_core::event::StageFatalReason::ReplayDivergence
-                && fatal.detail.contains("would replace an existing terminal")
+                && fatal.reason == obzenflow_core::event::StageFatalReason::UnusedEffectHistory
+                && fatal.detail.contains("skipped the recorded effect")
     ));
 
     let fatal =
@@ -4233,8 +4274,8 @@ async fn effectful_transform_success_checks_the_next_unused_cursor() {
         divergence,
         crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
             if fatal.code == obzenflow_core::event::StageFatalCode::Replay
-                && fatal.reason == obzenflow_core::event::StageFatalReason::ReplayDivergence
-                && fatal.detail.contains("would replace an existing terminal")
+                && fatal.reason == obzenflow_core::event::StageFatalReason::UnusedEffectHistory
+                && fatal.detail.contains("skipped the recorded effect")
     ));
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -4979,6 +5020,11 @@ async fn strict_replay_missing_effect_record_fails_without_execute() {
         .expect_err("strict replay must fail when the cursor is missing");
 
     assert!(matches!(err, EffectError::MissingRecordedEffect { .. }));
+    assert_eq!(
+        effects.authoring_halt_fatal().map(|fatal| fatal.reason),
+        Some(obzenflow_core::event::StageFatalReason::MissingRecordedEffect),
+        "a missing recording fails the stage whatever the handler does (FLOWIP-010t B11)"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(effect_records(&journal).is_empty());
 }
@@ -5044,6 +5090,10 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
         .expect_err("strict replay should return the recorded failure");
 
     assert!(matches!(replay_err, EffectError::RecordedFailure { .. }));
+    assert!(
+        replay.authoring_halt_fatal().is_none(),
+        "a recorded failure replays as handler data (FLOWIP-010t B11)"
+    );
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     let replay_events = replay_journal.events();
     assert_eq!(replay_events.len(), 1);
@@ -5931,6 +5981,11 @@ async fn replay_rejects_a_version_only_outcome_mismatch_without_execution() {
         "{error:?}"
     );
     assert_eq!(
+        replay.authoring_halt_fatal().map(|fatal| fatal.reason),
+        Some(obzenflow_core::event::StageFatalReason::ReplayDivergence),
+        "an undecodable recorded outcome latches (FLOWIP-010t B11)"
+    );
+    assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
         "replay must make zero physical calls"
@@ -5975,6 +6030,235 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
         .expect_err("descriptor mismatch must fail replay");
 
     assert!(matches!(err, EffectError::DescriptorMismatch { .. }));
+    let fatal = replay
+        .authoring_halt_fatal()
+        .expect("a descriptor mismatch latches a stage failure");
+    assert_eq!(fatal.code, obzenflow_core::event::StageFatalCode::Replay);
+    assert_eq!(
+        fatal.reason,
+        obzenflow_core::event::StageFatalReason::DescriptorMismatch
+    );
+    assert!(fatal.detail.starts_with("effect descriptor mismatch"));
+    assert!(
+        replay.ensure_authoring_open().is_err(),
+        "nothing authored after the refusal commits"
+    );
+}
+
+#[tokio::test]
+async fn conflicting_archived_and_current_terminals_refuse_whatever_the_handler_does() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let mut live = EffectsCore::new(invocation_context(journal.clone(), parent.clone(), None));
+    live.perform(CountingEffect {
+        value: 1,
+        label: "same",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("live effect");
+    let mut records = effect_records(&journal);
+    let EffectOutcomePayload::SucceededFact { output, .. } = &mut records[0].outcome else {
+        panic!("domain output fact");
+    };
+    *output = json!({ "value": 999 });
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("history should index"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = EffectsCore::new(invocation_context(journal, parent, Some(history)));
+
+    let error = replay
+        .perform(CountingEffect {
+            value: 1,
+            label: "same",
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("conflicting terminals refuse");
+
+    assert!(
+        matches!(error, EffectError::EffectProvenanceMismatch(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        replay.authoring_halt_fatal().map(|fatal| fatal.reason),
+        Some(obzenflow_core::event::StageFatalReason::ReplayDivergence)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn capture_refuses_a_changed_label_whatever_the_handler_does() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+    let _: u64 = live.capture("side_value", 7).await.expect("capture");
+    let records = effect_records(&journal);
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("history should index"),
+    );
+    let mut replay = EffectsCore::new(invocation_context(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+    ));
+
+    let error = replay
+        .capture("renamed_value", 7_u64)
+        .await
+        .expect_err("a changed capture label is a changed identity");
+
+    assert!(matches!(error, EffectError::DescriptorMismatch { .. }));
+    assert_eq!(
+        replay.authoring_halt_fatal().map(|fatal| fatal.reason),
+        Some(obzenflow_core::event::StageFatalReason::DescriptorMismatch)
+    );
+}
+
+#[tokio::test]
+async fn an_in_doubt_attempt_the_declaration_cannot_follow_refuses() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let (_, in_doubt_history) = affine_scope_matrix_histories(&parent).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = EffectsCore::new(invocation_context(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id))),
+        parent,
+        Some(in_doubt_history),
+    ));
+
+    let error = replay
+        .perform(CountingEffect {
+            value: 1,
+            label: "not-at-least-once",
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("an in-doubt attempt needs an at-least-once declaration");
+
+    assert!(
+        matches!(error, EffectError::EffectProvenanceMismatch(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        replay.authoring_halt_fatal().map(|fatal| fatal.reason),
+        Some(obzenflow_core::event::StageFatalReason::ReplayDivergence),
+        "a history shape only a code change causes keeps replay_divergence"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[derive(Clone, Debug)]
+struct CatchRefusalThenSettle {
+    label: &'static str,
+    calls: Arc<AtomicUsize>,
+    settlement: AdapterSettlement,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulTransformHandler for CatchRefusalThenSettle {
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![CountingEffect];
+
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        let prebuilt_receipt = fx
+            .complete_empty()
+            .map_err(Into::<crate::stages::common::handler_error::HandlerError>::into)?;
+        let _caught = fx
+            .perform(CountingEffect {
+                value: input.value,
+                label: self.label,
+                calls: self.calls.clone(),
+            })
+            .await
+            .expect_err("the fixture's recording refuses this effect");
+
+        match self.settlement {
+            AdapterSettlement::Success => Ok(prebuilt_receipt),
+            AdapterSettlement::Nonfatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Domain(
+                    "caught refusal".to_string(),
+                ))
+            }
+            AdapterSettlement::Fatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Fatal(
+                    crate::stages::common::handler_error::StageFatal::new(
+                        obzenflow_core::event::StageFatalCode::Protocol,
+                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                        "handler fatal must lose to the refusal latch",
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn transform_adapter_reconstruction_refusal_supersedes_every_handler_settlement() {
+    use crate::stages::common::handlers::{
+        EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
+    };
+    use obzenflow_core::event::StageFatalReason;
+
+    for (label, recorded, reason) in [
+        ("changed", 1, StageFatalReason::DescriptorMismatch),
+        ("first", 0, StageFatalReason::MissingRecordedEffect),
+    ] {
+        for settlement in [
+            AdapterSettlement::Success,
+            AdapterSettlement::Nonfatal,
+            AdapterSettlement::Fatal,
+        ] {
+            let (parent, history) = adapter_history_fixture(recorded).await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+            let mut context = invocation_context(journal.clone(), parent.clone(), Some(history));
+            context.output_contract = output_contract_for::<CountingOutput>();
+            let adapter = EffectfulTransformHandlerAdapter::new(
+                CatchRefusalThenSettle {
+                    label,
+                    calls: calls.clone(),
+                    settlement,
+                },
+                Arc::new(AbortingBoundary),
+            );
+            let result = UnifiedTransformHandler::process(
+                &adapter,
+                parent.authored(),
+                Some(context),
+                obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+            )
+            .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::stages::common::handler_error::HandlerError::Fatal(ref fatal))
+                        if fatal.code == obzenflow_core::event::StageFatalCode::Replay
+                            && fatal.reason == reason
+                ),
+                "{label} {settlement:?}: {result:?}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "{label} {settlement:?}");
+            assert!(
+                effect_records(&journal).is_empty(),
+                "{label} {settlement:?}: a refusal authors nothing"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -7076,6 +7360,10 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
                 ..
             } if last_started_attempt == EffectAttemptOrdinal::new(1)
         ));
+        assert!(
+            replay.authoring_halt_fatal().is_none(),
+            "a recorded abandonment replays as handler data (FLOWIP-010t B11)"
+        );
         assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
         assert!(
             replay_observations

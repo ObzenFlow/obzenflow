@@ -324,6 +324,153 @@ async fn successful_disk_flow_reports_durable_and_persists_the_manifest() {
         .expect("run should succeed");
 }
 
+fn context_with_journal_root(
+    root: &std::path::Path,
+) -> obzenflow_runtime::run_context::FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate, JOURNAL_ROOT_KEY,
+    };
+    let mut candidates = CandidateSet::default();
+    candidates
+        .admit(ScopedCandidate::unqualified(
+            JOURNAL_ROOT_KEY,
+            ConfigScope::Global,
+            ConfigSource::File,
+            ConfigValue::Text(root.display().to_string()),
+        ))
+        .expect("journal.root admits a path");
+    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
+        candidates,
+    )))
+}
+
+#[tokio::test]
+async fn configured_journal_root_outranks_the_compiled_root() {
+    let compiled = tempfile::tempdir().expect("tempdir");
+    let configured = tempfile::tempdir().expect("tempdir");
+    let compiled_root = compiled.path().to_path_buf();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "configured_root",
+            journals: disk_journals(compiled_root),
+
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
+    .build(context_with_journal_root(configured.path()))
+    .await
+    .expect("flow must build");
+
+    let locator = handle
+        .run_substrate()
+        .locator()
+        .expect("a disk run is durable")
+        .clone();
+    assert!(locator.path().starts_with(configured.path()), "{locator}");
+    assert!(locator.path().join("run_manifest.json").is_file());
+    assert!(
+        !compiled.path().join("flows").exists(),
+        "the compiled root stays untouched"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.run())
+        .await
+        .expect("empty finite flow must complete promptly")
+        .expect("run should succeed");
+}
+
+#[tokio::test]
+async fn configured_journal_root_refuses_a_provider_that_does_not_honour_it() {
+    let configured = tempfile::tempdir().expect("tempdir");
+    let failure = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "memory_with_root",
+            journals: memory_journals(),
+
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
+    .build(context_with_journal_root(configured.path()))
+    .await
+    .err()
+    .expect("memory journals refuse a configured root");
+    assert!(
+        matches!(
+            &failure.error,
+            obzenflow_dsl::FlowBuildError::JournalRootUnused { located: None, .. }
+        ),
+        "{failure}"
+    );
+    assert!(failure
+        .to_string()
+        .contains("this flow records to memory journals"));
+
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let fixed = elsewhere.path().to_path_buf();
+    let failure = FlowDefinition::materialize(move |_runtime_config| {
+        let ignores_root =
+            move |flow_id, _: Option<&std::path::Path>| DiskJournalFactory::new(fixed, flow_id);
+        Ok(flow! {
+            name: "provider_ignores_root",
+            journals: ignores_root,
+
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
+    .build(context_with_journal_root(configured.path()))
+    .await
+    .err()
+    .expect("a provider that ignores the root is refused");
+    assert!(
+        matches!(
+            &failure.error,
+            obzenflow_dsl::FlowBuildError::JournalRootUnused { located: Some(path), .. }
+                if path.starts_with(elsewhere.path())
+        ),
+        "{failure}"
+    );
+    assert!(
+        std::fs::read_dir(configured.path())
+            .expect("configured root exists")
+            .next()
+            .is_none(),
+        "nothing was recorded under the configured root"
+    );
+    for run in std::fs::read_dir(elsewhere.path().join("flows")).expect("provider's runs") {
+        let run = run.expect("run directory").path();
+        assert!(
+            std::fs::read_dir(&run)
+                .expect("run directory")
+                .next()
+                .is_none(),
+            "no journal exists in {}",
+            run.display()
+        );
+    }
+}
+
 /// A successful memory build reports Ephemeral: no location exists anywhere.
 #[tokio::test]
 async fn successful_memory_flow_reports_ephemeral() {

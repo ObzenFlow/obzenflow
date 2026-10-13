@@ -13,3 +13,8 @@ startup_mode = "manual"
 # obzenflow server on localhost:9090. Tighten to "allow-list" + populate
 # server.cors.allow_origins for production.
 mode = "allow-any-origin"
+
+# true gives one order an unknown payment method, so the strict join triggers
+# the Jonestown Protocol; obzenflow.bad_payment.toml sets it.
+[app]
+inject_bad_payment = false

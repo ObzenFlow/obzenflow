@@ -32,7 +32,7 @@ pub fn payment_methods_source(
 }
 
 pub fn orders_source(
+    inject_bad_payment: bool,
 ) -> impl TypedFiniteSourceHandler<Output = OrderEvent> + std::fmt::Debug + 'static {
-    let inject_bad = std::env::var("INJECT_BAD_PAYMENT").is_ok();
-    sources::ValuesSource::new(fixtures::orders(inject_bad))
+    sources::ValuesSource::new(fixtures::orders(inject_bad_payment))
 }

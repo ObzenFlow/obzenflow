@@ -115,6 +115,51 @@ fn reauthor_archived_effect_control(mut event: ChainEvent) -> ChainEvent {
     event
 }
 
+#[derive(Debug, Clone)]
+enum ReconstructionRefusal {
+    DescriptorMismatch {
+        cursor: EffectCursor,
+        expected: EffectDescriptorHash,
+        recorded: EffectDescriptorHash,
+    },
+    Unrecorded {
+        cursor: EffectCursor,
+    },
+    HistoryShape(EffectError),
+    UndecodableOutcome(EffectError),
+}
+
+impl ReconstructionRefusal {
+    fn error(&self) -> EffectError {
+        match self {
+            Self::DescriptorMismatch {
+                cursor,
+                expected,
+                recorded,
+            } => EffectError::DescriptorMismatch {
+                cursor: cursor.clone(),
+                expected: expected.clone(),
+                recorded: recorded.clone(),
+            },
+            Self::Unrecorded { cursor } => EffectError::MissingRecordedEffect {
+                cursor: cursor.clone(),
+            },
+            Self::HistoryShape(error) | Self::UndecodableOutcome(error) => error.clone(),
+        }
+    }
+
+    fn reason(&self) -> obzenflow_core::event::StageFatalReason {
+        use obzenflow_core::event::StageFatalReason;
+        match self {
+            Self::DescriptorMismatch { .. } => StageFatalReason::DescriptorMismatch,
+            Self::Unrecorded { .. } => StageFatalReason::MissingRecordedEffect,
+            Self::HistoryShape(_) | Self::UndecodableOutcome(_) => {
+                StageFatalReason::ReplayDivergence
+            }
+        }
+    }
+}
+
 /// The first condition that closes authoring for an invocation. The stage
 /// fails with it whatever the handler does with the returned error.
 #[derive(Debug, Clone)]
@@ -123,6 +168,7 @@ enum AuthoringHalt {
     /// A replay reached a cursor its recording holds no outcome for
     /// (FLOWIP-134i B13).
     RecordingEnded(EffectCursor),
+    Reconstruction(ReconstructionRefusal),
 }
 
 impl AuthoringHalt {
@@ -134,6 +180,7 @@ impl AuthoringHalt {
             Self::RecordingEnded(cursor) => EffectError::RecordingEnded {
                 cursor: cursor.clone(),
             },
+            Self::Reconstruction(refusal) => refusal.error(),
         }
     }
 
@@ -143,6 +190,11 @@ impl AuthoringHalt {
             Self::RecordingEnded(_) => crate::stages::common::handler_error::StageFatal::new(
                 obzenflow_core::event::StageFatalCode::Replay,
                 obzenflow_core::event::StageFatalReason::RecordingEnded,
+                self.error().to_string(),
+            ),
+            Self::Reconstruction(refusal) => crate::stages::common::handler_error::StageFatal::new(
+                obzenflow_core::event::StageFatalCode::Replay,
+                refusal.reason(),
                 self.error().to_string(),
             ),
         }
@@ -207,6 +259,36 @@ impl EffectsCore {
         self.latch(AuthoringHalt::Binding(fault))
     }
 
+    fn refuse(&mut self, refusal: ReconstructionRefusal) -> EffectError {
+        self.latch(AuthoringHalt::Reconstruction(refusal))
+    }
+
+    fn refuse_descriptor(
+        &mut self,
+        cursor: &EffectCursor,
+        expected: &EffectDescriptorHash,
+        recorded: &EffectDescriptorHash,
+    ) -> EffectError {
+        self.refuse(ReconstructionRefusal::DescriptorMismatch {
+            cursor: cursor.clone(),
+            expected: expected.clone(),
+            recorded: recorded.clone(),
+        })
+    }
+
+    fn recorded_outcome<T>(&mut self, decoded: Result<T, EffectError>) -> Result<T, EffectError> {
+        match decoded {
+            Err(error) if !matches!(error, EffectError::RecordedFailure { .. }) => {
+                Err(self.refuse(ReconstructionRefusal::UndecodableOutcome(error)))
+            }
+            other => other,
+        }
+    }
+
+    fn history_shape<T>(&mut self, checked: Result<T, EffectError>) -> Result<T, EffectError> {
+        checked.map_err(|error| self.refuse(ReconstructionRefusal::HistoryShape(error)))
+    }
+
     /// The refusal for a cursor without any recorded attempt, or `None` when
     /// this position performs it live (FLOWIP-134i B13).
     fn unrecorded_effect_error(&mut self, cursor: EffectCursor) -> Option<EffectError> {
@@ -219,7 +301,9 @@ impl EffectsCore {
         };
         match self.ctx.runtime_execution.missing_outcome(at) {
             UnrecordedEffect::Execute => None,
-            UnrecordedEffect::Corrupt => Some(EffectError::MissingRecordedEffect { cursor }),
+            UnrecordedEffect::Corrupt => {
+                Some(self.refuse(ReconstructionRefusal::Unrecorded { cursor }))
+            }
             UnrecordedEffect::RecordingEnded => {
                 Some(self.latch(AuthoringHalt::RecordingEnded(cursor)))
             }
@@ -301,6 +385,50 @@ impl EffectsCore {
     }
 
     pub(crate) async fn preflight_next_effect_cursor_is_empty(&self) -> Result<(), EffectError> {
+        let (cursor, selection) = self.next_cursor_selection().await?;
+        match selection {
+            EffectHistorySelection::Miss => Ok(()),
+            EffectHistorySelection::Hit(_) => Err(EffectError::EffectProvenanceMismatch(format!(
+                "pre-effect failure at cursor {cursor:?} would replace an existing terminal"
+            ))),
+            EffectHistorySelection::InDoubt(attempts) => {
+                let highest = attempts
+                    .last()
+                    .ok_or_else(|| {
+                        EffectError::EffectProvenanceMismatch(format!(
+                            "effect cursor {cursor:?} selected InDoubt without an attempt"
+                        ))
+                    })?
+                    .attempt;
+                Err(EffectError::EffectProvenanceMismatch(format!(
+                    "pre-effect failure at cursor {cursor:?} would erase in-doubt Start({highest})"
+                )))
+            }
+        }
+    }
+
+    pub(crate) async fn settlement_divergence(
+        &self,
+    ) -> Option<crate::stages::common::handler_error::StageFatal> {
+        use obzenflow_core::event::StageFatalReason;
+        let (reason, detail) = match self.next_cursor_selection().await {
+            Ok((_, EffectHistorySelection::Miss)) => return None,
+            Ok((cursor, _)) => (
+                StageFatalReason::UnusedEffectHistory,
+                format!("the rebuild skipped the recorded effect at cursor {cursor:?}"),
+            ),
+            Err(error) => (StageFatalReason::ReplayDivergence, error.to_string()),
+        };
+        Some(crate::stages::common::handler_error::StageFatal::new(
+            obzenflow_core::event::StageFatalCode::Replay,
+            reason,
+            detail,
+        ))
+    }
+
+    async fn next_cursor_selection(
+        &self,
+    ) -> Result<(EffectCursor, EffectHistorySelection), EffectError> {
         self.gate_authoring()?;
         let recorded_flow_id = self
             .ctx
@@ -324,25 +452,7 @@ impl EffectsCore {
         let selected = merge_cursor_histories(&cursor, archived, current)?;
         crate::supervised_base::publication::incorporate(&selected.causal)
             .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
-        match selected.select() {
-            EffectHistorySelection::Miss => Ok(()),
-            EffectHistorySelection::Hit(_) => Err(EffectError::EffectProvenanceMismatch(format!(
-                "pre-effect failure at cursor {cursor:?} would replace an existing terminal"
-            ))),
-            EffectHistorySelection::InDoubt(attempts) => {
-                let highest = attempts
-                    .last()
-                    .ok_or_else(|| {
-                        EffectError::EffectProvenanceMismatch(format!(
-                            "effect cursor {cursor:?} selected InDoubt without an attempt"
-                        ))
-                    })?
-                    .attempt;
-                Err(EffectError::EffectProvenanceMismatch(format!(
-                    "pre-effect failure at cursor {cursor:?} would erase in-doubt Start({highest})"
-                )))
-            }
-        }
+        Ok((cursor, selected.select()))
     }
 
     pub(crate) async fn request_generated_live_admission(&self) -> Result<(), EffectError> {
@@ -641,10 +751,11 @@ impl EffectsCore {
             .map(|history| history.cursor_history(&cursor))
             .unwrap_or_default();
         let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
-        let selected = merge_cursor_histories(&cursor, archived, current)?;
-        self.incorporate_history(&selected.causal)?;
+        let selected = self.history_shape(merge_cursor_histories(&cursor, archived, current))?;
+        let incorporated = self.incorporate_history(&selected.causal);
+        self.history_shape(incorporated)?;
         if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
-            validate_affine_terminal_group(&cursor, &selected)?;
+            self.history_shape(validate_affine_terminal_group(&cursor, &selected))?;
         }
 
         match selected.select() {
@@ -653,35 +764,33 @@ impl EffectsCore {
                     if started.descriptor_hash != descriptor_hash
                         || started.effect_type.as_str() != E::EFFECT_TYPE
                     {
-                        return Err(EffectError::DescriptorMismatch {
-                            cursor: cursor.clone(),
-                            expected: descriptor_hash.clone(),
-                            recorded: started.descriptor_hash.clone(),
-                        });
+                        return Err(self.refuse_descriptor(
+                            &cursor,
+                            &descriptor_hash,
+                            &started.descriptor_hash,
+                        ));
                     }
                 }
                 let record_refs = records.iter().collect::<Vec<_>>();
                 for record in &record_refs {
                     if record.descriptor_hash != descriptor_hash {
-                        return Err(EffectError::DescriptorMismatch {
-                            cursor: cursor.clone(),
-                            expected: descriptor_hash.clone(),
-                            recorded: record.descriptor_hash.clone(),
-                        });
+                        return Err(self.refuse_descriptor(
+                            &cursor,
+                            &descriptor_hash,
+                            &record.descriptor_hash,
+                        ));
                     }
                 }
-                let output_result = self.replay_records_output::<E>(
-                    &record_refs,
-                    cursor.clone(),
-                    descriptor_hash.clone(),
-                );
+                let output_result =
+                    self.recorded_outcome(E::OutcomeSemantics::decode_success(&record_refs));
                 if output_result
                     .as_ref()
                     .is_err_and(|error| !matches!(error, EffectError::RecordedFailure { .. }))
                 {
                     return output_result;
                 }
-                let materialization = effect_record_group_materialization(&record_refs)?;
+                let materialization =
+                    self.history_shape(effect_record_group_materialization(&record_refs))?;
                 if selected.attempts.is_empty()
                     && selected.abandonment.is_none()
                     && selected.terminal_group_events.is_empty()
@@ -720,30 +829,32 @@ impl EffectsCore {
             }
             EffectHistorySelection::InDoubt(attempts) => {
                 if !matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
-                    return Err(EffectError::EffectProvenanceMismatch(format!(
-                        "effect cursor {cursor:?} has attempt history but effect '{}' is not NonIdempotentAtLeastOnce",
-                        E::EFFECT_TYPE
+                    return Err(self.refuse(ReconstructionRefusal::HistoryShape(
+                        EffectError::EffectProvenanceMismatch(format!(
+                            "effect cursor {cursor:?} has attempt history but effect '{}' is not NonIdempotentAtLeastOnce",
+                            E::EFFECT_TYPE
+                        )),
                     )));
                 }
                 for started in &attempts {
                     if started.descriptor_hash != descriptor_hash
                         || started.effect_type.as_str() != E::EFFECT_TYPE
                     {
-                        return Err(EffectError::DescriptorMismatch {
-                            cursor: cursor.clone(),
-                            expected: descriptor_hash.clone(),
-                            recorded: started.descriptor_hash.clone(),
-                        });
+                        return Err(self.refuse_descriptor(
+                            &cursor,
+                            &descriptor_hash,
+                            &started.descriptor_hash,
+                        ));
                     }
                 }
-                let highest_started_attempt = attempts
-                    .last()
-                    .ok_or_else(|| {
+                let Some(highest_started_attempt) = attempts.last().map(|started| started.attempt)
+                else {
+                    return Err(self.refuse(ReconstructionRefusal::HistoryShape(
                         EffectError::EffectProvenanceMismatch(format!(
                             "effect cursor {cursor:?} selected InDoubt without an attempt"
-                        ))
-                    })?
-                    .attempt;
+                        )),
+                    )));
+                };
                 if !self.ctx.runtime_execution.in_doubt_authorizes_attempt() {
                     tracing::debug!(
                         ?cursor,
@@ -1687,20 +1798,32 @@ impl EffectsCore {
             effect_ordinal,
         );
 
-        if let Some(history) = &self.ctx.effect_history {
+        if let Some(history) = self.ctx.effect_history.clone() {
             if let Some(records) = history.find_group(&cursor) {
                 let frontier = history.cursor_history(&cursor).causal;
-                self.causal
-                    .merge(&frontier)
-                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
-                crate::supervised_base::publication::incorporate(&frontier)
-                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
-                let output_result =
-                    self.replay_capture_output(&records, cursor.clone(), descriptor_hash.clone());
+                let incorporated = self.incorporate_history(&frontier);
+                self.history_shape(incorporated)?;
+                let [record] = records.as_slice() else {
+                    return Err(self.refuse(ReconstructionRefusal::HistoryShape(
+                        EffectError::EffectProvenanceMismatch(format!(
+                            "capture cursor {cursor:?} recorded {} outcome records",
+                            records.len()
+                        )),
+                    )));
+                };
+                if record.descriptor_hash != descriptor_hash {
+                    return Err(self.refuse_descriptor(
+                        &cursor,
+                        &descriptor_hash,
+                        &record.descriptor_hash,
+                    ));
+                }
+                let output_result = self.recorded_outcome(decode_effect_outcome(&record.outcome));
                 let output = match output_result {
                     Ok(output) => output,
                     Err(err @ EffectError::RecordedFailure { .. }) => {
-                        let materialization = effect_record_group_materialization(&records)?;
+                        let materialization =
+                            self.history_shape(effect_record_group_materialization(&records))?;
                         self.append_replayed_records(
                             cursor,
                             descriptor_hash,
@@ -1712,7 +1835,8 @@ impl EffectsCore {
                     }
                     Err(err) => return Err(err),
                 };
-                let materialization = effect_record_group_materialization(&records)?;
+                let materialization =
+                    self.history_shape(effect_record_group_materialization(&records))?;
                 self.append_replayed_records(cursor, descriptor_hash, descriptor, materialization)
                     .await?;
                 return Ok(output);
@@ -2131,54 +2255,6 @@ impl EffectsCore {
         }
     }
 
-    fn replay_records_output<E>(
-        &self,
-        records: &[&EffectRecord],
-        cursor: EffectCursor,
-        descriptor_hash: EffectDescriptorHash,
-    ) -> Result<E::Outcome, EffectError>
-    where
-        E: Effect,
-    {
-        for record in records {
-            if record.descriptor_hash != descriptor_hash {
-                return Err(EffectError::DescriptorMismatch {
-                    cursor,
-                    expected: descriptor_hash.clone(),
-                    recorded: record.descriptor_hash.clone(),
-                });
-            }
-        }
-
-        E::OutcomeSemantics::decode_success(records)
-    }
-
-    fn replay_capture_output<T>(
-        &self,
-        records: &[&EffectRecord],
-        cursor: EffectCursor,
-        descriptor_hash: EffectDescriptorHash,
-    ) -> Result<T, EffectError>
-    where
-        T: DeserializeOwned,
-    {
-        let [record] = records else {
-            return Err(EffectError::EffectProvenanceMismatch(format!(
-                "capture cursor {cursor:?} recorded {} outcome records",
-                records.len()
-            )));
-        };
-        if record.descriptor_hash != descriptor_hash {
-            return Err(EffectError::DescriptorMismatch {
-                cursor,
-                expected: descriptor_hash.clone(),
-                recorded: record.descriptor_hash.clone(),
-            });
-        }
-
-        decode_effect_outcome(&record.outcome)
-    }
-
     fn binding_fault_for_error<E: Effect>(
         &self,
         declaration: &EffectDeclaration,
@@ -2537,7 +2613,7 @@ impl EffectsCore {
     }
 
     async fn append_replayed_prefix(
-        &self,
+        &mut self,
         cursor: &EffectCursor,
         history: &EffectCursorHistory,
         descriptor: EffectDescriptor,
@@ -2550,16 +2626,15 @@ impl EffectsCore {
                 descriptor.clone(),
                 self.ctx.lineage,
             )?;
-            let archived = history
-                .attempt_events
-                .get(&started.attempt)
-                .ok_or_else(|| {
+            let archived = self.history_shape(
+                history.attempt_events.get(&started.attempt).ok_or_else(|| {
                     EffectError::EffectProvenanceMismatch(format!(
                         "effect cursor {cursor:?} Start({}) lacks its archived event identity",
                         started.attempt
                     ))
-                })?;
-            restore_archived_effect_identity(&mut event, archived)?;
+                }),
+            )?;
+            self.history_shape(restore_archived_effect_identity(&mut event, archived))?;
             self.commit_framework_effect_event(event).await?;
             if let Some(control_events) = history.escape_control_batches.get(&started.attempt) {
                 self.commit_escape_control_group(
@@ -2594,12 +2669,17 @@ impl EffectsCore {
             if EffectRecoveryAbandoned::matches_event_type(&event.event_type()) {
                 continue;
             }
-            if effect_record_from_event(event)?.is_some() {
+            if self
+                .history_shape(effect_record_from_event(event))?
+                .is_some()
+            {
                 continue;
             }
             if event.consumes_data_credit() {
-                return Err(EffectError::EffectProvenanceMismatch(format!(
-                    "terminal control evidence for cursor {cursor:?} contains unrecognised Data"
+                return Err(self.refuse(ReconstructionRefusal::HistoryShape(
+                    EffectError::EffectProvenanceMismatch(format!(
+                        "terminal control evidence for cursor {cursor:?} contains unrecognised Data"
+                    )),
                 )));
             }
             terminal_control_events.push(reauthor_archived_effect_control(event.clone()));
@@ -2638,7 +2718,7 @@ impl EffectsCore {
                             )
                         })?
                         .attempt = terminal_attempt;
-                    restore_archived_terminal_identity(event, history)?;
+                    self.history_shape(restore_archived_terminal_identity(event, history))?;
                 }
                 entries.extend(events.iter().cloned().map(|event| AtomicCommitEntry {
                     event,
@@ -2668,7 +2748,7 @@ impl EffectsCore {
                             )
                         })?
                         .attempt = terminal_attempt;
-                    restore_archived_terminal_identity(&mut event, history)?;
+                    self.history_shape(restore_archived_terminal_identity(&mut event, history))?;
                     entries.push(AtomicCommitEntry {
                         event,
                         options: CommitOptions::default(),
@@ -2686,7 +2766,7 @@ impl EffectsCore {
                 descriptor,
                 self.ctx.lineage,
             )?;
-            restore_archived_terminal_identity(&mut event, history)?;
+            self.history_shape(restore_archived_terminal_identity(&mut event, history))?;
             entries.push(AtomicCommitEntry {
                 event,
                 options: CommitOptions::default(),

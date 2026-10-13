@@ -44,22 +44,28 @@
 //! - With control-plane auth enabled, configure the client's `Authorization` header
 //!   through its protected credential configuration before querying `/metrics` or
 //!   `/api/topology`. Keep credential values out of command arguments and shell history.
-//! - In this example, `runner.rs` owns the HTTP ingress bundle, hosting shell and
-//!   accounts file, while `build_flow(...)` stays pipeline-only and accepts the
-//!   typed sources. That split is intentional: hosting concerns stay outside `flow!`.
 
 use super::domain::*;
 use super::handlers::Checkbook;
-use obzenflow::flow::{async_infinite_source, flow, join, sink, source, stateful, FlowDefinition};
+use obzenflow::flow::{
+    async_infinite_source, flow, join, sink, source, stateful, FlowBuildError, FlowDefinition,
+};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{
     HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord, YamlDecodeError,
-    YamlDecoder, YamlRecord, YamlSource,
+    YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow::stages::{joins, sinks};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PiggyBankSettings {
+    accounts_file: PathBuf,
+}
 
 /// Decodes one entry of `accounts.yaml`; a negative opening balance rejects
 /// only that account.
@@ -94,13 +100,13 @@ impl IngressDecoder for LedgerIngress {
     }
 }
 
-pub fn build_flow(
-    accounts_source: YamlSource<AccountYaml>,
-    tx_source: HostedIngressSource<LedgerIngress>,
-) -> FlowDefinition {
-    // This function takes only typed sources, not `HttpIngress<D>` bundles.
-    // The runner owns HTTP hosting; the flow owns pipeline topology.
-    FlowDefinition::materialize(move |_runtime_config| {
+pub fn build_flow(tx_source: HostedIngressSource<LedgerIngress>) -> FlowDefinition {
+    FlowDefinition::materialize_with(move |_runtime_config, settings: PiggyBankSettings| {
+        let accounts_source = YamlSource::builder(AccountYaml)
+            .path(settings.accounts_file)
+            .selection(YamlSelection::SequenceAt("/accounts".into()))
+            .build()
+            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
         let post_entry = joins::inner(
             |account: &AccountOpened| account.account_id.clone(),
             |entry: &LedgerEntry| entry.account_id.clone(),

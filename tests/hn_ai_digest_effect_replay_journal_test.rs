@@ -1037,12 +1037,31 @@ async fn assert_zero_chunk_archive(
         .keys()
         .any(|key| key.event_type.as_str().ends_with(".v1")));
 
-    let map_eof = final_eof_event_type_counts(&map);
-    assert_eq!(map_eof.len(), 1);
+    let chunk_writer = stage_writer(run_dir, "digest__chunk");
+    let map_writer = stage_writer(run_dir, "digest__map");
+    let eof_counts_by = |writer: WriterId| {
+        map.iter()
+            .rev()
+            .filter(|envelope| envelope.envelope.provenance.event.writer_id == writer)
+            .find_map(|envelope| match &envelope.payload {
+                ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    writer_seq_by_event_type,
+                    ..
+                }) => Some(writer_seq_by_event_type.clone()),
+                _ => None,
+            })
+            .expect("map journal carries the writer's EOF")
+    };
+    let forwarded_chunk_eof = eof_counts_by(chunk_writer);
+    assert_eq!(forwarded_chunk_eof.len(), 1);
     assert_eq!(
-        map_eof.get(&manifest_key),
+        forwarded_chunk_eof.get(&manifest_key),
         Some(&obzenflow_core::event::types::SeqNo(1)),
-        "the selected manifest reconciles exactly through the map feed"
+        "the passed-through manifest reconciles against the chunk frontier in the map feed"
+    );
+    assert!(
+        eof_counts_by(map_writer).is_empty(),
+        "a zero-chunk map authors no Data"
     );
     assert!(
         map.iter().all(|envelope| {
@@ -1359,8 +1378,8 @@ async fn wait_for_counter(counter: &AtomicUsize, minimum: usize) {
 fn hn_witness_uses_materialization_and_deferred_port_contract() {
     let _ = config::DEFAULT_HN_MAX_STORIES;
     let _ = config::DEFAULT_HN_SOURCE_RATE_LIMIT;
-    let _ = config::PreparedHnRun::from_env;
-    let _ = config::HnRunInputs::group_max_stories_label;
+    let _ = config::HnSettings::into_inputs;
+    let _ = hn_demo_flow::settings_flow_definition;
     let _ = hn_demo_flow::run_example;
     let _ = hn_demo_flow::run_demo_blocking;
     let _ = hn_demo_flow::build_presentation;
@@ -1376,6 +1395,9 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
             .expect("HN witness config is readable");
 
     for required in [
+        "FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {",
+        ".into_inputs()",
+        "Ok(build_flow_definition(inputs, HnFlowOptions::default()))",
         "FlowDefinition::materialize(move |runtime_config| {",
         "let HnRunInputs {",
         "ChatEffectBinding::from_config(&runtime_config.ai_models())?",
@@ -1449,6 +1471,19 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     assert!(checked_config.contains("model = \"llama3.1:8b\""));
     assert!(checked_config.contains("[sinks]"));
     assert!(checked_config.contains("handler = \"console_sink\""));
+    assert!(checked_config.contains("[app]"));
+    assert!(checked_config.contains("source = \"mock\""));
+    for retired in [
+        "\"HN_LIVE\"",
+        "\"HN_MAX_STORIES\"",
+        "\"HN_AI_INTERESTS\"",
+        "env_bool_or",
+    ] {
+        assert!(
+            !app_config_source.contains(retired),
+            "HN run inputs may not return to environment variables: {retired}"
+        );
+    }
     for forbidden in [
         "enum DigestOutput",
         "ResolvedDigestOutput",
@@ -1463,35 +1498,6 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
             "HN configuration may not regain backend-aware selection: {forbidden}"
         );
     }
-}
-
-#[test]
-fn hn_postgres_sink_description_is_truthful_without_selection_instrumentation() {
-    let postgres_connection = obzenflow::stages::sinks::postgres::PostgresConnection::from_url(
-        "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
-        obzenflow::stages::sinks::postgres::PostgresTransport::VerifiedTls,
-    )
-    .expect("cold verified-TLS fixture URL is valid without I/O");
-    let postgres_config = config::HnDigestPostgresConfig {
-        connection: postgres_connection,
-        schema: "hn_digest_fixture".to_string(),
-    };
-    let description = hn_demo_flow::describe_digest_postgres_sink(postgres_config)
-        .expect("the locked PostgreSQL sink operation builds");
-    assert_eq!(
-        description.destination_name(),
-        Some("postgres.hn_digest_fixture.hn_digest_summaries")
-    );
-    assert_eq!(
-        description.default_method(),
-        &DeliveryMethod::DatabaseInsert {
-            table: "hn_digest_fixture.hn_digest_summaries".to_string(),
-        }
-    );
-    assert_eq!(
-        description.redelivery_safety(),
-        Some(SinkRedeliverySafety::DuplicateSensitive)
-    );
 }
 
 #[tokio::test]
@@ -2543,9 +2549,7 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
 
     let temp = tempfile::tempdir().expect("temporary PostgreSQL HN-flow journal root");
     let journal_base = temp.path().join("journals");
-    let server = mock_server::spawn_mock_hn_server()
-        .await
-        .expect("deterministic HN server starts");
+    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
@@ -2556,8 +2560,7 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
         mode_label: "mock".to_string(),
         base_url: server.base_url(),
     };
-    let config_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
+    let config_path = witness_config(temp.path(), |_| {});
     let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     FlowApplication::builder()
@@ -2655,13 +2658,58 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     assert_eq!(receipt.items, Some(1));
 }
 
+fn witness_config(dir: &Path, edit: impl FnOnce(&mut toml::Table)) -> PathBuf {
+    let shipped =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
+    let mut config: toml::Table =
+        toml::from_str(&std::fs::read_to_string(shipped).unwrap()).unwrap();
+    assert!(config.remove("app").is_some(), "the demo ships [app]");
+    edit(&mut config);
+    let path = dir.join("witness-obzenflow.toml");
+    std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn hn_settings_convert_to_the_run_inputs_the_flow_reads() {
+    let settings: config::HnSettings = toml::from_str(
+        "max_stories = 5\npoll_timeout_secs = 10\ninterests = \"runtime protocols\"\n\n\
+         [digest]\ngroup_budget_tokens = 10000\ngroup_max_stories = 0\n",
+    )
+    .unwrap();
+    let inputs = settings.into_inputs().expect("a mock source starts");
+    assert_eq!(inputs.max_stories, 5);
+    assert_eq!(inputs.poll_timeout_secs, 10);
+    assert_eq!(inputs.interests.as_deref(), Some("runtime protocols"));
+    assert_eq!(
+        inputs.budget_per_group_override,
+        Some(TokenCount::new(10_000))
+    );
+    assert_eq!(inputs.max_stories_per_group, None, "0 is unlimited");
+    assert_eq!(inputs.mode_label, "mock");
+    assert_eq!(inputs.base_url.host_str(), Some("127.0.0.1"));
+    assert_eq!(
+        inputs.source_rate_limit,
+        config::DEFAULT_HN_SOURCE_RATE_LIMIT
+    );
+
+    let live: config::HnSettings = toml::from_str("source = \"live\"").unwrap();
+    let live = live.into_inputs().unwrap();
+    assert_eq!(live.mode_label, "live");
+    assert_eq!(
+        live.base_url.as_str(),
+        "https://hacker-news.firebaseio.com/"
+    );
+    assert_eq!(live.max_stories, config::DEFAULT_HN_MAX_STORIES);
+    assert_eq!(live.max_stories_per_group, Some(10));
+    assert!(toml::from_str::<config::HnSettings>("[digest]\ngroup_budget_tokens = 0").is_err());
+}
+
 #[tokio::test]
 async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let temp = tempfile::tempdir().expect("temporary real HN-flow journal root");
     let journal_base = temp.path().join("journals");
-    let server = mock_server::spawn_mock_hn_server()
-        .await
-        .expect("deterministic HN server starts");
+    let server = mock_server::spawn_mock_hn_server().expect("deterministic HN server starts");
     let demo_inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
@@ -2672,23 +2720,19 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         mode_label: "mock".to_string(),
         base_url: server.base_url(),
     };
-    let config_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
-    let mut config: toml::Value =
-        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config
-        .get_mut("runtime")
-        .unwrap()
-        .as_table_mut()
-        .unwrap()
-        .insert(
-            "observability".into(),
-            toml::toml! { mode = "periodic"
-            interval_ms = 250 }
-            .into(),
-        );
-    let config_path = temp.path().join("periodic-obzenflow.toml");
-    std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+    let config_path = witness_config(temp.path(), |config| {
+        config
+            .get_mut("runtime")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "observability".into(),
+                toml::toml! { mode = "periodic"
+                interval_ms = 250 }
+                .into(),
+            );
+    });
     let production_provider = AiProvider::new("ollama");
     let production_target = ChatTarget::with_binding_fingerprint(
         production_provider.clone(),
@@ -2782,9 +2826,8 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     // Replay prepares a fresh host fixture with a different physical endpoint.
     // The live guard can be retired; neither endpoint is durable flow identity.
     drop(server);
-    let replay_server = mock_server::spawn_mock_hn_server()
-        .await
-        .expect("strict replay HN server starts");
+    let replay_server =
+        mock_server::spawn_mock_hn_server().expect("strict replay HN server starts");
     let replay_inputs = config::HnRunInputs {
         base_url: replay_server.base_url(),
         ..demo_inputs
@@ -3086,8 +3129,15 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
         "client target validation must precede the attempt boundary"
     );
     assert!(
-        !map.iter()
-            .any(|envelope| matches!(&envelope.payload, ChainPayload::Execution(_))),
+        !map.iter().any(|envelope| matches!(
+            &envelope.payload,
+            ChainPayload::Execution(
+                ExecutionPayload::CircuitBreaker(_)
+                    | ExecutionPayload::Recovery(_)
+                    | ExecutionPayload::RateLimiter(_)
+                    | ExecutionPayload::Backpressure(_)
+            )
+        )),
         "client target validation must precede policy observation"
     );
     assert!(

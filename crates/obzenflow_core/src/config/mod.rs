@@ -20,5 +20,5 @@ pub use evidence::{
     EffectiveConfigEvidence, ResolvedForDoc, ResolvedValueDoc, EVIDENCE_SCHEMA_VERSION,
 };
 pub use provenance::{ConfigAddress, ConfigScope, ConfigSource, ConfigSubject, ConfigValueMeta};
-pub use secret::{SecretRef, SecretResolveError, SecretString};
+pub use secret::{is_env_name, InvalidSecretRef, SecretRef, SecretResolveError, SecretString};
 pub use values::{LineagePolicy, DEFAULT_MAX_LINEAGE_DEPTH};

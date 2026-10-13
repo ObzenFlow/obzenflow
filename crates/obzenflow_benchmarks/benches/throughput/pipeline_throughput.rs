@@ -104,7 +104,7 @@ async fn build<P, J>(
     delivered: Delivered,
 ) -> FlowHandle
 where
-    P: Fn(FlowId) -> Result<J, JournalError> + Send + Sync + 'static,
+    P: Fn(FlowId, Option<&std::path::Path>) -> Result<J, JournalError> + Send + Sync + 'static,
     J: FlowJournalFactory + 'static,
 {
     FlowDefinition::materialize(move |_| {

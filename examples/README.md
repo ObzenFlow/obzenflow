@@ -41,13 +41,16 @@ cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai post
 ```
 
 Both AI configurations require Ollama running with `llama3.1:8b` available.
-The digest uses a local mock news endpoint by default; prefix its command with
-`HN_LIVE=1` to fetch real Hacker News stories. For PostgreSQL output, select
+The digest uses a local mock news endpoint by default; set `source = "live"` under
+`[app]` in a copy of its config to fetch real Hacker News stories. For PostgreSQL output, select
 [the PostgreSQL config](hn_ai_digest_demo/obzenflow.postgres.toml) and supply a
 connection as described in the [local PostgreSQL guide](../dev/postgres/README.md).
 
-The bank example opens its accounts from [accounts.yaml](http_ingestion_piggy_bank_demo/accounts.yaml)
-at startup; transactions arrive over HTTP. It also includes an
+The bank example opens its accounts at startup from the file its
+[config](http_ingestion_piggy_bank_demo/obzenflow.toml) names under `[app] accounts_file`,
+[accounts.yaml](http_ingestion_piggy_bank_demo/accounts.yaml) by default; transactions
+arrive over HTTP. To open other accounts, pass a copy of the config that names another
+file, with `--config <file>` or `OBZENFLOW_CONFIG=<file>`. It also includes an
 [authenticated control-plane config](http_ingestion_piggy_bank_demo/obzenflow.auth.toml);
 see [managed web authentication](../crates/obzenflow_infra/src/web/README.md) for setup.
 

@@ -6,13 +6,13 @@
 
 use super::domain::{HoldId, OrderId, Sku, StockReleased, StockReserved};
 use async_trait::async_trait;
-use obzenflow::effects::BoundedBindingEvidence;
 use obzenflow::effects::{
     AllowedEffectsAllowEffect, Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse,
     EffectContext, EffectError, EffectOutcomeFitsOutput, EffectPortSlot, EffectPortSlotSet,
     EffectRegistrationBuilder, EffectSafety, EffectSet, Effects, LogicalEffectBindingName, Named,
     NamedEffect,
 };
+use obzenflow::effects::{BindingEvidenceError, BoundedBindingEvidence};
 use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 #[cfg(test)]
 use obzenflow::effects::{EffectPortResolutionError, EffectPortResolver};
@@ -31,15 +31,25 @@ pub struct WarehouseConfig {
     pub reserve_test_fault: Option<WarehouseTestFault>,
 }
 
-impl Default for WarehouseConfig {
-    fn default() -> Self {
+impl WarehouseConfig {
+    pub fn new(warehouse_id: String, reserve_latency: Duration, reserve_unavailable: bool) -> Self {
         Self {
-            warehouse_id: "warehouse-demo".to_string(),
-            reserve_latency: Duration::from_millis(20),
-            reserve_unavailable: false,
+            warehouse_id,
+            reserve_latency,
+            reserve_unavailable,
             #[cfg(test)]
             reserve_test_fault: None,
         }
+    }
+}
+
+impl Default for WarehouseConfig {
+    fn default() -> Self {
+        Self::new(
+            "warehouse-demo".to_string(),
+            Duration::from_millis(20),
+            false,
+        )
     }
 }
 
@@ -152,14 +162,13 @@ pub struct WarehouseBindingEvidence {
 }
 
 impl WarehouseBindingEvidence {
-    fn new(warehouse_id: &str) -> Self {
+    fn new(warehouse_id: &str) -> Result<Self, BindingEvidenceError> {
         let canonical = BoundedBindingEvidence::try_new(
             json!({ "warehouse_id": warehouse_id })
                 .to_string()
                 .into_bytes(),
-        )
-        .expect("warehouse binding evidence is bounded");
-        Self { canonical }
+        )?;
+        Ok(Self { canonical })
     }
 }
 
@@ -320,6 +329,8 @@ fn warehouse_error(error: WarehousePortError) -> EffectError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WarehouseBindingsBuildError {
+    #[error("warehouse binding evidence is invalid: {0}")]
+    Evidence(#[source] BindingEvidenceError),
     #[error("reserve warehouse binding is invalid: {0}")]
     Reserve(#[source] obzenflow::effects::EffectBindingBuildError),
     #[error("release warehouse binding is invalid: {0}")]
@@ -347,7 +358,8 @@ impl WarehouseEffectBindings {
             config: config.clone(),
             stats,
         });
-        let evidence = WarehouseBindingEvidence::new(&config.warehouse_id);
+        let evidence = WarehouseBindingEvidence::new(&config.warehouse_id)
+            .map_err(WarehouseBindingsBuildError::Evidence)?;
 
         let reserve_builder = EffectRegistrationBuilder::<ReserveStock>::new(
             LogicalEffectBindingName::new("reserve_warehouse")

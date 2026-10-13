@@ -60,9 +60,9 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_exporter() {
             assert!(model.snapshot().infra.is_none());
             let admission = Arc::new(Mutex::new(Vec::new()));
             let recorded = admission.clone();
-            let factory = move |flow_id| {
+            let factory = move |flow_id, root: Option<&std::path::Path>| {
                 Ok(RecordingFactory {
-                    inner: memory_journals()(flow_id)?,
+                    inner: memory_journals()(flow_id, root)?,
                     admission: recorded.clone(),
                 })
             };

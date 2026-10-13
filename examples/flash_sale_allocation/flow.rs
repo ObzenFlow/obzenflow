@@ -10,18 +10,44 @@ use super::domain::{
     SoldOut, StockReleased, StockReserved,
 };
 use super::warehouse::{
-    ReleaseStock, ReserveStock, WarehouseConfig, WarehouseEffectBindings, WarehouseStats,
+    ReleaseStock, ReserveStock, WarehouseBindingsBuildError, WarehouseConfig,
+    WarehouseEffectBindings, WarehouseStats,
 };
-use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowDefinition};
+use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::circuit_breaker;
 use obzenflow::stages::sinks::TracingSink;
 use obzenflow::stages::sources;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub const DEMO_JOURNAL_ROOT: &str = "target/flash-sale-allocation-logs";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlashSaleSettings {
+    warehouse: WarehouseSettings,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WarehouseSettings {
+    id: String,
+    reserve_latency_ms: u64,
+    reserve_unavailable: bool,
+}
+
+impl WarehouseSettings {
+    fn into_config(self) -> WarehouseConfig {
+        WarehouseConfig::new(
+            self.id,
+            Duration::from_millis(self.reserve_latency_ms),
+            self.reserve_unavailable,
+        )
+    }
+}
 
 pub fn scripted_inputs() -> Vec<AllocationInput> {
     let sku = Sku::from("flash-sku");
@@ -55,15 +81,30 @@ pub fn scripted_inputs() -> Vec<AllocationInput> {
 }
 
 pub fn build_flow() -> FlowDefinition {
-    assemble_flow(
+    settings_flow(
         scripted_inputs(),
-        WarehouseConfig::default(),
         Arc::new(WarehouseStats::default()),
         PathBuf::from(DEMO_JOURNAL_ROOT),
     )
 }
 
-/// Build the same topology for the executable and its journal acceptance test.
+pub fn settings_flow(
+    inputs: Vec<AllocationInput>,
+    warehouse_stats: Arc<WarehouseStats>,
+    journal_root: PathBuf,
+) -> FlowDefinition {
+    FlowDefinition::materialize_with(move |_runtime_config, settings: FlashSaleSettings| {
+        allocation_flow(
+            inputs,
+            settings.warehouse.into_config(),
+            warehouse_stats,
+            journal_root,
+        )
+        .map_err(warehouse_binding_failed)
+    })
+}
+
+#[cfg(test)]
 pub fn assemble_flow(
     inputs: Vec<AllocationInput>,
     warehouse_config: WarehouseConfig,
@@ -71,82 +112,95 @@ pub fn assemble_flow(
     journal_root: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let WarehouseEffectBindings {
-            reserve: reserve_warehouse,
-            release: release_warehouse,
-        } = WarehouseEffectBindings::with_stats(&warehouse_config, warehouse_stats.clone())
-            .expect("static warehouse bindings must be valid");
+        allocation_flow(inputs, warehouse_config, warehouse_stats, journal_root)
+            .map_err(warehouse_binding_failed)
+    })
+}
 
-        // One deliberately slow successful reservation opens this breaker.
-        // Subsequent ReserveStock calls fail fast, while ReleaseStock remains
-        // isolated because it has no policy attachment.
-        let reserve_breaker = circuit_breaker()
-            .count_window(1)
-            .minimum_calls(1)
-            .failure_rate_threshold(1.0)
-            .slow_call_duration(Duration::from_millis(1))
-            .slow_call_rate_threshold(1.0)
-            .open_for(Duration::from_secs(60))
-            .probes(1);
-        let reserve_resilience = reserve_breaker;
+fn warehouse_binding_failed(error: WarehouseBindingsBuildError) -> FlowBuildError {
+    FlowBuildError::BindingConfiguration {
+        binding: "warehouse".to_string(),
+        detail: error.to_string(),
+    }
+}
 
-        let allocation_feed = sources::ValuesSource::new(inputs.clone());
-        let allocator = Allocator::new(1);
-        let record_reservation = TracingSink::new(|reserved: &StockReserved| {
-            tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
-        });
-        let record_release = TracingSink::new(|released: &StockReleased| {
-            tracing::info!(order_id = %released.order_id.0, "stock release delivered");
-        });
-        let record_reservation_failure = TracingSink::new(|failed: &ReservationFailed| {
-            tracing::info!(order_id = %failed.order_id.0, "reservation failure delivered");
-        });
+fn allocation_flow(
+    inputs: Vec<AllocationInput>,
+    warehouse_config: WarehouseConfig,
+    warehouse_stats: Arc<WarehouseStats>,
+    journal_root: PathBuf,
+) -> Result<FlowDefinition, WarehouseBindingsBuildError> {
+    let WarehouseEffectBindings {
+        reserve: reserve_warehouse,
+        release: release_warehouse,
+    } = WarehouseEffectBindings::with_stats(&warehouse_config, warehouse_stats)?;
 
-        Ok(flow! {
-            name: "flash_sale_allocation",
-            journals: disk_journals(journal_root.clone()),
+    let reserve_breaker = circuit_breaker()
+        .count_window(1)
+        .minimum_calls(1)
+        .failure_rate_threshold(1.0)
+        .slow_call_duration(Duration::from_millis(1))
+        .slow_call_rate_threshold(1.0)
+        .open_for(Duration::from_secs(60))
+        .probes(1);
+    let reserve_resilience = reserve_breaker;
 
-            stages: {
-                allocation_inputs = source!(AllocationInput => allocation_feed);
+    let allocation_feed = sources::ValuesSource::new(inputs);
+    let allocator = Allocator::new(1);
+    let record_reservation = TracingSink::new(|reserved: &StockReserved| {
+        tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
+    });
+    let record_release = TracingSink::new(|released: &StockReleased| {
+        tracing::info!(order_id = %released.order_id.0, "stock release delivered");
+    });
+    let record_reservation_failure = TracingSink::new(|failed: &ReservationFailed| {
+        tracing::info!(order_id = %failed.order_id.0, "reservation failure delivered");
+    });
 
-                allocate_stock = effectful_stateful!(
-                    AllocationInput -> {
-                        StockReserved,
-                        StockReleased,
-                        ReservationFailed,
-                        SoldOut,
-                        CancelIgnored,
-                    }
-                    uses {
-                        ReserveStock
-                            via reserve_warehouse
-                            with reserve_resilience,
-                        ReleaseStock
-                            via release_warehouse,
-                    }
-                    => allocator,
-                );
+    Ok(flow! {
+        name: "flash_sale_allocation",
+        journals: disk_journals(journal_root),
 
-                reservations = sink!(
-                    StockReserved => record_reservation,
-                    delivery: idempotent
-                );
-                releases = sink!(
-                    StockReleased => record_release,
-                    delivery: idempotent
-                );
-                reservation_failures = sink!(
-                    ReservationFailed => record_reservation_failure,
-                    delivery: idempotent
-                );
-            },
+        stages: {
+            allocation_inputs = source!(AllocationInput => allocation_feed);
 
-            topology: {
-                allocation_inputs |> allocate_stock;
-                allocate_stock |> reservations;
-                allocate_stock |> releases;
-                allocate_stock |> reservation_failures;
-            }
-        })
+            allocate_stock = effectful_stateful!(
+                AllocationInput -> {
+                    StockReserved,
+                    StockReleased,
+                    ReservationFailed,
+                    SoldOut,
+                    CancelIgnored,
+                }
+                uses {
+                    ReserveStock
+                        via reserve_warehouse
+                        with reserve_resilience,
+                    ReleaseStock
+                        via release_warehouse,
+                }
+                => allocator,
+            );
+
+            reservations = sink!(
+                StockReserved => record_reservation,
+                delivery: idempotent
+            );
+            releases = sink!(
+                StockReleased => record_release,
+                delivery: idempotent
+            );
+            reservation_failures = sink!(
+                ReservationFailed => record_reservation_failure,
+                delivery: idempotent
+            );
+        },
+
+        topology: {
+            allocation_inputs |> allocate_stock;
+            allocate_stock |> reservations;
+            allocate_stock |> releases;
+            allocate_stock |> reservation_failures;
+        }
     })
 }

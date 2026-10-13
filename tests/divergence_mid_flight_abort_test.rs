@@ -701,7 +701,7 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let entry = PassThroughTransform;
     let iter = PassThroughTransform;
     let sink = CountingSink;
-    let journals = |flow_id| Ok(CycleDepthFaultFactory::new(flow_id));
+    let journals = |flow_id, _: Option<&std::path::Path>| Ok(CycleDepthFaultFactory::new(flow_id));
 
     let harness = test_flow! {
         name: "divergence_cycle_depth_abort",

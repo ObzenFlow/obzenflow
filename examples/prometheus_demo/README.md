@@ -24,8 +24,9 @@ curl -X POST http://127.0.0.1:9090/api/flow/control \
 ```
 
 The default run processes 100,000 inputs, intentionally routes every hundredth
-input to an error journal, and exits on completion. Prefix the run command with
-`PROMETHEUS_EVENT_COUNT=100` for a short run without the simulated outages.
+input to an error journal, and exits on completion. Set `event_count = 100`
+under `[app]` in a copy of the config for a short run without the simulated
+outages. Start-up output lists the settings the run used.
 
 To replay, repeat the run command with `--replay-from <archive> --verify` appended,
 using the archive path printed by the live run. Replay also waits for Play;
@@ -59,8 +60,8 @@ not by themselves establish CPU time or the cause of pending waits.
 Managed Console rejects `TOKIO_CONSOLE_RECORD_PATH`: the upstream recorder's
 separate thread cannot join the application's shutdown lifecycle.
 
-`PROMETHEUS_RATE_LIMIT=0` removes the source limiter; unset or `1` retains the default
-1,000/s policy. Other values fail before launch. Window 64 and the breaker remain in place.
+`source_rate_limit = false` under `[app]` removes the source limiter; absent or
+`true` retains the default 1,000/s policy. Window 64 and the breaker remain in place.
 The existing outcome checker verifies a retained synthetic archive without parsing logs:
 
 ```sh
