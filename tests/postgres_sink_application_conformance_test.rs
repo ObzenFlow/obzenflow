@@ -1095,19 +1095,6 @@ impl OrderingDatabase {
         .expect("read ordering destination")
     }
 
-    async fn wait_for_amount(&self, id: i64, expected: i64) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if self.amount(id).await == Some(expected) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("expected value becomes visible in the ordering destination");
-    }
-
     async fn cleanup(&self) {
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
             .execute(&self.pool)
@@ -1571,17 +1558,47 @@ async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_sa
     .build(FlowBuildContext::for_tests())
     .await
     .expect("source-fed PostgreSQL fan-in builds");
+    let topology = handle.topology().expect("flow exposes its topology");
+    let snapshots = handle
+        .liveness_snapshots()
+        .expect("flow exposes liveness snapshots");
 
     tokio::time::timeout(Duration::from_secs(10), right_gate.wait_until_waiting())
         .await
         .expect("right source reaches its deterministic asynchronous fan-in gate");
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        live_probe.wait_for_calls(SinkExternalCallKind::Commit, 1),
-    )
-    .await
-    .expect("the left-only threshold transaction commits while the right source is gated");
-    database.wait_for_amount(9_101, 300).await;
+    let quiet_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let quiet_upstream = loop {
+        if let Some(upstream) = snapshots.with_read(|all| {
+            all.values().find_map(|snapshot| {
+                if snapshot.stage_name != "postgres" {
+                    return None;
+                }
+                match snapshot.activity {
+                    StageActivity::WaitingOnQuietInput {
+                        upstream: Some(upstream),
+                    } => Some(upstream),
+                    _ => None,
+                }
+            })
+        }) {
+            break upstream;
+        }
+        assert!(
+            tokio::time::Instant::now() < quiet_deadline,
+            "finite-rooted PostgreSQL fan-in never reported its gated input"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(
+        topology.stage_name(quiet_upstream.to_topology_id()),
+        Some("right"),
+        "the canonical merge waits on the gated finite source"
+    );
+    assert_eq!(
+        live_probe.snapshot().count(SinkExternalCallKind::Commit),
+        0,
+        "nothing commits while a finite sibling is gated"
+    );
     right_gate.release();
 
     tokio::time::timeout(Duration::from_secs(12), handle.wait_for_completion())
