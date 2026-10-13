@@ -61,8 +61,6 @@ fn csv_configuration_is_cold_and_opens_independent_readers() -> anyhow::Result<(
     Ok(())
 }
 
-/// One run of the shipped example: a config file naming its inputs and
-/// output under `[app]`, and its journal root under `journal.root`.
 #[derive(Clone)]
 struct DemoRun {
     config: PathBuf,
@@ -178,8 +176,6 @@ async fn csv_example_replays_through_application_entry_without_either_input() ->
 
     std::fs::remove_file(&paths.customers_csv)?;
     std::fs::remove_file(&paths.tickets_csv)?;
-    // Wire again exactly as main does, with the same settings. Any attempted
-    // file/header read would fail before replay could complete.
     let replay_args = paths.args([
         OsString::from("--replay-from"),
         live.clone().into_os_string(),
@@ -244,8 +240,6 @@ async fn run_example_with(paths: &DemoRun, args: Vec<OsString>) -> anyhow::Resul
     .await?
 }
 
-/// The shipped example as a child process, configured the way a platform
-/// configures processes: through `OBZENFLOW_CONFIG`.
 fn spawn_child(
     paths: &DemoRun,
     shutdown_timeout_secs: Option<&str>,

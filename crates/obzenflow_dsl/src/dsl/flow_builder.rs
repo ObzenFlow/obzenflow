@@ -201,8 +201,6 @@ where
     // FLOWIP-010 §7: the resolved snapshot arrives as build input.
     let __runtime_config = build_ctx.runtime_config().clone();
     let metrics_exporter = build_ctx.metrics_exporter().cloned();
-    // FLOWIP-010t B4: every factory has run, so any `[app]` extraction is
-    // recorded; the flow's evidence carries it.
     let __app_settings = build_ctx.app_settings_evidence().cloned();
 
     // FLOWIP-120u F2: pair the build result with the substrate state known
@@ -210,8 +208,6 @@ where
     // build failed before substrate selection, so no run directory exists.
     let mut __run_state: Option<obzenflow_core::journal::factory::RunSubstrateState> = None;
     let __build_result: Result<_, FlowBuildError> = async {
-        // FLOWIP-010t B10: a non-empty `[app]` table that no build extracted
-        // refuses before a run directory, manifest or continuation claim.
         build_ctx
             .ensure_app_settings_extracted()
             .map_err(FlowBuildError::ApplicationSettings)?;
@@ -963,8 +959,6 @@ where
         let pipeline_system_id = obzenflow_core::SystemId::new();
         let pipeline_id = pipeline_system_id;
 
-        // Get the journal factory for this specific flow. The operator's
-        // `journal.root` outranks the provider's own root (FLOWIP-010t B14).
         let __journal_root = __flow_effective.journal_root();
         let mut journal_factory = journal_factory_provider(flow_id, __journal_root)
             .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
@@ -975,8 +969,6 @@ where
             obzenflow_core::journal::factory::FlowJournalFactory::run_state(&journal_factory);
         __run_state = Some(__substrate.clone());
 
-        // FLOWIP-010t B14: a configured root the run did not record under is
-        // refused before any journal exists.
         if let Some(root) = __journal_root {
             let located = __substrate.locator().map(|locator| locator.path());
             if !located.is_some_and(|path| path.starts_with(root)) {

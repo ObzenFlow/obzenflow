@@ -181,8 +181,6 @@ impl EffectHistory {
                 Ok((cursor, joined))
             })
             .collect::<Result<Vec<_>, EffectError>>()?;
-        // A run that recorded no effect evidence only names its own flow as a
-        // fallback root; the lineage keeps the root its evidence carries.
         let recorded_flow_id = if newer.holds_evidence() || !self.holds_evidence() {
             newer.recorded_flow_id.clone()
         } else {

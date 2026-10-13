@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The config file's `[app]` table (FLOWIP-010t): carried untyped in the
-//! immutable snapshot, deserialized into the application's own serde type
-//! once per build, and never interpreted by the framework.
+//! The config file's `[app]` table. The framework carries it untyped and never
+//! interprets it; each build deserializes it once into the application's type.
 
 use crate::classified_de::{self, ClassifiedError};
 use serde::de::{self, DeserializeOwned, Expected, Unexpected};
@@ -13,13 +12,11 @@ use serde_json::{Map, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Longer map keys are elided from diagnostics (B7).
 const MAX_SHOWN_KEY_BYTES: usize = 64;
-/// Name lists in diagnostics stop after this many names (B7, B10).
 const MAX_LISTED_NAMES: usize = 8;
 
 /// The `[app]` table as the config file wrote it, and the file it came from.
-/// `Debug` shows keys only: a value may be a mistyped secret.
+/// `Debug` shows keys only, since a value may be a mistyped secret.
 #[derive(Clone, Default, PartialEq)]
 pub struct AppTable {
     origin: Option<PathBuf>,
@@ -43,7 +40,6 @@ impl AppTable {
         self.table.is_empty()
     }
 
-    /// Deserialize the table into `T`, and serialize `T` back as evidence.
     pub(crate) fn extract<T: DeserializeOwned + Serialize>(
         &self,
     ) -> Result<(T, Value), ApplicationSettingsError> {
@@ -55,7 +51,6 @@ impl AppTable {
         Ok((settings, evidence))
     }
 
-    /// The refusal for a non-empty table that no build extracted (B10).
     pub(crate) fn unextracted(&self) -> ApplicationSettingsError {
         ApplicationSettingsError::Unextracted {
             origin: self.origin.clone(),
@@ -75,16 +70,16 @@ impl fmt::Debug for AppTable {
 }
 
 /// Why a build could not use the `[app]` table. Diagnostics name keys and
-/// types, never values (B7).
+/// types, never values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationSettingsError {
     /// The table does not fit the application's type.
     Invalid(ConfigDeError),
-    /// A build extracts its settings once (B4).
+    /// A build extracts its settings once.
     AlreadyExtracted,
     /// The extracted value has no JSON form to record as evidence.
     Unrecordable,
-    /// A non-empty table that no `materialize_with` extracted (B10).
+    /// A non-empty table that no `materialize_with` extracted.
     Unextracted {
         origin: Option<PathBuf>,
         keys: Vec<String>,
@@ -131,12 +126,10 @@ impl fmt::Display for ApplicationSettingsError {
 
 impl std::error::Error for ApplicationSettingsError {}
 
-/// The config policy of the classified deserializer (B7): every key the
-/// operator wrote, the type's expectation and the kind of value found. It
-/// never keeps a value, an unknown variant's text or a custom error's text.
+/// An `[app]` deserialization failure naming the key path, the expectation
+/// and the kind of value found. It keeps no value or serde message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigDeError {
-    /// Innermost segment first, as the failure unwinds.
     path: Vec<Segment>,
     problem: Problem,
 }
@@ -273,7 +266,6 @@ impl fmt::Display for ConfigDeError {
 
 impl std::error::Error for ConfigDeError {}
 
-/// The kind of value found, in TOML's terms; never the value.
 fn kind(unexpected: &Unexpected<'_>) -> &'static str {
     match unexpected {
         Unexpected::Bool(_) => "a boolean",
@@ -294,7 +286,6 @@ fn kind(unexpected: &Unexpected<'_>) -> &'static str {
     }
 }
 
-/// One `[app]` key in a diagnostic, elided past 64 bytes.
 fn write_key(f: &mut fmt::Formatter<'_>, key: &str) -> fmt::Result {
     if key.len() > MAX_SHOWN_KEY_BYTES {
         f.write_str("<key longer than 64 bytes>")
@@ -303,7 +294,6 @@ fn write_key(f: &mut fmt::Formatter<'_>, key: &str) -> fmt::Result {
     }
 }
 
-/// A key as TOML spells it: bare when it can be, quoted otherwise.
 pub(crate) fn toml_key(key: &str) -> String {
     let bare = !key.is_empty()
         && key

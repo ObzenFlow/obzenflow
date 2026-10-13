@@ -11,8 +11,9 @@
 //! manifest serve one projection. Redaction is schema-driven (§13):
 //! resolved secret values redact, reference names stay visible. The
 //! overlay and diff routes are truthfully empty in this slice (gap 12;
-//! FLOWIP-010b owns mutation). The effective and flow routes also carry the
-//! flow's extracted `[app]` settings; the base view never does (FLOWIP-010t).
+//! FLOWIP-010b owns mutation).
+//! The effective and flow routes also carry the flow's extracted `[app]`
+//! settings; the base view never does.
 
 use async_trait::async_trait;
 use obzenflow_core::web::{
@@ -187,8 +188,6 @@ impl ConfigReadModel {
     }
 }
 
-/// The flow's extracted `[app]` settings, as its manifest records them
-/// (FLOWIP-010t). The base view never carries them.
 fn with_app(mut body: serde_json::Value, app: Option<serde_json::Value>) -> serde_json::Value {
     if let (Some(app), Some(body)) = (app, body.as_object_mut()) {
         body.insert("app".to_string(), app);
@@ -383,7 +382,6 @@ mod tests {
         )
     }
 
-    /// What a flow extracted, with a secret reference recorded by name.
     fn app_settings() -> serde_json::Value {
         json!({"accounts_file": "accounts.yaml", "partner_api_key_env": "PARTNER_API_KEY"})
     }

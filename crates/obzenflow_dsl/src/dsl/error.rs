@@ -241,14 +241,13 @@ pub enum FlowBuildError {
     #[error("{0}")]
     ConfigResolution(#[source] obzenflow_runtime::runtime_config::ConfigResolveError),
 
-    /// FLOWIP-010t: the config file's `[app]` table did not fit the
-    /// application's settings type, was extracted twice, or is non-empty in
-    /// a build that extracts none. The message names keys, never values.
+    /// The `[app]` table did not fit the settings type, was extracted twice, or
+    /// is non-empty in a build that extracts none; the message names keys, never values.
     #[error("{0}")]
     ApplicationSettings(#[source] obzenflow_runtime::runtime_config::ApplicationSettingsError),
 
-    /// FLOWIP-010t B14: `journal.root` is set, but the flow's journal
-    /// provider keeps no run location under it.
+    /// `journal.root` is set, but the flow's journal provider keeps no run
+    /// location under it.
     #[error("{}", journal_root_unused(.root, .located.as_deref()))]
     JournalRootUnused {
         root: PathBuf,

@@ -28,7 +28,7 @@ pub const CIRCUIT_BREAKER_MINIMUM_CALLS_KEY: &str = "middleware.circuit_breaker.
 pub const CIRCUIT_BREAKER_MODE_KEY: &str = "middleware.circuit_breaker.mode";
 pub const CIRCUIT_BREAKER_OPEN_FOR_MS_KEY: &str = "middleware.circuit_breaker.open_for_ms";
 pub const CIRCUIT_BREAKER_PROBES_KEY: &str = "middleware.circuit_breaker.probes";
-/// Where a durable run records its location (FLOWIP-010t B14).
+/// Where a durable run records its location.
 pub const JOURNAL_ROOT_KEY: &str = "journal.root";
 pub const CIRCUIT_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY: &str =
     "middleware.circuit_breaker.rate_limited_counts_as_failure";
@@ -95,8 +95,8 @@ pub enum KnobType {
         allowed: &'static [&'static str],
     },
     Path,
-    /// An environment-variable name, the visible half of a secret reference
-    /// (FLOWIP-010t B5). Refusals never echo the text.
+    /// An environment-variable name, the visible half of a secret reference.
+    /// Refusals never echo the text.
     EnvName,
 }
 
@@ -179,13 +179,13 @@ pub enum Mutability {
     Immutable,
 }
 
-/// What a knob's value describes (FLOWIP-010t B9). The configuration
-/// difference a replay or resume reports compares configuration only.
+/// What a knob's value describes. The configuration difference a replay or
+/// resume reports compares configuration knobs only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnobRole {
     Configuration,
-    /// Places a run without changing what it does: a replay or resume launch
-    /// flag places it in its history, and `journal.root` in storage (B14).
+    /// Places a run without changing what it does, such as a replay or resume
+    /// launch flag or `journal.root`.
     Invocation,
 }
 
@@ -383,8 +383,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
-            // Outranks the root a flow passes to its journal provider; absent,
-            // the provider's root applies (FLOWIP-010t B14).
             KnobSpec {
                 key_path: JOURNAL_ROOT_KEY,
                 file_path: None,
@@ -791,7 +789,6 @@ pub fn knob_registry() -> &'static [KnobSpec] {
             },
             // The runtime.resume.* view over the 010h [replay] parse
             // (absorption without moving the parse; Immutable: run identity).
-            // Launch flags, so invocation knobs (FLOWIP-010t B9).
             KnobSpec {
                 key_path: "runtime.resume.allow_duplicate_sink_delivery",
                 file_path: Some("replay.allow_duplicate_sink_delivery"),

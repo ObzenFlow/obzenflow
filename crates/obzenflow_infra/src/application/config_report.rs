@@ -2,12 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Start-up lines for the extracted `[app]` settings (FLOWIP-010t B13), and
-//! start-up and failure-footer lines for a replay or resume whose
-//! configuration differs from the runs it rebuilds (B6, B9, B12).
-//! Projections over the recorded evidence and journalled refusals; they
-//! change nothing.
-
 use crate::journal::read::{
     compare_with_runs, read_configuration_refusals, read_logic_version_changes, ConfigChanges,
     LogicVersionChange, RunConfigChanges,
@@ -17,8 +11,6 @@ use obzenflow_runtime::runtime_config::app_leaves;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// The settings this build extracted, as its evidence records them, under
-/// the file they came from; empty when the build extracted none.
 pub(super) fn settings_lines(flow: &FlowHandle, origin: Option<&Path>) -> Vec<String> {
     flow.flow_effective_config()
         .map(|effective| render_settings(effective.app_settings(), origin))
@@ -42,8 +34,6 @@ fn render_settings(app: Option<&Value>, origin: Option<&Path>) -> Vec<String> {
         .collect()
 }
 
-/// This run's configuration against the archive it reads and, for a resume,
-/// every ancestor it merges: the runs its manifest links.
 pub(super) fn rebuilt_config_changes(flow: &FlowHandle) -> Vec<RunConfigChanges> {
     let (Some(archive), Some(effective)) = (
         obzenflow_runtime::bootstrap::replay_archive(),
@@ -62,7 +52,6 @@ pub(super) fn rebuilt_config_changes(flow: &FlowHandle) -> Vec<RunConfigChanges>
     compare_with_runs(&effective.manifest_evidence(), &runs)
 }
 
-/// One line per compared run whose configuration differs or is unknown.
 pub(super) fn startup_lines(changes: &[RunConfigChanges]) -> Vec<String> {
     changes
         .iter()
@@ -85,8 +74,6 @@ pub(super) fn startup_lines(changes: &[RunConfigChanges]) -> Vec<String> {
         .collect()
 }
 
-/// The failure footer after a refusal a changed configuration value can cause
-/// (FLOWIP-010t B12); empty after any other failure.
 pub(super) async fn refusal_footer(run_dir: &Path, changes: &[RunConfigChanges]) -> Vec<String> {
     let refused = match read_configuration_refusals(run_dir).await {
         Ok(refused) => refused,
@@ -112,7 +99,6 @@ pub(super) async fn refusal_footer(run_dir: &Path, changes: &[RunConfigChanges])
     )
 }
 
-/// The changed keys, then each refused stage whose logic version changed.
 fn footer_lines(changes: &[RunConfigChanges], logic: &[LogicVersionChange]) -> Vec<String> {
     let mut keys: Vec<&str> = changes
         .iter()

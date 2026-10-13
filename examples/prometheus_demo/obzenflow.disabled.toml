@@ -1,4 +1,4 @@
-# FLOWIP-140h deterministic witness: 100 inputs, without hosting or metrics.
+# A deterministic witness of 100 inputs, without hosting or metrics.
 [server]
 enabled = false
 host = "127.0.0.1"

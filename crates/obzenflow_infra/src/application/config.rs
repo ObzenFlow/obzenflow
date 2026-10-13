@@ -379,13 +379,9 @@ pub(crate) struct RawFileStartupConfig {
     pub(crate) sinks: RawFileSinksConfig,
     /// FLOWIP-114d: Studio phonebook registration (010h startup layer).
     studio: RawFileStudioConfig,
-    /// FLOWIP-010t: the application's own table, the only open one. The
-    /// framework carries it untyped and never interprets a key.
     app: Option<RawAppTable>,
 }
 
-/// The `[app]` table as parsed. `Debug` shows keys only: a value may be a
-/// mistyped secret.
 #[derive(Clone, Deserialize)]
 #[serde(transparent)]
 struct RawAppTable(toml::Value);
@@ -401,8 +397,6 @@ impl std::fmt::Debug for RawAppTable {
     }
 }
 
-/// The `[app]` table in format-neutral form, with the file it came from.
-/// Datetimes become their TOML text; JSON has no NaN or infinity.
 fn app_table(raw: Option<RawAppTable>, origin: &Path) -> Result<AppTable, ConfigError> {
     let Some(RawAppTable(raw)) = raw else {
         return Ok(AppTable::default());
@@ -698,7 +692,6 @@ pub(crate) struct RawFileContractsConfig {
     pub(crate) source_contract_strict_mode: Option<String>,
 }
 
-/// `[journal]`: where new runs record (FLOWIP-010t B14).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawFileJournalConfig {
@@ -801,7 +794,6 @@ pub(crate) struct RawFileReplayConfig {
 }
 
 impl FlowConfig {
-    /// `env_config_file` is `OBZENFLOW_CONFIG` as the host read it, once.
     pub(crate) fn parse_and_resolve(
         builder_config_file: Option<PathBuf>,
         env_config_file: Option<OsString>,
@@ -871,10 +863,6 @@ impl FlowConfig {
             enable_autodiscovery,
         )?;
         let (file, app) = load_file_config(file_path.as_deref(), selection)?;
-        // FLOWIP-010 Phase A: the runtime config snapshot resolves from the
-        // same raw inputs, once, and rides the resolved startup config so
-        // the host owns it for the run (§7 carrier). The `[app]` table rides
-        // it untyped (FLOWIP-010t).
         let runtime_config = std::sync::Arc::new(
             super::runtime_config_sources::build_runtime_config_snapshot(&self, &file)?
                 .with_app(app),
@@ -1274,17 +1262,12 @@ pub(crate) fn autodiscover_config(enabled: bool) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Where the selected config file came from, for read diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigFileSelection {
-    /// `OBZENFLOW_CONFIG` named it; read failures name the variable.
     Environment,
-    /// `--config`, the builder default or the working-directory search.
     Other,
 }
 
-/// Parse the selected file. The `[app]` table comes back separately, tied
-/// to the file it came from (FLOWIP-010t).
 fn load_file_config(
     path: Option<&Path>,
     selection: ConfigFileSelection,
@@ -1318,10 +1301,6 @@ fn load_file_config(
     Ok((file, app))
 }
 
-/// A syntax error shows the file, line, column and grammar message only.
-/// The parser's own rendering prints the offending source line, where an
-/// unquoted or badly escaped secret lands, and its `Debug` holds the whole
-/// document, so it is rendered here and dropped (FLOWIP-010t B8).
 fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError {
     let message = error
         .message()
@@ -1353,11 +1332,8 @@ fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError
     }
 }
 
-/// The environment variable that selects the config file (FLOWIP-010t B3).
 pub(crate) const CONFIG_FILE_ENV: &str = "OBZENFLOW_CONFIG";
 
-/// `--config`, then `OBZENFLOW_CONFIG`, then the builder's compiled default,
-/// then the working-directory search: operators override code (010 §2).
 fn select_config_file(
     cli: Option<PathBuf>,
     env: Option<OsString>,
@@ -2870,8 +2846,6 @@ port = "abc"
             "PARTNER_API_KEY"
         );
 
-        // `toml`'s own message carries no refused text; its Display, which
-        // prints the source line, is never used for a config file.
         let error = toml::from_str::<BTreeMap<String, obzenflow_core::config::SecretRef>>(
             &format!("partner_api_key_env = \"{SENTINEL}\""),
         )

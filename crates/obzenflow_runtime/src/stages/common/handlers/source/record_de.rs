@@ -3,12 +3,6 @@
 // https://obzenflow.dev
 
 //! Serde over one source record, with typed and safe errors (FLOWIP-084n B6).
-//!
-//! [`RecordDeError`] is the record policy of the shared classified
-//! deserializer: it classifies by which serde hook fired and drops serde's
-//! text and rejected values. Field names come only from serde's static struct
-//! and variant lists, so input-controlled map keys are redacted. Record
-//! deserializers share it; ingress bodies decode through [`deserialize_json`].
 
 use crate::classified_de::ClassifiedError;
 use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
@@ -106,7 +100,6 @@ impl ClassifiedError for RecordDeError {
     }
 }
 
-/// Deserializes one JSON value; a failure names a reason and a static path.
 pub(crate) fn deserialize_json<T: DeserializeOwned>(value: &Value) -> Result<T, SourceDiagnostic> {
     crate::classified_de::from_value::<T, RecordDeError>(value)
         .map_err(RecordDeError::into_diagnostic)

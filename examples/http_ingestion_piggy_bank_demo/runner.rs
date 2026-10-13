@@ -6,7 +6,7 @@
 //!
 //! The application builder hosts HTTP ingress and returns the typed source for
 //! `flow!`. Readiness, telemetry and shutdown wiring stay with the builder. The
-//! accounts file is application configuration, read by the flow from `[app]`.
+//! accounts source is cold configuration; the file opens only for a live run.
 
 use super::flow::{self, LedgerIngress};
 use anyhow::Result;
@@ -36,8 +36,6 @@ pub fn run_example() -> Result<()> {
             .config("transactions", format!("POST {TX_BASE_PATH}/events")),
     );
 
-    // The compiled config path is a default: `--config` or `OBZENFLOW_CONFIG`
-    // selects another file, and with it other accounts.
     let mut app = FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)

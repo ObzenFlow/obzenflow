@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-010t: a build extracts the config file's `[app]` table at most once
-//! and records it, and a non-empty table that no build extracts refuses
-//! before any run directory, manifest or continuation claim exists (B10).
-
 #[path = "../../../tests/replay_testkit/mod.rs"]
 mod replay_testkit;
 
@@ -157,7 +153,6 @@ async fn an_extracted_table_is_recorded_in_the_run_manifest() {
     );
 }
 
-/// Emits `count` events, then idles, so a stopped run can be resumed.
 #[derive(Clone, Debug)]
 struct Bounded(u64);
 
@@ -210,7 +205,6 @@ async fn a_resume_refused_for_an_unextracted_table_leaves_its_parent_unclaimed()
     .await?;
     handle.stop().await?;
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion()).await??;
-    // The journal writers' locks mark a live run until the handle is gone.
     drop(handle);
     let r0 = replay_testkit::latest_run_dir(&base);
     let runs = std::fs::read_dir(base.join("flows"))?.count();

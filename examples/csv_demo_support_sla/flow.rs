@@ -18,15 +18,12 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// The compiled default; `journal.root` relocates it (FLOWIP-010t B14).
 pub const DEMO_JOURNAL_ROOT: &str = "target/csv-demo-support-sla/logs";
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/csv_demo_support_sla/obzenflow.toml"
 );
 
-/// The demo's `[app]` settings (FLOWIP-010t). Building the sources opens no
-/// file, so strict replay starts with both inputs absent.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupportSlaSettings {
@@ -214,8 +211,6 @@ fn build_flow() -> FlowDefinition {
     })
 }
 
-/// Run the demo. The compiled config path is a default: `--config` or
-/// `OBZENFLOW_CONFIG` selects another file, and with it other inputs.
 pub fn run_example(
     presentation: Presentation,
     cli_args: impl IntoIterator<Item = OsString>,

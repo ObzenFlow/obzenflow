@@ -25,15 +25,12 @@ use std::time::Duration;
 
 pub const DEMO_JOURNAL_ROOT: &str = "target/flash-sale-allocation-logs";
 
-/// The demo's `[app]` settings (FLOWIP-010t).
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlashSaleSettings {
     warehouse: WarehouseSettings,
 }
 
-/// The simulated warehouse. Its id is binding evidence for every warehouse
-/// effect, so changing it refuses replay and resume of earlier runs.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct WarehouseSettings {
@@ -91,7 +88,6 @@ pub fn build_flow() -> FlowDefinition {
     )
 }
 
-/// The shipped flow, with its warehouse read from the `[app]` settings.
 pub fn settings_flow(
     inputs: Vec<AllocationInput>,
     warehouse_stats: Arc<WarehouseStats>,
@@ -108,7 +104,6 @@ pub fn settings_flow(
     })
 }
 
-/// The same topology with an explicit warehouse, for the journal acceptance tests.
 #[cfg(test)]
 pub fn assemble_flow(
     inputs: Vec<AllocationInput>,
@@ -140,9 +135,6 @@ fn allocation_flow(
         release: release_warehouse,
     } = WarehouseEffectBindings::with_stats(&warehouse_config, warehouse_stats)?;
 
-    // One deliberately slow successful reservation opens this breaker.
-    // Subsequent ReserveStock calls fail fast, while ReleaseStock remains
-    // isolated because it has no policy attachment.
     let reserve_breaker = circuit_breaker()
         .count_window(1)
         .minimum_calls(1)

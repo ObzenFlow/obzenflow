@@ -69,7 +69,7 @@ impl ResolvedRuntimeConfig {
         }
     }
 
-    /// Carry the config file's `[app]` table (FLOWIP-010t).
+    /// Carry the config file's `[app]` table.
     pub fn with_app(mut self, app: AppTable) -> Self {
         self.app = app;
         self

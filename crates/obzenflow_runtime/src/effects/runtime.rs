@@ -115,9 +115,6 @@ fn reauthor_archived_effect_control(mut event: ChainEvent) -> ChainEvent {
     event
 }
 
-/// Why an invocation cannot reproduce its recorded effect history. It leaves
-/// the core only through `EffectsCore::refuse`, which latches it, and has no
-/// conversion to `EffectError` (FLOWIP-120a, FLOWIP-010t B11).
 #[derive(Debug, Clone)]
 enum ReconstructionRefusal {
     DescriptorMismatch {
@@ -125,11 +122,10 @@ enum ReconstructionRefusal {
         expected: EffectDescriptorHash,
         recorded: EffectDescriptorHash,
     },
-    /// No recording where the history must hold one.
-    Unrecorded { cursor: EffectCursor },
-    /// Recorded attempts the current declaration cannot follow.
+    Unrecorded {
+        cursor: EffectCursor,
+    },
     HistoryShape(EffectError),
-    /// A recorded outcome that no longer decodes.
     UndecodableOutcome(EffectError),
 }
 
@@ -152,8 +148,6 @@ impl ReconstructionRefusal {
         }
     }
 
-    /// FLOWIP-010t B12: refusals a changed configuration value can cause carry
-    /// their own reason; the rest only a code change causes.
     fn reason(&self) -> obzenflow_core::event::StageFatalReason {
         use obzenflow_core::event::StageFatalReason;
         match self {
@@ -265,8 +259,6 @@ impl EffectsCore {
         self.latch(AuthoringHalt::Binding(fault))
     }
 
-    /// The only way a reconstruction refusal leaves the core: the stage fails
-    /// with it whatever the handler does with the error.
     fn refuse(&mut self, refusal: ReconstructionRefusal) -> EffectError {
         self.latch(AuthoringHalt::Reconstruction(refusal))
     }
@@ -284,8 +276,6 @@ impl EffectsCore {
         })
     }
 
-    /// A recorded outcome replays as the handler's value or its recorded
-    /// failure; any other decode result refuses the rebuild.
     fn recorded_outcome<T>(&mut self, decoded: Result<T, EffectError>) -> Result<T, EffectError> {
         match decoded {
             Err(error) if !matches!(error, EffectError::RecordedFailure { .. }) => {
@@ -295,9 +285,6 @@ impl EffectsCore {
         }
     }
 
-    /// Recorded history that is corrupt, or that this rebuild cannot follow,
-    /// refuses it. Only checks made before any journal write pass through
-    /// here; journal errors keep their retry disposition.
     fn history_shape<T>(&mut self, checked: Result<T, EffectError>) -> Result<T, EffectError> {
         checked.map_err(|error| self.refuse(ReconstructionRefusal::HistoryShape(error)))
     }
@@ -420,8 +407,6 @@ impl EffectsCore {
         }
     }
 
-    /// Settlement after the handler returns: history at the next cursor is a
-    /// recorded effect the rebuild skipped (FLOWIP-010t B12).
     pub(crate) async fn settlement_divergence(
         &self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {
@@ -441,7 +426,6 @@ impl EffectsCore {
         ))
     }
 
-    /// The next effect cursor and the history it already holds.
     async fn next_cursor_selection(
         &self,
     ) -> Result<(EffectCursor, EffectHistorySelection), EffectError> {

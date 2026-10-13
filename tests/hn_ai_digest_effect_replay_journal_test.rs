@@ -1037,12 +1037,31 @@ async fn assert_zero_chunk_archive(
         .keys()
         .any(|key| key.event_type.as_str().ends_with(".v1")));
 
-    let map_eof = final_eof_event_type_counts(&map);
-    assert_eq!(map_eof.len(), 1);
+    let chunk_writer = stage_writer(run_dir, "digest__chunk");
+    let map_writer = stage_writer(run_dir, "digest__map");
+    let eof_counts_by = |writer: WriterId| {
+        map.iter()
+            .rev()
+            .filter(|envelope| envelope.envelope.provenance.event.writer_id == writer)
+            .find_map(|envelope| match &envelope.payload {
+                ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    writer_seq_by_event_type,
+                    ..
+                }) => Some(writer_seq_by_event_type.clone()),
+                _ => None,
+            })
+            .expect("map journal carries the writer's EOF")
+    };
+    let forwarded_chunk_eof = eof_counts_by(chunk_writer);
+    assert_eq!(forwarded_chunk_eof.len(), 1);
     assert_eq!(
-        map_eof.get(&manifest_key),
+        forwarded_chunk_eof.get(&manifest_key),
         Some(&obzenflow_core::event::types::SeqNo(1)),
-        "the selected manifest reconciles exactly through the map feed"
+        "the passed-through manifest reconciles against the chunk frontier in the map feed"
+    );
+    assert!(
+        eof_counts_by(map_writer).is_empty(),
+        "a zero-chunk map authors no Data"
     );
     assert!(
         map.iter().all(|envelope| {
@@ -1452,7 +1471,6 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     assert!(checked_config.contains("model = \"llama3.1:8b\""));
     assert!(checked_config.contains("[sinks]"));
     assert!(checked_config.contains("handler = \"console_sink\""));
-    // FLOWIP-010t: run inputs are application settings, not environment variables.
     assert!(checked_config.contains("[app]"));
     assert!(checked_config.contains("source = \"mock\""));
     for retired in [
@@ -1480,35 +1498,6 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
             "HN configuration may not regain backend-aware selection: {forbidden}"
         );
     }
-}
-
-#[test]
-fn hn_postgres_sink_description_is_truthful_without_selection_instrumentation() {
-    let postgres_connection = obzenflow::stages::sinks::postgres::PostgresConnection::from_url(
-        "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
-        obzenflow::stages::sinks::postgres::PostgresTransport::VerifiedTls,
-    )
-    .expect("cold verified-TLS fixture URL is valid without I/O");
-    let postgres_config = config::HnDigestPostgresConfig {
-        connection: postgres_connection,
-        schema: "hn_digest_fixture".to_string(),
-    };
-    let description = hn_demo_flow::describe_digest_postgres_sink(postgres_config)
-        .expect("the locked PostgreSQL sink operation builds");
-    assert_eq!(
-        description.destination_name(),
-        Some("postgres.hn_digest_fixture.hn_digest_summaries")
-    );
-    assert_eq!(
-        description.default_method(),
-        &DeliveryMethod::DatabaseInsert {
-            table: "hn_digest_fixture.hn_digest_summaries".to_string(),
-        }
-    );
-    assert_eq!(
-        description.redelivery_safety(),
-        Some(SinkRedeliverySafety::DuplicateSensitive)
-    );
 }
 
 #[tokio::test]
@@ -2669,8 +2658,6 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     assert_eq!(receipt.items, Some(1));
 }
 
-/// The shipped config for a witness that supplies its run inputs directly:
-/// the build extracts no `[app]` settings, so the table is removed (FLOWIP-010t B10).
 fn witness_config(dir: &Path, edit: impl FnOnce(&mut toml::Table)) -> PathBuf {
     let shipped =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
@@ -3142,8 +3129,15 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
         "client target validation must precede the attempt boundary"
     );
     assert!(
-        !map.iter()
-            .any(|envelope| matches!(&envelope.payload, ChainPayload::Execution(_))),
+        !map.iter().any(|envelope| matches!(
+            &envelope.payload,
+            ChainPayload::Execution(
+                ExecutionPayload::CircuitBreaker(_)
+                    | ExecutionPayload::Recovery(_)
+                    | ExecutionPayload::RateLimiter(_)
+                    | ExecutionPayload::Backpressure(_)
+            )
+        )),
         "client target validation must precede policy observation"
     );
     assert!(

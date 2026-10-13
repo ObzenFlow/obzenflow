@@ -2,13 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-010t B6, B11, B12: a changed `[app]` value that the recorded history
-//! cannot absorb refuses strict replay and resume, whatever the handler does
-//! with the error. An identity-bearing value refuses with a descriptor
-//! mismatch, a value that adds an effect with a missing recording, and a
-//! changed source path with the source's `input_changed` refusal. Each refusal
-//! reaches the failure footer, and the difference report names the key.
-
 #[path = "../../../tests/replay_testkit/mod.rs"]
 mod replay_testkit;
 
@@ -81,8 +74,6 @@ impl TypedPayload for Scored {
     const EVENT_TYPE: &'static str = "app_identity.scored";
 }
 
-/// The handler's fallback when scoring fails, as `AuthorizationUnavailable`
-/// is the payment gateway's.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Unscored {
     value: u64,
@@ -92,8 +83,6 @@ impl TypedPayload for Unscored {
     const EVENT_TYPE: &'static str = "app_identity.unscored";
 }
 
-/// The application's settings; `affinity.threshold` feeds the effect, and
-/// `rescore` adds a second effect per reading.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
@@ -108,7 +97,6 @@ struct Affinity {
     threshold: u64,
 }
 
-/// The `[app]` values one run's config file holds.
 #[derive(Clone, Copy, Debug)]
 struct App {
     threshold: u64,
@@ -142,7 +130,6 @@ impl TypedInfiniteSourceHandler for BoundedReader {
 
 type Executed = Arc<Mutex<Vec<u64>>>;
 
-/// The threshold is canonical input, so it is part of the recorded identity.
 #[derive(Clone, Debug)]
 struct ScoreEffect {
     value: u64,
@@ -183,7 +170,6 @@ impl Effect for ScoreEffect {
 type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored];
 type ScoreEffects = obzenflow_runtime::effect_set![ScoreEffect];
 
-/// The reading a rescore performs its second effect for.
 const RESCORE_OFFSET: u64 = 1_000;
 
 #[derive(Clone, Debug)]
@@ -225,8 +211,6 @@ impl EffectfulTransformHandler for ScoreTransform {
         input: Reading,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        // Every effect failure becomes a fact, as `payment_gateway_resilience`
-        // does; a reconstruction refusal still fails the stage (B11).
         match self.score(input.value, fx).await {
             Ok(score) => {
                 fx.emit(Scored {
@@ -261,8 +245,6 @@ impl InlineSink for CountingSink {
     }
 }
 
-/// What one run's handlers did: the readings whose effect executed live, and
-/// the outputs its sink consumed.
 #[derive(Default)]
 struct Run {
     executed: Executed,
@@ -275,7 +257,6 @@ impl Run {
     }
 }
 
-/// A build context whose config file holds `table` as `[app]`.
 fn context(table: serde_json::Value) -> FlowBuildContext {
     let serde_json::Value::Object(table) = table else {
         panic!("[app] is a table");
@@ -352,8 +333,6 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
 }
 
-/// Run until the sink consumed `delivered` outputs and `executed` effects ran
-/// live, then stop.
 async fn run_until(
     journal_base: &Path,
     first_value: u64,
@@ -384,8 +363,6 @@ async fn run_until(
     Ok(run.executed())
 }
 
-/// A run that refuses at its first recorded effect: no live call, no
-/// delivery, and a failed outcome.
 async fn run_refused(journal_base: &Path, first_value: u64, count: u64, app: App) -> Result<()> {
     let (handle, run) = build(journal_base, first_value, count, app).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
@@ -406,7 +383,6 @@ fn archive(path: PathBuf, verb: ReplayVerb) -> ReplayBootstrap {
     }
 }
 
-/// The stage failures a run journalled, as `(stage, reason, detail)`.
 async fn stage_fatals(run_dir: &Path) -> Result<Vec<(String, StageFatalReason, String)>> {
     let mut snapshot = open_disk_run(run_dir).await?;
     let mut fatals = Vec::new();
@@ -422,7 +398,6 @@ async fn stage_fatals(run_dir: &Path) -> Result<Vec<(String, StageFatalReason, S
     Ok(fatals)
 }
 
-/// The source refusals a run journalled, as `(stage, refusal)`.
 async fn source_refusals(run_dir: &Path) -> Result<Vec<(String, SourceContinuationRefusal)>> {
     let mut snapshot = open_disk_run(run_dir).await?;
     let mut refusals = Vec::new();
@@ -438,8 +413,6 @@ async fn source_refusals(run_dir: &Path) -> Result<Vec<(String, SourceContinuati
     Ok(refusals)
 }
 
-/// The `score` stage refused with `reason` and committed no fallback fact;
-/// returns the refusal's detail.
 async fn assert_refused(run_dir: &Path, reason: StageFatalReason) -> Result<String> {
     let fatals = stage_fatals(run_dir).await?;
     assert_eq!(fatals.len(), 1, "{fatals:?}");
@@ -455,7 +428,6 @@ async fn assert_refused(run_dir: &Path, reason: StageFatalReason) -> Result<Stri
     Ok(detail)
 }
 
-/// The changed keys against each compared run, as `show` reads them.
 fn changed_keys(run_dir: &Path) -> Result<Vec<(PathBuf, Vec<String>)>> {
     Ok(read_config_changes(run_dir)?
         .into_iter()
@@ -493,7 +465,6 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
     );
     let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
 
-    // Strict replay with the changed value refuses at the first recorded effect.
     {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Replay)).await,
@@ -512,8 +483,6 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
         [(r0.clone(), vec![KEY.to_string()])]
     );
 
-    // Resume catch-up refuses the same way, and the resume stays torn. Its
-    // reader offers no live readings, so the torn run holds only the prefix.
     {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
@@ -525,8 +494,6 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
     assert_eq!(read_configuration_refusals(&r1).await?, stages(&["score"]));
     assert_eq!(changed_keys(&r1)?, [(r0.clone(), vec![KEY.to_string()])]);
 
-    // Reverting the value resumes the torn run: it merges the ancestor and
-    // reuses every recorded outcome, so only the live readings 4 and 5 execute.
     let r2_executed = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r1.clone(), ReplayVerb::Resume)).await,
@@ -565,8 +532,6 @@ async fn an_app_value_that_adds_an_effect_refuses_replay_and_resume_catch_up() -
     );
     let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
 
-    // A stopped recording is complete, so strict replay meets the added effect
-    // as a missing recording.
     {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Replay)).await,
@@ -584,8 +549,6 @@ async fn an_app_value_that_adds_an_effect_refuses_replay_and_resume_catch_up() -
         [(r0.clone(), vec![KEY.to_string()])]
     );
 
-    // Resume catch-up: each recorded reading now performs a second effect its
-    // recording lacks.
     {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
@@ -633,8 +596,6 @@ fn write_accounts(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Accounts read one record per poll from the file `[app]` names, paced by a
-/// limiter that admits `burst` records at once and then `rate` a second.
 async fn build_accounts(
     journal_base: &Path,
     accounts_file: &Path,
@@ -683,8 +644,6 @@ async fn a_changed_app_path_refuses_an_interrupted_source_and_reaches_the_footer
     write_accounts(&recorded_file)?;
     write_accounts(&staging_file)?;
 
-    // Stop after the limiter's burst, before the end of the accounts file. The
-    // handle drops with the block, releasing the recording's writers.
     {
         let delivered = Arc::new(AtomicUsize::new(0));
         let handle =
@@ -704,8 +663,6 @@ async fn a_changed_app_path_refuses_an_interrupted_source_and_reaches_the_footer
     }
     let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
 
-    // The same records in another file are another input: the interrupted
-    // source refuses to continue it (134i B10).
     let outcome = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,

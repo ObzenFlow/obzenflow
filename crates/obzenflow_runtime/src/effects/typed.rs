@@ -219,8 +219,6 @@ where
         self.core.authoring_halt_fatal()
     }
 
-    /// The stage failure for a settlement that left recorded history unused
-    /// (FLOWIP-010t B12).
     pub(crate) async fn settlement_divergence(
         &self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {

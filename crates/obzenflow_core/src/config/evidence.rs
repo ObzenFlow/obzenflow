@@ -66,7 +66,7 @@ pub struct EffectiveConfigEvidence {
     /// tests without collapsing equal inherited effect values.
     pub values: Vec<ResolvedValueDoc>,
     /// The application's `[app]` settings as its type serialized them,
-    /// defaults included (FLOWIP-010t). Absent when the build extracted none.
+    /// defaults included. Absent when the build extracted none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<serde_json::Value>,
 }

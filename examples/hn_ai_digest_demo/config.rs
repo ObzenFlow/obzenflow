@@ -15,16 +15,12 @@ use std::num::NonZeroU64;
 mod postgres_transport;
 
 pub(crate) const DEFAULT_HN_MAX_STORIES: usize = 60;
-/// The source limiter the flow declares; operators override it under
-/// `[middleware.stages.hn_stories.rate_limiter]`.
 pub(crate) const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
 const DEFAULT_HN_POLL_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_HN_GROUP_MAX_STORIES: usize = 10;
 const HN_LIVE_BASE_URL: &str = "https://hacker-news.firebaseio.com/";
 const DEFAULT_HN_DIGEST_POSTGRES_SCHEMA: &str = "obzenflow_example";
 
-/// The PostgreSQL connection that `cargo xtask postgres run` hands the
-/// application (FLOWIP-010q); not application settings.
 #[derive(Clone, Debug)]
 pub(crate) struct HnDigestPostgresConfig {
     pub(crate) connection: PostgresConnection,
@@ -46,18 +42,14 @@ impl HnDigestPostgresConfig {
     }
 }
 
-/// Where the stories come from.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum HnSource {
-    /// A loopback fixture the flow starts for each run.
     #[default]
     Mock,
-    /// The Hacker News Firebase API.
     Live,
 }
 
-/// The demo's `[app]` settings (FLOWIP-010t).
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HnSettings {
@@ -67,8 +59,6 @@ pub(crate) struct HnSettings {
     max_stories: usize,
     #[serde(default = "default_poll_timeout_secs")]
     poll_timeout_secs: u64,
-    /// Personalizes both prompts, so it is part of every chat effect's
-    /// identity: changing it refuses replay and resume of earlier runs.
     #[serde(default)]
     interests: Option<String>,
     #[serde(default)]
@@ -78,9 +68,7 @@ pub(crate) struct HnSettings {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct DigestSettings {
-    /// Per-chunk input budget; absent, 2,500 tokens for Ollama and 6,000 otherwise.
     group_budget_tokens: Option<NonZeroU64>,
-    /// Stories per chunk; 0 for unlimited.
     group_max_stories: usize,
 }
 
@@ -102,8 +90,6 @@ fn default_poll_timeout_secs() -> u64 {
 }
 
 impl HnSettings {
-    /// The run's inputs. A mock source starts its fixture here and leaves it
-    /// serving for the rest of the runtime; strict replay never polls it.
     pub(crate) fn into_inputs(self) -> Result<HnRunInputs> {
         let (base_url, mode_label) = match self.source {
             HnSource::Live => (

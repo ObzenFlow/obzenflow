@@ -2020,9 +2020,6 @@ fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
 
 #[test]
 fn a_torn_run_without_effects_keeps_its_ancestors_root() {
-    // A resume refused before its first effect records nothing, so its own
-    // flow id is only a fallback; resuming it again must still find the
-    // ancestor's outcomes under the lineage root.
     let record = EffectRecord {
         observation:
             obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
@@ -6033,7 +6030,6 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
         .expect_err("descriptor mismatch must fail replay");
 
     assert!(matches!(err, EffectError::DescriptorMismatch { .. }));
-    // However the handler maps the error, the stage fails (FLOWIP-010t B11).
     let fatal = replay
         .authoring_halt_fatal()
         .expect("a descriptor mismatch latches a stage failure");
@@ -6071,8 +6067,6 @@ async fn conflicting_archived_and_current_terminals_refuse_whatever_the_handler_
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
             .expect("history should index"),
     );
-    // The current run already holds this cursor's terminal, and the archive
-    // disagrees with it: corrupt history, never a dropped record (B11).
     let calls = Arc::new(AtomicUsize::new(0));
     let mut replay = EffectsCore::new(invocation_context(journal, parent, Some(history)));
 
@@ -6162,8 +6156,6 @@ async fn an_in_doubt_attempt_the_declaration_cannot_follow_refuses() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-/// Catches every effect error, as `payment_gateway_resilience` does, then
-/// settles; a reconstruction refusal still fails the stage (FLOWIP-010t B11).
 #[derive(Clone, Debug)]
 struct CatchRefusalThenSettle {
     label: &'static str,
@@ -6222,8 +6214,6 @@ async fn transform_adapter_reconstruction_refusal_supersedes_every_handler_settl
     };
     use obzenflow_core::event::StageFatalReason;
 
-    // The recording holds effect "first" at ordinal 0: a changed label is a
-    // changed identity, and an empty recording lacks the effect entirely.
     for (label, recorded, reason) in [
         ("changed", 1, StageFatalReason::DescriptorMismatch),
         ("first", 0, StageFatalReason::MissingRecordedEffect),

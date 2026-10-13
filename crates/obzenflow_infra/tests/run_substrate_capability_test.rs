@@ -324,7 +324,6 @@ async fn successful_disk_flow_reports_durable_and_persists_the_manifest() {
         .expect("run should succeed");
 }
 
-/// A build context whose resolved configuration sets `journal.root`.
 fn context_with_journal_root(
     root: &std::path::Path,
 ) -> obzenflow_runtime::run_context::FlowBuildContext {
@@ -346,7 +345,6 @@ fn context_with_journal_root(
     )))
 }
 
-/// FLOWIP-010t B14: `journal.root` outranks the root the flow compiles in.
 #[tokio::test]
 async fn configured_journal_root_outranks_the_compiled_root() {
     let compiled = tempfile::tempdir().expect("tempdir");
@@ -389,9 +387,6 @@ async fn configured_journal_root_outranks_the_compiled_root() {
         .expect("run should succeed");
 }
 
-/// FLOWIP-010t B14: a configured root the run cannot record under is refused
-/// before any journal exists, whether the provider keeps no location or
-/// ignores the root.
 #[tokio::test]
 async fn configured_journal_root_refuses_a_provider_that_does_not_honour_it() {
     let configured = tempfile::tempdir().expect("tempdir");
@@ -463,7 +458,6 @@ async fn configured_journal_root_refuses_a_provider_that_does_not_honour_it() {
             .is_none(),
         "nothing was recorded under the configured root"
     );
-    // The provider made its own run directory; the refusal precedes every journal.
     for run in std::fs::read_dir(elsewhere.path().join("flows")).expect("provider's runs") {
         let run = run.expect("run directory").path();
         assert!(

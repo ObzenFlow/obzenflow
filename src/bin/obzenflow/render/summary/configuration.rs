@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The configuration a replayed or resumed run changed from the runs whose
-//! history it rebuilt, with each key's recorded old and new values
-//! (FLOWIP-010t B6, B9). The library reads it from the linked manifests.
-
 use super::*;
 
 impl Renderer {
@@ -30,7 +26,6 @@ impl Renderer {
     }
 }
 
-/// One block per compared run that differs, or whose configuration is unknown.
 fn configuration_lines(changes: &[RunConfigChanges]) -> Vec<String> {
     let mut lines = Vec::new();
     for compared in changes {
@@ -73,7 +68,6 @@ fn key_label(difference: &ConfigDifference) -> String {
     }
 }
 
-/// The value as evidence recorded it, already redacted.
 fn value_text(value: Option<&serde_json::Value>) -> String {
     value.map_or_else(|| "(none)".to_string(), serde_json::Value::to_string)
 }

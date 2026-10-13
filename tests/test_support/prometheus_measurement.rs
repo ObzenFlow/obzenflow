@@ -413,8 +413,6 @@ async fn measure_demo_process_completion() -> Result<()> {
     );
     let directory = tempfile::tempdir()?;
     let journals = directory.path().join("journals");
-    // The Studio walkthrough config with this cohort's settings and journal
-    // root (FLOWIP-010t B14).
     let studio: toml::Value = toml::from_str(&std::fs::read_to_string(
         root.join("examples/prometheus_demo/obzenflow.studio.toml"),
     )?)?;

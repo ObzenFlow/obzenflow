@@ -7,9 +7,9 @@
 # collapsed node in Studio (FLOWIP-128a), not four `digest__*` member stages.
 #
 # The HN feed is mocked by default (set source = "live" under [app] for the
-# real API). The AI
-# target is resolved from the checked [ai.models] snapshot below. The client
-# and any credential remain deferred until the first executable live effect.
+# real API). The AI target is resolved from the checked [ai.models] snapshot
+# below. The client and any credential remain deferred until the first
+# executable live effect.
 
 [runtime.backpressure.flow]
 mode = "enforce"

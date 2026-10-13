@@ -90,7 +90,7 @@ impl FlowEffectiveConfig {
         }
     }
 
-    /// Record the settings the build extracted from `[app]` (FLOWIP-010t).
+    /// Record the settings the build extracted from `[app]`.
     pub fn with_app_settings(mut self, app: Option<serde_json::Value>) -> Self {
         self.app = app;
         self
@@ -215,7 +215,7 @@ impl FlowEffectiveConfig {
             .expect("registry default guarantees metrics_drain_timeout_ms")
     }
 
-    /// The operator's `journal.root`, when set (FLOWIP-010t B14).
+    /// The operator's `journal.root`, when set.
     pub fn journal_root(&self) -> Option<&std::path::Path> {
         self.get(super::schema::JOURNAL_ROOT_KEY, &ConfigScope::Global)
             .and_then(|r| r.value.as_text())

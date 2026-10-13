@@ -11,11 +11,9 @@ use obzenflow::stages::{joins, stateful};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The demo's `[app]` settings (FLOWIP-010t).
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSettings {
-    /// Gives one order an unknown payment method, so the strict join fails.
     #[serde(default)]
     inject_bad_payment: bool,
 }

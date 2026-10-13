@@ -2,11 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! What a replayed or resumed run's configuration changed from the runs whose
-//! history it rebuilds (FLOWIP-010t B6, B9). Read from run manifests linked
-//! by `replay_from`, `resumed_from` and `merged_from`; it adds no event and
-//! never refuses or alters a run.
-
 use super::{open_disk_run, JournalReadError};
 use crate::journal::disk::inspect::load_manifest;
 use obzenflow_core::config::EffectiveConfigEvidence;
@@ -53,9 +48,8 @@ impl ConfigChanges {
     }
 }
 
-/// A run's configuration changes against each run whose history it rebuilt:
-/// the replayed run, or `resumed_from` and every `merged_from` ancestor. A
-/// run that rebuilt nothing, or recorded no configuration, compares nothing.
+/// Configuration changes against the replayed run, or `resumed_from` and every
+/// `merged_from` ancestor; empty when the run rebuilt nothing or recorded no configuration.
 pub fn read_config_changes(run_dir: &Path) -> Result<Vec<RunConfigChanges>, JournalReadError> {
     let manifest = load_manifest(run_dir)?;
     Ok(match &manifest.effective_config {
@@ -85,7 +79,7 @@ pub fn compare_with_runs(
 }
 
 /// The stages of a run that refused in a way a changed configuration value can
-/// cause (FLOWIP-010t B12), in key order.
+/// cause, in key order.
 pub async fn read_configuration_refusals(
     run_dir: &Path,
 ) -> Result<BTreeSet<String>, JournalReadError> {
@@ -105,9 +99,6 @@ pub async fn read_configuration_refusals(
     Ok(refused)
 }
 
-/// The refusing stage's key when `execution` is a refusal a changed value can
-/// cause: an effect identity, an added or a skipped effect, or a source's
-/// changed input.
 fn configuration_refusal<'a>(
     stage: Option<&'a RunStage>,
     execution: &'a ExecutionPayload,
@@ -140,8 +131,7 @@ pub struct LogicVersionChange {
 }
 
 /// Each of `stages` whose logic version this run records differently from a
-/// compared run. Unreadable manifests compare nothing; the start-up report
-/// already names them.
+/// compared run; unreadable manifests compare nothing.
 pub fn read_logic_version_changes(
     run_dir: &Path,
     runs: &[PathBuf],
@@ -166,7 +156,6 @@ pub fn read_logic_version_changes(
         .collect()
 }
 
-/// `(stage, recorded, current)` for each of `stages` whose logic version differs.
 fn logic_version_changes(
     recorded: &HashMap<String, RunManifestStage>,
     current: &HashMap<String, RunManifestStage>,

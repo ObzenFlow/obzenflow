@@ -111,16 +111,13 @@ impl FlowDefinition {
         })
     }
 
-    /// [`Self::materialize`] for an application that reads typed settings
-    /// from the config file's `[app]` table (FLOWIP-010t).
+    /// [`Self::materialize`] whose factory receives `T`, deserialized from the
+    /// config file's `[app]` table before it runs; an absent table reads as empty.
     ///
-    /// Before the factory runs, the table deserializes into `T`; an absent
-    /// table deserializes as an empty one. The run records `T` as serialized,
-    /// defaults included, in the `app` section of its config evidence, so a
-    /// secret belongs in a [`SecretRef`](obzenflow_core::config::SecretRef)
-    /// field. A table that does not fit `T` fails startup naming the key, and
-    /// the factory never runs. A build extracts its settings once: nest
-    /// several concerns in one root type.
+    /// The run records `T` as serialized in its config evidence, so a secret
+    /// belongs in a [`SecretRef`](obzenflow_core::config::SecretRef) field. A
+    /// table that does not fit `T` fails startup naming the key, and a build
+    /// extracts its settings once.
     ///
     /// ```rust,ignore
     /// #[derive(Deserialize, Serialize)]

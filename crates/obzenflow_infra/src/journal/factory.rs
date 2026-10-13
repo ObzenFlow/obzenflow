@@ -216,7 +216,7 @@ fn seed_admission_sequencer(sequencer: &AtomicU64, archive: &dyn ReplayArchive) 
 }
 
 /// Disk journals under `base_path`, or under the operator's `journal.root`
-/// when set (FLOWIP-010t B14).
+/// when set.
 pub fn disk_journals(
     base_path: PathBuf,
 ) -> impl Fn(FlowId, Option<&Path>) -> Result<DiskJournalFactory, JournalError> {

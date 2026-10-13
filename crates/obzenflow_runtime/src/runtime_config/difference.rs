@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The configuration a replayed or resumed run changed from a run whose
-//! history it rebuilds (FLOWIP-010t B6, B9). A projection over two runs'
-//! recorded evidence: it adds no event and never refuses or alters a run.
+//! The configuration a replayed or resumed run changed from the run whose
+//! history it rebuilds, projected from both runs' recorded evidence.
 
 use super::app::toml_key;
 use super::model::diff;
@@ -27,8 +26,7 @@ pub struct ConfigDifference {
 }
 
 /// Every recorded configuration value that differs, in key order. Invocation
-/// knobs differ by construction and are skipped; a key the registry no
-/// longer knows counts as configuration, as does every `[app]` key.
+/// knobs are skipped; unregistered keys and `[app]` keys count as configuration.
 pub fn config_differences(
     recorded: &EffectiveConfigEvidence,
     current: &EffectiveConfigEvidence,
@@ -39,7 +37,6 @@ pub fn config_differences(
         &configuration(&current.values),
     ) {
         let point = point(entry.resolved_for.as_ref(), &entry.scope);
-        // A winning scope that moved under one effect point is one change.
         let difference = by_point
             .entry((entry.key_path.clone(), point.clone()))
             .or_insert_with(|| ConfigDifference {

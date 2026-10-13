@@ -1,6 +1,4 @@
-# Hosts /metrics and waits for Play, then processes the default 100,000
-# inputs. The FLOWIP-140h deterministic witness ran it with event_count = 100
-# under [app].
+# Hosts /metrics and waits for Play, then processes the default 100,000 inputs.
 [server]
 enabled = true
 host = "127.0.0.1"

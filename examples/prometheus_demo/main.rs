@@ -14,8 +14,6 @@
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host
 //!
-//! Event volume is operator-tunable through `[app] event_count` (default
-//! 100000), so varying the load needs no code change.
 //! With the `tokio-console` feature, the framework's `--tokio-console` flag enables
 //! Tokio Console diagnostics. Diagnostics are disabled by default.
 //!
@@ -43,20 +41,16 @@ const CONFIG_FILE: &str = concat!(
     "/examples/prometheus_demo/obzenflow.toml"
 );
 
-/// Default event volume; override with `[app] event_count`.
 const DEFAULT_EVENT_COUNT: usize = 100_000;
 const SOURCE_OUTAGE_INTERVAL: usize = 20_000;
 const SOURCE_BREAKER_COOLDOWN: Duration = Duration::from_secs(5);
 const JOURNAL_ROOT: &str = "target/prometheus_demo_journal";
 
-/// The demo's `[app]` settings (FLOWIP-010t).
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PrometheusDemoSettings {
-    /// Inputs the source generates.
     #[serde(default = "default_event_count")]
     event_count: usize,
-    /// Keeps the 1,000/s source limiter; false omits it for measurement.
     #[serde(default = "keep_source_rate_limit")]
     source_rate_limit: bool,
 }
@@ -234,7 +228,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The shipped demo, with its volume and source limiter read from `[app]`.
 fn demo_flow() -> FlowDefinition {
     FlowDefinition::materialize_with(|_runtime_config, settings: PrometheusDemoSettings| {
         let journal_root = std::path::PathBuf::from(JOURNAL_ROOT);

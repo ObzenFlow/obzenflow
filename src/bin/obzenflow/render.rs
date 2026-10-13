@@ -59,8 +59,6 @@ impl ObservationEnd {
     }
 }
 
-/// The admitted run the summary describes, with its place in its history and
-/// its configuration changes read when the summary renders.
 pub(super) struct Observed<'a> {
     pub run: &'a RunIdentity,
     pub manifest: &'a RunManifest,

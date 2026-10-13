@@ -121,14 +121,6 @@ fn build_digest_postgres_sink(
         .build()?)
 }
 
-#[cfg(test)]
-pub(crate) fn describe_digest_postgres_sink(
-    config: HnDigestPostgresConfig,
-) -> Result<obzenflow::stages::sinks::SinkDescription> {
-    let sink = build_digest_postgres_sink(config)?;
-    Ok(obzenflow::stages::sinks::SinkConnector::describe(&sink))
-}
-
 struct DigestMapCtx {
     interests: Option<String>,
 }
@@ -394,7 +386,6 @@ impl Default for HnFlowOptions {
     }
 }
 
-/// The shipped demo: its run inputs come from `[app]` (FLOWIP-010t).
 pub(crate) fn settings_flow_definition() -> FlowDefinition {
     FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {
         let inputs = settings
@@ -568,8 +559,6 @@ pub fn run_demo_blocking() -> Result<()> {
     runtime.block_on(run_example(build_presentation()))
 }
 
-/// The run's settings print after the build, so the banner shows only what
-/// the code fixes.
 pub(crate) fn build_presentation() -> Presentation {
     Presentation::new(
         Banner::new("HN AI Digest Demo")
@@ -826,6 +815,35 @@ mod tests {
              ### Links\n\n\
              [^1]: [First](<https://news.ycombinator.com/item?id=100>)\n\
              [^2]: [Second \\[story\\]](<https://example.com/second%20story>) · [HN discussion](<https://news.ycombinator.com/item?id=101>)"
+        );
+    }
+
+    #[test]
+    fn postgres_sink_description_is_truthful_without_selection_instrumentation() {
+        let connection = obzenflow::stages::sinks::postgres::PostgresConnection::from_url(
+            "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
+            obzenflow::stages::sinks::postgres::PostgresTransport::VerifiedTls,
+        )
+        .expect("cold verified-TLS fixture URL is valid without I/O");
+        let sink = build_digest_postgres_sink(HnDigestPostgresConfig {
+            connection,
+            schema: "hn_digest_fixture".to_string(),
+        })
+        .expect("the locked PostgreSQL sink operation builds");
+        let description = obzenflow::stages::sinks::SinkConnector::describe(&sink);
+        assert_eq!(
+            description.destination_name(),
+            Some("postgres.hn_digest_fixture.hn_digest_summaries")
+        );
+        assert_eq!(
+            description.default_method(),
+            &obzenflow::stages::sinks::DeliveryMethod::DatabaseInsert {
+                table: "hn_digest_fixture.hn_digest_summaries".to_string(),
+            }
+        );
+        assert_eq!(
+            description.redelivery_safety(),
+            Some(SinkRedeliverySafety::DuplicateSensitive)
         );
     }
 

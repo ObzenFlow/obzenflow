@@ -2,33 +2,21 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Serde over one JSON value, with errors classified by the serde hook that
-//! fired (FLOWIP-084n B6, FLOWIP-010t B7).
-//!
-//! The error type is the policy: it decides which keys a failure names and
-//! drops serde's text and rejected values. Source records use the record
-//! policy; the config file's `[app]` table uses the config policy.
-
 use serde::de::value::StrDeserializer;
 use serde::de::{self, DeserializeOwned, DeserializeSeed, Unexpected, VariantAccess, Visitor};
 use serde_json::Value;
 use std::marker::PhantomData;
 
-/// A serde error that records where in the value it arose.
 pub(crate) trait ClassifiedError: de::Error {
-    /// The failure arose under `key`; `known` holds serde's static field or
-    /// variant names when the value is a struct or an enum.
     fn within_key(self, key: &str, known: Option<&'static [&'static str]>) -> Self;
 
     fn within_index(self, index: usize) -> Self;
 }
 
-/// Deserializes one JSON value; a failure carries only what `E` keeps.
 pub(crate) fn from_value<T: DeserializeOwned, E: ClassifiedError>(value: &Value) -> Result<T, E> {
     T::deserialize(ValueDeserializer::<E>::new(value))
 }
 
-/// The value's kind for a type error; the policy decides how much to keep.
 fn unexpected(value: &Value) -> Unexpected<'_> {
     match value {
         Value::Null => Unexpected::Unit,
@@ -191,7 +179,6 @@ impl<'de, 'a, E: ClassifiedError> de::MapAccess<'de> for MapAccess<'a, E> {
             return Ok(None);
         };
         self.pending = Some((key, value));
-        // A key error, such as an unknown field, already names its subject.
         seed.deserialize(StrDeserializer::<E>::new(key)).map(Some)
     }
 

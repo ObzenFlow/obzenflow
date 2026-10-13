@@ -11,7 +11,7 @@
 //! that name belongs to the core metrics snapshot.
 //!
 //! It also holds the build's one extraction of the `[app]` table until the
-//! flow build records it (FLOWIP-010t B4); the snapshot stays immutable.
+//! flow build records it; the snapshot stays immutable.
 
 use crate::runtime_config::{ApplicationSettingsError, ResolvedRuntimeConfig};
 use obzenflow_core::metrics::MetricsSnapshotExporter;
@@ -23,7 +23,6 @@ use std::sync::{Arc, OnceLock};
 pub struct FlowBuildContext {
     runtime_config: Arc<ResolvedRuntimeConfig>,
     metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
-    /// Shared by clones, so a build extracts at most once.
     app_settings: Arc<OnceLock<serde_json::Value>>,
 }
 
@@ -49,9 +48,6 @@ impl FlowBuildContext {
         &self.runtime_config
     }
 
-    /// Deserialize the `[app]` table into `T` and record its serialized
-    /// value for the run's evidence. A second call in one build fails.
-    /// `FlowDefinition::materialize_with` is the only caller.
     #[doc(hidden)]
     pub fn extract_app_settings<T: DeserializeOwned + Serialize>(
         &self,
@@ -71,8 +67,7 @@ impl FlowBuildContext {
         self.app_settings.get()
     }
 
-    /// Refuse a non-empty `[app]` table that no extraction consumed
-    /// (FLOWIP-010t B10).
+    /// Refuse a non-empty `[app]` table that no extraction consumed.
     pub fn ensure_app_settings_extracted(&self) -> Result<(), ApplicationSettingsError> {
         let app = self.runtime_config.app();
         if app.is_empty() || self.app_settings.get().is_some() {

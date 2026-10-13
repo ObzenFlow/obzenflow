@@ -23,7 +23,6 @@ fn public_source_construction_keeps_output_on_the_decoder_value() {
     let ingress_example =
         fs::read_to_string(root.join("examples/http_ingestion_piggy_bank_demo/runner.rs"))
             .expect("read hosted ingress example");
-    // FLOWIP-010t: the flow builds the accounts source from its `[app]` settings.
     let yaml_example =
         fs::read_to_string(root.join("examples/http_ingestion_piggy_bank_demo/flow.rs"))
             .expect("read YAML example");

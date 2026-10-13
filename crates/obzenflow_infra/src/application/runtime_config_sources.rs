@@ -421,7 +421,6 @@ fn admit_file_candidates(
         )?;
     }
 
-    // [journal].
     if let Some(root) = &file.journal.root {
         if root.as_os_str().is_empty() {
             return Err(ConfigError::at(JOURNAL_ROOT_KEY, "must name a directory"));

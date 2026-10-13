@@ -29,7 +29,6 @@ impl MockHnServer {
         self.requests.load(Ordering::SeqCst)
     }
 
-    /// Keep serving for the rest of the runtime's life, and return the endpoint.
     pub fn detach(mut self) -> Url {
         self.task.take();
         self.base_url()
@@ -45,7 +44,6 @@ impl Drop for MockHnServer {
     }
 }
 
-/// Bind a loopback port and serve the fixture from the current runtime.
 pub fn spawn_mock_hn_server() -> Result<MockHnServer> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;

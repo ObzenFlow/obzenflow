@@ -34,11 +34,11 @@ pub enum StageFatalReason {
     /// A replay reached a cursor its recording holds no outcome for; only a
     /// resume finishes that work (FLOWIP-134i B13).
     RecordingEnded,
-    /// A rebuilt effect's identity differs from its recording (FLOWIP-010t B12).
+    /// A rebuilt effect's identity differs from its recording.
     DescriptorMismatch,
-    /// The rebuild performed an effect its recording lacks (FLOWIP-010t B12).
+    /// The rebuild performed an effect its recording lacks.
     MissingRecordedEffect,
-    /// The rebuild skipped an effect its recording holds (FLOWIP-010t B12).
+    /// The rebuild skipped an effect its recording holds.
     UnusedEffectHistory,
     ConfigurationInvariant,
     EffectTargetAssertionMismatch,

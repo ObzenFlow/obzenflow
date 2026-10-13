@@ -11,9 +11,6 @@
 //! cargo run -p obzenflow --example flash_sale_allocation -- \
 //!   --replay-from target/flash-sale-allocation-logs/flows/<flow_id> --verify
 //! ```
-//!
-//! The simulated warehouse comes from `[app.warehouse]` in `obzenflow.toml`.
-//! Its id is binding evidence, so replaying under another id refuses.
 
 mod allocation;
 mod domain;
@@ -225,7 +222,6 @@ mod tests {
         assert_eq!(count::<SoldOut>(&events), 1);
         assert_eq!(count::<CancelIgnored>(&events), 1);
 
-        // A boundary policy's refusal records the effect as rejected.
         let policy_rejections = events
             .iter()
             .filter(|event| event.event_type() == "effect.execution_rejected")
@@ -373,7 +369,6 @@ mod tests {
         }
     }
 
-    /// A config file for the shipped flow naming one warehouse.
     fn warehouse_settings(dir: &Path, id: &str) -> PathBuf {
         let path = dir.join(format!("{id}.toml"));
         std::fs::write(
@@ -409,9 +404,6 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
-    /// FLOWIP-010t criterion 9: the warehouse id is binding evidence, so a
-    /// replay under another id fails the allocator at its first recorded
-    /// effect and calls no warehouse, whatever the handler does.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_changed_warehouse_id_refuses_replay_without_calling_the_warehouse() {
         let temp = tempfile::tempdir().expect("tempdir");

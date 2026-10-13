@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Env-backed secret references (FLOWIP-010 §5, §13; FLOWIP-010t B5).
+//! Env-backed secret references.
 //!
 //! Config carries the reference NAME (visible, non-secret); the resolved
 //! secret value exists only at point of use as a [`SecretString`], which
@@ -52,7 +52,6 @@ impl SecretRef {
     }
 }
 
-/// Rejected text never reaches serde, so no error can echo it.
 impl<'de> Deserialize<'de> for SecretRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct EnvName;
@@ -74,9 +73,8 @@ impl<'de> Deserialize<'de> for SecretRef {
     }
 }
 
-/// POSIX's portable environment-variable names, uppercase only so pasted
-/// `sk_live_…` or `ghp_…` tokens never pass: uppercase letters, digits and
-/// underscores, not starting with a digit.
+/// True when `text` holds only uppercase letters, digits and underscores and
+/// does not start with a digit.
 pub fn is_env_name(text: &str) -> bool {
     let mut chars = text.chars();
     chars
