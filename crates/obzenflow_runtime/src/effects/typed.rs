@@ -219,9 +219,11 @@ where
         self.core.authoring_halt_fatal()
     }
 
-    pub(crate) async fn preflight_settlement_has_no_unused_history(
+    /// The stage failure for a settlement that left recorded history unused
+    /// (FLOWIP-010t B12).
+    pub(crate) async fn settlement_divergence(
         &self,
-    ) -> Result<(), EffectError> {
-        self.core.preflight_next_effect_cursor_is_empty().await
+    ) -> Option<crate::stages::common::handler_error::StageFatal> {
+        self.core.settlement_divergence().await
     }
 }

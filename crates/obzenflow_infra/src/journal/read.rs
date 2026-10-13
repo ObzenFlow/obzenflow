@@ -18,7 +18,10 @@ use std::path::{Component, Path, PathBuf};
 
 mod config_changes;
 mod lineage;
-pub use config_changes::{compare_with_runs, read_config_changes, ConfigChanges, RunConfigChanges};
+pub use config_changes::{
+    compare_with_runs, read_config_changes, read_configuration_refusals,
+    read_logic_version_changes, ConfigChanges, LogicVersionChange, RunConfigChanges,
+};
 pub use lineage::{read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing};
 pub use obzenflow_runtime::runtime_config::ConfigDifference;
 

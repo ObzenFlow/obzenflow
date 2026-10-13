@@ -181,10 +181,18 @@ impl EffectHistory {
                 Ok((cursor, joined))
             })
             .collect::<Result<Vec<_>, EffectError>>()?;
-        Ok(Self::from_cursor_histories(
-            newer.recorded_flow_id.clone(),
-            histories,
-        ))
+        // A run that recorded no effect evidence only names its own flow as a
+        // fallback root; the lineage keeps the root its evidence carries.
+        let recorded_flow_id = if newer.holds_evidence() || !self.holds_evidence() {
+            newer.recorded_flow_id.clone()
+        } else {
+            self.recorded_flow_id.clone()
+        };
+        Ok(Self::from_cursor_histories(recorded_flow_id, histories))
+    }
+
+    fn holds_evidence(&self) -> bool {
+        !(self.index.is_empty() && self.attempts.is_empty() && self.abandonments.is_empty())
     }
 
     /// Index validated cursor histories, as one run's history would be.

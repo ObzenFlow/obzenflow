@@ -2,25 +2,35 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-010t B6: an `[app]` value in an effect's canonical input is part of
-//! that effect's recorded identity. Changing it refuses strict replay and
-//! resume catch-up with a descriptor mismatch and zero live calls; reverting
-//! it resumes the torn run, and the difference report names the key against
-//! the torn run and nothing against the ancestor.
+//! FLOWIP-010t B6, B11, B12: a changed `[app]` value that the recorded history
+//! cannot absorb refuses strict replay and resume, whatever the handler does
+//! with the error. An identity-bearing value refuses with a descriptor
+//! mismatch, a value that adds an effect with a missing recording, and a
+//! changed source path with the source's `input_changed` refusal. Each refusal
+//! reaches the failure footer, and the difference report names the key.
 
 #[path = "../../../tests/replay_testkit/mod.rs"]
 mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::sources::{
+    YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, SourceContinuationRefusal,
+};
 use obzenflow_core::event::{ChainPayload, StageFatalReason};
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, FlowDefinition};
+use obzenflow_dsl::dsl::FlowBuildError;
+use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_infra::journal::read::{open_disk_run, read_config_changes, ConfigChanges};
+use obzenflow_infra::journal::read::{
+    open_disk_run, read_config_changes, read_configuration_refusals, ConfigChanges,
+};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
@@ -37,8 +47,9 @@ use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -70,11 +81,25 @@ impl TypedPayload for Scored {
     const EVENT_TYPE: &'static str = "app_identity.scored";
 }
 
-/// The application's settings; `affinity.threshold` feeds the effect.
+/// The handler's fallback when scoring fails, as `AuthorizationUnavailable`
+/// is the payment gateway's.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Unscored {
+    value: u64,
+}
+
+impl TypedPayload for Unscored {
+    const EVENT_TYPE: &'static str = "app_identity.unscored";
+}
+
+/// The application's settings; `affinity.threshold` feeds the effect, and
+/// `rescore` adds a second effect per reading.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
     affinity: Affinity,
+    #[serde(default)]
+    rescore: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -82,6 +107,18 @@ struct Settings {
 struct Affinity {
     threshold: u64,
 }
+
+/// The `[app]` values one run's config file holds.
+#[derive(Clone, Copy, Debug)]
+struct App {
+    threshold: u64,
+    rescore: bool,
+}
+
+const RECORDED: App = App {
+    threshold: 10,
+    rescore: false,
+};
 
 #[derive(Clone, Debug)]
 struct BoundedReader {
@@ -143,35 +180,63 @@ impl Effect for ScoreEffect {
     }
 }
 
+type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored];
+type ScoreEffects = obzenflow_runtime::effect_set![ScoreEffect];
+
+/// The reading a rescore performs its second effect for.
+const RESCORE_OFFSET: u64 = 1_000;
+
 #[derive(Clone, Debug)]
 struct ScoreTransform {
-    threshold: u64,
+    app: App,
     executed: Executed,
+}
+
+impl ScoreTransform {
+    fn effect(&self, value: u64) -> ScoreEffect {
+        ScoreEffect {
+            value,
+            threshold: self.app.threshold,
+            executed: self.executed.clone(),
+        }
+    }
+
+    async fn score(
+        &self,
+        value: u64,
+        fx: &mut Effects<ScoreOutput, ScoreEffects>,
+    ) -> Result<Score, EffectError> {
+        let score = fx.perform(self.effect(value)).await?;
+        if self.app.rescore {
+            fx.perform(self.effect(value + RESCORE_OFFSET)).await?;
+        }
+        Ok(score)
+    }
 }
 
 #[async_trait]
 impl EffectfulTransformHandler for ScoreTransform {
     type Input = Reading;
-    type Output = obzenflow_core::stage_fact_set![Scored, Score];
-    type AllowedEffects = obzenflow_runtime::effect_set![ScoreEffect];
+    type Output = ScoreOutput;
+    type AllowedEffects = ScoreEffects;
 
     async fn process(
         &self,
         input: Reading,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let score = fx
-            .perform(ScoreEffect {
-                value: input.value,
-                threshold: self.threshold,
-                executed: self.executed.clone(),
-            })
-            .await?;
-        fx.emit(Scored {
-            value: input.value,
-            score: score.score,
-        })
-        .await?;
+        // Every effect failure becomes a fact, as `payment_gateway_resilience`
+        // does; a reconstruction refusal still fails the stage (B11).
+        match self.score(input.value, fx).await {
+            Ok(score) => {
+                fx.emit(Scored {
+                    value: input.value,
+                    score: score.score,
+                })
+                .await?
+            }
+            Err(_) => fx.emit(Unscored { value: input.value }).await?,
+        }
         Ok(fx.complete()?)
     }
 }
@@ -210,10 +275,11 @@ impl Run {
     }
 }
 
-/// A build context whose config file holds `[app.affinity] threshold`.
-fn context(threshold: u64) -> FlowBuildContext {
-    let table =
-        serde_json::Map::from_iter([("affinity".to_string(), json!({ "threshold": threshold }))]);
+/// A build context whose config file holds `table` as `[app]`.
+fn context(table: serde_json::Value) -> FlowBuildContext {
+    let serde_json::Value::Object(table) = table else {
+        panic!("[app] is a table");
+    };
     FlowBuildContext::new(Arc::new(
         ResolvedRuntimeConfig::builtin_defaults().with_app(AppTable::new("obzenflow.toml", table)),
     ))
@@ -223,7 +289,7 @@ async fn build(
     journal_base: &Path,
     first_value: u64,
     count: u64,
-    threshold: u64,
+    app: App,
 ) -> Result<(FlowHandle, Run)> {
     let run = Run::default();
     let (executed, delivered, base) = (
@@ -237,7 +303,10 @@ async fn build(
             remaining: count,
         });
         let score_transform = ScoreTransform {
-            threshold: settings.affinity.threshold,
+            app: App {
+                threshold: settings.affinity.threshold,
+                rescore: settings.rescore,
+            },
             executed,
         };
         let counting_sink = CountingSink { delivered };
@@ -248,7 +317,7 @@ async fn build(
             stages: {
                 src = infinite_source!(Reading => reader);
                 score = effectful_transform!(
-                    Reading -> { Scored, Score } uses ScoreEffect => score_transform);
+                    Reading -> { Scored, Score, Unscored } uses ScoreEffect => score_transform);
                 snk = sink!(Scored => counting_sink);
             },
 
@@ -258,7 +327,10 @@ async fn build(
             }
         })
     })
-    .build(context(threshold))
+    .build(context(json!({
+        "affinity": { "threshold": app.threshold },
+        "rescore": app.rescore,
+    })))
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     Ok((handle, run))
@@ -286,11 +358,11 @@ async fn run_until(
     journal_base: &Path,
     first_value: u64,
     count: u64,
-    threshold: u64,
+    app: App,
     delivered: u64,
     executed: usize,
 ) -> Result<Vec<u64>> {
-    let (handle, run) = build(journal_base, first_value, count, threshold).await?;
+    let (handle, run) = build(journal_base, first_value, count, app).await?;
     wait_for_running(&handle).await?;
     tokio::time::timeout(Duration::from_secs(20), async {
         while run.delivered.load(Ordering::SeqCst) < delivered || run.executed().len() < executed {
@@ -314,17 +386,12 @@ async fn run_until(
 
 /// A run that refuses at its first recorded effect: no live call, no
 /// delivery, and a failed outcome.
-async fn run_refused(
-    journal_base: &Path,
-    first_value: u64,
-    count: u64,
-    threshold: u64,
-) -> Result<()> {
-    let (handle, run) = build(journal_base, first_value, count, threshold).await?;
+async fn run_refused(journal_base: &Path, first_value: u64, count: u64, app: App) -> Result<()> {
+    let (handle, run) = build(journal_base, first_value, count, app).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for the refused run to end"))?;
-    assert!(outcome.is_err(), "a changed effect identity fails the run");
+    assert!(outcome.is_err(), "a changed effect history fails the run");
     assert_eq!(run.executed(), Vec::<u64>::new(), "zero live calls");
     assert_eq!(run.delivered.load(Ordering::SeqCst), 0);
     Ok(())
@@ -355,14 +422,37 @@ async fn stage_fatals(run_dir: &Path) -> Result<Vec<(String, StageFatalReason, S
     Ok(fatals)
 }
 
-async fn assert_refused_by_descriptor_mismatch(run_dir: &Path) -> Result<()> {
+/// The source refusals a run journalled, as `(stage, refusal)`.
+async fn source_refusals(run_dir: &Path) -> Result<Vec<(String, SourceContinuationRefusal)>> {
+    let mut snapshot = open_disk_run(run_dir).await?;
+    let mut refusals = Vec::new();
+    while let Some(record) = snapshot.next().await? {
+        if let (RunRecordData::Chain(row), Some(stage)) = (&record.record, &record.journal.stage) {
+            if let ChainPayload::Execution(ExecutionPayload::SourceContinuationRefused(fact)) =
+                &row.payload
+            {
+                refusals.push((stage.key.clone(), fact.refusal.clone()));
+            }
+        }
+    }
+    Ok(refusals)
+}
+
+/// The `score` stage refused with `reason` and committed no fallback fact;
+/// returns the refusal's detail.
+async fn assert_refused(run_dir: &Path, reason: StageFatalReason) -> Result<String> {
     let fatals = stage_fatals(run_dir).await?;
     assert_eq!(fatals.len(), 1, "{fatals:?}");
-    let (stage, reason, detail) = &fatals[0];
+    let (stage, recorded, detail) = fatals.into_iter().next().unwrap();
     assert_eq!(stage, "score");
-    assert_eq!(*reason, StageFatalReason::ReplayDivergence);
-    assert!(detail.starts_with("effect descriptor mismatch"), "{detail}");
-    Ok(())
+    assert_eq!(recorded, reason);
+    let unscored = replay_testkit::read_stage_envelopes_appended(run_dir, "score")
+        .await
+        .iter()
+        .filter(|record| Unscored::from_event(&record.authored()).is_some())
+        .count();
+    assert_eq!(unscored, 0, "the handler's fallback fact never commits");
+    Ok(detail)
 }
 
 /// The changed keys against each compared run, as `show` reads them.
@@ -382,14 +472,22 @@ fn changed_keys(run_dir: &Path) -> Result<Vec<(PathBuf, Vec<String>)>> {
         .collect())
 }
 
+fn stages(keys: &[&str]) -> BTreeSet<String> {
+    keys.iter().map(|key| key.to_string()).collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -> Result<()> {
     const KEY: &str = "app.affinity.threshold";
+    let changed = App {
+        threshold: 20,
+        ..RECORDED
+    };
 
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     assert_eq!(
-        run_until(&journal_base, 1, 3, 10, 3, 3).await?,
+        run_until(&journal_base, 1, 3, RECORDED, 3, 3).await?,
         [1, 2, 3],
         "the recording performs readings 1 to 3 live"
     );
@@ -400,10 +498,15 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Replay)).await,
         );
-        run_refused(&journal_base, 1, 0, 20).await?;
+        run_refused(&journal_base, 1, 0, changed).await?;
     }
     let replay = replay_testkit::latest_run_dir(&journal_base);
-    assert_refused_by_descriptor_mismatch(&replay).await?;
+    let detail = assert_refused(&replay, StageFatalReason::DescriptorMismatch).await?;
+    assert!(detail.starts_with("effect descriptor mismatch"), "{detail}");
+    assert_eq!(
+        read_configuration_refusals(&replay).await?,
+        stages(&["score"])
+    );
     assert_eq!(
         changed_keys(&replay)?,
         [(r0.clone(), vec![KEY.to_string()])]
@@ -415,10 +518,11 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
         );
-        run_refused(&journal_base, 4, 0, 20).await?;
+        run_refused(&journal_base, 4, 0, changed).await?;
     }
     let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
-    assert_refused_by_descriptor_mismatch(&r1).await?;
+    assert_refused(&r1, StageFatalReason::DescriptorMismatch).await?;
+    assert_eq!(read_configuration_refusals(&r1).await?, stages(&["score"]));
     assert_eq!(changed_keys(&r1)?, [(r0.clone(), vec![KEY.to_string()])]);
 
     // Reverting the value resumes the torn run: it merges the ancestor and
@@ -427,14 +531,212 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(archive(r1.clone(), ReplayVerb::Resume)).await,
         );
-        run_until(&journal_base, 4, 2, 10, 2, 2).await?
+        run_until(&journal_base, 4, 2, RECORDED, 2, 2).await?
     };
     assert_eq!(r2_executed, [4, 5]);
     let r2 = replay_testkit::latest_run_dir(&journal_base);
+    assert_eq!(
+        stage_fatals(&r2).await?,
+        Vec::new(),
+        "catch-up finds every recorded outcome under the lineage root"
+    );
+    assert!(read_configuration_refusals(&r2).await?.is_empty());
     assert_eq!(
         changed_keys(&r2)?,
         [(r1, vec![KEY.to_string()]), (r0, Vec::new())],
         "the key differs from the torn run and from nothing the ancestor recorded"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_value_that_adds_an_effect_refuses_replay_and_resume_catch_up() -> Result<()> {
+    const KEY: &str = "app.rescore";
+    let rescore = App {
+        rescore: true,
+        ..RECORDED
+    };
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    assert_eq!(
+        run_until(&journal_base, 1, 3, RECORDED, 3, 3).await?,
+        [1, 2, 3]
+    );
+    let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+
+    // A stopped recording is complete, so strict replay meets the added effect
+    // as a missing recording.
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Replay)).await,
+        );
+        run_refused(&journal_base, 1, 0, rescore).await?;
+    }
+    let replay = replay_testkit::latest_run_dir(&journal_base);
+    assert_refused(&replay, StageFatalReason::MissingRecordedEffect).await?;
+    assert_eq!(
+        read_configuration_refusals(&replay).await?,
+        stages(&["score"])
+    );
+    assert_eq!(
+        changed_keys(&replay)?,
+        [(r0.clone(), vec![KEY.to_string()])]
+    );
+
+    // Resume catch-up: each recorded reading now performs a second effect its
+    // recording lacks.
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
+        );
+        run_refused(&journal_base, 4, 0, rescore).await?;
+    }
+    let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+    assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
+    assert_eq!(read_configuration_refusals(&r1).await?, stages(&["score"]));
+    assert_eq!(changed_keys(&r1)?, [(r0, vec![KEY.to_string()])]);
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Account {
+    id: u64,
+}
+
+impl TypedPayload for Account {
+    const EVENT_TYPE: &'static str = "app_identity.account";
+}
+
+#[derive(Clone, Debug)]
+struct AccountYaml;
+
+impl YamlDecoder for AccountYaml {
+    type Output = Account;
+
+    fn decode(&self, record: YamlRecord<'_>) -> Result<Account, YamlDecodeError> {
+        record.deserialize()
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AccountsSettings {
+    accounts_file: PathBuf,
+}
+
+const ACCOUNTS: u64 = 8;
+
+fn write_accounts(path: &Path) -> Result<()> {
+    let rows: String = (1..=ACCOUNTS).map(|id| format!("  - id: {id}\n")).collect();
+    std::fs::write(path, format!("accounts:\n{rows}"))?;
+    Ok(())
+}
+
+/// Accounts read one record per poll from the file `[app]` names, paced by a
+/// limiter that admits `burst` records at once and then `rate` a second.
+async fn build_accounts(
+    journal_base: &Path,
+    accounts_file: &Path,
+    rate: f64,
+    burst: f64,
+    delivered: Arc<AtomicUsize>,
+) -> Result<FlowHandle> {
+    let base = journal_base.to_path_buf();
+    FlowDefinition::materialize_with(move |_, settings: AccountsSettings| {
+        let accounts_source = YamlSource::builder(AccountYaml)
+            .path(&settings.accounts_file)
+            .selection(YamlSelection::SequenceAt("/accounts".into()))
+            .batch_size(1)
+            .build()
+            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+        let collect_handler = replay_testkit::CountDeliveries::<Account>::new(delivered);
+        Ok(flow! {
+            name: "app_accounts",
+            journals: disk_journals(base),
+
+            stages: {
+                accounts = source!(Account => accounts_source with {
+                    rate_limit(rate).burst_capacity(burst)
+                });
+                collect = sink!(Account => collect_handler);
+            },
+
+            topology: {
+                accounts |> collect;
+            }
+        })
+    })
+    .build(context(json!({ "accounts_file": accounts_file })))
+    .await
+    .map_err(|e| anyhow!("flow failed to build: {e:?}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_app_path_refuses_an_interrupted_source_and_reaches_the_footer() -> Result<()> {
+    const KEY: &str = "app.accounts_file";
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let recorded_file = temp.path().join("accounts.yaml");
+    let staging_file = temp.path().join("staging_accounts.yaml");
+    write_accounts(&recorded_file)?;
+    write_accounts(&staging_file)?;
+
+    // Stop after the limiter's burst, before the end of the accounts file. The
+    // handle drops with the block, releasing the recording's writers.
+    {
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let handle =
+            build_accounts(&journal_base, &recorded_file, 0.5, 3.0, delivered.clone()).await?;
+        wait_for_running(&handle).await?;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while delivered.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("timeout waiting for 3 accounts"))?;
+        handle.stop_graceful(Duration::from_secs(10)).await?;
+        tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the recording to stop"))??;
+    }
+    let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+
+    // The same records in another file are another input: the interrupted
+    // source refuses to continue it (134i B10).
+    let outcome = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
+        );
+        let handle = build_accounts(
+            &journal_base,
+            &staging_file,
+            0.5,
+            3.0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await?;
+        tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the refused resume to end"))?
+    };
+    assert!(outcome.is_err(), "a changed input refuses the resume");
+    let r1 = replay_testkit::latest_run_dir(&journal_base);
+    assert_eq!(
+        source_refusals(&r1).await?,
+        [(
+            "accounts".to_string(),
+            SourceContinuationRefusal::InputChanged {
+                part: "file".to_string()
+            }
+        )]
+    );
+    assert_eq!(
+        read_configuration_refusals(&r1).await?,
+        stages(&["accounts"])
+    );
+    assert_eq!(changed_keys(&r1)?, [(r0, vec![KEY.to_string()])]);
     Ok(())
 }

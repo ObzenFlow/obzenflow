@@ -1125,18 +1125,13 @@ impl FlowApplication {
                     }
                     _ => err,
                 };
-                // FLOWIP-010t B6: a stage that refused its recorded history
-                // repeats the configuration keys that changed.
-                let changed_configuration = match (
-                    super::config_report::descriptor_mismatch_line(&config_changes),
-                    run_state.as_ref().and_then(|s| s.locator()),
-                ) {
-                    (Some(line), Some(locator))
-                        if super::config_report::refused_by_divergence(locator.path()).await =>
-                    {
-                        Some(line)
+                // FLOWIP-010t B12: a refusal a changed value can cause repeats
+                // what changed since the runs this one rebuilds.
+                let refusal_footer = match run_state.as_ref().and_then(|s| s.locator()) {
+                    Some(locator) if !config_changes.is_empty() => {
+                        super::config_report::refusal_footer(locator.path(), &config_changes).await
                     }
-                    _ => None,
+                    _ => Vec::new(),
                 };
                 if let Some(presentation) = &presentation {
                     let rendered_footer_banner = presentation.render_footer_banner();
@@ -1159,7 +1154,7 @@ impl FlowApplication {
                         }
                     }
                 }
-                if let Some(line) = changed_configuration {
+                for line in refusal_footer {
                     println!("{line}");
                 }
                 Err(err)

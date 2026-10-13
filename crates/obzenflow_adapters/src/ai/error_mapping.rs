@@ -67,9 +67,17 @@ pub fn effect_error_to_handler_error(error: EffectError) -> HandlerError {
             StageFatalReason::RecordingEnded,
             error.to_string(),
         ),
-        error @ (EffectError::MissingRecordedEffect { .. }
-        | EffectError::DuplicateRecordedEffect { .. }
-        | EffectError::DescriptorMismatch { .. }
+        error @ EffectError::DescriptorMismatch { .. } => fatal(
+            StageFatalCode::Replay,
+            StageFatalReason::DescriptorMismatch,
+            error.to_string(),
+        ),
+        error @ EffectError::MissingRecordedEffect { .. } => fatal(
+            StageFatalCode::Replay,
+            StageFatalReason::MissingRecordedEffect,
+            error.to_string(),
+        ),
+        error @ (EffectError::DuplicateRecordedEffect { .. }
         | EffectError::IncompleteOutcomeGroup { .. }) => fatal(
             StageFatalCode::Replay,
             StageFatalReason::ReplayDivergence,

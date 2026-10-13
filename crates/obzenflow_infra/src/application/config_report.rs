@@ -3,15 +3,13 @@
 // https://obzenflow.dev
 
 //! Start-up and failure-footer lines for a replay or resume whose
-//! configuration differs from the runs it rebuilds (FLOWIP-010t B6, B9).
-//! Projections over the manifests' config evidence; they change nothing.
+//! configuration differs from the runs it rebuilds (FLOWIP-010t B6, B9, B12).
+//! Projections over the manifests and journalled refusals; they change nothing.
 
 use crate::journal::read::{
-    compare_with_runs, open_disk_run, ConfigChanges, JournalReadError, RunConfigChanges,
+    compare_with_runs, read_configuration_refusals, read_logic_version_changes, ConfigChanges,
+    LogicVersionChange, RunConfigChanges,
 };
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::{ChainPayload, StageFatalReason};
-use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_runtime::pipeline::FlowHandle;
 use std::path::{Path, PathBuf};
 
@@ -58,48 +56,59 @@ pub(super) fn startup_lines(changes: &[RunConfigChanges]) -> Vec<String> {
         .collect()
 }
 
-/// Whether a stage of the run refused to rebuild its recorded history, as a
-/// changed effect identity does.
-pub(super) async fn refused_by_divergence(run_dir: &Path) -> bool {
-    let divergence = async {
-        let mut snapshot = open_disk_run(run_dir).await?;
-        while let Some(record) = snapshot.next().await? {
-            if let RunRecordData::Chain(row) = &record.record {
-                if let ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) =
-                    &row.payload
-                {
-                    if fatal.reason == StageFatalReason::ReplayDivergence {
-                        return Ok(true);
-                    }
-                }
-            }
+/// The failure footer after a refusal a changed configuration value can cause
+/// (FLOWIP-010t B12); empty after any other failure.
+pub(super) async fn refusal_footer(run_dir: &Path, changes: &[RunConfigChanges]) -> Vec<String> {
+    let refused = match read_configuration_refusals(run_dir).await {
+        Ok(refused) => refused,
+        Err(error) => {
+            tracing::warn!(
+                run = %run_dir.display(),
+                %error,
+                "could not read the failed run's refusals"
+            );
+            return Vec::new();
         }
-        Ok::<_, JournalReadError>(false)
     };
-    divergence.await.unwrap_or_else(|error| {
-        tracing::warn!(
-            run = %run_dir.display(),
-            %error,
-            "could not read the failed run's stage-fatal facts"
-        );
-        false
-    })
+    if refused.is_empty() {
+        return Vec::new();
+    }
+    let runs: Vec<PathBuf> = changes
+        .iter()
+        .map(|compared| compared.run.clone())
+        .collect();
+    footer_lines(
+        changes,
+        &read_logic_version_changes(run_dir, &runs, &refused),
+    )
 }
 
-/// The keys to revert after a stage refused a changed effect identity.
-pub(super) fn descriptor_mismatch_line(changes: &[RunConfigChanges]) -> Option<String> {
+/// The changed keys, then each refused stage whose logic version changed.
+fn footer_lines(changes: &[RunConfigChanges], logic: &[LogicVersionChange]) -> Vec<String> {
     let mut keys: Vec<&str> = changes
         .iter()
         .flat_map(|compared| compared.changes.keys())
         .collect();
     keys.sort_unstable();
     keys.dedup();
-    (!keys.is_empty()).then(|| {
+    let changed_keys = (!keys.is_empty()).then(|| {
         format!(
             "The recorded run used different configuration for: {}",
             keys.join(", ")
         )
-    })
+    });
+    changed_keys
+        .into_iter()
+        .chain(logic.iter().map(|change| {
+            format!(
+                "Stage '{}' changed its logic version since {}: {} -> {}",
+                change.stage,
+                change.run.display(),
+                change.recorded,
+                change.current
+            )
+        }))
+        .collect()
 }
 
 #[cfg(test)]
@@ -141,10 +150,32 @@ mod tests {
                 "Configuration of /runs/old was not recorded",
             ]
         );
+    }
+
+    #[test]
+    fn the_footer_names_changed_keys_then_changed_logic_versions() {
+        let changes = [
+            changed("/runs/torn", &["app.mode", "app.affinity.threshold"]),
+            changed("/runs/root", &["app.mode"]),
+        ];
+        let logic = [LogicVersionChange {
+            run: PathBuf::from("/runs/root"),
+            stage: "score".to_string(),
+            recorded: "scorer-v1".to_string(),
+            current: "scorer-v2".to_string(),
+        }];
         assert_eq!(
-            descriptor_mismatch_line(&changes).unwrap(),
-            "The recorded run used different configuration for: app.affinity.threshold, app.mode"
+            footer_lines(&changes, &logic),
+            [
+                "The recorded run used different configuration for: app.affinity.threshold, app.mode",
+                "Stage 'score' changed its logic version since /runs/root: scorer-v1 -> scorer-v2",
+            ]
         );
-        assert_eq!(descriptor_mismatch_line(&[changed("/runs/r", &[])]), None);
+        assert_eq!(
+            footer_lines(&[changed("/runs/r", &[])], &logic),
+            ["Stage 'score' changed its logic version since /runs/root: scorer-v1 -> scorer-v2"],
+            "a code change alone names no configuration"
+        );
+        assert!(footer_lines(&[changed("/runs/r", &[])], &[]).is_empty());
     }
 }
