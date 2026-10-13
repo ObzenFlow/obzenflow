@@ -137,10 +137,11 @@ impl CycleGuard {
             | FlowControlPayload::ConsumptionFinal { .. }
             | FlowControlPayload::ProductionFinal { .. }
             | FlowControlPayload::ReaderStalled { .. }
-            | FlowControlPayload::AtLeastOnceViolation { .. } => {
+            | FlowControlPayload::AtLeastOnceViolation { .. }
+            | FlowControlPayload::InputSelection { .. } => {
                 unreachable!(
-                    "FLOWIP-095d: reader telemetry is filtered at the read side of every \
-                     TransportOnly subscription and never reaches signal forwarding"
+                    "FLOWIP-095d: reader telemetry and decision rows are filtered at the read \
+                     side of every TransportOnly subscription and never reach signal forwarding"
                 )
             }
             FlowControlPayload::CatchUpComplete { .. } => {

@@ -311,7 +311,7 @@ async fn observation_archive() -> ObservationArchive {
                     data_journal_file: file.into(),
                     error_journal_file: format!("{name}-error.log"),
                     inbound: vec![],
-                    ordered_delivery: true,
+                    delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
                 },
             )
         })

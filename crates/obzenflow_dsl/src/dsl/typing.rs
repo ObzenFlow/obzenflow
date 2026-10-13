@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
@@ -2736,61 +2737,115 @@ pub fn derive_deterministic_fan_in_stages(
     marked
 }
 
-/// FLOWIP-120n F18: ordered fan-ins whose every forward inbound edge comes
-/// from a source stage. Their inputs are re-admitted verbatim on replay, so
-/// the recorded `admission_seq` is a stable within-generation comparator and
-/// the merge needs no Kahn wait. Derived-fed ordered fan-ins stay Kahn: their
-/// inputs are re-authored on replay with fresh sequences.
-pub fn derive_seq_ordered_fan_ins(
+/// Each stage's delivery order, decided once at flow build.
+///
+/// A marked fan-in records its order when an infinite source is among its
+/// roots and keeps the canonical merge otherwise. A hydrating join is
+/// structural with one stream reader, unordered when unmarked, and otherwise
+/// classified by its stream inputs' roots. Cycle members are unordered.
+///
+/// Takes descriptors before `wrap_deterministic_orderers` wraps them.
+pub fn derive_delivery_orders(
     topology: &Topology,
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
     deterministic_fan_in_stages: &HashSet<StageId>,
-) -> HashSet<StageId> {
+) -> HashMap<StageId, DeliveryOrder> {
     let mut inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
     for edge in topology.edges() {
         if edge.kind != EdgeKind::Forward {
             continue;
         }
-        inbound
+        let upstreams = inbound
             .entry(StageId::from_ulid(edge.to.ulid()))
-            .or_default()
-            .push(StageId::from_ulid(edge.from.ulid()));
+            .or_default();
+        let upstream = StageId::from_ulid(edge.from.ulid());
+        if !upstreams.contains(&upstream) {
+            upstreams.push(upstream);
+        }
     }
-
-    deterministic_fan_in_stages
+    let live_roots: HashSet<StageId> = descriptors
         .iter()
-        .copied()
-        .filter(|fan_in| {
-            inbound.get(fan_in).is_some_and(|upstreams| {
-                !upstreams.is_empty()
-                    && upstreams
-                        .iter()
-                        .all(|upstream| inbound.get(upstream).is_none_or(|edges| edges.is_empty()))
-            })
-        })
-        .collect()
+        .filter(|(_, descriptor)| descriptor.stage_type() == StageType::InfiniteSource)
+        .filter_map(|(name, _)| name_to_id.get(name).copied())
+        .collect();
+    let mut live_memo: HashMap<StageId, bool> = HashMap::new();
+
+    let mut orders = HashMap::new();
+    for (name, descriptor) in descriptors {
+        let Some(&stage_id) = name_to_id.get(name) else {
+            continue;
+        };
+        let upstreams = inbound.get(&stage_id).cloned().unwrap_or_default();
+        let marked = deterministic_fan_in_stages.contains(&stage_id);
+        let hydrating_join = descriptor.stage_type() == StageType::Join
+            && descriptor.is_deterministic_input_orderer();
+        let merged: Vec<StageId> = if hydrating_join {
+            let reference = descriptor.reference_stage_id();
+            upstreams
+                .iter()
+                .copied()
+                .filter(|upstream| Some(*upstream) != reference)
+                .collect()
+        } else {
+            upstreams
+        };
+        let order = if topology.is_in_cycle(stage_id.to_topology_id()) {
+            DeliveryOrder::Unordered
+        } else if merged.len() <= 1 {
+            if hydrating_join {
+                DeliveryOrder::Structural
+            } else {
+                DeliveryOrder::SingleInput
+            }
+        } else if !marked {
+            DeliveryOrder::Unordered
+        } else if merged
+            .iter()
+            .any(|upstream| has_live_root(*upstream, &inbound, &live_roots, &mut live_memo))
+        {
+            DeliveryOrder::Recorded
+        } else {
+            DeliveryOrder::Canonical
+        };
+        orders.insert(stage_id, order);
+    }
+    orders
+}
+
+fn has_live_root(
+    stage: StageId,
+    inbound: &HashMap<StageId, Vec<StageId>>,
+    live_roots: &HashSet<StageId>,
+    memo: &mut HashMap<StageId, bool>,
+) -> bool {
+    if let Some(known) = memo.get(&stage) {
+        return *known;
+    }
+    memo.insert(stage, false);
+    let live = live_roots.contains(&stage)
+        || inbound.get(&stage).is_some_and(|upstreams| {
+            upstreams
+                .iter()
+                .any(|upstream| has_live_root(*upstream, inbound, live_roots, memo))
+        });
+    memo.insert(stage, live);
+    live
 }
 
 /// FLOWIP-095j: per-stage delivery metadata recorded in the run manifest.
 ///
 /// For each stage: the upstream stage keys delivering into it over forward
-/// edges (sorted, deduplicated), and whether its input delivery order is
-/// deterministic. A stage delivers deterministically when it has at most one
-/// forward inbound edge and is outside any cycle, or when its descriptor
-/// reports `is_deterministic_input_orderer()` (an FLOWIP-095d marked fan-in,
-/// already wrapped by `wrap_deterministic_orderers` when this runs, or a
-/// structural orderer such as the hydrating join). Cycle members are always
-/// non-deterministic: backflow arrivals interleave by timing, and the 095d
-/// merge is never enabled on a cycle edge.
-///
-/// Called after `wrap_deterministic_orderers` so the descriptor answer is the
-/// same one the runtime acts on. The verifier (FLOWIP-095j) computes
+/// edges (sorted, deduplicated), and its delivery order from
+/// [`derive_delivery_orders`]. The verifier computes
 /// order-certification as the transitive closure over these recorded fields,
 /// never by re-deriving from a topology it does not have.
 pub fn derive_manifest_delivery_metadata(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
-) -> HashMap<StageId, (Vec<String>, bool)> {
+    delivery_orders: &HashMap<StageId, DeliveryOrder>,
+) -> HashMap<StageId, (Vec<String>, DeliveryOrder)> {
     let mut id_to_stage_key: HashMap<StageId, String> = HashMap::new();
     for (dsl_name, stage_id) in name_to_id {
         if let Some(descriptor) = descriptors.get(dsl_name.as_str()) {
@@ -2811,9 +2866,9 @@ pub fn derive_manifest_delivery_metadata(
 
     let mut metadata = HashMap::new();
     for (dsl_name, stage_id) in name_to_id {
-        let Some(descriptor) = descriptors.get(dsl_name.as_str()) else {
+        if !descriptors.contains_key(dsl_name.as_str()) {
             continue;
-        };
+        }
         let mut inbound: Vec<String> = inbound_ids
             .get(stage_id)
             .map(|ups| {
@@ -2825,12 +2880,11 @@ pub fn derive_manifest_delivery_metadata(
         inbound.sort();
         inbound.dedup();
 
-        let ordered_delivery = if topology.is_in_cycle(stage_id.to_topology_id()) {
-            false
-        } else {
-            inbound.len() <= 1 || descriptor.is_deterministic_input_orderer()
-        };
-        metadata.insert(*stage_id, (inbound, ordered_delivery));
+        let delivery_order = delivery_orders
+            .get(stage_id)
+            .copied()
+            .unwrap_or(DeliveryOrder::Unordered);
+        metadata.insert(*stage_id, (inbound, delivery_order));
     }
     metadata
 }

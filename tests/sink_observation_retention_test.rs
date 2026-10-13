@@ -17,6 +17,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, ExecutionPayload, StageLifecycleFact,
 };
+use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, StageFatalCode, StageFatalRecorded, SystemEvent,
     SystemPayload,
@@ -562,13 +563,12 @@ async fn policy_evidence_is_runtime_stamped_parented_and_reported_in_place() {
     assert_eq!(observations.load(Ordering::SeqCst), 2);
 
     let source = read_stage(&run, "input", "data_journal_file").await;
-    let inputs = source
+    let input_records = source
         .iter()
         .filter(|envelope| RetainedInput::from_event(&envelope.authored()).is_some())
-        .map(|envelope| envelope.authored())
         .collect::<Vec<_>>();
     let sink = read_stage(&run, "output", "data_journal_file").await;
-    let evidence = sink
+    let evidence_records = sink
         .iter()
         .filter(|envelope| {
             matches!(
@@ -578,10 +578,17 @@ async fn policy_evidence_is_runtime_stamped_parented_and_reported_in_place() {
                 ))
             )
         })
-        .map(|envelope| envelope.authored())
         .collect::<Vec<_>>();
-    assert_eq!(evidence.len(), 2);
-    for (input, evidence) in inputs.iter().zip(&evidence) {
+    assert_eq!(evidence_records.len(), 2);
+    for (input_record, evidence_record) in input_records.iter().zip(&evidence_records) {
+        assert!(
+            CausalOrderingService::happened_before(
+                &input_record.envelope.provenance.journal.vector_clock,
+                &evidence_record.envelope.provenance.journal.vector_clock,
+            ),
+            "the input happens before the evidence it caused"
+        );
+        let (input, evidence) = (&input_record.authored(), &evidence_record.authored());
         assert_ne!(evidence.id, input.id);
         assert_eq!(parent(evidence), Some(input.id));
         assert_eq!(evidence.flow_context.stage_name, "output");
@@ -600,7 +607,6 @@ async fn policy_evidence_is_runtime_stamped_parented_and_reported_in_place() {
         assert!(evidence.replay_context.is_none());
         assert!(evidence.ingress_context.is_none());
         assert!(evidence.effect_provenance.is_none());
-        assert!(input.admission_seq < evidence.admission_seq);
     }
 
     let reports = sink
@@ -619,7 +625,10 @@ async fn policy_evidence_is_runtime_stamped_parented_and_reported_in_place() {
             .iter()
             .map(|report| *report.id())
             .collect::<Vec<_>>(),
-        evidence.iter().map(|event| event.id).collect::<Vec<_>>()
+        evidence_records
+            .iter()
+            .map(|record| *record.id())
+            .collect::<Vec<_>>()
     );
     assert!(
         read_system(&run)

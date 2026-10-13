@@ -60,6 +60,7 @@ event_names! {
         CONSUMPTION_FINALIZED => "consumption_finalized",
         STALL_DETECTED => "stall_detected",
         AT_LEAST_ONCE_VIOLATED => "at_least_once_violated",
+        INPUT_SELECTED => "input_selected",
     },
     contract => "contract" {
         CONTINUATION_ALLOWED => "continuation_allowed",

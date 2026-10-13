@@ -218,7 +218,7 @@ mod tests {
                 data_journal_file: String::new(),
                 error_journal_file: String::new(),
                 inbound: Vec::new(),
-                ordered_delivery: true,
+                delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
             },
         )
     }

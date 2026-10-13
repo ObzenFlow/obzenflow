@@ -7,8 +7,8 @@ use super::types::{
 };
 use super::{
     CompositeEntrySpec, ContractTracker, ContractsWiring, DeliveredCount, DeliveryFilter,
-    FeedContractChain, FeedIdentity, ReaderSlot, ReaderTiebreakKey, SelectedFeedMetadata, StageKey,
-    SubscriptionState, UpstreamSubscription,
+    FeedContractChain, FeedIdentity, ReaderSlot, ReaderTiebreakKey, RecordedOrder,
+    SelectedFeedMetadata, StageKey, SubscriptionState, UpstreamSubscription,
 };
 use crate::contracts::ContractChain;
 use crate::control_plane::NoControlPlane;
@@ -195,7 +195,6 @@ where
             held_heads: readers.iter().map(|_| None).collect(),
             delivered_count_by_reader: vec![DeliveredCount::default(); readers.len()],
             generation_by_reader: vec![obzenflow_core::ReaderGeneration::default(); readers.len()],
-            last_positional_seq: vec![obzenflow_core::AdmissionSeq(0); readers.len()],
             last_delivered_generation: None,
             reader_tiebreak_keys,
             readers,
@@ -215,7 +214,8 @@ where
             next_stage_input_position: 1,
             last_delivered_stage_input_position: None,
             reader_selection: ReaderSelectionPolicy::default(),
-            seq_ordered: false,
+            recorded: None,
+            selection_base: 0,
             entered_generation: obzenflow_core::ReaderGeneration::default(),
             last_merge_wait: None,
             merge_candidate_index: None,
@@ -248,17 +248,17 @@ where
         self
     }
 
-    /// FLOWIP-120n F18: run the seq-ordered merge. Only meaningful under
-    /// `CanonicalMerge`; the flow build sets both together on marked
-    /// source-fed ordered fan-ins.
-    pub fn with_seq_ordered(mut self, seq_ordered: bool) -> Self {
-        self.seq_ordered = seq_ordered;
-        self
+    /// Record this ordered fan-in's selections in the stage journal its
+    /// contracts write to. Implies `CanonicalMerge`.
+    pub fn with_recorded_order(self, order: RecordedOrder) -> Self {
+        let mut subscription = self.with_reader_selection(ReaderSelectionPolicy::CanonicalMerge);
+        subscription.recorded = Some(order);
+        subscription
     }
 
-    /// The generation this run entered at (FLOWIP-120n F18): 0 live, archive
-    /// max recorded generation + 1 on replay/resume. Gates the seq-mode
-    /// quiet-input wait exemption per reader.
+    /// The generation this run entered at, 0 live and the archive's maximum
+    /// recorded generation plus one on replay or resume. A recorded fan-in
+    /// waits on a reader below it.
     pub fn with_entered_generation(mut self, entered: obzenflow_core::ReaderGeneration) -> Self {
         self.entered_generation = entered;
         self

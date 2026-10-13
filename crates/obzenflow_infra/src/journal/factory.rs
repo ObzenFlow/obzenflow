@@ -7,7 +7,6 @@
 //! No more two-level closures. Just a simple factory that works.
 
 use obzenflow_core::journal::archive::manifest::{RunManifest, RUN_MANIFEST_FILENAME};
-use obzenflow_core::journal::archive::ReplayArchive;
 use obzenflow_core::journal::factory::{
     CurrentRunLocator, FlowJournalFactory, RunResourcePlan, RunSubstrateState,
 };
@@ -24,7 +23,6 @@ use obzenflow_runtime::runtime_resource_limits::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::disk::DiskJournal;
@@ -37,10 +35,6 @@ pub struct DiskJournalFactory {
     // Cache journals so all consumers share the same instance (and shared locks)
     chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
     system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
-    /// Flow-global admission sequencer (FLOWIP-120n F18): one per run, shared
-    /// by every data/error journal; system journals skip it (system rows are
-    /// never merge inputs). Seeded above the archive maximum on replay/resume.
-    admission_sequencer: Arc<AtomicU64>,
 }
 
 impl DiskJournalFactory {
@@ -57,7 +51,6 @@ impl DiskJournalFactory {
             flow_id,
             chain_journals: HashMap::new(),
             system_journals: HashMap::new(),
-            admission_sequencer: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -84,10 +77,11 @@ impl DiskJournalFactory {
             })?;
         }
 
-        let journal = Arc::new(
-            DiskJournal::<ChainEvent>::with_owner_in_run(journal_path, owner, self.flow_id)?
-                .with_admission_sequencer(self.admission_sequencer.clone()),
-        );
+        let journal = Arc::new(DiskJournal::<ChainEvent>::with_owner_in_run(
+            journal_path,
+            owner,
+            self.flow_id,
+        )?);
         self.chain_journals.insert(name, journal.clone());
         Ok(journal)
     }
@@ -153,8 +147,6 @@ pub struct MemoryJournalFactory {
     // Keep created journals so we can return the same instance for the same name
     chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
     system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
-    /// Flow-global admission sequencer (FLOWIP-120n F18); see `DiskJournalFactory`.
-    admission_sequencer: Arc<AtomicU64>,
 }
 
 impl MemoryJournalFactory {
@@ -163,7 +155,6 @@ impl MemoryJournalFactory {
             flow_id,
             chain_journals: HashMap::new(),
             system_journals: HashMap::new(),
-            admission_sequencer: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -172,15 +163,14 @@ impl MemoryJournalFactory {
         name: JournalName,
         owner: JournalOwner,
     ) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
-        let sequencer = self.admission_sequencer.clone();
         Ok(self
             .chain_journals
             .entry(name)
             .or_insert_with(|| {
-                Arc::new(
-                    MemoryJournal::<ChainEvent>::with_owner_in_run(owner, self.flow_id)
-                        .with_admission_sequencer(sequencer),
-                )
+                Arc::new(MemoryJournal::<ChainEvent>::with_owner_in_run(
+                    owner,
+                    self.flow_id,
+                ))
             })
             .clone())
     }
@@ -201,18 +191,6 @@ impl MemoryJournalFactory {
             })
             .clone())
     }
-}
-
-/// Seed the flow sequencer above the archive's recorded maximum (FLOWIP-120n
-/// F18) so this run's stamps order after every re-admitted sequence. Runs at
-/// flow build, before any stage appends.
-fn seed_admission_sequencer(sequencer: &AtomicU64, archive: &dyn ReplayArchive) {
-    let seed = archive.max_recorded_admission_seq().0 + 1;
-    sequencer.store(seed, Ordering::SeqCst);
-    tracing::debug!(
-        seed,
-        "seeded flow admission sequencer above the archive maximum (FLOWIP-120n F18)"
-    );
 }
 
 /// Disk journals under `base_path`, or under the operator's `journal.root`
@@ -308,10 +286,6 @@ impl FlowJournalFactory for DiskJournalFactory {
     fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
         DiskJournalFactory::write_run_manifest(self, manifest)
     }
-
-    fn seed_admission_from_archive(&self, archive: &dyn ReplayArchive) {
-        seed_admission_sequencer(&self.admission_sequencer, archive);
-    }
 }
 
 impl FlowJournalFactory for MemoryJournalFactory {
@@ -337,8 +311,4 @@ impl FlowJournalFactory for MemoryJournalFactory {
 
     // resource_preflight and write_run_manifest inherit the accepting defaults:
     // an ephemeral run has no location and no provider-specific resource shape.
-
-    fn seed_admission_from_archive(&self, archive: &dyn ReplayArchive) {
-        seed_admission_sequencer(&self.admission_sequencer, archive);
-    }
 }

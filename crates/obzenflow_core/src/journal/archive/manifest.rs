@@ -17,7 +17,7 @@ pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 /// One version for the journal records, physical frames, and run manifest.
 /// Breaking any of these contracts requires a bump here and fresh archives.
 /// Framework package versions are provenance only, never archive admission gates.
-pub const JOURNAL_SCHEMA_VERSION: &str = "19.0";
+pub const JOURNAL_SCHEMA_VERSION: &str = "20.0";
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
@@ -110,12 +110,35 @@ pub struct RunManifestStage {
     pub data_journal_file: String,
     pub error_journal_file: String,
     /// FLOWIP-095j: upstream stage keys delivering into this stage over forward
-    /// edges, sorted and deduplicated. Together with `ordered_delivery` this makes
+    /// edges, sorted and deduplicated. Together with `delivery_order` this makes
     /// the archive self-describing for order-certification at verify time.
     pub inbound: Vec<String>,
-    /// FLOWIP-095j: whether this stage's input delivery order is deterministic
-    /// (zero or one inbound edge outside a cycle, an FLOWIP-095d marked fan-in,
-    /// or a structural orderer such as the hydrating join). Cycle members are
-    /// always false; backflow arrivals interleave by timing.
-    pub ordered_delivery: bool,
+    /// How this stage's input order is fixed, written once at flow build.
+    pub delivery_order: DeliveryOrder,
+}
+
+/// How a stage's input delivery order is fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryOrder {
+    /// Several inputs with no order guarantee, such as cycle members.
+    Unordered,
+    /// Zero or one inbound edge, so the stage inherits its upstream's order.
+    SingleInput,
+    /// The stage's structure fixes the order, as in a hydrating join with one
+    /// stream reader.
+    Structural,
+    /// An ordered fan-in whose roots are all finite; the canonical merge gives
+    /// the same order in every run.
+    Canonical,
+    /// An ordered fan-in with a live root; its order is chosen at run time and
+    /// written as decision rows.
+    Recorded,
+}
+
+impl DeliveryOrder {
+    /// Whether independent runs over the same inputs deliver in the same order.
+    pub const fn agrees_across_runs(self) -> bool {
+        matches!(self, Self::SingleInput | Self::Structural | Self::Canonical)
+    }
 }

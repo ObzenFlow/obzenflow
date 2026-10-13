@@ -6,7 +6,7 @@ use super::ChainEvent;
 use crate::event::envelope::AuthoredEnvelope;
 use crate::event::journal_event::{JournalEvent, Sealed};
 use crate::event::provenance::ChainEventProvenance;
-use crate::event::types::{AdmissionSeq, EventId, WriterId};
+use crate::event::types::{EventId, WriterId};
 use crate::event::ChainPayload;
 
 impl Sealed for ChainEvent {}
@@ -29,14 +29,6 @@ impl JournalEvent for ChainEvent {
 
     fn writer_id(&self) -> &WriterId {
         &self.writer_id
-    }
-
-    fn admission_seq(&self) -> Option<AdmissionSeq> {
-        self.admission_seq
-    }
-
-    fn set_admission_seq(&mut self, seq: AdmissionSeq) {
-        self.admission_seq = Some(seq);
     }
 
     fn event_type_name(&self) -> &str {

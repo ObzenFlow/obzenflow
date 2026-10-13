@@ -46,6 +46,14 @@ pub(super) fn ensure_subscriptions<
     if sup.stream_subscription.is_none() {
         sup.stream_subscription = ctx.stream_subscription.take();
     }
+    if let (Some(reference), Some(stream)) = (
+        sup.reference_subscription.as_ref(),
+        sup.stream_subscription.as_mut(),
+    ) {
+        if stream.records_order() {
+            stream.set_selection_base(reference.delivered_total());
+        }
+    }
 }
 
 /// FLOWIP-120n: the join's catch-up flip for `target`. The flip requires BOTH

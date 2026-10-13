@@ -157,7 +157,7 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
             "dsl_var": stage.key, "stage_type": stage.stage_type, "is_effectful": false,
             "stage_id": stage.id.to_string(), "stage_logic_version": "1",
             "data_journal_file": "thermometer.log", "error_journal_file": "thermometer.errors.log",
-            "inbound": [], "ordered_delivery": true
+            "inbound": [], "delivery_order": "single_input"
         }}
     }))
     .unwrap();
@@ -269,7 +269,7 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
                     "data_journal_file": format!("{}.log", stage.key),
                     "error_journal_file": format!("{}.errors.log", stage.key),
                     "inbound": if stage.key == "classify" { vec!["thermometer"] } else { vec![] },
-                    "ordered_delivery": true
+                    "delivery_order": "single_input"
                 }),
             )
         })

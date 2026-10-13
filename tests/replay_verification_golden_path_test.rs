@@ -489,7 +489,7 @@ async fn replay_verification_certifies_the_reconstruction_and_replay_closure() {
         .expect("verification should run");
     let report = assert_certified_match(&outcome);
 
-    assert_eq!(report.report_version, 1);
+    assert_eq!(report.report_version, 2);
     assert_eq!(report.mode, "whole_run");
     assert_eq!(
         report.identity_mode, "lineage",

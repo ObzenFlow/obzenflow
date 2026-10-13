@@ -293,6 +293,28 @@ pub enum FlowControlPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         advertised_writer_seq: Option<SeqNo>,
     },
+
+    /// A recorded fan-in's choice of input, appended to its own journal before
+    /// the first delivery of each selection. Downstream readers never deliver it.
+    #[serde(rename = "input_selection")]
+    InputSelection {
+        input: SelectedInput,
+        /// The fan-in's delivered count before the selection, which is also the
+        /// position of its first delivery.
+        delivered_count: Count,
+        /// The input's delivered count before the selection.
+        input_delivered_count: Count,
+    },
+}
+
+/// The input a recorded fan-in selected, named by the upstream's stable stage
+/// key and, for a reader filtered to selected feeds, those feeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedInput {
+    pub stage_key: StageKey,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feed: Vec<crate::contracts::SubscriptionFeed>,
 }
 
 impl FlowControlPayload {
@@ -311,6 +333,7 @@ impl FlowControlPayload {
             Self::ConsumptionFinal { .. } => vocabulary::subscription::CONSUMPTION_FINALIZED,
             Self::ReaderStalled { .. } => vocabulary::subscription::STALL_DETECTED,
             Self::AtLeastOnceViolation { .. } => vocabulary::subscription::AT_LEAST_ONCE_VIOLATED,
+            Self::InputSelection { .. } => vocabulary::subscription::INPUT_SELECTED,
         }
     }
 
@@ -341,7 +364,8 @@ impl FlowControlPayload {
     ///
     /// `SourceContract` is behavioural: it is emitted exactly once,
     /// deterministically, at source startup and is consumed by downstream
-    /// contract chains.
+    /// contract chains. `InputSelection` stays in the writing stage's journal,
+    /// like the reports.
     ///
     /// Deliberately an exhaustive match with no wildcard arm: adding a new
     /// variant must force a lane decision here.
@@ -352,7 +376,8 @@ impl FlowControlPayload {
             | Self::ConsumptionFinal { .. }
             | Self::ProductionFinal { .. }
             | Self::ReaderStalled { .. }
-            | Self::AtLeastOnceViolation { .. } => true,
+            | Self::AtLeastOnceViolation { .. }
+            | Self::InputSelection { .. } => true,
             Self::Eof { .. }
             | Self::Watermark { .. }
             | Self::CatchUpComplete { .. }

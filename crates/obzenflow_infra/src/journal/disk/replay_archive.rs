@@ -42,9 +42,6 @@ pub struct DiskReplayArchive {
     /// Max generation with a recorded catch-up boundary in any source journal
     /// (FLOWIP-120n), scanned once at open. See [`scan_source_journals`].
     max_recorded_generation: obzenflow_core::ReaderGeneration,
-    /// Max recorded admission sequence in any source journal (FLOWIP-120n
-    /// F18), from the same scan. Seeds the resuming run's flow sequencer.
-    max_recorded_admission_seq: obzenflow_core::AdmissionSeq,
     /// Each source journal's committed EOF kind (FLOWIP-134i B8), from the
     /// same scan; under a merged lineage, the kind ending its merged records.
     recorded_source_eof: HashMap<String, EofKind>,
@@ -236,7 +233,6 @@ impl DiskReplayArchive {
             allow_incomplete_archive,
             read_write_lock: Arc::new(RwLock::new(())),
             max_recorded_generation: scan.max_generation,
-            max_recorded_admission_seq: scan.max_admission_seq,
             recorded_source_eof: scan.eof_by_source,
             recorded_frontier: scan.frontier_by_source,
             replayable_by_source: scan.replayable_by_source,
@@ -382,9 +378,6 @@ impl DiskReplayArchive {
             self.max_recorded_generation = self
                 .max_recorded_generation
                 .max(ancestor.max_recorded_generation);
-            self.max_recorded_admission_seq = self
-                .max_recorded_admission_seq
-                .max(ancestor.max_recorded_admission_seq);
         }
         self.ancestors = ancestors;
         Ok(())
@@ -630,18 +623,11 @@ impl ReplayArchive for DiskReplayArchive {
     fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {
         self.max_recorded_generation
     }
-
-    /// Max recorded admission sequence across the source journals (FLOWIP-120n
-    /// F18), 0 when there are no recorded source admissions. From the same open-time scan.
-    fn max_recorded_admission_seq(&self) -> obzenflow_core::AdmissionSeq {
-        self.max_recorded_admission_seq
-    }
 }
 
 /// What one open-time scan of the archive's source journals recorded.
 struct SourceJournalScan {
     max_generation: obzenflow_core::ReaderGeneration,
-    max_admission_seq: obzenflow_core::AdmissionSeq,
     /// Each source's committed EOF kind, by stage key (FLOWIP-134i B8).
     eof_by_source: HashMap<String, EofKind>,
     /// Each source's count of records a replay re-admits or preserves.
@@ -769,16 +755,6 @@ impl ReplayableIds {
     }
 }
 
-/// Scan the archive's source journals once for the max recorded generation
-/// and admission sequence, `0` each when none exists (FLOWIP-120n), and each
-/// source's committed EOF kind (FLOWIP-134i B8).
-/// The scan is the authority for the resume generation: a torn catch-up
-/// (interrupted before a source authored its watermark) leaves the manifest's
-/// entered generation with no recorded boundary, and entering past it would
-/// trip the downstream F11 exactly-one advance check. The admission-seq
-/// maximum (F18) seeds the resuming run's flow sequencer above every
-/// re-admitted sequence. Cost: one sequential read per source journal at
-/// bootstrap, journals resume re-reads anyway.
 fn scan_source_journals(
     archive_path: &Path,
     manifest: &RunManifest,
@@ -790,7 +766,6 @@ fn scan_source_journals(
     use obzenflow_core::event::chain_event::ReplayDisposition;
 
     let mut max_generation = 0u64;
-    let mut max_admission_seq = 0u64;
     let mut eof_by_source = HashMap::new();
     let mut replayable_by_source = HashMap::new();
     let mut frontier_by_source = HashMap::new();
@@ -856,9 +831,6 @@ fn scan_source_journals(
                                 eof_by_source.insert(stage_key.clone(), kind);
                             }
                         }
-                        if let Some(seq) = record.envelope.provenance.event.admission_seq {
-                            max_admission_seq = max_admission_seq.max(seq.0);
-                        }
                     }
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
@@ -886,7 +858,6 @@ fn scan_source_journals(
     }
     Ok(SourceJournalScan {
         max_generation: obzenflow_core::ReaderGeneration(max_generation),
-        max_admission_seq: obzenflow_core::AdmissionSeq(max_admission_seq),
         eof_by_source,
         replayable_by_source,
         frontier_by_source,

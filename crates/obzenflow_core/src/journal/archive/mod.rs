@@ -29,7 +29,7 @@ pub struct StatusDerivation {
 pub mod manifest;
 pub mod replay;
 pub use manifest::{
-    RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_SCHEMA_VERSION,
+    DeliveryOrder, RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_SCHEMA_VERSION,
     RUN_MANIFEST_FILENAME,
 };
 pub use replay::{ReplayArchive, ReplayError};

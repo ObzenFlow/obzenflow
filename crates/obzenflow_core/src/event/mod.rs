@@ -67,8 +67,7 @@ pub use payloads::system_payload::{
 };
 pub use system_event::{SystemEvent, SystemEventFactory};
 pub use types::{
-    AdmissionSeq, CorrelationId, EventDescriptor, EventId, EventType, JournalWriterId,
-    ReaderGeneration, WriterId,
+    CorrelationId, EventDescriptor, EventId, EventType, JournalWriterId, ReaderGeneration, WriterId,
 };
 
 pub use utils::EventFilter;

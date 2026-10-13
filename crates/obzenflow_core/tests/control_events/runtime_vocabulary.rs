@@ -88,6 +88,14 @@ fn stream_and_subscription_wire_names_match_the_contract() {
             json!({"flow_control_type":"at_least_once_violation", "upstream":stage, "reason":{"violation_type":"gap_detected", "details":{"from":1, "to":3}}, "reader_seq":1}),
             "runtime.subscription.at_least_once_violated",
         ),
+        (
+            json!({"flow_control_type":"input_selection", "input":{"stage_key":"tx"}, "delivered_count":40, "input_delivered_count":37}),
+            "runtime.subscription.input_selected",
+        ),
+        (
+            json!({"flow_control_type":"input_selection", "input":{"stage_key":"accounts", "feed":[{"descriptor":{"event_kind":"fact", "event_type":"bank.account_opened", "payload_schema_version":1}, "role":"reference"}]}, "delivered_count":0, "input_delivered_count":0}),
+            "runtime.subscription.input_selected",
+        ),
     ] {
         let payload: FlowControlPayload = serde_json::from_value(payload).unwrap();
         assert_chain(

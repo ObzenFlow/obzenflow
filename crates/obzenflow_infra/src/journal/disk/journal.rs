@@ -91,10 +91,6 @@ pub struct DiskJournal<T: JournalEvent> {
     /// Set when a failed append could not be rolled back, leaving the file in an
     /// unknown state. Further appends are rejected until the journal is reopened.
     poisoned: Arc<AtomicBool>,
-    /// Flow-shared admission sequencer (FLOWIP-120n F18). When present, appends
-    /// stamp sequence-less events under the write lock, so sequence order
-    /// equals append order. None outside factory-built flow journals.
-    admission_sequencer: Option<Arc<AtomicU64>>,
     definitions: DefinitionStore,
     observations: super::observations::DiskObservationReader<T>,
     observability: JournalObservability,
@@ -264,15 +260,8 @@ impl<T: JournalEvent> DiskJournal<T> {
             observability: shared_state_for_path(&log_path).1,
             last_commit: Arc::new(RwLock::new(last_commit)),
             poisoned: Arc::new(AtomicBool::new(false)),
-            admission_sequencer: None,
             _phantom: std::marker::PhantomData,
         })
-    }
-
-    /// Attach the flow-shared admission sequencer (FLOWIP-120n F18).
-    pub fn with_admission_sequencer(mut self, sequencer: Arc<AtomicU64>) -> Self {
-        self.admission_sequencer = Some(sequencer);
-        self
     }
 }
 
@@ -418,7 +407,6 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             read_write_lock: self.read_write_lock.clone(),
             last_commit: self.last_commit.clone(),
             poisoned: self.poisoned.clone(),
-            admission_sequencer: self.admission_sequencer.clone(),
             definitions: self.definitions.clone(),
             observations: self.observations.clone(),
             observability: self.observability.clone(),
@@ -454,7 +442,7 @@ async fn retain_commit<R: Send + 'static>(
 impl<T: JournalEvent + 'static> DiskJournal<T> {
     async fn append_record(
         &self,
-        mut event: T,
+        event: T,
         frontier: &CausalFrontier,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
@@ -478,16 +466,6 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                 message: "journal publication is closed after indeterminate commit".into(),
                 source: "poisoned journal".into(),
             });
-        }
-
-        // FLOWIP-120n F18: stamp under the write lock so sequence order equals
-        // append order; re-admitted rows already carry theirs and keep it.
-        if let Some(sequencer) = &self.admission_sequencer {
-            if event.admission_seq().is_none() {
-                event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                    sequencer.fetch_add(1, Ordering::Relaxed),
-                ));
-            }
         }
 
         // Compute the journal's next clock under the write lock. The helper is
@@ -626,7 +604,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
     async fn append_records(
         &self,
         group_id: &str,
-        mut events: Vec<T>,
+        events: Vec<T>,
         frontier: &CausalFrontier,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
@@ -658,15 +636,6 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                 message: "journal publication is closed after indeterminate commit".into(),
                 source: "poisoned journal".into(),
             });
-        }
-        if let Some(sequencer) = &self.admission_sequencer {
-            for event in &mut events {
-                if event.admission_seq().is_none() {
-                    event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                        sequencer.fetch_add(1, Ordering::Relaxed),
-                    ));
-                }
-            }
         }
 
         let group_size = u32::try_from(events.len()).map_err(|_| JournalError::Implementation {

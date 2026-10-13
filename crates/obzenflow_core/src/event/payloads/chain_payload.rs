@@ -271,7 +271,8 @@ impl ChainPayload {
                 | FlowControlPayload::ConsumptionFinal { .. }
                 | FlowControlPayload::ProductionFinal { .. }
                 | FlowControlPayload::ReaderStalled { .. }
-                | FlowControlPayload::AtLeastOnceViolation { .. } => ReplayDisposition::ReAuthor,
+                | FlowControlPayload::AtLeastOnceViolation { .. }
+                | FlowControlPayload::InputSelection { .. } => ReplayDisposition::ReAuthor,
             },
             ChainPayload::Delivery(_) => ReplayDisposition::ReAuthor,
         }

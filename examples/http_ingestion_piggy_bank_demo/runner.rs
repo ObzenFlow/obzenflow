@@ -3,16 +3,13 @@
 // https://obzenflow.dev
 
 //! Example entrypoint and application hosting for the piggy bank demo.
-//!
-//! The application builder hosts HTTP ingress and returns the typed source for
-//! `flow!`. Readiness, telemetry and shutdown wiring stay with the builder. The
-//! accounts source is cold configuration; the file opens only for a live run.
 
-use super::flow::{self, LedgerIngress};
+use super::flow::{self, AccountIngress, LedgerIngress};
 use anyhow::Result;
 use obzenflow::application::ingress::IngestionConfig;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 
+const ACCOUNTS_BASE_PATH: &str = "/api/bank/accounts";
 const TX_BASE_PATH: &str = "/api/bank/tx";
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -30,9 +27,10 @@ pub fn run_example() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("Piggy Bank")
             .description(
-                "Stream-table join: accounts load from YAML, transactions post over \
-                 HTTP against them, balances fold into a live checkbook.",
+                "Batch and live data in one checkbook: accounts load from YAML and \
+                 entries post from CSV, then live accounts and entries arrive over HTTP.",
             )
+            .config("accounts", format!("POST {ACCOUNTS_BASE_PATH}/events"))
             .config("transactions", format!("POST {TX_BASE_PATH}/events")),
     );
 
@@ -40,9 +38,10 @@ pub fn run_example() -> Result<()> {
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation);
+    let new_accounts_source = app.http_ingress(AccountIngress, ingress_config(ACCOUNTS_BASE_PATH));
     let tx_source = app.http_ingress(LedgerIngress, ingress_config(TX_BASE_PATH));
 
-    app.run_blocking(flow::build_flow(tx_source))?;
+    app.run_blocking(flow::build_flow(new_accounts_source, tx_source))?;
 
     Ok(())
 }

@@ -2,60 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! HTTP Ingestion Piggy Bank Demo (FLOWIP-084d, FLOWIP-084n)
-//!
-//! A curl-friendly end-to-end demo that uses:
-//! - A finite YAML source (accounts, read once from `accounts.yaml`)
-//! - HTTP ingestion (push-based transactions)
-//! - Join stage (accounts as reference catalog; ledger entries as stream)
-//! - Stateful stage (materializes a checkbook snapshot per posted entry)
-//! - Console sink (prints balances + a transaction table)
-//!
-//! Run with localhost-only defaults:
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host`
-//!
-//! Recommended control-plane auth example:
-//! Provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete
-//! expected `Authorization` header value before starting the process. The repository
-//! guide at `crates/obzenflow_infra/src/web/README.md` explains the authentication scopes.
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
-//!
-//! Accounts `acct-1` (Alice, $10.00) and `acct-2` (Bob, $0.00) open from
-//! `accounts.yaml` before any transaction joins. Post credits and debits:
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "tx-0001"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Credit","amount_cents":250,"note":"paycheck"}}'`
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "tx-0002"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'`
-//!
-//! Notes:
-//! - Accounts are fixed at startup. `joins::inner` hydrates every account before
-//!   any transaction joins, so there is no startup race for unknown accounts.
-//! - Entries for accounts missing from `accounts.yaml` are dropped by the join.
-//! - A zero-amount or malformed entry is refused with `400`, and the system journal
-//!   records the refusal with the field it names.
-//! - Strict replay (`-- --replay-from <run-dir>`) reuses the archived accounts and
-//!   never reopens `accounts.yaml`; transaction ingress answers `503 not_ready`
-//!   throughout.
-//! - Transaction ingress has its own rate limiter.
-//! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
-//! - A `202` names each entry's committed row (`outcome` `committed`). Resending the
-//!   same entry with the same `Idempotency-Key` answers `duplicate` with the original
-//!   `event_id`; other content under that key answers `422`. A `503 outcome_unknown`
-//!   means retry the identical request with the same key.
-//! - Ingress POSTs above stay unauthenticated in this example. Control-plane auth protects built-ins such as `/metrics`, `/api/topology`, and `/api/flow/*`.
-//! - With control-plane auth enabled, configure the client's `Authorization` header
-//!   through its protected credential configuration before querying `/metrics` or
-//!   `/api/topology`. Keep credential values out of command arguments and shell history.
-
 use super::domain::*;
-use super::handlers::Checkbook;
+use super::handlers::{AccountBook, Checkbook};
 use obzenflow::flow::{
-    async_infinite_source, flow, join, sink, source, stateful, FlowBuildError, FlowDefinition,
+    async_infinite_source, flow, join, sink, source, stateful, transform, FlowBuildError,
+    FlowDefinition,
 };
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::SnapshotTableFormatter;
 use obzenflow::stages::sources::{
-    HostedIngressSource, IngressDecodeError, IngressDecoder, IngressRecord, YamlDecodeError,
-    YamlDecoder, YamlRecord, YamlSelection, YamlSource,
+    CsvDecodeError, CsvDecoder, CsvRecord, CsvSource, HostedIngressSource, IngressDecodeError,
+    IngressDecoder, IngressRecord, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
+    YamlSource,
 };
 use obzenflow::stages::{joins, sinks};
 use serde::{Deserialize, Serialize};
@@ -65,6 +24,7 @@ use std::path::PathBuf;
 #[serde(deny_unknown_fields)]
 pub(crate) struct PiggyBankSettings {
     accounts_file: PathBuf,
+    transactions_file: PathBuf,
 }
 
 /// Decodes one entry of `accounts.yaml`; a negative opening balance rejects
@@ -79,6 +39,36 @@ impl YamlDecoder for AccountYaml {
         let account: AccountOpened = record.deserialize()?;
         if account.initial_balance_cents < 0 {
             return Err(YamlDecodeError::invalid_value("initial_balance_cents"));
+        }
+        Ok(account)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LedgerCsv;
+
+impl CsvDecoder for LedgerCsv {
+    type Output = LedgerEntry;
+
+    fn decode(&self, record: CsvRecord<'_>) -> Result<LedgerEntry, CsvDecodeError> {
+        let entry: LedgerEntry = record.deserialize()?;
+        if entry.amount_cents == 0 {
+            return Err(CsvDecodeError::invalid_value("amount_cents"));
+        }
+        Ok(entry)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AccountIngress;
+
+impl IngressDecoder for AccountIngress {
+    type Output = AccountOpened;
+
+    fn decode(&self, record: IngressRecord<'_>) -> Result<AccountOpened, IngressDecodeError> {
+        let account: AccountOpened = record.deserialize()?;
+        if account.initial_balance_cents < 0 {
+            return Err(IngressDecodeError::invalid_value("initial_balance_cents"));
         }
         Ok(account)
     }
@@ -100,24 +90,42 @@ impl IngressDecoder for LedgerIngress {
     }
 }
 
-pub fn build_flow(tx_source: HostedIngressSource<LedgerIngress>) -> FlowDefinition {
+fn post(account: AccountOpened, entry: LedgerEntry) -> PostedEntry {
+    PostedEntry {
+        account_id: entry.account_id,
+        owner: account.owner,
+        kind: entry.kind,
+        amount_cents: entry.amount_cents,
+        initial_balance_cents: account.initial_balance_cents,
+        note: entry.note,
+    }
+}
+
+pub fn build_flow(
+    new_accounts_source: HostedIngressSource<AccountIngress>,
+    tx_source: HostedIngressSource<LedgerIngress>,
+) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: PiggyBankSettings| {
         let accounts_source = YamlSource::builder(AccountYaml)
             .path(settings.accounts_file)
             .selection(YamlSelection::SequenceAt("/accounts".into()))
             .build()
             .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
-        let post_entry = joins::inner(
+        let ledger_source = CsvSource::builder(LedgerCsv)
+            .path(settings.transactions_file)
+            .chunk_size(1)
+            .build()
+            .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
+        let account_book = AccountBook;
+        let post_batch = joins::inner(
             |account: &AccountOpened| account.account_id.clone(),
             |entry: &LedgerEntry| entry.account_id.clone(),
-            |account, entry| PostedEntry {
-                account_id: entry.account_id,
-                owner: account.owner,
-                kind: entry.kind,
-                amount_cents: entry.amount_cents,
-                initial_balance_cents: account.initial_balance_cents,
-                note: entry.note,
-            },
+            post,
+        );
+        let post_live = joins::inner_live(
+            |account: &AccountOpened| account.account_id.clone(),
+            |entry: &LedgerEntry| entry.account_id.clone(),
+            post,
         );
         let checkbook_handler = Checkbook;
         let printer_sink = sinks::ConsoleSink::<CheckbookSnapshot, _>::new(
@@ -181,14 +189,21 @@ pub fn build_flow(tx_source: HostedIngressSource<LedgerIngress>) -> FlowDefiniti
             stages: {
                 // Ingestion
                 accounts = source!(AccountOpened => accounts_source);
+                ledger = source!(LedgerEntry => ledger_source with { rate_limit(2.0) });
+                new_accounts = async_infinite_source!(AccountOpened => new_accounts_source);
                 tx = async_infinite_source!(
                     LedgerEntry => tx_source with { rate_limit(50.0) }
                 );
 
                 // Processing
-                posted = join!(
+                all_accounts = transform!(AccountOpened -> AccountOpened => account_book);
+                posted_batch = join!(
                     catalog accounts: AccountOpened,
-                    LedgerEntry -> PostedEntry => post_entry
+                    LedgerEntry -> PostedEntry => post_batch
+                );
+                posted_live = join!(
+                    catalog all_accounts: AccountOpened,
+                    LedgerEntry -> PostedEntry => post_live
                 );
                 checkbook = stateful!(
                     PostedEntry -> CheckbookSnapshot => checkbook_handler
@@ -201,8 +216,12 @@ pub fn build_flow(tx_source: HostedIngressSource<LedgerIngress>) -> FlowDefiniti
             },
 
             topology: {
-                (accounts, tx) |> posted;
-                posted |> checkbook;
+                accounts |> all_accounts;
+                new_accounts |> all_accounts;
+                (accounts, ledger) |> posted_batch;
+                (all_accounts, tx) |> posted_live;
+                posted_batch |> checkbook;
+                posted_live |> checkbook;
                 checkbook |> printer;
             }
         })

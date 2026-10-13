@@ -50,7 +50,6 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
         cycle_depth: None,
         cycle_scc_id: None,
         effect_provenance: None,
-        admission_seq: None,
         source_progress: None,
         runtime: Some(runtime),
         composite_activations: vec![CompositeActivationContext::new(

@@ -69,7 +69,7 @@ impl Run {
                     data_journal_file: "data.log".into(),
                     error_journal_file: "error.log".into(),
                     inbound: vec![],
-                    ordered_delivery: true,
+                    delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
                 },
             )]
             .into(),

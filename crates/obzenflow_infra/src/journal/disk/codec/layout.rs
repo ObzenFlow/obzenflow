@@ -174,7 +174,6 @@ impl Layout {
                         field("cycle_depth", K::Unsigned),
                         field("cycle_scc_id", K::Value),
                         field("effect_provenance", K::Value),
-                        field("admission_seq", K::Unsigned),
                         field("runtime", K::Struct(S::Runtime)),
                         field("composite_activations", K::List(&K::Value)),
                         field("timestamp", K::Unsigned),

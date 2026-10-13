@@ -136,13 +136,16 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             stream_subscription_factory.reader_selection =
                 crate::messaging::upstream_subscription::ReaderSelectionPolicy::CanonicalMerge;
         }
-        // FLOWIP-120n F18: a source-fed ordered join runs the seq-ordered
-        // merge on both sides; the cross-side rule compares the same key.
-        let seq_ordered = self.resources.seq_ordered_fan_in;
-        if seq_ordered {
-            reference_subscription_factory.seq_ordered = true;
-            stream_subscription_factory.seq_ordered = true;
-        }
+        let recorded = match self.config.reference_mode {
+            super::config::JoinReferenceMode::Live => {
+                stream_subscription_factory.recorded = None;
+                reference_subscription_factory.recorded.take()
+            }
+            super::config::JoinReferenceMode::FiniteEof => {
+                reference_subscription_factory.recorded = None;
+                None
+            }
+        };
 
         let publications = crate::supervised_base::publication::PublicationScope::new();
         let heartbeat_config = self.heartbeat_config.clone();
@@ -225,7 +228,8 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             backpressure_stall: None,
             heartbeat,
             deterministic_fan_in,
-            seq_ordered,
+            recorded,
+            recorded_order: None,
             catch_up_flip: None,
         };
 

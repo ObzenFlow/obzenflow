@@ -29,7 +29,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, CorrelationId};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{
-    AdmissionSeq, EventId, FlowId, JournalId, JournalWriterId, ReaderGeneration, StageId, WriterId,
+    EventId, FlowId, JournalId, JournalWriterId, ReaderGeneration, StageId, WriterId,
 };
 use serde_json::json;
 use ulid::Ulid;
@@ -185,7 +185,6 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
             metadata: None,
         }),
     ));
-    event.admission_seq = Some(AdmissionSeq(stage as u64 * 20 + emitted));
     let mut accounting = ExecutionAccounting {
         events_processed_total: processed,
         events_emitted_total: emitted,

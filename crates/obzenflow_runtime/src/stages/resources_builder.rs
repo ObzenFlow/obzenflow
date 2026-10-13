@@ -16,8 +16,8 @@ use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{
-    CompositeEntrySpec, ContractsWiring, ReaderSelectionPolicy, SelectedFeedMetadata,
-    SelectedFeedRole, UpstreamSubscription,
+    load_selection_record, AfterRecord, CompositeEntrySpec, ContractsWiring, ReaderSelectionPolicy,
+    RecordedOrder, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
 use crate::metrics::observations::ObservationRegistry;
 use crate::stages::LivenessSnapshots;
@@ -84,10 +84,32 @@ pub struct SubscriptionFactory {
     /// Stable current-to-archive stage identity used by contract authorship
     /// during replay and resume.
     archived_stage_ids_by_current: HashMap<StageId, StageId>,
-    /// The generation this run entered at (FLOWIP-120n F18): 0 live, archive
-    /// max recorded generation + 1 on replay/resume. Copied into every bound
-    /// factory; seq-mode subscriptions gate the quiet-input wait on it.
+    /// The generation this run entered at, 0 live and the archive's maximum
+    /// recorded generation plus one on replay or resume. Copied into every
+    /// bound factory.
     pub entered_generation: obzenflow_core::ReaderGeneration,
+}
+
+/// How a recorded fan-in reads its own archived selections.
+#[derive(Clone)]
+pub struct RecordedSubscription {
+    /// The stage whose archived journal holds the decision rows.
+    pub stage_key: String,
+    /// The archive a replay or resume reads; `None` in a live run.
+    pub archive: Option<Arc<dyn ReplayArchive>>,
+    /// What follows the archived rows.
+    pub after: AfterRecord,
+}
+
+impl RecordedSubscription {
+    /// Read the archived rows this run follows.
+    pub async fn order(&self) -> Result<RecordedOrder, String> {
+        let rows = match &self.archive {
+            Some(archive) => load_selection_record(archive, &self.stage_key).await?,
+            None => Vec::new(),
+        };
+        Ok(RecordedOrder::following(rows, self.after))
+    }
 }
 
 /// A subscription factory that is already bound to a specific set of journals
@@ -106,10 +128,10 @@ pub struct BoundSubscriptionFactory {
     /// `CanonicalMerge` on stages the flow build marked as deterministic
     /// fan-in orderers; availability-driven round-robin otherwise.
     pub reader_selection: ReaderSelectionPolicy,
-    /// FLOWIP-120n F18: built subscriptions run the seq-ordered merge. Set
-    /// with `CanonicalMerge` on marked source-fed ordered fan-ins.
-    pub seq_ordered: bool,
-    /// The run's entered generation (FLOWIP-120n F18); see
+    /// Built subscriptions record their own selections. Set on ordered
+    /// fan-ins with a live root.
+    pub recorded: Option<RecordedSubscription>,
+    /// The run's entered generation; see
     /// [`SubscriptionFactory::entered_generation`].
     pub entered_generation: obzenflow_core::ReaderGeneration,
 }
@@ -176,7 +198,7 @@ impl SubscriptionFactory {
             selected_feeds_by_stage: HashMap::new(),
             composite_entries_by_stage: HashMap::new(),
             reader_selection: ReaderSelectionPolicy::default(),
-            seq_ordered: false,
+            recorded: None,
             entered_generation: self.entered_generation,
         }
     }
@@ -220,8 +242,16 @@ impl BoundSubscriptionFactory {
         factory
     }
 
-    /// Build a subscription from the bound journals
+    /// Build a subscription from the bound journals. A recorded fan-in builds
+    /// only through [`Self::build_with_contracts`].
     pub async fn build(&self) -> Result<UpstreamSubscription<ChainEvent>, String> {
+        if self.recorded.is_some() {
+            return Err(format!(
+                "recorded fan-in '{}' must build its subscription with contracts, which carry \
+                 the stage journal its decision rows are appended to (FLOWIP-095q)",
+                self.owner_label
+            ));
+        }
         UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
             .await
             .map(|sub| {
@@ -229,7 +259,6 @@ impl BoundSubscriptionFactory {
                     .with_archived_stage_ids(self.archived_stage_ids_by_current.clone())
                     .with_composite_entries(self.composite_entries_by_stage.clone())
                     .with_reader_selection(self.reader_selection)
-                    .with_seq_ordered(self.seq_ordered)
                     .with_entered_generation(self.entered_generation)
                     .transport_only()
             })
@@ -241,7 +270,7 @@ impl BoundSubscriptionFactory {
         &self,
         wiring: ContractsWiring,
     ) -> Result<UpstreamSubscription<ChainEvent>, String> {
-        let subscription =
+        let mut subscription =
             UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
@@ -249,11 +278,13 @@ impl BoundSubscriptionFactory {
                 .with_archived_stage_ids(self.archived_stage_ids_by_current.clone())
                 .with_composite_entries(self.composite_entries_by_stage.clone())
                 .with_reader_selection(self.reader_selection)
-                .with_seq_ordered(self.seq_ordered)
                 .with_entered_generation(self.entered_generation)
                 .with_contracts(wiring)
                 .with_advisory_contract_upstreams(self.advisory_contract_upstreams.clone())
                 .transport_only();
+        if let Some(recorded) = &self.recorded {
+            subscription = subscription.with_recorded_order(recorded.order().await?);
+        }
 
         Ok(subscription)
     }
@@ -372,10 +403,9 @@ pub struct StageResources {
     /// delivery runs the canonical merge.
     pub deterministic_fan_in: bool,
 
-    /// FLOWIP-120n F18: this ordered fan-in's inputs are all source journals,
-    /// so its subscription compares by the recorded admission sequence and
-    /// needs no Kahn wait on a quiet input.
-    pub seq_ordered_fan_in: bool,
+    /// Whether this ordered fan-in has a live root and records its
+    /// selections. Its upstream factory carries the recorded configuration.
+    pub recorded_fan_in: bool,
 
     /// FLOWIP-010 §7: build-resolved lineage policy for this stage, consumed
     /// as data by the event factories (no global read on the data path).
@@ -399,7 +429,7 @@ pub struct StageResourcesBuilder {
     effect_ports: EffectPortRegistry,
     feed_plan: FeedPlan,
     deterministic_fan_in_stages: HashSet<StageId>,
-    seq_ordered_fan_ins: HashSet<StageId>,
+    recorded_fan_ins: HashSet<StageId>,
     /// FLOWIP-010 §7: build-resolved per-stage lineage policy, threaded into
     /// stage resources so the event factories consume it as data.
     lineage_policies: HashMap<StageId, obzenflow_core::config::LineagePolicy>,
@@ -431,7 +461,7 @@ impl StageResourcesBuilder {
             effect_ports: EffectPortRegistry::new(),
             feed_plan: FeedPlan::default(),
             deterministic_fan_in_stages: HashSet::new(),
-            seq_ordered_fan_ins: HashSet::new(),
+            recorded_fan_ins: HashSet::new(),
             lineage_policies: HashMap::new(),
             heartbeat_intervals: HashMap::new(),
             source_contract_strict_mode: Default::default(),
@@ -495,10 +525,10 @@ impl StageResourcesBuilder {
         self
     }
 
-    /// FLOWIP-120n F18: ordered fan-ins whose inputs are all source journals;
-    /// their subscriptions compare by the recorded admission sequence.
-    pub fn with_seq_ordered_fan_ins(mut self, stages: HashSet<StageId>) -> Self {
-        self.seq_ordered_fan_ins = stages;
+    /// Ordered fan-ins with a live root, which record their selections in
+    /// their own journals.
+    pub fn with_recorded_fan_ins(mut self, stages: HashSet<StageId>) -> Self {
+        self.recorded_fan_ins = stages;
         self
     }
 
@@ -551,9 +581,6 @@ impl StageResourcesBuilder {
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
 
-        // FLOWIP-120n F18: the generation this run enters at. 0 live; archive
-        // max recorded generation + 1 for both replay and resume, so a reader
-        // still below it may present re-admitted rows and keeps the Kahn wait.
         let entered_generation = match &self.replay_archive {
             None => obzenflow_core::ReaderGeneration(0),
             Some(archive) => {
@@ -750,7 +777,7 @@ impl StageResourcesBuilder {
             let input_feeds = self.feed_plan.input_feeds(stage_id);
             let selected_feeds_by_stage = selected_feeds_by_upstream(&input_feeds);
             let deterministic_fan_in = self.deterministic_fan_in_stages.contains(&stage_id);
-            let seq_ordered_fan_in = self.seq_ordered_fan_ins.contains(&stage_id);
+            let recorded_fan_in = self.recorded_fan_ins.contains(&stage_id);
             let mut upstream_subscription_factory = subscription_factory
                 .bind_with_selected_feeds(&upstream_journals, selected_feeds_by_stage);
             let mut composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>> =
@@ -835,11 +862,15 @@ impl StageResourcesBuilder {
                 upstream_subscription_factory.reader_selection =
                     ReaderSelectionPolicy::CanonicalMerge;
             }
-            if seq_ordered_fan_in {
-                // FLOWIP-120n F18: seq mode implies the canonical merge.
-                upstream_subscription_factory.reader_selection =
-                    ReaderSelectionPolicy::CanonicalMerge;
-                upstream_subscription_factory.seq_ordered = true;
+            if recorded_fan_in {
+                upstream_subscription_factory.recorded = Some(RecordedSubscription {
+                    stage_key: stage_info.name.clone(),
+                    archive: flow_runtime_execution.archive_for_io().cloned(),
+                    after: match runtime_mode {
+                        RuntimeMode::Replay => AfterRecord::Canonical,
+                        RuntimeMode::Live | RuntimeMode::Resume => AfterRecord::Record,
+                    },
+                });
             }
 
             let runtime_execution = flow_runtime_execution.clone();
@@ -897,7 +928,7 @@ impl StageResourcesBuilder {
                 effect_declarations: Vec::new(),
                 direct_fact_plan: DirectFactPlan::default(),
                 deterministic_fan_in,
-                seq_ordered_fan_in,
+                recorded_fan_in,
                 lineage_policy: self
                     .lineage_policies
                     .get(&stage_id)

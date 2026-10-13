@@ -249,13 +249,4 @@ pub trait ReplayArchive: Send + Sync {
     fn max_recorded_generation(&self) -> crate::ReaderGeneration {
         crate::ReaderGeneration(0)
     }
-
-    /// Maximum recorded admission sequence in this archive's source journals
-    /// (FLOWIP-120n F18). The run's flow sequencer is seeded above it so live
-    /// stamps order after every re-admitted sequence. The default answers for
-    /// archives with no recorded source admissions; `DiskReplayArchive` overrides it from the
-    /// same single-pass source-journal scan as `max_recorded_generation`.
-    fn max_recorded_admission_seq(&self) -> crate::AdmissionSeq {
-        crate::AdmissionSeq(0)
-    }
 }

@@ -1132,8 +1132,8 @@ fn same_key_payment_word(sequence: &[(String, u64)]) -> Vec<i64> {
 fn assert_postgres_ordered_delivery(run: &Path, expected_inbound: &[&str]) {
     let manifest = replay_testkit::archive_manifest(run);
     assert_eq!(
-        manifest["stages"]["postgres"]["ordered_delivery"],
-        serde_json::Value::Bool(true),
+        manifest["stages"]["postgres"]["delivery_order"],
+        serde_json::Value::from("canonical"),
         "the real PostgreSQL sink must record deterministic input delivery"
     );
     let inbound = manifest["stages"]["postgres"]["inbound"]

@@ -448,15 +448,22 @@ where
             &descriptors,
             &name_to_id,
         );
-        crate::dsl::typing::wrap_deterministic_orderers(
-            &mut descriptors,
+        let delivery_orders = crate::dsl::typing::derive_delivery_orders(
+            &topology,
+            &descriptors,
             &name_to_id,
             &deterministic_fan_in_stages,
         );
-        // FLOWIP-120n F18: source-fed ordered fan-ins compare by the recorded
-        // admission sequence and need no Kahn wait on a quiet input.
-        let seq_ordered_fan_ins = crate::dsl::typing::derive_seq_ordered_fan_ins(
-            &topology,
+        let recorded_fan_ins: HashSet<StageId> = delivery_orders
+            .iter()
+            .filter(|(_, order)| {
+                **order == obzenflow_core::journal::archive::DeliveryOrder::Recorded
+            })
+            .map(|(stage_id, _)| *stage_id)
+            .collect();
+        crate::dsl::typing::wrap_deterministic_orderers(
+            &mut descriptors,
+            &name_to_id,
             &deterministic_fan_in_stages,
         );
 
@@ -1044,12 +1051,11 @@ where
         let mut error_journals = HashMap::new();
         let mut manifest_stages: HashMap<String, obzenflow_core::journal::archive::manifest::RunManifestStage> = HashMap::new();
         let mut bounded_direct_fact_admission = Vec::new();
-        // FLOWIP-095j: per-stage delivery metadata for the manifest, derived after
-        // wrap_deterministic_orderers so orderer answers match the runtime.
         let manifest_delivery_metadata = crate::dsl::typing::derive_manifest_delivery_metadata(
             &topology,
             &descriptors,
             &name_to_id,
+            &delivery_orders,
         );
         for (name, &stage_id) in name_to_id.iter() {
             // Get the descriptor to access stage type and name
@@ -1126,10 +1132,13 @@ where
                 name: format!("{}_error", descriptor.name()),
             }
             .to_filename();
-            let (inbound, ordered_delivery) = manifest_delivery_metadata
+            let (inbound, delivery_order) = manifest_delivery_metadata
                 .get(&stage_id)
                 .cloned()
-                .unwrap_or((Vec::new(), true));
+                .unwrap_or((
+                    Vec::new(),
+                    obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
+                ));
             manifest_stages.insert(
                 stage_key,
                 obzenflow_core::journal::archive::manifest::RunManifestStage {
@@ -1141,7 +1150,7 @@ where
                     data_journal_file,
                     error_journal_file,
                     inbound,
-                    ordered_delivery,
+                    delivery_order,
                 },
             );
         }
@@ -1149,8 +1158,6 @@ where
 
         // FLOWIP-120n: take the replay archive before the manifest is written,
         // so a resume records the generation it enters (max recorded + 1).
-        // FLOWIP-120u: the host opened it into the bootstrap snapshot; the
-        // factory only consumes it, to seed the F18 admission sequencer.
         let replay_archive = obzenflow_runtime::bootstrap::replay_archive();
         if !bounded_direct_fact_admission.is_empty() {
             if let Some(archive) = replay_archive.as_ref() {
@@ -1178,12 +1185,6 @@ where
                     )));
                 }
             }
-        }
-        if let Some(archive) = replay_archive.as_ref() {
-            obzenflow_core::journal::factory::FlowJournalFactory::seed_admission_from_archive(
-                &journal_factory,
-                archive.as_ref(),
-            );
         }
 
         // Write run manifest (disk journals persist; memory journals no-op) - FLOWIP-095a.
@@ -1413,7 +1414,7 @@ where
         .with_backpressure_plan(backpressure_plan)
         .with_feed_plan(feed_plan)
         .with_deterministic_fan_in_stages(deterministic_fan_in_stages)
-        .with_seq_ordered_fan_ins(seq_ordered_fan_ins)
+        .with_recorded_fan_ins(recorded_fan_ins)
         .with_source_contract_strict_mode(obzenflow_runtime::messaging::upstream_subscription_policy::SourceContractStrictMode::from_token(__flow_effective.source_contract_strict_mode()))
         .with_lineage_policies(lineage_policies)
         .with_heartbeat_intervals(heartbeat_intervals)

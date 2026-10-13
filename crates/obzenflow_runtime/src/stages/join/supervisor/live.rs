@@ -26,6 +26,7 @@ use std::time::Instant;
 
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
+use crate::messaging::upstream_subscription::{selection_failure, NamedHead, RecordedStep};
 use crate::stages::join::fsm::{
     JoinEvent, JoinResources, JoinSubscriptionSide, PendingSubscriptionAck,
 };
@@ -53,9 +54,9 @@ pub(super) async fn dispatch_live<
         FlushOutcome::Drained => {}
     }
 
-    // FLOWIP-095d: an ordered join runs the canonical cross-subscription
-    // merge; the availability-driven preference polling below (and its
-    // fairness cap) applies to unordered joins only.
+    if ctx.recorded_order.is_some() {
+        return Box::pin(dispatch_live_recorded(sup, ctx)).await;
+    }
     if ctx.deterministic_fan_in {
         return dispatch_live_canonical(sup, ctx).await;
     }
@@ -897,16 +898,6 @@ pub(crate) enum JoinSide {
     Stream,
 }
 
-/// Cross-subscription comparison for the FLOWIP-095d canonical join dispatch.
-///
-/// Applies the same rule as the subscription-internal merge: happened-before
-/// between non-EOF candidates first (authored EOFs are exempt and order by
-/// tiebreak alone), then generation as the coarsest axis (FLOWIP-120n; a
-/// recorded head orders ahead of a live head, and cross-generation causality
-/// never inverts, so the two rules cannot disagree), then `(generation,
-/// admission_seq)` when both candidates carry sequences (FLOWIP-120n F18, the
-/// seq-ordered join), falling through to the (ordinal, reader tiebreak key,
-/// join side) tiebreak otherwise.
 pub(crate) fn select_between(
     a: &crate::messaging::upstream_subscription::MergeCandidateMeta<'_>,
     a_side: JoinSide,
@@ -921,13 +912,49 @@ pub(crate) fn select_between(
             return std::cmp::Ordering::Greater;
         }
     }
-    if let (Some(a_seq), Some(b_seq)) = (a.admission_seq, b.admission_seq) {
-        let by_seq = (a.generation, a_seq).cmp(&(b.generation, b_seq));
-        if by_seq != std::cmp::Ordering::Equal {
-            return by_seq;
-        }
-    }
     (a.generation, a.ordinal, a.key, a_side).cmp(&(b.generation, b.ordinal, b.key, b_side))
+}
+
+pub(crate) fn select_recorded(candidates: &[RecordedCandidate<'_>]) -> Option<(JoinSide, usize)> {
+    let admissible = |candidate: &&RecordedCandidate<'_>| {
+        let (_, _, meta) = candidate;
+        meta.is_authored_eof
+            || !candidates.iter().any(|other| {
+                !std::ptr::eq(other, *candidate)
+                    && !other.2.is_authored_eof
+                    && CausalOrderingService::happened_before(
+                        other.2.vector_clock,
+                        meta.vector_clock,
+                    )
+            })
+    };
+    candidates
+        .iter()
+        .filter(admissible)
+        .min_by(|left, right| recorded_rank(left).cmp(&recorded_rank(right)))
+        .or_else(|| {
+            candidates
+                .iter()
+                .min_by(|left, right| recorded_rank(left).cmp(&recorded_rank(right)))
+        })
+        .map(|(side, index, _)| (*side, *index))
+}
+
+pub(crate) type RecordedCandidate<'a> = (
+    JoinSide,
+    usize,
+    crate::messaging::upstream_subscription::MergeCandidateMeta<'a>,
+);
+
+fn recorded_rank<'a>(
+    (side, _, meta): &'a RecordedCandidate<'_>,
+) -> (
+    obzenflow_core::ReaderGeneration,
+    JoinSide,
+    crate::messaging::upstream_subscription::DeliveredOrdinal,
+    &'a crate::messaging::upstream_subscription::ReaderTiebreakKey,
+) {
+    (meta.generation, *side, meta.ordinal, meta.key)
 }
 
 /// Run the periodic contract ticks for both join sides (the idle-path block
@@ -962,32 +989,13 @@ async fn run_live_contract_ticks<
 }
 
 /// Canonical deterministic dispatch for ordered live joins (FLOWIP-095d).
-///
-/// Both subscriptions select their internal merge candidates; the cross-side
-/// choice applies the same rule to the two candidates with the side label as
-/// the final tiebreak component. A blocking-quiet side (one whose silence is
-/// not proof) blocks delivery, reported through the heartbeat as
-/// idle-by-rule; in seq mode (FLOWIP-120n F18) an exempt-quiet side does not.
 async fn dispatch_live_canonical<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    // Seq mode repeats the two ensure rounds until neither side acquired a
-    // new head (FLOWIP-120n F18): every headless reader's last empty poll
-    // then postdates every held head's acquisition on either side, which is
-    // what makes cross-side silence proof. Bounded by total reader count;
-    // heads are only released at delivery, after this loop.
-    loop {
-        let held_before = (
-            sup.reference_subscription
-                .as_ref()
-                .map(|subscription| subscription.held_head_count()),
-            sup.stream_subscription
-                .as_ref()
-                .map(|subscription| subscription.held_head_count()),
-        );
+    {
         if let Some(subscription) = sup.reference_subscription.as_mut() {
             let mut progress = Some(&mut ctx.reference_contract_state[..]);
             match subscription
@@ -1048,23 +1056,8 @@ async fn dispatch_live_canonical<
                 Ok(_) => {}
             }
         }
-        let held_after = (
-            sup.reference_subscription
-                .as_ref()
-                .map(|subscription| subscription.held_head_count()),
-            sup.stream_subscription
-                .as_ref()
-                .map(|subscription| subscription.held_head_count()),
-        );
-        if !ctx.seq_ordered || held_after == held_before {
-            break;
-        }
     }
 
-    // A side's ensure records a merge wait exactly when its quiet is
-    // blocking: every Kahn quiet, and a seq-mode reader still below the
-    // entered generation. Exempt-quiet seq readers record nothing and do not
-    // block the other side's candidate.
     let blocking_wait = sup
         .reference_subscription
         .as_ref()
@@ -1185,6 +1178,367 @@ async fn dispatch_live_canonical<
     Ok(directive.unwrap_or(EventLoopDirective::Continue))
 }
 
+async fn dispatch_live_recorded<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    sup: &mut JoinSupervisor<H>,
+    ctx: &mut JoinResources<H>,
+) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    let step = ctx
+        .recorded_order
+        .as_mut()
+        .expect("recorded join holds its order")
+        .step();
+    match step {
+        RecordedStep::Open { row } => Box::pin(follow_recorded(sup, ctx, row, true)).await,
+        RecordedStep::Continue { row } => Box::pin(follow_recorded(sup, ctx, row, false)).await,
+        RecordedStep::Canonical => Box::pin(dispatch_live_canonical(sup, ctx)).await,
+        RecordedStep::Record => Box::pin(select_and_record(sup, ctx)).await,
+    }
+}
+
+fn join_delivered_total<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+    sup: &JoinSupervisor<H>,
+) -> u64 {
+    sup.reference_subscription
+        .as_ref()
+        .map_or(0, |subscription| subscription.delivered_total())
+        + sup
+            .stream_subscription
+            .as_ref()
+            .map_or(0, |subscription| subscription.delivered_total())
+}
+
+fn side_subscription<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+    sup: &mut JoinSupervisor<H>,
+    side: JoinSide,
+) -> Option<&mut crate::messaging::UpstreamSubscription<ChainEvent>> {
+    match side {
+        JoinSide::Reference => sup.reference_subscription.as_mut(),
+        JoinSide::Stream => sup.stream_subscription.as_mut(),
+    }
+}
+
+async fn append_join_selection<H: UnifiedJoinHandler>(
+    ctx: &JoinResources<H>,
+    input: obzenflow_core::event::payloads::flow_control_payload::SelectedInput,
+    delivered_count: u64,
+    input_delivered_count: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
+    let flow_id = ctx.flow_id.to_string();
+    let event = ChainEventFactory::input_selected_event(
+        writer_id,
+        input,
+        delivered_count,
+        input_delivered_count,
+    )
+    .with_flow_context(make_flow_context(
+        &ctx.flow_name,
+        &flow_id,
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Join,
+    ));
+    crate::supervised_base::publication::append(&ctx.data_journal, event, Default::default())
+        .await?;
+    Ok(())
+}
+
+async fn deliver_recorded<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    sup: &mut JoinSupervisor<H>,
+    ctx: &mut JoinResources<H>,
+    side: JoinSide,
+    index: usize,
+) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    let poll = match side {
+        JoinSide::Reference => match sup.reference_subscription.as_mut() {
+            Some(subscription) => subscription.take_held_head(
+                index,
+                "Live",
+                Some(&mut ctx.reference_contract_state[..]),
+            ),
+            None => return Ok(EventLoopDirective::Continue),
+        },
+        JoinSide::Stream => match sup.stream_subscription.as_mut() {
+            Some(subscription) => {
+                subscription.take_held_head(index, "Live", Some(&mut ctx.stream_contract_state[..]))
+            }
+            None => return Ok(EventLoopDirective::Continue),
+        },
+    };
+    let directive = match poll {
+        PollResult::Event(envelope) => match side {
+            JoinSide::Reference => Box::pin(handle_reference_envelope(sup, ctx, envelope)).await?,
+            JoinSide::Stream => Box::pin(handle_stream_envelope(sup, ctx, envelope)).await?,
+        },
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            Some(EventLoopDirective::Continue)
+        }
+        PollResult::NoEvents => None,
+        PollResult::Error(e) => Some(EventLoopDirective::Transition(JoinEvent::Error(format!(
+            "Join subscription error: {e}"
+        )))),
+    };
+    Ok(directive.unwrap_or(EventLoopDirective::Continue))
+}
+
+async fn follow_recorded<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    sup: &mut JoinSupervisor<H>,
+    ctx: &mut JoinResources<H>,
+    row: usize,
+    opening: bool,
+) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    let archived = ctx
+        .recorded_order
+        .as_ref()
+        .expect("recorded join holds its order")
+        .row(row)
+        .clone();
+    let named = [JoinSide::Reference, JoinSide::Stream]
+        .into_iter()
+        .find_map(|side| {
+            let subscription = match side {
+                JoinSide::Reference => sup.reference_subscription.as_ref(),
+                JoinSide::Stream => sup.stream_subscription.as_ref(),
+            }?;
+            subscription
+                .reader_for_input(&archived.input)
+                .map(|index| (side, index))
+        });
+    let Some((side, index)) = named else {
+        return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+            selection_failure(
+                &ctx.stage_name,
+                &archived,
+                "names an input this join does not read",
+            )
+            .to_string(),
+        )));
+    };
+    let ensured = {
+        let (subscription, mut progress) = match side {
+            JoinSide::Reference => (
+                sup.reference_subscription.as_mut(),
+                Some(&mut ctx.reference_contract_state[..]),
+            ),
+            JoinSide::Stream => (
+                sup.stream_subscription.as_mut(),
+                Some(&mut ctx.stream_contract_state[..]),
+            ),
+        };
+        let subscription = subscription.expect("named side is subscribed");
+        subscription
+            .ensure_named_head(index, "Live", &mut progress)
+            .await
+    };
+    match ensured {
+        Err(e) => {
+            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                "Join subscription error: {e}"
+            ))));
+        }
+        Ok(NamedHead::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        }) => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            return Ok(EventLoopDirective::Continue);
+        }
+        Ok(NamedHead::Exhausted) => {
+            return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                selection_failure(
+                    &ctx.stage_name,
+                    &archived,
+                    "names an input that is exhausted",
+                )
+                .to_string(),
+            )));
+        }
+        Ok(NamedHead::Waiting) => {
+            let wait = side_subscription(sup, side)
+                .and_then(|subscription| subscription.merge_wait().cloned());
+            crate::stages::common::heartbeat::note_merge_wait(
+                ctx.heartbeat.as_ref(),
+                wait.as_ref(),
+            );
+            run_live_contract_ticks(sup, ctx).await?;
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            return Ok(EventLoopDirective::Continue);
+        }
+        Ok(NamedHead::Held) => {}
+    }
+    if opening {
+        let delivered_total = join_delivered_total(sup);
+        let subscription = side_subscription(sup, side).expect("named side is subscribed");
+        if let Err(error) = subscription.check_archived_counts_at(delivered_total, index, &archived)
+        {
+            return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                error.to_string(),
+            )));
+        }
+        append_join_selection(
+            ctx,
+            archived.input.clone(),
+            archived.delivered_count,
+            archived.input_delivered_count,
+        )
+        .await?;
+        ctx.recorded_order
+            .as_mut()
+            .expect("recorded join holds its order")
+            .opened();
+    }
+    let ends_input = side_subscription(sup, side)
+        .is_some_and(|subscription| subscription.held_head_ends_recorded_rows(index));
+    ctx.recorded_order
+        .as_mut()
+        .expect("recorded join holds its order")
+        .followed(ends_input);
+    deliver_recorded(sup, ctx, side, index).await
+}
+
+async fn select_and_record<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    sup: &mut JoinSupervisor<H>,
+    ctx: &mut JoinResources<H>,
+) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        let held = |sup: &JoinSupervisor<H>| {
+            sup.reference_subscription
+                .as_ref()
+                .map_or(0, |subscription| subscription.held_head_count())
+                + sup
+                    .stream_subscription
+                    .as_ref()
+                    .map_or(0, |subscription| subscription.held_head_count())
+        };
+        let held_before = held(sup);
+        for side in [JoinSide::Reference, JoinSide::Stream] {
+            let acquired = {
+                let (subscription, mut progress) = match side {
+                    JoinSide::Reference => (
+                        sup.reference_subscription.as_mut(),
+                        Some(&mut ctx.reference_contract_state[..]),
+                    ),
+                    JoinSide::Stream => (
+                        sup.stream_subscription.as_mut(),
+                        Some(&mut ctx.stream_contract_state[..]),
+                    ),
+                };
+                let Some(subscription) = subscription else {
+                    continue;
+                };
+                subscription
+                    .acquire_available_heads("Live", &mut progress)
+                    .await
+            };
+            match acquired {
+                Err(e) => {
+                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                        "Join subscription error: {e}"
+                    ))));
+                }
+                Ok(Some((upstream, completed_data_rows))) => {
+                    crate::backpressure::complete_filtered_data_rows(
+                        &ctx.backpressure_readers,
+                        upstream,
+                        completed_data_rows,
+                    );
+                    ctx.instrumentation
+                        .event_loops_with_work_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(EventLoopDirective::Continue);
+                }
+                Ok(None) => {}
+            }
+        }
+        if held(sup) == held_before {
+            break;
+        }
+    }
+
+    let waiting: Vec<_> = [
+        sup.reference_subscription.as_ref(),
+        sup.stream_subscription.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|subscription| subscription.pre_crossing_quiet_inputs())
+    .collect();
+    if !waiting.is_empty() {
+        let wait = crate::messaging::upstream_subscription::MergeWaitState {
+            quiet_inputs: waiting,
+        };
+        crate::stages::common::heartbeat::note_merge_wait(ctx.heartbeat.as_ref(), Some(&wait));
+        run_live_contract_ticks(sup, ctx).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        return Ok(EventLoopDirective::Continue);
+    }
+
+    let chosen = {
+        let mut candidates = Vec::new();
+        for (side, subscription) in [
+            (JoinSide::Reference, sup.reference_subscription.as_ref()),
+            (JoinSide::Stream, sup.stream_subscription.as_ref()),
+        ] {
+            let Some(subscription) = subscription else {
+                continue;
+            };
+            for index in subscription.held_indices() {
+                if let Some(meta) = subscription.held_meta(index) {
+                    candidates.push((side, index, meta));
+                }
+            }
+        }
+        select_recorded(&candidates)
+    };
+    let Some((side, index)) = chosen else {
+        run_live_contract_ticks(sup, ctx).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        return Ok(EventLoopDirective::Continue);
+    };
+
+    let delivered_total = join_delivered_total(sup);
+    let (input, input_delivered) = {
+        let subscription = side_subscription(sup, side).expect("chosen side is subscribed");
+        (
+            subscription.selected_input(index),
+            subscription.delivered_count_of(index),
+        )
+    };
+    let opens = ctx
+        .recorded_order
+        .as_ref()
+        .expect("recorded join holds its order")
+        .opens_selection(&input);
+    if opens {
+        append_join_selection(ctx, input.clone(), delivered_total, input_delivered).await?;
+        ctx.recorded_order
+            .as_mut()
+            .expect("recorded join holds its order")
+            .selected(input);
+    }
+    deliver_recorded(sup, ctx, side, index).await
+}
+
 async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinResources<H>,
@@ -1274,7 +1628,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
 
 #[cfg(test)]
 mod tests {
-    use super::{select_between, JoinSide};
+    use super::{select_between, select_recorded, JoinSide};
     use crate::messaging::upstream_subscription::{
         DeliveredOrdinal, FeedIdentity, MergeCandidateMeta, ReaderTiebreakKey, StageKey,
     };
@@ -1314,7 +1668,6 @@ mod tests {
             key,
             vector_clock,
             is_authored_eof,
-            admission_seq: None,
         }
     }
 
@@ -1407,36 +1760,45 @@ mod tests {
     }
 
     #[test]
-    fn admission_seq_orders_ahead_of_ordinal_and_key_when_both_carry_it() {
-        // FLOWIP-120n F18: with both candidates sequenced, (generation,
-        // admission_seq) decides before ordinal and key.
+    fn recorded_join_prefers_an_eligible_reference_head() {
         let empty = VectorClock::new();
-        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
-        let mut a = meta(9, &key_z, &empty, false);
-        a.admission_seq = Some(obzenflow_core::AdmissionSeq(1));
-        let mut b = meta(1, &key_a, &empty, false);
-        b.admission_seq = Some(obzenflow_core::AdmissionSeq(2));
+        let (accounts, tx) = (key("z_accounts"), key("a_tx"));
+        let candidates = [
+            (JoinSide::Stream, 0, meta(1, &tx, &empty, false)),
+            (JoinSide::Reference, 0, meta(9, &accounts, &empty, false)),
+        ];
+        assert_eq!(select_recorded(&candidates), Some((JoinSide::Reference, 0)));
+    }
+
+    #[test]
+    fn recorded_join_waits_a_reference_head_behind_a_stream_head_it_follows() {
+        let first = clock(&[("wa", 1)]);
+        let unrelated = clock(&[("wb", 1)]);
+        let derived = clock(&[("wa", 1), ("wc", 1)]);
+        let (accounts, early, late) = (key("accounts"), key("a_early"), key("b_late"));
+        let candidates = [
+            (JoinSide::Stream, 0, meta(1, &early, &unrelated, false)),
+            (JoinSide::Stream, 1, meta(1, &late, &first, false)),
+            (JoinSide::Reference, 0, meta(1, &accounts, &derived, false)),
+        ];
+        assert_eq!(select_recorded(&candidates), Some((JoinSide::Stream, 0)));
+        let without_unrelated = &candidates[1..];
         assert_eq!(
-            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
-            Ordering::Less
-        );
-        assert_eq!(
-            select_between(&b, JoinSide::Reference, &a, JoinSide::Stream),
-            Ordering::Greater
+            select_recorded(without_unrelated),
+            Some((JoinSide::Stream, 1))
         );
     }
 
     #[test]
-    fn missing_admission_seq_on_either_side_falls_back_to_ordinal_key() {
+    fn recorded_join_orders_a_recorded_generation_ahead_of_the_reference_side() {
         let empty = VectorClock::new();
-        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
-        let mut a = meta(9, &key_z, &empty, false);
-        a.admission_seq = Some(obzenflow_core::AdmissionSeq(1));
-        let b = meta(1, &key_a, &empty, false);
-        assert_eq!(
-            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
-            Ordering::Greater,
-            "one sequence-less side sends the decision to the existing tiebreak"
-        );
+        let (accounts, tx) = (key("accounts"), key("tx"));
+        let mut live_reference = meta(1, &accounts, &empty, false);
+        live_reference.generation = obzenflow_core::ReaderGeneration(1);
+        let candidates = [
+            (JoinSide::Reference, 0, live_reference),
+            (JoinSide::Stream, 0, meta(5, &tx, &empty, false)),
+        ];
+        assert_eq!(select_recorded(&candidates), Some((JoinSide::Stream, 0)));
     }
 }

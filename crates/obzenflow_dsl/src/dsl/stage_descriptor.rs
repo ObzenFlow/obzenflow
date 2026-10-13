@@ -4335,7 +4335,7 @@ mod tests {
             direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
             ),
             deterministic_fan_in: false,
-            seq_ordered_fan_in: false,
+            recorded_fan_in: false,
         };
 
         let descriptor = FiniteSourceDescriptor {

@@ -23,8 +23,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::journal::archive::ReplayArchive;
-
 /// Erased substrate fact for consumers outside the build (FLOWIP-120u).
 ///
 /// Durable means located: the locator names the single addressable place
@@ -113,12 +111,4 @@ pub trait FlowJournalFactory: Send {
     fn write_run_manifest(&self, _manifest: &RunManifest) -> Result<(), JournalError> {
         Ok(())
     }
-
-    /// Seed run-output state from the opened replay/resume input archive, once
-    /// at build before any journal append (FLOWIP-120n F18 admission sequencing).
-    ///
-    /// Consume-only: the factory never opens archives (FLOWIP-120u); the host
-    /// opens the archive and the composition root passes it here. Default is a
-    /// no-op for factories with no sequenced output state.
-    fn seed_admission_from_archive(&self, _archive: &dyn ReplayArchive) {}
 }
