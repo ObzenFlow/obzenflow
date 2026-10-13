@@ -10,7 +10,8 @@ use super::domain::{
     SoldOut, StockReleased, StockReserved,
 };
 use super::warehouse::{
-    ReleaseStock, ReserveStock, WarehouseConfig, WarehouseEffectBindings, WarehouseStats,
+    ReleaseStock, ReserveStock, WarehouseBindingsBuildError, WarehouseConfig,
+    WarehouseEffectBindings, WarehouseStats,
 };
 use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow::journal::disk_journals;
@@ -103,6 +104,7 @@ pub fn settings_flow(
             warehouse_stats,
             journal_root,
         )
+        .map_err(warehouse_binding_failed)
     })
 }
 
@@ -116,7 +118,15 @@ pub fn assemble_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         allocation_flow(inputs, warehouse_config, warehouse_stats, journal_root)
+            .map_err(warehouse_binding_failed)
     })
+}
+
+fn warehouse_binding_failed(error: WarehouseBindingsBuildError) -> FlowBuildError {
+    FlowBuildError::BindingConfiguration {
+        binding: "warehouse".to_string(),
+        detail: error.to_string(),
+    }
 }
 
 fn allocation_flow(
@@ -124,16 +134,11 @@ fn allocation_flow(
     warehouse_config: WarehouseConfig,
     warehouse_stats: Arc<WarehouseStats>,
     journal_root: PathBuf,
-) -> Result<FlowDefinition, FlowBuildError> {
+) -> Result<FlowDefinition, WarehouseBindingsBuildError> {
     let WarehouseEffectBindings {
         reserve: reserve_warehouse,
         release: release_warehouse,
-    } = WarehouseEffectBindings::with_stats(&warehouse_config, warehouse_stats).map_err(
-        |error| FlowBuildError::BindingConfiguration {
-            binding: "warehouse".to_string(),
-            detail: error.to_string(),
-        },
-    )?;
+    } = WarehouseEffectBindings::with_stats(&warehouse_config, warehouse_stats)?;
 
     // One deliberately slow successful reservation opens this breaker.
     // Subsequent ReserveStock calls fail fast, while ReleaseStock remains

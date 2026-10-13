@@ -235,6 +235,7 @@ mod presentation_tests {
         })
         .finish();
 
-        assert!(live.contains("--config examples/product_catalog_enrichment/obzenflow.bad_payment.toml"));
+        assert!(live
+            .contains("--config examples/product_catalog_enrichment/obzenflow.bad_payment.toml"));
     }
 }

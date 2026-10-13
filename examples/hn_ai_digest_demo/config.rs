@@ -3,10 +3,9 @@
 // https://obzenflow.dev
 
 use super::mock_server::spawn_mock_hn_server;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use obzenflow::ai::TokenCount;
 use obzenflow::env::env_var_or;
-use obzenflow::flow::FlowBuildError;
 use obzenflow::stages::sinks::postgres::PostgresConnection;
 use obzenflow::stages::sources::Url;
 use serde::{Deserialize, Serialize};
@@ -105,7 +104,7 @@ fn default_poll_timeout_secs() -> u64 {
 impl HnSettings {
     /// The run's inputs. A mock source starts its fixture here and leaves it
     /// serving for the rest of the runtime; strict replay never polls it.
-    pub(crate) fn into_inputs(self) -> Result<HnRunInputs, FlowBuildError> {
+    pub(crate) fn into_inputs(self) -> Result<HnRunInputs> {
         let (base_url, mode_label) = match self.source {
             HnSource::Live => (
                 Url::parse(HN_LIVE_BASE_URL).expect("the HN API URL is valid"),
@@ -113,11 +112,7 @@ impl HnSettings {
             ),
             HnSource::Mock => (
                 spawn_mock_hn_server()
-                    .map_err(|error| {
-                        FlowBuildError::StageResourcesFailed(format!(
-                            "mock HN server failed to start: {error}"
-                        ))
-                    })?
+                    .context("mock HN server failed to start")?
                     .detach(),
                 "mock",
             ),

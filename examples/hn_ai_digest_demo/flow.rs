@@ -397,10 +397,10 @@ impl Default for HnFlowOptions {
 /// The shipped demo: its run inputs come from `[app]` (FLOWIP-010t).
 pub(crate) fn settings_flow_definition() -> FlowDefinition {
     FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {
-        Ok(build_flow_definition(
-            settings.into_inputs()?,
-            HnFlowOptions::default(),
-        ))
+        let inputs = settings
+            .into_inputs()
+            .map_err(|error| FlowBuildError::StageResourcesFailed(format!("{error:#}")))?;
+        Ok(build_flow_definition(inputs, HnFlowOptions::default()))
     })
 }
 

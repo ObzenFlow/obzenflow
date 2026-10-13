@@ -422,13 +422,21 @@ async fn measure_demo_process_completion() -> Result<()> {
         let mut config = studio.clone();
         let table = config.as_table_mut().context("the config is a table")?;
         let mut app = toml::Table::new();
-        app.insert("event_count".into(), toml::Value::Integer(i64::try_from(event_count)?));
+        app.insert(
+            "event_count".into(),
+            toml::Value::Integer(i64::try_from(event_count)?),
+        );
         app.insert("source_rate_limit".into(), toml::Value::Boolean(false));
         table.insert("app".into(), toml::Value::Table(app));
         let mut journal = toml::Table::new();
-        journal.insert("root".into(), toml::Value::String(journals.display().to_string()));
+        journal.insert(
+            "root".into(),
+            toml::Value::String(journals.display().to_string()),
+        );
         table.insert("journal".into(), toml::Value::Table(journal));
-        let path = directory.path().join(format!("prometheus-{event_count}.toml"));
+        let path = directory
+            .path()
+            .join(format!("prometheus-{event_count}.toml"));
         std::fs::write(&path, toml::to_string(&config)?)?;
         Ok(path)
     };

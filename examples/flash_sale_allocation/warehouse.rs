@@ -6,13 +6,13 @@
 
 use super::domain::{HoldId, OrderId, Sku, StockReleased, StockReserved};
 use async_trait::async_trait;
-use obzenflow::effects::{BindingEvidenceError, BoundedBindingEvidence};
 use obzenflow::effects::{
     AllowedEffectsAllowEffect, Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse,
     EffectContext, EffectError, EffectOutcomeFitsOutput, EffectPortSlot, EffectPortSlotSet,
     EffectRegistrationBuilder, EffectSafety, EffectSet, Effects, LogicalEffectBindingName, Named,
     NamedEffect,
 };
+use obzenflow::effects::{BindingEvidenceError, BoundedBindingEvidence};
 use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 #[cfg(test)]
 use obzenflow::effects::{EffectPortResolutionError, EffectPortResolver};

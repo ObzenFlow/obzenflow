@@ -27,7 +27,7 @@
 use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow::flow::backpressure::enforced;
-use obzenflow::flow::{flow, sink, source, stateful, transform, FlowBuildError, FlowDefinition};
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
 use obzenflow::schema::TypedPayload;
@@ -286,79 +286,65 @@ fn flow_definition_with_options(
     outage_interval: usize,
     source_rate_limit: SourceRateLimit,
 ) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        prometheus_flow(
-            total_events,
-            journal_root,
-            outage_interval,
-            source_rate_limit,
-        )
-    })
-}
-
-fn prometheus_flow(
-    total_events: usize,
-    journal_root: std::path::PathBuf,
-    outage_interval: usize,
-    source_rate_limit: SourceRateLimit,
-) -> Result<FlowDefinition, FlowBuildError> {
     assert!(
         outage_interval > 0,
         "source outage interval must be positive"
     );
-    let high_volume_source_handler = HighVolumeSource {
-        next_id: 0,
-        total_events,
-        outage_interval,
-        outage_failures: 0,
-    };
-    let error_processor_handler = error_prone_transform();
-    let event_counter_handler = stateful::reduce(
-        EventCountState::default(),
-        |state: &mut EventCountState, _event: &ProcessedEvent| {
-            state.event_count += 1;
-            if state.event_count.is_multiple_of(10_000) {
-                println!("📊 Counted {} events so far...", state.event_count);
+    FlowDefinition::materialize(move |_runtime_config| {
+        let high_volume_source_handler = HighVolumeSource {
+            next_id: 0,
+            total_events,
+            outage_interval,
+            outage_failures: 0,
+        };
+        let error_processor_handler = error_prone_transform();
+        let event_counter_handler = stateful::reduce(
+            EventCountState::default(),
+            |state: &mut EventCountState, _event: &ProcessedEvent| {
+                state.event_count += 1;
+                if state.event_count.is_multiple_of(10_000) {
+                    println!("📊 Counted {} events so far...", state.event_count);
+                }
+            },
+        )
+        .emit_on_eof();
+        let summary_sink_handler = ConsoleSink::new(format_summary);
+
+        Ok(flow! {
+            name: "prometheus_demo",
+            journals: disk_journals(journal_root),
+            // Explicit demo defaults; operator configuration can override them.
+            backpressure: enforced(64).stall_timeout_ms(30_000),
+
+            stages: {
+                // The simulated service outage belongs at the live source boundary.
+                // Pure transform errors still follow their existing error-journal path.
+                high_volume_source = match source_rate_limit {
+                    SourceRateLimit::Enabled => source!(DataRequest => high_volume_source_handler with {
+                        circuit_breaker()
+                            .consecutive_failures(1)
+                            .open_for(SOURCE_BREAKER_COOLDOWN)
+                            .probes(1),
+                        rate_limit(1000.0)
+                    }),
+                    SourceRateLimit::Disabled => source!(DataRequest => high_volume_source_handler with {
+                        circuit_breaker()
+                            .consecutive_failures(1)
+                            .open_for(SOURCE_BREAKER_COOLDOWN)
+                            .probes(1)
+                    }),
+                };
+                error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
+                event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
+                summary_sink = sink!(EventCountState => summary_sink_handler);
+            },
+
+            topology: {
+                high_volume_source |> error_processor;
+                error_processor |> event_counter;
+                event_counter |> summary_sink;
             }
-        },
-    )
-    .emit_on_eof();
-    let summary_sink_handler = ConsoleSink::new(format_summary);
-
-    Ok(flow! {
-        name: "prometheus_demo",
-        journals: disk_journals(journal_root),
-        // Explicit demo defaults; operator configuration can override them.
-        backpressure: enforced(64).stall_timeout_ms(30_000),
-
-        stages: {
-            // The simulated service outage belongs at the live source boundary.
-            // Pure transform errors still follow their existing error-journal path.
-            high_volume_source = match source_rate_limit {
-                SourceRateLimit::Enabled => source!(DataRequest => high_volume_source_handler with {
-                    circuit_breaker()
-                        .consecutive_failures(1)
-                        .open_for(SOURCE_BREAKER_COOLDOWN)
-                        .probes(1),
-                    rate_limit(1000.0)
-                }),
-                SourceRateLimit::Disabled => source!(DataRequest => high_volume_source_handler with {
-                    circuit_breaker()
-                        .consecutive_failures(1)
-                        .open_for(SOURCE_BREAKER_COOLDOWN)
-                        .probes(1)
-                }),
-            };
-            error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
-            event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
-            summary_sink = sink!(EventCountState => summary_sink_handler);
-        },
-
-        topology: {
-            high_volume_source |> error_processor;
-            error_processor |> event_counter;
-            event_counter |> summary_sink;
-        }
+        })
     })
 }
 

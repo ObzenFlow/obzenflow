@@ -1377,7 +1377,8 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
 
     for required in [
         "FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {",
-        "settings.into_inputs()?",
+        ".into_inputs()",
+        "Ok(build_flow_definition(inputs, HnFlowOptions::default()))",
         "FlowDefinition::materialize(move |runtime_config| {",
         "let HnRunInputs {",
         "ChatEffectBinding::from_config(&runtime_config.ai_models())?",
@@ -1454,7 +1455,12 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     // FLOWIP-010t: run inputs are application settings, not environment variables.
     assert!(checked_config.contains("[app]"));
     assert!(checked_config.contains("source = \"mock\""));
-    for retired in ["HN_LIVE", "HN_MAX_STORIES", "HN_AI_INTERESTS", "env_bool_or"] {
+    for retired in [
+        "\"HN_LIVE\"",
+        "\"HN_MAX_STORIES\"",
+        "\"HN_AI_INTERESTS\"",
+        "env_bool_or",
+    ] {
         assert!(
             !app_config_source.contains(retired),
             "HN run inputs may not return to environment variables: {retired}"
@@ -2688,16 +2694,25 @@ async fn hn_settings_convert_to_the_run_inputs_the_flow_reads() {
     assert_eq!(inputs.max_stories, 5);
     assert_eq!(inputs.poll_timeout_secs, 10);
     assert_eq!(inputs.interests.as_deref(), Some("runtime protocols"));
-    assert_eq!(inputs.budget_per_group_override, Some(TokenCount::new(10_000)));
+    assert_eq!(
+        inputs.budget_per_group_override,
+        Some(TokenCount::new(10_000))
+    );
     assert_eq!(inputs.max_stories_per_group, None, "0 is unlimited");
     assert_eq!(inputs.mode_label, "mock");
     assert_eq!(inputs.base_url.host_str(), Some("127.0.0.1"));
-    assert_eq!(inputs.source_rate_limit, config::DEFAULT_HN_SOURCE_RATE_LIMIT);
+    assert_eq!(
+        inputs.source_rate_limit,
+        config::DEFAULT_HN_SOURCE_RATE_LIMIT
+    );
 
     let live: config::HnSettings = toml::from_str("source = \"live\"").unwrap();
     let live = live.into_inputs().unwrap();
     assert_eq!(live.mode_label, "live");
-    assert_eq!(live.base_url.as_str(), "https://hacker-news.firebaseio.com/");
+    assert_eq!(
+        live.base_url.as_str(),
+        "https://hacker-news.firebaseio.com/"
+    );
     assert_eq!(live.max_stories, config::DEFAULT_HN_MAX_STORIES);
     assert_eq!(live.max_stories_per_group, Some(10));
     assert!(toml::from_str::<config::HnSettings>("[digest]\ngroup_budget_tokens = 0").is_err());
@@ -2824,7 +2839,8 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     // Replay prepares a fresh host fixture with a different physical endpoint.
     // The live guard can be retired; neither endpoint is durable flow identity.
     drop(server);
-    let replay_server = mock_server::spawn_mock_hn_server().expect("strict replay HN server starts");
+    let replay_server =
+        mock_server::spawn_mock_hn_server().expect("strict replay HN server starts");
     let replay_inputs = config::HnRunInputs {
         base_url: replay_server.base_url(),
         ..demo_inputs

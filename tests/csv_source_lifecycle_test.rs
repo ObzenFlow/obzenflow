@@ -180,7 +180,10 @@ async fn csv_example_replays_through_application_entry_without_either_input() ->
     std::fs::remove_file(&paths.tickets_csv)?;
     // Wire again exactly as main does, with the same settings. Any attempted
     // file/header read would fail before replay could complete.
-    let replay_args = paths.args([OsString::from("--replay-from"), live.clone().into_os_string()]);
+    let replay_args = paths.args([
+        OsString::from("--replay-from"),
+        live.clone().into_os_string(),
+    ]);
     tokio::task::spawn_blocking(move || {
         example::flow::run_example(
             Presentation::new(Banner::new("CSV lifecycle proof")),
@@ -243,7 +246,10 @@ async fn run_example_with(paths: &DemoRun, args: Vec<OsString>) -> anyhow::Resul
 
 /// The shipped example as a child process, configured the way a platform
 /// configures processes: through `OBZENFLOW_CONFIG`.
-fn spawn_child(paths: &DemoRun, shutdown_timeout_secs: Option<&str>) -> std::io::Result<tokio::process::Child> {
+fn spawn_child(
+    paths: &DemoRun,
+    shutdown_timeout_secs: Option<&str>,
+) -> std::io::Result<tokio::process::Child> {
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
     command
         .args(["--ignored", "--exact", "csv_example_child", "--nocapture"])

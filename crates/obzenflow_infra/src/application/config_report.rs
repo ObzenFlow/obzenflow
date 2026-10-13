@@ -26,8 +26,7 @@ pub(super) fn settings_lines(flow: &FlowHandle, origin: Option<&Path>) -> Vec<St
 }
 
 fn render_settings(app: Option<&Value>, origin: Option<&Path>) -> Vec<String> {
-    let Some(app) = app.filter(|app| !app.as_object().is_some_and(|table| table.is_empty()))
-    else {
+    let Some(app) = app.filter(|app| !app.as_object().is_some_and(|table| table.is_empty())) else {
         return Vec::new();
     };
     let heading = match origin {

@@ -221,13 +221,16 @@ pub fn disk_journals(
     base_path: PathBuf,
 ) -> impl Fn(FlowId, Option<&Path>) -> Result<DiskJournalFactory, JournalError> {
     move |flow_id, root| {
-        DiskJournalFactory::new(root.map_or_else(|| base_path.clone(), Path::to_path_buf), flow_id)
+        DiskJournalFactory::new(
+            root.map_or_else(|| base_path.clone(), Path::to_path_buf),
+            flow_id,
+        )
     }
 }
 
 /// Memory journals keep no location, so the build refuses a `journal.root`.
-pub fn memory_journals() -> impl Fn(FlowId, Option<&Path>) -> Result<MemoryJournalFactory, JournalError>
-{
+pub fn memory_journals(
+) -> impl Fn(FlowId, Option<&Path>) -> Result<MemoryJournalFactory, JournalError> {
     move |flow_id, _| Ok(MemoryJournalFactory::new(flow_id))
 }
 

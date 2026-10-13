@@ -1074,7 +1074,10 @@ mod tests {
             canonical_env_name("runtime.backpressure.window"),
             "OBZENFLOW_RUNTIME_BACKPRESSURE_WINDOW"
         );
-        assert_eq!(canonical_env_name(JOURNAL_ROOT_KEY), "OBZENFLOW_JOURNAL_ROOT");
+        assert_eq!(
+            canonical_env_name(JOURNAL_ROOT_KEY),
+            "OBZENFLOW_JOURNAL_ROOT"
+        );
     }
 
     #[test]

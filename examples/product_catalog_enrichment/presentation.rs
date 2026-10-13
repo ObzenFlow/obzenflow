@@ -34,16 +34,17 @@ fn live_banner() -> Banner {
 pub fn banner_for(mode: &RunMode) -> Banner {
     match mode {
         RunMode::Replay(ctx) => Banner::new("Product Catalog Enrichment (strict replay)")
-            .description(
-                "Reconstructing archived catalog inputs and deterministic join outputs.",
-            )
+            .description("Reconstructing archived catalog inputs and deterministic join outputs.")
             .bullets(
                 "What this replay does",
                 [
                     format!("Source archive: {}", ctx.source_label()),
-                    "Source settings are ignored; recorded catalog and order facts are re-admitted".to_string(),
-                    "Inner, left, and strict joins are recomputed from the recorded inputs".to_string(),
-                    "The analytics summary is rebuilt and idempotent console deliveries run again".to_string(),
+                    "Source settings are ignored; recorded catalog and order facts are re-admitted"
+                        .to_string(),
+                    "Inner, left, and strict joins are recomputed from the recorded inputs"
+                        .to_string(),
+                    "The analytics summary is rebuilt and idempotent console deliveries run again"
+                        .to_string(),
                 ],
             ),
         _ => live_banner(),

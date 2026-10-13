@@ -463,6 +463,18 @@ async fn configured_journal_root_refuses_a_provider_that_does_not_honour_it() {
             .is_none(),
         "nothing was recorded under the configured root"
     );
+    // The provider made its own run directory; the refusal precedes every journal.
+    for run in std::fs::read_dir(elsewhere.path().join("flows")).expect("provider's runs") {
+        let run = run.expect("run directory").path();
+        assert!(
+            std::fs::read_dir(&run)
+                .expect("run directory")
+                .next()
+                .is_none(),
+            "no journal exists in {}",
+            run.display()
+        );
+    }
 }
 
 /// A successful memory build reports Ephemeral: no location exists anywhere.
