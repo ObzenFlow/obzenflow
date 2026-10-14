@@ -1008,6 +1008,21 @@ impl Sender {
 // ---------------------------------------------------------------------------
 // Checker: projections read through the supported journal reader.
 
+fn decision_row(row: &JournalRecord<ChainPayload>) -> Option<(String, u64, u64)> {
+    match &row.payload {
+        ChainPayload::FlowControl(FlowControlPayload::InputSelection {
+            input,
+            delivered_count,
+            input_delivered_count,
+        }) => Some((
+            input.stage_key.to_string(),
+            delivered_count.0,
+            input_delivered_count.0,
+        )),
+        _ => None,
+    }
+}
+
 struct Archive {
     dir: PathBuf,
     records: Vec<RunRecord>,
@@ -1277,6 +1292,12 @@ impl Archive {
                 .expect("the manifest is readable"),
         )
         .expect("the manifest parses")
+    }
+
+    fn decision_rows(&self, stage: &str) -> Vec<(String, u64, u64)> {
+        self.rows(stage, RunJournalKind::Data)
+            .filter_map(decision_row)
+            .collect()
     }
 
     /// The run this one resumed or replays.
@@ -1591,6 +1612,71 @@ impl History {
         if self.scenario.http.is_some() {
             self.check_answers(&answers);
         }
+        self.check_recorded_order();
+    }
+
+    fn check_recorded_order(&self) {
+        let name = self.name;
+        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or(path.to_path_buf());
+        let mut recorded_archives = 0;
+        let mut rows_seen = 0;
+        for (archive, _) in &self.runs {
+            let dir = archive.dir.display();
+            if archive.manifest()["stages"]["authorize_payment"]["delivery_order"] != "recorded" {
+                continue;
+            }
+            recorded_archives += 1;
+            rows_seen += archive.decision_rows("authorize_payment").len();
+            let input_of: BTreeMap<EventId, &str> = ["web_orders", "store_orders"]
+                .into_iter()
+                .flat_map(|source| {
+                    archive
+                        .rows(source, RunJournalKind::Data)
+                        .map(move |row| (*row.id(), source))
+                })
+                .collect();
+            let mut governing: Option<String> = None;
+            for row in archive.rows("authorize_payment", RunJournalKind::Data) {
+                if let Some(selection) = decision_row(row) {
+                    governing = Some(selection.0);
+                    continue;
+                }
+                let parent = row.envelope.provenance.event.causality.parent_ids.last();
+                if let Some(input) = parent.and_then(|parent| input_of.get(parent)) {
+                    assert_eq!(
+                        governing.as_deref(),
+                        Some(*input),
+                        "{name} {dir}: {} lies under no decision row naming {input}",
+                        row.event_type()
+                    );
+                }
+            }
+            if !archive.manifest()["resume"].is_object() {
+                continue;
+            }
+            let Some(parent) = archive.link().map(|link| canonical(&link)) else {
+                continue;
+            };
+            let Some((parent, _)) = self
+                .runs
+                .iter()
+                .find(|(other, _)| canonical(&other.dir) == parent)
+            else {
+                continue;
+            };
+            let (rows, parent_rows) = (
+                archive.decision_rows("authorize_payment"),
+                parent.decision_rows("authorize_payment"),
+            );
+            assert!(
+                rows.len() >= parent_rows.len() && rows[..parent_rows.len()] == parent_rows[..],
+                "{name} {dir}: the resume's decision rows do not extend its parent's"
+            );
+        }
+        assert!(
+            recorded_archives == 0 || rows_seen > 0,
+            "{name}: a recorded fan-in wrote no decision rows"
+        );
     }
 
     /// I11: every answer the sender recorded agrees with the journal.
@@ -1877,9 +1963,6 @@ async fn durable_execution_contract() {
     before_rebuild.check(Some(&reference));
     before_rebuild.report();
 
-    // S8, S8b: store_orders' open is held on a FIFO until every web outcome
-    // commits; the open then fails (S8) or the process dies (S8b), so the
-    // source never pins. Each resume starts it as a fresh run would (B15).
     for (name, killed) in [("S8", false), ("S8b", true)] {
         let scenario = Scenario::fresh(&name.to_lowercase());
         let mut never_pinned = History::new(name, &scenario);
@@ -1891,25 +1974,20 @@ async fn durable_execution_contract() {
             .success());
         let child = Child::spawn(&scenario, Vec::new(), None);
         let run = child.run().await;
-        let web: BTreeSet<String> = web_ids().into_iter().collect();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(archive) = Archive::try_read(&run).await {
-                let outcomes: BTreeSet<String> = archive.outcomes().into_keys().collect();
-                // A live run is read as independent per-journal prefixes, so a
-                // receipt can be read before its payment; the next poll holds both.
-                let delivered: BTreeSet<String> =
-                    archive.receipt_orders().into_iter().flatten().collect();
-                if archive.eof("web_orders") == Some(EofKind::Natural)
-                    && outcomes == web
-                    && delivered == web
+                if archive
+                    .admitted()
+                    .iter()
+                    .any(|(order, _)| order.starts_with("W-"))
                 {
                     break;
                 }
             }
             assert!(
                 Instant::now() < deadline,
-                "{name}: web outcomes never committed"
+                "{name}: web orders were never recorded"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1931,17 +2009,15 @@ async fn durable_execution_contract() {
             .await;
         std::fs::remove_file(scenario.store_input()).expect("remove the FIFO");
         std::fs::write(scenario.store_input(), store_input()).expect("restore store orders");
-        scenario.without_web_input();
         let web_calls = scenario
             .calls()
             .into_iter()
             .filter(|call| call.order_id.starts_with("W-"))
             .count();
+        assert_eq!(web_calls, 0, "{name}: nothing is charged before the cut");
         let resumed = Child::spawn(&scenario, resume(&run), None)
             .completed()
             .await;
-        // I10: the source pins its input and starts before its first order,
-        // and the journal-only web channel calls no gateway.
         let opening = never_pinned
             .record(&resumed, Ended::Natural)
             .await
@@ -1952,14 +2028,17 @@ async fn durable_execution_contract() {
             started("runtime.source.started_on_resume"),
         );
         assert!(pinned.is_some() && pinned < started, "{name}: {opening:?}");
-        let web_calls_after = scenario
+        let web_calls_after: Vec<String> = scenario
             .calls()
             .into_iter()
             .filter(|call| call.order_id.starts_with("W-"))
-            .count();
+            .map(|call| call.order_id)
+            .collect();
+        let distinct: BTreeSet<&String> = web_calls_after.iter().collect();
         assert_eq!(
-            web_calls, web_calls_after,
-            "{name}: web orders call no gateway"
+            distinct.len(),
+            web_calls_after.len(),
+            "{name}: the resume charges each web order once"
         );
         never_pinned.check(Some(&reference));
         assert_eq!(

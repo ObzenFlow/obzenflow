@@ -1,0 +1,7 @@
+account_id,kind,amount_cents,note
+acct-1,Credit,250,paycheck
+acct-1,Debit,99,coffee
+acct-2,Credit,1500,birthday gift
+acct-1,Debit,450,groceries
+acct-2,Debit,300,movie tickets
+acct-1,Credit,125,refund

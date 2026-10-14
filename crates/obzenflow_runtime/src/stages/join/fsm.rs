@@ -560,10 +560,9 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     /// cross-subscription merge instead of preference polling.
     pub(crate) deterministic_fan_in: bool,
 
-    /// FLOWIP-120n F18: this join's inputs are all source journals; both side
-    /// subscriptions run the seq-ordered merge and the cross-side dispatch
-    /// applies the seq-mode wait rule.
-    pub(crate) seq_ordered: bool,
+    pub(crate) recorded: Option<crate::stages::resources_builder::RecordedSubscription>,
+
+    pub(crate) recorded_order: Option<crate::messaging::upstream_subscription::RecordedOrder>,
 
     /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
     /// flipped at, making the flip idempotent per generation across both
@@ -721,6 +720,14 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 );
 
                 ctx.stream_subscription = Some(stream_subscription);
+
+                if let Some(recorded) = &ctx.recorded {
+                    ctx.recorded_order = Some(recorded.order().await.map_err(|error| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to read the join's recorded selections: {error}"
+                        ))
+                    })?);
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

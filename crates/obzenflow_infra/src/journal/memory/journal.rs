@@ -28,7 +28,6 @@ use obzenflow_core::journal::{
     JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
 };
 use obzenflow_core::FlowId;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::reader::MemoryJournalReader;
@@ -47,8 +46,6 @@ pub struct MemoryJournal<T: JournalEvent> {
     journal_id: JournalId,
     run_id: FlowId,
     state: Arc<Mutex<MemoryJournalState<T>>>,
-    /// Flow-shared admission sequencer (FLOWIP-120n F18); see `DiskJournal`.
-    admission_sequencer: Option<Arc<AtomicU64>>,
     observability: JournalObservability,
     _phantom: std::marker::PhantomData<T>,
 }
@@ -72,7 +69,6 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 observations: ObservationIndex::default(),
                 metrics_tail: MetricsTailIndex::default(),
             })),
-            admission_sequencer: None,
             observability: JournalObservability::default(),
             _phantom: std::marker::PhantomData,
         }
@@ -90,7 +86,6 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 observations: ObservationIndex::default(),
                 metrics_tail: MetricsTailIndex::default(),
             })),
-            admission_sequencer: None,
             observability: JournalObservability::default(),
             _phantom: std::marker::PhantomData,
         }
@@ -103,33 +98,17 @@ impl<T: JournalEvent> MemoryJournal<T> {
             ..Self::with_owner(owner)
         }
     }
-
-    /// Attach the flow-shared admission sequencer (FLOWIP-120n F18).
-    pub fn with_admission_sequencer(mut self, sequencer: Arc<AtomicU64>) -> Self {
-        self.admission_sequencer = Some(sequencer);
-        self
-    }
 }
 
 impl<T: JournalEvent> MemoryJournal<T> {
     fn append_record(
         &self, // Note: &self, not &mut self
-        mut event: T,
+        event: T,
         frontier: &CausalFrontier,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
 
         let mut state = self.state.lock().unwrap();
-
-        // FLOWIP-120n F18: stamp under the state lock so sequence order equals
-        // append order; re-admitted rows already carry theirs and keep it.
-        if let Some(sequencer) = &self.admission_sequencer {
-            if event.admission_seq().is_none() {
-                event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                    sequencer.fetch_add(1, Ordering::Relaxed),
-                ));
-            }
-        }
 
         let (commitment, predecessor) = JournalClock::prepare(
             self.run_id,
@@ -172,7 +151,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
     fn append_records(
         &self,
         group_id: &str,
-        mut events: Vec<T>,
+        events: Vec<T>,
         frontier: &CausalFrontier,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
@@ -188,15 +167,6 @@ impl<T: JournalEvent> MemoryJournal<T> {
         }
 
         let mut state = self.state.lock().unwrap();
-        if let Some(sequencer) = &self.admission_sequencer {
-            for event in &mut events {
-                if event.admission_seq().is_none() {
-                    event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                        sequencer.fetch_add(1, Ordering::Relaxed),
-                    ));
-                }
-            }
-        }
 
         // Build against a private clock snapshot, then publish clocks and
         // events together while holding the single state mutex.

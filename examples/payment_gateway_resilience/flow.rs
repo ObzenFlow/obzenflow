@@ -4,23 +4,21 @@
 
 //! The payment-gateway resilience flow.
 //!
-//! Two upstream order channels, three business deliveries:
+//! Two upstream order channels, four business deliveries:
 //!
 //! ```text
 //! web_orders ---+ canonical merge
 //! store_orders -+-> validate_order -- ValidatedOrder --> authorize_payment -- PaymentAuthorized --> paid-orders sink
-//!                     |                                    |             \-- PaymentAuthorizationUnavailable --> manual-review sink
-//!                     \-- CancelledOrder --------------+   \-- CancelledOrder --+
-//!                                                      \----------------------(fan-in)--> cancelled-orders sink
+//!                     |                                                   |-- PaymentDeclined --> declined-orders sink
+//!                     |                                                   \-- PaymentAuthorizationUnavailable --> manual-review sink
+//!                     \-- CancelledOrder --> cancelled-orders sink
 //! ```
 //!
 //! The channel merge at `validate_order` is FLOWIP-095d's canonical
 //! deterministic merge, enabled automatically because the effectful
 //! `authorize_payment` sits below the fan-in. Delivery order is a pure
 //! function of the two recorded streams: live runs with different arrival
-//! timing and replays all consume orders in the same merged order. The
-//! `cancelled_orders` sink fan-in stays availability-driven, since it is
-//! delivery-only with no effectful descendant.
+//! timing and replays all consume orders in the same merged order.
 //!
 //! Validation lives in `validation.rs` as one typed classifier with the flat
 //! contract `CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder,
@@ -30,12 +28,14 @@
 //! `gateway.rs`). On a live run the configured resilience policy may make up
 //! to three breaker-governed physical calls before the runtime journals one
 //! terminal result; on replay the runtime returns that recorded gateway
-//! decision without calling the gateway again. The stage then emits the named
-//! payment fact that happened, deriving `CancelledOrder` from declines.
+//! decision without calling the gateway again. That decision is the named
+//! payment fact, authorized or declined, and each reaches its own delivery.
 //!
-//! `InvalidOrder` and `PaymentDeclined` are journal-recorded facts with no
-//! dedicated sink: the journal is the record, sinks are external deliveries.
-//! The cancelled-orders sink converges cancellations from both producers.
+//! `InvalidOrder` is a journal-recorded fact with no dedicated sink: the
+//! journal is the record, sinks are external deliveries. Its consequence,
+//! `CancelledOrder`, reaches the cancelled-orders sink. A decline is a payment
+//! outcome, not a cancellation; a subscriber that wants one feed of failed
+//! orders joins the cancelled and declined feeds downstream.
 //!
 //! The resilience unit on the authorize_payment stage is the second,
 //! independent layer: bounded retry handles transient failures, the circuit
@@ -119,6 +119,7 @@ pub fn assemble_flow(
         let store_orders_feed = sources::ValuesSource::new(scripted_store_orders);
         let validate_order = validation::ValidateOrder;
         let shipping_handoff = ConsoleSink::new(console::format_shipping);
+        let record_declined = ConsoleSink::new(console::format_declined);
         let record_cancelled = ConsoleSink::new(console::format_cancelled);
         let record_unavailable = ConsoleSink::new(console::format_unavailable);
 
@@ -187,7 +188,6 @@ pub fn assemble_flow(
                     ValidatedOrder -> {
                         PaymentAuthorized,
                         PaymentDeclined,
-                        CancelledOrder,
                         PaymentAuthorizationUnavailable,
                     }
                     uses AuthorizePayment
@@ -207,12 +207,15 @@ pub fn assemble_flow(
                     ) },
                     delivery: idempotent);
 
-                // Cancelled-order console destination. The order's
-                // fate converges from both producers (local validation failures
-                // and gateway declines). `InvalidOrder` and `PaymentDeclined`
-                // stay journal-recorded facts with no dedicated sink; this
-                // delivery carries the lifecycle consequence wherever it
-                // originated. The console adapter labels reconstructed output.
+                // Declined-payment console destination. The gateway's decline
+                // is recorded by the effect as `PaymentDeclined`; it is a
+                // payment outcome, not an order cancellation.
+                declined_orders = sink!(PaymentDeclined => record_declined, delivery: idempotent);
+
+                // Cancelled-order console destination for locally invalid
+                // orders. `InvalidOrder` stays a journal-recorded fact with no
+                // dedicated sink; this delivery carries its lifecycle
+                // consequence. The console adapter labels reconstructed output.
                 cancelled_orders = sink!(CancelledOrder => record_cancelled, delivery: idempotent);
 
                 // Unavailable-authorization destination: failed gateway call or
@@ -232,9 +235,9 @@ pub fn assemble_flow(
                 web_orders |> validate_order;
                 store_orders |> validate_order;
                 validate_order |> authorize_payment;
-                authorize_payment |> paid_orders;
                 validate_order |> cancelled_orders;
-                authorize_payment |> cancelled_orders;
+                authorize_payment |> paid_orders;
+                authorize_payment |> declined_orders;
                 authorize_payment |> manual_review;
             }
         })

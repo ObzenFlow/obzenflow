@@ -2,9 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::types::{
-    MergeCandidateStatus, MergeWaitState, ReaderSelectionPolicy, ReaderTiebreakKey, StageKey,
-};
+use super::types::{MergeCandidateStatus, MergeWaitState, ReaderSelectionPolicy, StageKey};
 use super::{
     DeliveryFilter, EofOutcome, HeldHead, MergeCandidateMeta, PollResult, ReaderProgress,
     StageInputPosition, UpstreamSubscription,
@@ -143,18 +141,12 @@ where
             }
             _ => None,
         };
-        // FLOWIP-120n F18: re-admittable rows own a cross-run-stable sequence;
-        // re-authored control rows order by journal position instead.
-        let orders_by_own_seq = chain_event
-            .map(ChainEvent::is_source_replayable)
-            .unwrap_or(true);
         Ok(ReadStep::Head {
             head: HeldHead {
                 envelope,
                 is_authored_eof,
                 is_drain,
                 catch_up,
-                orders_by_own_seq,
             },
             is_data,
         })
@@ -407,7 +399,7 @@ where
     /// `StageInputPosition` assignment, and the per-reader delivered ordinal.
     /// Exhaustion happens strictly at EOF delivery, never when an EOF head is
     /// merely held.
-    fn deliver_from_reader(
+    pub(super) fn deliver_from_reader(
         &mut self,
         reader_index: usize,
         head: HeldHead<T>,
@@ -420,19 +412,9 @@ where
             is_authored_eof: is_eof,
             is_drain,
             catch_up,
-            orders_by_own_seq,
         } = head;
         if let Err(error) = crate::supervised_base::publication::observe_record(&envelope) {
             return PollResult::Error(Box::new(error));
-        }
-        // FLOWIP-120n F18: a delivered positional row advances the inherited
-        // key for this reader's later re-authored control heads.
-        if orders_by_own_seq {
-            if let Some(seq) = envelope.admission_seq() {
-                if let Some(last) = self.last_positional_seq.get_mut(reader_index) {
-                    *last = seq;
-                }
-            }
         }
         let (stage_id, stage_key) = {
             let slot = &self.readers[reader_index];
@@ -913,12 +895,22 @@ where
     async fn poll_canonical_merge(
         &mut self,
         fsm_state: &str,
-        mut reader_progress: Option<&mut [ReaderProgress]>,
+        reader_progress: Option<&mut [ReaderProgress]>,
     ) -> PollResult<T> {
         if self.readers.is_empty() {
             return self.no_readers_error();
         }
+        if self.recorded.is_some() {
+            return self.poll_recorded(fsm_state, reader_progress).await;
+        }
+        self.poll_kahn_merge(fsm_state, reader_progress).await
+    }
 
+    pub(super) async fn poll_kahn_merge(
+        &mut self,
+        fsm_state: &str,
+        mut reader_progress: Option<&mut [ReaderProgress]>,
+    ) -> PollResult<T> {
         match self
             .ensure_merge_candidate(fsm_state, &mut reader_progress)
             .await
@@ -951,11 +943,6 @@ where
         fsm_state: &str,
         reader_progress: &mut Option<&mut [ReaderProgress]>,
     ) -> std::result::Result<MergeCandidateStatus, Box<dyn std::error::Error + Send + Sync>> {
-        if self.seq_ordered {
-            return self
-                .ensure_seq_merge_candidate(fsm_state, reader_progress)
-                .await;
-        }
         for index in 0..self.readers.len() {
             if self.state.is_reader_eof(index) || self.held_heads[index].is_some() {
                 continue;
@@ -1005,188 +992,11 @@ where
         Ok(MergeCandidateStatus::Candidate)
     }
 
-    /// Seq-ordered acquisition and selection (FLOWIP-120n F18).
-    ///
-    /// Acquisition repeats until a full round adds no head (bounded by reader
-    /// count): every headless reader's last empty poll then postdates every
-    /// held head's acquisition. The per-path journal lock makes an empty poll
-    /// a stamp fence — any row committed after it was stamped after it — so a
-    /// headless reader at or past `entered_generation` can never later
-    /// present a sequence below a held head; its silence is proof and it is
-    /// exempt from the quiet-input wait. A reader below the entered
-    /// generation may still present re-admitted rows with recorded (smaller)
-    /// sequences, so it keeps the Kahn wait until its F17 crossing.
-    async fn ensure_seq_merge_candidate(
-        &mut self,
-        fsm_state: &str,
-        reader_progress: &mut Option<&mut [ReaderProgress]>,
-    ) -> std::result::Result<MergeCandidateStatus, Box<dyn std::error::Error + Send + Sync>> {
-        loop {
-            let held_before = self.held_head_count();
-            for index in 0..self.readers.len() {
-                if self.state.is_reader_eof(index) || self.held_heads[index].is_some() {
-                    continue;
-                }
-                if let Some((upstream, completed_data_rows)) =
-                    self.acquire_head(index, fsm_state, reader_progress).await?
-                {
-                    self.merge_candidate_index = None;
-                    self.last_merge_wait = None;
-                    return Ok(MergeCandidateStatus::CursorAdvanced {
-                        upstream,
-                        completed_data_rows,
-                    });
-                }
-            }
-            if self.held_head_count() == held_before {
-                break;
-            }
-        }
-
-        let waiting_inputs: Vec<(StageId, String)> = (0..self.readers.len())
-            .filter(|&index| {
-                !self.state.is_reader_eof(index)
-                    && self.held_heads[index].is_none()
-                    && self.generation_by_reader[index] < self.entered_generation
-            })
-            .map(|index| {
-                let slot = &self.readers[index];
-                (slot.stage_id, slot.stage_key.to_string())
-            })
-            .collect();
-        if !waiting_inputs.is_empty() {
-            tracing::debug!(
-                target: "flowip-120n",
-                owner = %self.owner_label,
-                waiting = ?waiting_inputs.iter().map(|(_, name)| name).collect::<Vec<_>>(),
-                fsm_state = fsm_state,
-                "seq merge: waiting on pre-crossing quiet input(s)"
-            );
-            self.merge_candidate_index = None;
-            self.last_merge_wait = Some(MergeWaitState {
-                quiet_inputs: waiting_inputs,
-            });
-            return Ok(MergeCandidateStatus::Quiet);
-        }
-        self.last_merge_wait = None;
-
-        let candidates: Vec<usize> = (0..self.held_heads.len())
-            .filter(|&index| self.held_heads[index].is_some())
-            .collect();
-        if candidates.is_empty() {
-            self.merge_candidate_index = None;
-            // No heads and no waiters: every reader is EOF-exhausted or
-            // exempt-quiet. Only full exhaustion ends the merge.
-            return Ok(if self.state.eof_count() == self.readers.len() {
-                MergeCandidateStatus::AllExhausted
-            } else {
-                MergeCandidateStatus::Quiet
-            });
-        }
-
-        self.merge_candidate_index = Some(self.select_seq_winner(&candidates)?);
-        Ok(MergeCandidateStatus::Candidate)
-    }
-
-    /// The head's effective sequence key (FLOWIP-120n F18). Re-admittable
-    /// rows order by their own cross-run-stable sequence, failing closed when
-    /// it is missing (an archive predating the field). Re-authored control
-    /// rows (source contracts, EOFs) carry per-run sequences, so they inherit
-    /// the reader's last positional sequence: their journal position, which
-    /// is what replay reproduces.
-    fn effective_seq(
-        &self,
-        index: usize,
-    ) -> std::result::Result<obzenflow_core::AdmissionSeq, Box<dyn std::error::Error + Send + Sync>>
-    {
-        let head = self.held_heads[index].as_ref().expect("candidate has head");
-        if !head.orders_by_own_seq {
-            return Ok(self.last_positional_seq[index]);
-        }
-        head.envelope.admission_seq().ok_or_else(|| {
-            Box::new(JournalError::Implementation {
-                message: format!(
-                    "seq-ordered merge on '{}' found a head from reader '{}' without \
-                     an admission_seq; seq mode fails closed (FLOWIP-120n F18)",
-                    self.owner_label,
-                    self.readers[index].stage_key.as_str()
-                ),
-                source: "sequence-less head in seq mode".into(),
-            }) as Box<dyn std::error::Error + Send + Sync>
-        })
-    }
-
-    /// The seq-mode merge decision (FLOWIP-120n F18): the causality filter
-    /// exactly as in Kahn mode, then min by `(generation, effective sequence,
-    /// reader key)`. The reader key breaks the one reachable tie, two
-    /// first-row control heads both inheriting sequence zero.
-    fn select_seq_winner(
-        &self,
-        candidates: &[usize],
-    ) -> std::result::Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        let head = |index: usize| self.held_heads[index].as_ref().expect("candidate has head");
-        let mut keyed: Vec<(
-            usize,
-            (
-                obzenflow_core::ReaderGeneration,
-                obzenflow_core::AdmissionSeq,
-                &ReaderTiebreakKey,
-            ),
-        )> = Vec::with_capacity(candidates.len());
-        for &index in candidates {
-            keyed.push((
-                index,
-                (
-                    self.generation_by_reader[index],
-                    self.effective_seq(index)?,
-                    &self.reader_tiebreak_keys[index],
-                ),
-            ));
-        }
-        let causally_admissible = |index: usize| {
-            head(index).is_authored_eof
-                || !candidates.iter().any(|&other| {
-                    other != index
-                        && !head(other).is_authored_eof
-                        && CausalOrderingService::happened_before(
-                            &head(other)
-                                .envelope
-                                .envelope
-                                .provenance
-                                .journal
-                                .vector_clock,
-                            &head(index)
-                                .envelope
-                                .envelope
-                                .provenance
-                                .journal
-                                .vector_clock,
-                        )
-                })
-        };
-
-        Ok(keyed
-            .iter()
-            .filter(|(index, _)| causally_admissible(*index))
-            .min_by_key(|(_, key)| *key)
-            .or_else(|| {
-                tracing::error!(
-                    target: "flowip-120n",
-                    owner = %self.owner_label,
-                    "seq merge: causality exclusion emptied the candidate set; \
-                     falling back to sequence-only selection (still deterministic)"
-                );
-                keyed.iter().min_by_key(|(_, key)| *key)
-            })
-            .expect("candidates is non-empty")
-            .0)
-    }
-
     /// Take one bounded read step while acquiring a head.
     ///
     /// A filtered row returns its physical completion immediately. It never
     /// becomes a logical delivery or takes a canonical merge ordinal.
-    async fn acquire_head(
+    pub(super) async fn acquire_head(
         &mut self,
         index: usize,
         fsm_state: &str,
@@ -1232,7 +1042,7 @@ where
     /// the tiebreak alone. Happened-before is acyclic, so the candidate set
     /// cannot empty; the fallback is defensive only and remains
     /// deterministic.
-    fn select_merge_winner(&self, candidates: &[usize]) -> Option<usize> {
+    pub(super) fn select_merge_winner(&self, candidates: &[usize]) -> Option<usize> {
         let head = |index: usize| self.held_heads[index].as_ref().expect("candidate has head");
         // Compared as the ordinal the delivery would take, the same key shape
         // the join's cross-side rule uses; counts never enter a comparison.
@@ -1295,24 +1105,18 @@ where
     /// selects its internal winner, and the cross-side choice applies the same
     /// (causality, then ordinal/stage-key/feed-identity) rule to the two metas.
     pub fn merge_candidate(&self) -> Option<MergeCandidateMeta<'_>> {
-        let index = self.merge_candidate_index?;
+        self.held_meta(self.merge_candidate_index?)
+    }
+
+    pub(crate) fn held_meta(&self, index: usize) -> Option<MergeCandidateMeta<'_>> {
         let head = self.held_heads.get(index)?.as_ref()?;
         let key = self.reader_tiebreak_keys.get(index)?;
-        // The effective sequence is seq-mode-only: a Kahn join's cross-side
-        // rule must stay on the (ordinal, key) tiebreak even though live rows
-        // now carry sequences.
-        let admission_seq = if self.seq_ordered {
-            self.effective_seq(index).ok()
-        } else {
-            None
-        };
         Some(MergeCandidateMeta {
             generation: self.generation_by_reader[index],
             ordinal: self.delivered_count_by_reader[index].next_ordinal(),
             key,
             vector_clock: &head.envelope.envelope.provenance.journal.vector_clock,
             is_authored_eof: head.is_authored_eof,
-            admission_seq,
         })
     }
 

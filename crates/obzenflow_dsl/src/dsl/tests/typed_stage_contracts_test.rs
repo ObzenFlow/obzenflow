@@ -9,6 +9,7 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::event::payloads::execution_payload::ReattachGuarantee;
+    use obzenflow_core::journal::archive::DeliveryOrder;
     use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
     use obzenflow_runtime::effects::{Effects, StageCompletion};
@@ -2748,9 +2749,15 @@ mod tests {
         assert!(marked.contains(&direct_sink_id));
         assert!(marked.contains(&derived_sink_id));
 
-        let seq_ordered = crate::dsl::typing::derive_seq_ordered_fan_ins(&topology, &marked);
-        assert!(seq_ordered.contains(&direct_sink_id));
-        assert!(!seq_ordered.contains(&derived_sink_id));
+        let orders = crate::dsl::typing::derive_delivery_orders(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &marked,
+        );
+        assert_eq!(orders[&direct_sink_id], DeliveryOrder::Canonical);
+        assert_eq!(orders[&derived_sink_id], DeliveryOrder::Canonical);
+        assert_eq!(orders[&branch_a_id], DeliveryOrder::SingleInput);
 
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
         validate_order_observer_deterministic_input_order(
@@ -2760,6 +2767,186 @@ mod tests {
             &observers,
         )
         .expect("both acyclic sink fan-ins are canonicalised");
+    }
+
+    #[test]
+    fn a_live_root_above_a_fan_in_makes_it_recorded() {
+        let batch_id = StageId::new();
+        let live_id = StageId::new();
+        let normalise_id = StageId::new();
+        let fold_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "batch".to_string(),
+            crate::source!(name: "batch", OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "live".to_string(),
+            crate::infinite_source!(name: "live", OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "normalise".to_string(),
+            crate::transform!(name: "normalise", OutputEvent -> OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "fold".to_string(),
+            crate::transform!(name: "fold", OutputEvent -> OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", OutputEvent => OrderSensitiveSink),
+        );
+        let name_to_id = HashMap::from([
+            ("batch".to_string(), batch_id),
+            ("live".to_string(), live_id),
+            ("normalise".to_string(), normalise_id),
+            ("fold".to_string(), fold_id),
+            ("sink".to_string(), sink_id),
+        ]);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, stage_type) in [
+            (batch_id, "batch", TopologyStageType::FiniteSource),
+            (live_id, "live", TopologyStageType::InfiniteSource),
+            (normalise_id, "normalise", TopologyStageType::Transform),
+            (fold_id, "fold", TopologyStageType::Transform),
+            (sink_id, "sink", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), stage_type);
+            topology.reset_current();
+        }
+        topology.add_edge(live_id.to_topology_id(), normalise_id.to_topology_id());
+        topology.add_edge(batch_id.to_topology_id(), fold_id.to_topology_id());
+        topology.add_edge(normalise_id.to_topology_id(), fold_id.to_topology_id());
+        topology.add_edge(fold_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(marked.contains(&fold_id));
+        let orders = crate::dsl::typing::derive_delivery_orders(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &marked,
+        );
+        assert_eq!(orders[&fold_id], DeliveryOrder::Recorded);
+        assert_eq!(orders[&normalise_id], DeliveryOrder::SingleInput);
+        assert_eq!(orders[&sink_id], DeliveryOrder::SingleInput);
+        assert_eq!(orders[&live_id], DeliveryOrder::SingleInput);
+    }
+
+    #[test]
+    fn a_hydrating_join_is_classified_by_its_stream_side() {
+        struct Case {
+            stream_sources: &'static [TopologyStageType],
+            marked: bool,
+            expected: DeliveryOrder,
+        }
+        for case in [
+            Case {
+                stream_sources: &[TopologyStageType::InfiniteSource],
+                marked: true,
+                expected: DeliveryOrder::Structural,
+            },
+            Case {
+                stream_sources: &[
+                    TopologyStageType::FiniteSource,
+                    TopologyStageType::FiniteSource,
+                ],
+                marked: true,
+                expected: DeliveryOrder::Canonical,
+            },
+            Case {
+                stream_sources: &[
+                    TopologyStageType::FiniteSource,
+                    TopologyStageType::InfiniteSource,
+                ],
+                marked: true,
+                expected: DeliveryOrder::Recorded,
+            },
+            Case {
+                stream_sources: &[
+                    TopologyStageType::FiniteSource,
+                    TopologyStageType::InfiniteSource,
+                ],
+                marked: false,
+                expected: DeliveryOrder::Unordered,
+            },
+        ] {
+            let reference_id = StageId::new();
+            let join_id = StageId::new();
+            let mut join = crate::join!(
+                name: "posted",
+                catalog accounts: ReferenceEvent,
+                StreamEvent -> JoinedEvent => placeholder!()
+            );
+            join.set_reference_stage_id(reference_id);
+            let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+            descriptors.insert(
+                "accounts".to_string(),
+                crate::infinite_source!(name: "accounts", InputEvent => placeholder!()),
+            );
+            descriptors.insert("posted".to_string(), join);
+            let mut name_to_id = HashMap::from([
+                ("accounts".to_string(), reference_id),
+                ("posted".to_string(), join_id),
+            ]);
+            let mut topology = TopologyBuilder::new();
+            topology.add_stage_with_id(
+                reference_id.to_topology_id(),
+                Some("accounts".to_string()),
+                TopologyStageType::InfiniteSource,
+            );
+            topology.reset_current();
+            topology.add_stage_with_id(
+                join_id.to_topology_id(),
+                Some("posted".to_string()),
+                TopologyStageType::Join,
+            );
+            topology.reset_current();
+            for (index, stage_type) in case.stream_sources.iter().enumerate() {
+                let stream_id = StageId::new();
+                let name = format!("stream_{index}");
+                let descriptor: Box<dyn StageDescriptor> = match stage_type {
+                    TopologyStageType::InfiniteSource => {
+                        crate::infinite_source!(name: "stream", AlternateEvent => placeholder!())
+                    }
+                    _ => crate::source!(name: "stream", AlternateEvent => placeholder!()),
+                };
+                descriptors.insert(name.clone(), descriptor);
+                name_to_id.insert(name.clone(), stream_id);
+                topology.add_stage_with_id(stream_id.to_topology_id(), Some(name), *stage_type);
+                topology.reset_current();
+                topology.add_edge(stream_id.to_topology_id(), join_id.to_topology_id());
+            }
+            topology.add_edge(reference_id.to_topology_id(), join_id.to_topology_id());
+            let topology = topology.build_unchecked().unwrap();
+
+            let marked = if case.marked {
+                std::collections::HashSet::from([join_id])
+            } else {
+                std::collections::HashSet::new()
+            };
+            let orders = crate::dsl::typing::derive_delivery_orders(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &marked,
+            );
+            assert_eq!(
+                orders[&join_id],
+                case.expected,
+                "{} stream reader(s), marked: {}",
+                case.stream_sources.len(),
+                case.marked
+            );
+        }
     }
 
     #[test]

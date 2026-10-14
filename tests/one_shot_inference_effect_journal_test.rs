@@ -756,7 +756,7 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .collect()
 }
 
-async fn all_stage_events(run_dir: &Path) -> Vec<ChainEvent> {
+async fn assert_each_stage_journal_has_distinct_event_ids(archive_label: &str, run_dir: &Path) {
     let manifest = archive_manifest(run_dir);
     let stage_keys = manifest["stages"]
         .as_object()
@@ -764,28 +764,16 @@ async fn all_stage_events(run_dir: &Path) -> Vec<ChainEvent> {
         .keys()
         .cloned()
         .collect::<Vec<_>>();
-    let mut events = Vec::new();
     for stage_key in stage_keys {
-        events.extend(stage_events(run_dir, &stage_key).await);
-    }
-    events
-}
-
-fn assert_distinct_events_have_distinct_admission_sequences(
-    archive_label: &str,
-    events: &[ChainEvent],
-) {
-    let mut event_by_sequence = BTreeMap::new();
-    for event in events {
-        let sequence = event
-            .admission_seq
-            .expect("every stage-journal event has an admission sequence");
-        if let Some(first_event_id) = event_by_sequence.insert(sequence, event.id) {
-            assert_eq!(
-                first_event_id, event.id,
-                "{archive_label} assigns admission sequence {} to distinct events {} and {}",
-                sequence.0, first_event_id, event.id
-            );
+        let mut seen = BTreeMap::new();
+        for event in stage_events(run_dir, &stage_key).await {
+            if let Some(first_type) = seen.insert(event.id, event.event_type()) {
+                panic!(
+                    "{archive_label} commits event {} twice in '{stage_key}' ({first_type}, {})",
+                    event.id,
+                    event.event_type()
+                );
+            }
         }
     }
 }
@@ -985,10 +973,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
     assert_eq!(live_calls.load(Ordering::SeqCst), 1);
 
     let live_archive = latest_run_dir(&journal_base);
-    assert_distinct_events_have_distinct_admission_sequences(
-        "live archive",
-        &all_stage_events(&live_archive).await,
-    );
+    assert_each_stage_journal_has_distinct_event_ids("live archive", &live_archive).await;
     let manifest = archive_manifest(&live_archive);
     assert_eq!(
         manifest["bounded_direct_fact_admission"],
@@ -1084,10 +1069,8 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
     let replay_archive = latest_run_dir(&journal_base);
     let replay_events = stage_events(&replay_archive, "brief").await;
     assert_eq!(durable_inference_ids(&replay_events), live_ids);
-    assert_distinct_events_have_distinct_admission_sequences(
-        "strict replay archive",
-        &all_stage_events(&replay_archive).await,
-    );
+    assert_each_stage_journal_has_distinct_event_ids("strict replay archive", &replay_archive)
+        .await;
 
     let verification = verify_run_dirs(
         &live_archive,
@@ -1131,10 +1114,11 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
         expected
     );
     let replay_of_replay_archive = latest_run_dir(&journal_base);
-    assert_distinct_events_have_distinct_admission_sequences(
+    assert_each_stage_journal_has_distinct_event_ids(
         "replay-of-replay archive",
-        &all_stage_events(&replay_of_replay_archive).await,
-    );
+        &replay_of_replay_archive,
+    )
+    .await;
 }
 
 #[tokio::test]

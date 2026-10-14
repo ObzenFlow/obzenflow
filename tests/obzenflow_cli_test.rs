@@ -880,12 +880,6 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 "authorize_payment",
                 "cli-teaching-declined",
             ),
-            (
-                "order.cancelled",
-                "payment.order_validated",
-                "authorize_payment",
-                "cli-teaching-declined",
-            ),
         ] {
             let heading = if stage == "authorize_payment" {
                 "EFFECTFUL TRANSFORM"
@@ -956,7 +950,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "\nTRANSFORM: validate_order\n  Reads from: store_orders, web_orders\n",
         "\nEFFECTFUL TRANSFORM: authorize_payment\n  Reads from: validate_order\n",
         "\nSINK: paid_orders\n  Reads from: authorize_payment\n",
-        "  Data subscribers: cancelled_orders, manual_review, paid_orders\n",
+        "  Data subscribers: declined_orders, manual_review, paid_orders\n",
         "  Data subscribers: —\n",
         "  Owns:\n    ",
         "      Runtime readers: —\n",
@@ -1100,7 +1094,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_fact_origins(&human);
     assert!(!human.contains("← cause") && !human.contains("root (no recorded parent)"));
     assert!(human.ends_with(&format!(
-        "CLI observed {} journal entries across 15 journals.\nRun completed. CLI reached the end of its snapshot.\n",
+        "CLI observed {} journal entries across 17 journals.\nRun completed. CLI reached the end of its snapshot.\n",
         rows.len()
     )));
     let manifest: serde_json::Value =
@@ -1178,8 +1172,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .collect();
     assert_eq!(
         registrations.len(),
-        8,
-        "seven stage supervisors and pipeline register themselves"
+        9,
+        "eight stage supervisors and pipeline register themselves"
     );
     let stage_names: std::collections::BTreeMap<_, _> = manifest["stages"]
         .as_object()
@@ -1283,10 +1277,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
     let system_counts = event_table(&verbose, "system.log", &registrations);
     assert_eq!(system_counts.values().sum::<usize>(), system_count);
-    for event_type in [
-        ".ready@1",
-        ".completed@1",
-        "execution/runtime.contract.continuation_allowed@1",
+    // One per stage, and one per topology edge.
+    for (event_type, expected) in [
+        (".ready@1", 8),
+        (".completed@1", 8),
+        ("execution/runtime.contract.continuation_allowed@1", 7),
     ] {
         assert_eq!(
             expected_journals
@@ -1296,7 +1291,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                     && kind.ends_with(event_type))
                 .map(|(_, count)| count)
                 .sum::<usize>(),
-            7
+            expected
         );
     }
     assert!(system_counts
@@ -1335,13 +1330,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         )],
         1
     );
-    assert_eq!(
-        event_table(&verbose, data_file("authorize_payment"), &registrations)[&(
-            "fact/order.cancelled@1".into(),
-            "authorize_payment".into(),
-            "Transform".into()
-        )],
-        1
+    assert!(
+        !event_table(&verbose, data_file("authorize_payment"), &registrations)
+            .keys()
+            .any(|(event, _, _)| event == "fact/order.cancelled@1"),
+        "a decline is a payment outcome; authorize_payment never cancels the order"
     );
     assert!(
         !verbose.contains("By event type")

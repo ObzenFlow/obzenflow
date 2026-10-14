@@ -4,7 +4,9 @@
 
 use crate::control_plane::ControlPlaneProvider;
 use crate::messaging::DeliveredRecord;
+use obzenflow_core::contracts::SubscriptionFeed;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::payloads::flow_control_payload::SelectedInput;
 use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::{
@@ -110,6 +112,25 @@ impl std::fmt::Display for FeedIdentity {
 pub struct ReaderTiebreakKey {
     pub stage_key: StageKey,
     pub feed_identity: FeedIdentity,
+}
+
+impl ReaderTiebreakKey {
+    /// The reader as a decision row names it, its stage key and any selected
+    /// feeds in identity order.
+    pub fn selected_input(&self) -> SelectedInput {
+        SelectedInput {
+            stage_key: obzenflow_core::id::StageKey(self.stage_key.as_str().to_string()),
+            feed: self
+                .feed_identity
+                .0
+                .iter()
+                .map(|(role, descriptor)| SubscriptionFeed {
+                    descriptor: descriptor.clone(),
+                    role: role.as_system_feed_role(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Count of transport events delivered from one reader (FLOWIP-095d): the

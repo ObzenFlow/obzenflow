@@ -10,7 +10,7 @@ use super::journal_event::JournalEvent;
 use super::payloads::{ChainPayload, JournalPayload, SystemPayload};
 use super::provenance::{AuthoredProvenance, JournalProvenance, Provenance, RecordProvenance};
 use crate::event::CorrelationId;
-use crate::{AdmissionSeq, EventId, JournalWriterId, WriterId};
+use crate::{EventId, JournalWriterId, WriterId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::ops::{Deref, DerefMut};
@@ -138,9 +138,6 @@ impl<P: JournalPayload> JournalRecord<P> {
     }
     pub fn event_type_name(&self) -> &str {
         self.envelope.provenance.event.event_type()
-    }
-    pub fn admission_seq(&self) -> Option<AdmissionSeq> {
-        self.envelope.provenance.event.admission_seq()
     }
     pub fn into_authored(self) -> P::Event {
         let (envelope, payload) = self.into_parts();

@@ -53,7 +53,7 @@ fn write_manifest(dir: &Path) {
             error_journal_file: "FiniteSource_returns_error_stage_01H00000000000000000000000.log"
                 .to_string(),
             inbound: Vec::new(),
-            ordered_delivery: true,
+            delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
         },
     );
 

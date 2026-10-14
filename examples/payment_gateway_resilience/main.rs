@@ -60,8 +60,8 @@ fn banner_for(mode: &RunMode) -> Banner {
             .bullets(
                 "What to watch",
                 [
-                    "validate_order classifies once and authors multiple named facts; invalid orders and gateway declines converge on the cancelled-orders delivery",
-                    "InvalidOrder and PaymentDeclined are journal-recorded provenance facts with no sink; CancelledOrder carries the order's fate",
+                    "validate_order classifies once and authors multiple named facts; InvalidOrder stays in the journal as provenance and CancelledOrder carries the order's fate",
+                    "Gateway declines are payment outcomes, not cancellations; PaymentDeclined reaches its own delivery",
                     "Transient gateway failures receive bounded retry; sustained outages open the circuit breaker (obzenflow_circuit_breaker_*), and terminal unavailability does not cancel",
                     "Re-run with --replay-from target/payment-gateway-logs/flows/<flow_id> to replay with zero gateway calls",
                 ],
@@ -76,6 +76,7 @@ fn banner_for(mode: &RunMode) -> Banner {
 /// replay-of-replay, never at metrics the replay did not touch.
 fn footer_for(outcome: RunPresentationOutcome) -> Footer {
     let next_step = match outcome.run_mode() {
+        RunMode::Replay(ctx) if ctx.verify => "Next: replay the replay.",
         RunMode::Replay(_) => {
             "Next: add --verify to make the runtime prove the reconstruction (\"output matched the original run, 0 differences\"), or replay the replay."
         }
@@ -170,5 +171,24 @@ mod tests {
             replay.contains("--replay-from target/payment-gateway-logs/flows/flow_01REPLAY"),
             "replay footer must offer replay-of-replay on the new journal: {replay}"
         );
+    }
+
+    #[test]
+    fn verified_replay_footer_does_not_suggest_verify_again() {
+        let mut run_mode = replay_mode();
+        if let RunMode::Replay(ctx) = &mut run_mode {
+            ctx.verify = true;
+        }
+        let replay = footer_for(RunPresentationOutcome::Completed {
+            flow_name: "payment_gateway_resilience_demo".to_string(),
+            location: Some(obzenflow::application::CurrentRunLocator::new(
+                PathBuf::from("target/payment-gateway-logs/flows/flow_01REPLAY"),
+            )),
+            run_mode,
+        })
+        .finish();
+
+        assert!(!replay.contains("--verify"), "{replay}");
+        assert!(replay.contains("replay the replay"), "{replay}");
     }
 }

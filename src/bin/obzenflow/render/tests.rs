@@ -157,7 +157,7 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
             "dsl_var": stage.key, "stage_type": stage.stage_type, "is_effectful": false,
             "stage_id": stage.id.to_string(), "stage_logic_version": "1",
             "data_journal_file": "thermometer.log", "error_journal_file": "thermometer.errors.log",
-            "inbound": [], "ordered_delivery": true
+            "inbound": [], "delivery_order": "single_input"
         }}
     }))
     .unwrap();
@@ -269,7 +269,7 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
                     "data_journal_file": format!("{}.log", stage.key),
                     "error_journal_file": format!("{}.errors.log", stage.key),
                     "inbound": if stage.key == "classify" { vec!["thermometer"] } else { vec![] },
-                    "ordered_delivery": true
+                    "delivery_order": "single_input"
                 }),
             )
         })
@@ -1516,6 +1516,38 @@ fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
     assert!(text.contains("⟨1:100,3:12⟩"), "{text}");
     assert!(text.contains(&format!("3 journal_{}", id(3))), "{text}");
     assert!(text.contains("input not recorded"), "{text}");
+}
+
+#[test]
+fn clocks_name_journals_from_earlier_runs_in_the_lineage() {
+    let mut renderer = renderer();
+    let mut ancestor = fact(1, 100, &[], json!({})).journal;
+    ancestor.id = *coordinate(3).journal_writer_id.as_journal_id();
+    renderer.name_ancestor_journals([(ancestor, "gen 0".to_string())]);
+    let mut source = fact(1, 100, &[], json!({}));
+    if let RunRecordData::Chain(row) = &mut source.record {
+        row.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .clocks
+            .insert(coordinate(3), 12);
+    }
+    let mut output = Vec::new();
+    renderer.record(&mut output, source).unwrap();
+    renderer.flush_pending(&mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("⟨1:100,3:12⟩"), "{text}");
+    assert!(text.contains("3 thermometer (gen 0)"), "{text}");
+    assert!(!text.contains(&format!("journal_{}", id(3))), "{text}");
+    let matrix = matrix_text(&renderer, &RunReadProgress::default());
+    assert!(
+        matrix
+            .lines()
+            .any(|line| line.split_whitespace().collect::<Vec<_>>()
+                == ["3", "thermometer", "(gen", "0)", "—", "—", "—"]),
+        "{matrix}"
+    );
 }
 
 #[test]

@@ -115,7 +115,6 @@ impl ChainEventFactory {
             cycle_scc_id: None,
             runtime: None,
             effect_provenance: None,
-            admission_seq: None,
             source_progress: None,
             composite_activations: Vec::new(),
         };

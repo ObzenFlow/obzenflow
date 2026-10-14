@@ -5,7 +5,20 @@
 use super::domain::*;
 use obzenflow::error::HandlerError;
 use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
+use obzenflow::stages::transforms::TypedTransformHandler;
 use std::collections::HashMap;
+
+#[derive(Clone, Debug)]
+pub struct AccountBook;
+
+impl TypedTransformHandler for AccountBook {
+    type Input = AccountOpened;
+    type Output = AccountOpened;
+
+    fn process(&self, account: AccountOpened) -> Result<AccountOpened, HandlerError> {
+        Ok(account)
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct CheckbookState {

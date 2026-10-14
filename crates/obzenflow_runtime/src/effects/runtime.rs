@@ -103,18 +103,6 @@ fn restore_archived_terminal_identity(
     restore_archived_effect_identity(rebuilt, archived)
 }
 
-/// Rematerialise archived control evidence into the current run's append order.
-///
-/// Effect control content and event identity remain durable replay evidence, but
-/// `admission_seq` is a run-local append coordinate. Source replay is the sole
-/// lane that preserves it across runs (FLOWIP-120n F18); downstream effect
-/// controls are re-authored and must let the candidate journal stamp a fresh
-/// value alongside the rebuilt Start and terminal facts.
-fn reauthor_archived_effect_control(mut event: ChainEvent) -> ChainEvent {
-    event.admission_seq = None;
-    event
-}
-
 #[derive(Debug, Clone)]
 enum ReconstructionRefusal {
     DescriptorMismatch {
@@ -2640,11 +2628,7 @@ impl EffectsCore {
                 self.commit_escape_control_group(
                     cursor,
                     started.attempt,
-                    control_events
-                        .iter()
-                        .cloned()
-                        .map(reauthor_archived_effect_control)
-                        .collect(),
+                    control_events.to_vec(),
                     obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
                 )
                 .await?;
@@ -2682,7 +2666,7 @@ impl EffectsCore {
                     )),
                 )));
             }
-            terminal_control_events.push(reauthor_archived_effect_control(event.clone()));
+            terminal_control_events.push(event.clone());
         }
 
         let terminal_attempt = history.terminal_attempt.flatten();

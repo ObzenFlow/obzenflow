@@ -53,6 +53,24 @@ impl ChainEventFactory {
         )
     }
 
+    /// Create a recorded fan-in's decision row, authored into its own journal
+    /// before the selection it names.
+    pub fn input_selected_event(
+        writer_id: WriterId,
+        input: crate::event::payloads::flow_control_payload::SelectedInput,
+        delivered_count: u64,
+        input_delivered_count: u64,
+    ) -> ChainEvent {
+        Self::framework_event(
+            writer_id,
+            ChainPayload::FlowControl(FlowControlPayload::InputSelection {
+                input,
+                delivered_count: crate::event::types::Count(delivered_count),
+                input_delivered_count: crate::event::types::Count(input_delivered_count),
+            }),
+        )
+    }
+
     /// Create a watermark signal
     pub fn watermark_event(
         writer_id: WriterId,

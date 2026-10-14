@@ -122,6 +122,7 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
                 },
                 payload: comparable_data_payload(
                     matches!(payload, ChainPayload::CompositeData(_)),
+                    event.effect_provenance.is_some(),
                     &payload.contract_body().ok()?,
                 ),
                 status: Some(semantic_status(event)),
@@ -156,8 +157,20 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
     }
 }
 
-fn comparable_data_payload(composite: bool, payload: &Value) -> Value {
+fn comparable_data_payload(composite: bool, effect_lane: bool, payload: &Value) -> Value {
     let mut payload = payload.clone();
+    if effect_lane {
+        if let Some(cursor) = payload
+            .get_mut("cursor")
+            .and_then(Value::as_object_mut)
+            .filter(|cursor| cursor.contains_key("recorded_flow_id"))
+        {
+            cursor.insert(
+                "recorded_flow_id".to_string(),
+                Value::String("<recorded-flow-namespace>".to_string()),
+            );
+        }
+    }
     if composite {
         if let Some(object) = payload.as_object_mut() {
             if object.contains_key("job_key") {
@@ -318,6 +331,46 @@ mod tests {
         };
         let identity = row.identity.expect("effect row carries identity");
         assert_eq!(identity.namespace, "flow_gen0");
+    }
+
+    #[test]
+    fn an_effect_records_payload_cursor_namespace_is_positionally_excluded() {
+        let record = |namespace: &str| {
+            let cursor = EffectCursor::new(namespace, "authorize", 3, 0);
+            let provenance = EffectProvenance {
+                cursor: cursor.clone(),
+                descriptor_hash: "hash".into(),
+                descriptor: EffectDescriptor::new("payment.charge", "charge", 1, "1", "input"),
+                outcome_fact_ordinal: None,
+                outcome_fact_count: None,
+                group_id: None,
+                fact_owner: Default::default(),
+                origin: None,
+                attempt: None,
+            };
+            ChainEventFactory::data_event(
+                writer(),
+                "effect.execution_failed",
+                std::num::NonZeroU32::MIN,
+                json!({"cursor": cursor, "outcome": "failed"}),
+            )
+            .with_effect_provenance(provenance)
+        };
+        let (Some(ProjectedRow::Positional(first)), Some(ProjectedRow::Positional(second))) = (
+            project(&record("flow_run_a")),
+            project(&record("flow_run_b")),
+        ) else {
+            panic!("effect records project positionally");
+        };
+        assert_eq!(
+            first.payload, second.payload,
+            "independent runs record the same effect content"
+        );
+        assert_ne!(
+            first.identity.map(|identity| identity.namespace),
+            second.identity.map(|identity| identity.namespace),
+            "the namespace stays in the identity a lineage compares"
+        );
     }
 
     #[test]

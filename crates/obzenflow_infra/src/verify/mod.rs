@@ -206,7 +206,9 @@ pub fn verify_sources(
                     counts_by_type: None,
                 }
             }
-            StageCertification::NotOrderCertified { blocking } => {
+            StageCertification::NotOrderCertified { blocking }
+            | StageCertification::OrderRecorded { blocking } => {
+                let recorded = matches!(certification, StageCertification::OrderRecorded { .. });
                 let b_data = tally_journal(baseline.stage_rows(&b_stage.data_journal_file)?)?;
                 let b_err = tally_journal(baseline.stage_rows(&b_stage.error_journal_file)?)?;
                 let c_data = tally_journal(candidate.stage_rows(&c_stage.data_journal_file)?)?;
@@ -227,10 +229,10 @@ pub fn verify_sources(
                 merge_counts(&mut candidate_counts, c_err.counts_by_type);
 
                 StageReport {
-                    status: if vacuous {
-                        "matched"
-                    } else {
-                        "not_order_certified"
+                    status: match (vacuous, recorded) {
+                        (true, _) => "matched",
+                        (false, true) => "order_recorded",
+                        (false, false) => "not_order_certified",
                     }
                     .to_string(),
                     vacuous,
@@ -241,12 +243,14 @@ pub fn verify_sources(
                     positional_rows_candidate: positional_candidate,
                     divergence_count: 0,
                     divergences: Vec::new(),
-                    informational: if vacuous {
-                        Vec::new()
-                    } else {
-                        vec![
+                    informational: match (vacuous, recorded) {
+                        (true, _) => Vec::new(),
+                        (false, true) => vec![
+                            "delivery order at or above this stage was recorded at run time; compare each run with its own replay".to_string(),
+                        ],
+                        (false, false) => vec![
                             "delivery order is unconstrained at or above this stage; per-type row counts are an order-insensitive advisory, never a certificate".to_string(),
-                        ]
+                        ],
                     },
                     counts_by_type: if vacuous {
                         None
@@ -265,6 +269,7 @@ pub fn verify_sources(
         match stage_report.status.as_str() {
             "diverged" => totals.diverged += 1,
             "not_order_certified" => totals.not_order_certified += 1,
+            "order_recorded" => totals.order_recorded += 1,
             _ => {
                 totals.matched += 1;
                 if stage_report.vacuous {
@@ -277,7 +282,7 @@ pub fn verify_sources(
 
     let verdict = if totals.diverged > 0 {
         Verdict::Diverged
-    } else if totals.not_order_certified > 0 {
+    } else if totals.not_order_certified > 0 || totals.order_recorded > 0 {
         Verdict::UncertifiedRemainder
     } else {
         Verdict::CertifiedMatch
@@ -338,20 +343,36 @@ pub fn render_verdict(outcome: &VerifyOutcome) -> String {
                     }
                 }
                 Verdict::UncertifiedRemainder => {
-                    let uncertified: Vec<&str> = report
-                        .stages
-                        .iter()
-                        .filter(|(_, s)| s.status == "not_order_certified")
-                        .map(|(k, _)| k.as_str())
-                        .collect();
-                    lines.push(format!(
-                        "certified region matched; {} stage(s) not order-certified: {}",
-                        uncertified.len(),
-                        uncertified.join(", ")
-                    ));
-                    lines.push(
-                        "delivery order is unconstrained at those stages; see the report's per-type row counts".to_string(),
-                    );
+                    let with_status = |status: &str| -> Vec<&str> {
+                        report
+                            .stages
+                            .iter()
+                            .filter(|(_, s)| s.status == status)
+                            .map(|(k, _)| k.as_str())
+                            .collect()
+                    };
+                    let recorded = with_status("order_recorded");
+                    if !recorded.is_empty() {
+                        lines.push(format!(
+                            "certified region matched; {} stage(s) order-recorded: {}",
+                            recorded.len(),
+                            recorded.join(", ")
+                        ));
+                        lines.push(
+                            "delivery order at those stages was recorded at run time; compare each run with its own replay".to_string(),
+                        );
+                    }
+                    let uncertified = with_status("not_order_certified");
+                    if !uncertified.is_empty() {
+                        lines.push(format!(
+                            "certified region matched; {} stage(s) not order-certified: {}",
+                            uncertified.len(),
+                            uncertified.join(", ")
+                        ));
+                        lines.push(
+                            "delivery order is unconstrained at those stages; see the report's per-type row counts".to_string(),
+                        );
+                    }
                 }
                 Verdict::Refused => unreachable!("refusals render above"),
             }
@@ -403,12 +424,14 @@ mod tests {
     };
     use obzenflow_core::event::ChainEvent;
     use obzenflow_core::journal::archive::manifest::{
-        RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_SCHEMA_VERSION,
+        DeliveryOrder, RunManifest, RunManifestReplayConfig, RunManifestStage,
+        JOURNAL_SCHEMA_VERSION,
     };
     use obzenflow_core::journal::ArchiveStatus;
     use obzenflow_core::{StageId, WriterId};
     use serde_json::json;
     use std::collections::HashMap;
+    use DeliveryOrder::{Recorded, SingleInput, Unordered};
 
     struct MemorySource {
         dir: PathBuf,
@@ -438,12 +461,12 @@ mod tests {
     }
 
     fn manifest(
-        stages: &[(&str, &[&str], bool)],
+        stages: &[(&str, &[&str], DeliveryOrder)],
         replay: Option<RunManifestReplayConfig>,
         flow_id: &str,
     ) -> RunManifest {
         let mut map = HashMap::new();
-        for (key, inbound, ordered) in stages {
+        for (key, inbound, delivery_order) in stages {
             map.insert(
                 key.to_string(),
                 RunManifestStage {
@@ -455,7 +478,7 @@ mod tests {
                     data_journal_file: format!("{key}.log"),
                     error_journal_file: format!("{key}_error.log"),
                     inbound: inbound.iter().map(|s| s.to_string()).collect(),
-                    ordered_delivery: *ordered,
+                    delivery_order: *delivery_order,
                 },
             );
         }
@@ -532,8 +555,8 @@ mod tests {
         }
     }
 
-    fn topology() -> Vec<(&'static str, &'static [&'static str], bool)> {
-        vec![("a", &[], true), ("b", &["a"], true)]
+    fn topology() -> Vec<(&'static str, &'static [&'static str], DeliveryOrder)> {
+        vec![("a", &[], SingleInput), ("b", &["a"], SingleInput)]
     }
 
     #[test]
@@ -581,10 +604,10 @@ mod tests {
 
     #[test]
     fn uncertified_stage_with_rows_exits_two_with_counts() {
-        let stages: Vec<(&str, &[&str], bool)> = vec![
-            ("x", &[], true),
-            ("y", &[], true),
-            ("merge", &["x", "y"], false),
+        let stages: Vec<(&str, &[&str], DeliveryOrder)> = vec![
+            ("x", &[], SingleInput),
+            ("y", &[], SingleInput),
+            ("merge", &["x", "y"], Unordered),
         ];
         let rows = vec![data("t", json!({"n": 1}))];
         let baseline = source(
@@ -610,11 +633,69 @@ mod tests {
     }
 
     #[test]
+    fn recorded_stage_across_independent_runs_exits_two_as_order_recorded() {
+        let stages: Vec<(&str, &[&str], DeliveryOrder)> = vec![
+            ("batch", &[], SingleInput),
+            ("live", &[], SingleInput),
+            ("merge", &["batch", "live"], Recorded),
+            ("fold", &["merge"], SingleInput),
+        ];
+        let rows = vec![data("t", json!({"n": 1}))];
+        let journals = [("merge.log", rows.clone()), ("fold.log", rows)];
+        let baseline = source(
+            manifest(&stages, None, "flow_b"),
+            ArchiveStatus::Completed,
+            &journals,
+            "/runs/b",
+        );
+        let candidate = source(
+            manifest(&stages, None, "flow_c"),
+            ArchiveStatus::Completed,
+            &journals,
+            "/runs/c",
+        );
+        let outcome = verify_sources(&baseline, &candidate, &no_write()).unwrap();
+        assert_eq!(outcome.exit_code(), 2);
+        let VerifyOutcome::Completed { report, .. } = &outcome else {
+            panic!()
+        };
+        assert_eq!(report.report_version, 2);
+        assert_eq!(report.totals.order_recorded, 2);
+        assert_eq!(report.totals.not_order_certified, 0);
+        for stage in ["merge", "fold"] {
+            assert_eq!(report.stages[stage].status, "order_recorded");
+            assert!(!report.stages[stage].order_certified);
+            assert_eq!(report.stages[stage].blocking, vec!["merge".to_string()]);
+        }
+        let rendered = render_verdict(&outcome);
+        let mut lines = rendered.lines();
+        assert_eq!(
+            lines.next(),
+            Some("certified region matched; 2 stage(s) order-recorded: fold, merge")
+        );
+        assert_eq!(
+            lines.next(),
+            Some(
+                "delivery order at those stages was recorded at run time; compare each run with its own replay"
+            )
+        );
+
+        let replay = source(
+            manifest(&stages, replay_block(), "flow_r"),
+            ArchiveStatus::Completed,
+            &journals,
+            "/runs/r",
+        );
+        let outcome = verify_sources(&baseline, &replay, &no_write()).unwrap();
+        assert_eq!(outcome.exit_code(), 0);
+    }
+
+    #[test]
     fn uncertified_stage_with_no_positional_rows_is_vacuously_certified() {
-        let stages: Vec<(&str, &[&str], bool)> = vec![
-            ("x", &[], true),
-            ("y", &[], true),
-            ("sink", &["x", "y"], false),
+        let stages: Vec<(&str, &[&str], DeliveryOrder)> = vec![
+            ("x", &[], SingleInput),
+            ("y", &[], SingleInput),
+            ("sink", &["x", "y"], Unordered),
         ];
         // The sink journal carries only excluded rows (none projected).
         let baseline = source(
@@ -780,8 +861,11 @@ mod tests {
             &[],
             "/runs/b",
         );
-        let extended: Vec<(&str, &[&str], bool)> =
-            vec![("a", &[], true), ("b", &["a"], true), ("c", &["b"], true)];
+        let extended: Vec<(&str, &[&str], DeliveryOrder)> = vec![
+            ("a", &[], SingleInput),
+            ("b", &["a"], SingleInput),
+            ("c", &["b"], SingleInput),
+        ];
         let candidate = source(
             manifest(&extended, replay_block(), "flow_c"),
             ArchiveStatus::Completed,

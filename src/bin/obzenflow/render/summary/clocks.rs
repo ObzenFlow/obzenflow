@@ -54,7 +54,7 @@ impl Renderer {
                 .map(|id| ClockRow {
                     id: *id,
                     number: self.context.journal_number(id),
-                    name: id.to_string(),
+                    name: safe_text(&self.context.journal_label(id)),
                     values: None,
                 }),
         );

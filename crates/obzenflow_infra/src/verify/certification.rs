@@ -2,29 +2,39 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Order-certification (FLOWIP-095j): which stages may be compared
-//! positionally.
+//! Order certification decides which stages may be compared positionally.
 //!
-//! A stage is order-certified when every fan-in on every path from the
-//! sources to it delivers deterministically. The inputs are the manifest's
-//! recorded `inbound` edges and `ordered_delivery` flags (written at flow
-//! build, where the FLOWIP-095d marked set and structural orderers are
-//! known), so certification is a pure graph walk over manifest data and both
-//! verify surfaces certify identically. A stage's own `ordered_delivery` must
-//! be true in BOTH manifests: the flag is the ordering-regime record, and a
-//! mismatch means the runs executed under different regimes.
+//! A pure walk over each manifest's `inbound` edges and `delivery_order`
+//! values, which must match in both manifests. A replay reproduces every
+//! order except `unordered`. Independent runs agree only where the order is a
+//! function of the inputs, so a recorded stage or ancestor is reported instead
+//! of compared.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use obzenflow_core::journal::archive::manifest::RunManifest;
+use obzenflow_core::journal::archive::manifest::{DeliveryOrder, RunManifest};
+
+/// What the two runs are to each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    /// The candidate replays the baseline's lineage.
+    Replay,
+    /// Two runs that each read their inputs live.
+    IndependentRuns,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageCertification {
     Certified,
-    /// Not positionally comparable. `blocking` names every ancestor
-    /// (possibly including the stage itself) whose delivery order is
-    /// unconstrained in at least one of the two runs.
+    /// Not positionally comparable. `blocking` names every ancestor, possibly
+    /// the stage itself, whose delivery order prevents certification; at
+    /// least one is unordered or differs between the runs.
     NotOrderCertified {
+        blocking: Vec<String>,
+    },
+    /// Not compared across independent runs, because the stage or an ordered
+    /// ancestor recorded its order at run time. `blocking` names them.
+    OrderRecorded {
         blocking: Vec<String>,
     },
 }
@@ -35,23 +45,27 @@ impl StageCertification {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Blocker {
+    Recorded,
+    Unconstrained,
+}
+
 /// Compute certification for every stage key present in both manifests.
 /// Callers validate stage-set and inbound equality first (`validate`), so the
 /// walk reads edges from the candidate manifest.
 pub fn certify(
     baseline: &RunManifest,
     candidate: &RunManifest,
+    comparison: Comparison,
 ) -> BTreeMap<String, StageCertification> {
-    let ordered_both: HashMap<&str, bool> = candidate
+    let blockers: HashMap<&str, Blocker> = candidate
         .stages
         .iter()
-        .map(|(key, stage)| {
-            let baseline_ordered = baseline
-                .stages
-                .get(key)
-                .map(|s| s.ordered_delivery)
-                .unwrap_or(false);
-            (key.as_str(), stage.ordered_delivery && baseline_ordered)
+        .filter_map(|(key, stage)| {
+            let baseline_order = baseline.stages.get(key).map(|s| s.delivery_order);
+            stage_blocker(baseline_order, stage.delivery_order, comparison)
+                .map(|blocker| (key.as_str(), blocker))
         })
         .collect();
 
@@ -59,35 +73,55 @@ pub fn certify(
     for key in candidate.stages.keys() {
         let mut blocking = HashSet::new();
         let mut visited = HashSet::new();
-        collect_blocking(key, candidate, &ordered_both, &mut visited, &mut blocking);
+        collect_blocking(key, candidate, &blockers, &mut visited, &mut blocking);
+        let unconstrained = blocking
+            .iter()
+            .any(|stage| blockers.get(stage.as_str()) == Some(&Blocker::Unconstrained));
+        let mut blocking: Vec<String> = blocking.into_iter().collect();
+        blocking.sort();
         let certification = if blocking.is_empty() {
             StageCertification::Certified
-        } else {
-            let mut blocking: Vec<String> = blocking.into_iter().collect();
-            blocking.sort();
+        } else if unconstrained {
             StageCertification::NotOrderCertified { blocking }
+        } else {
+            StageCertification::OrderRecorded { blocking }
         };
         result.insert(key.clone(), certification);
     }
     result
 }
 
+fn stage_blocker(
+    baseline: Option<DeliveryOrder>,
+    candidate: DeliveryOrder,
+    comparison: Comparison,
+) -> Option<Blocker> {
+    if baseline != Some(candidate) || candidate == DeliveryOrder::Unordered {
+        return Some(Blocker::Unconstrained);
+    }
+    match comparison {
+        Comparison::Replay => None,
+        Comparison::IndependentRuns if candidate.agrees_across_runs() => None,
+        Comparison::IndependentRuns => Some(Blocker::Recorded),
+    }
+}
+
 fn collect_blocking(
     key: &str,
     manifest: &RunManifest,
-    ordered_both: &HashMap<&str, bool>,
+    blockers: &HashMap<&str, Blocker>,
     visited: &mut HashSet<String>,
     blocking: &mut HashSet<String>,
 ) {
     if !visited.insert(key.to_string()) {
         return;
     }
-    if !ordered_both.get(key).copied().unwrap_or(false) {
+    if blockers.contains_key(key) {
         blocking.insert(key.to_string());
     }
     if let Some(stage) = manifest.stages.get(key) {
         for upstream in &stage.inbound {
-            collect_blocking(upstream, manifest, ordered_both, visited, blocking);
+            collect_blocking(upstream, manifest, blockers, visited, blocking);
         }
     }
 }
@@ -98,10 +132,11 @@ mod tests {
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::journal::archive::manifest::RunManifestStage;
     use std::collections::HashMap as StdHashMap;
+    use DeliveryOrder::{Canonical, Recorded, SingleInput, Structural, Unordered};
 
-    fn manifest(stages: &[(&str, &[&str], bool)]) -> RunManifest {
+    fn manifest(stages: &[(&str, &[&str], DeliveryOrder)]) -> RunManifest {
         let mut map = StdHashMap::new();
-        for (key, inbound, ordered) in stages {
+        for (key, inbound, delivery_order) in stages {
             map.insert(
                 key.to_string(),
                 RunManifestStage {
@@ -113,7 +148,7 @@ mod tests {
                     data_journal_file: format!("{key}.log"),
                     error_journal_file: format!("{key}_error.log"),
                     inbound: inbound.iter().map(|s| s.to_string()).collect(),
-                    ordered_delivery: *ordered,
+                    delivery_order: *delivery_order,
                 },
             );
         }
@@ -137,83 +172,148 @@ mod tests {
         }
     }
 
+    fn names(blocking: &[&str]) -> Vec<String> {
+        blocking.iter().map(|name| name.to_string()).collect()
+    }
+
     #[test]
     fn single_input_chain_is_fully_certified() {
         let m = manifest(&[
-            ("source", &[], true),
-            ("transform", &["source"], true),
-            ("sink", &["transform"], true),
+            ("source", &[], SingleInput),
+            ("transform", &["source"], SingleInput),
+            ("sink", &["transform"], SingleInput),
         ]);
-        let certs = certify(&m, &m);
-        assert!(certs.values().all(StageCertification::is_certified));
+        for comparison in [Comparison::Replay, Comparison::IndependentRuns] {
+            let certs = certify(&m, &m, comparison);
+            assert!(certs.values().all(StageCertification::is_certified));
+        }
     }
 
     #[test]
     fn unordered_fan_in_poisons_descendants_and_names_the_blocker() {
         let m = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], false),
-            ("downstream", &["merge"], true),
+            ("a", &[], SingleInput),
+            ("b", &[], SingleInput),
+            ("merge", &["a", "b"], Unordered),
+            ("downstream", &["merge"], SingleInput),
         ]);
-        let certs = certify(&m, &m);
-        assert!(certs["a"].is_certified());
-        assert!(certs["b"].is_certified());
-        assert_eq!(
-            certs["merge"],
-            StageCertification::NotOrderCertified {
-                blocking: vec!["merge".to_string()]
-            }
-        );
-        assert_eq!(
-            certs["downstream"],
-            StageCertification::NotOrderCertified {
-                blocking: vec!["merge".to_string()]
-            }
-        );
+        for comparison in [Comparison::Replay, Comparison::IndependentRuns] {
+            let certs = certify(&m, &m, comparison);
+            assert!(certs["a"].is_certified());
+            assert!(certs["b"].is_certified());
+            assert_eq!(
+                certs["merge"],
+                StageCertification::NotOrderCertified {
+                    blocking: names(&["merge"])
+                }
+            );
+            assert_eq!(
+                certs["downstream"],
+                StageCertification::NotOrderCertified {
+                    blocking: names(&["merge"])
+                }
+            );
+        }
     }
 
     #[test]
-    fn ordered_fan_in_certifies_when_both_regimes_agree() {
+    fn canonical_fan_in_certifies_across_independent_runs_and_replay() {
         let m = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], true),
+            ("a", &[], SingleInput),
+            ("b", &[], SingleInput),
+            ("merge", &["a", "b"], Canonical),
         ]);
-        let certs = certify(&m, &m);
-        assert!(certs["merge"].is_certified());
+        for comparison in [Comparison::Replay, Comparison::IndependentRuns] {
+            assert!(certify(&m, &m, comparison)["merge"].is_certified());
+        }
     }
 
     #[test]
-    fn regime_mismatch_downgrades_the_stage() {
+    fn recorded_fan_in_certifies_against_its_replay_only() {
+        let m = manifest(&[
+            ("batch", &[], SingleInput),
+            ("live", &[], SingleInput),
+            ("merge", &["batch", "live"], Recorded),
+            ("fold", &["merge"], SingleInput),
+        ]);
+        let replay = certify(&m, &m, Comparison::Replay);
+        assert!(replay.values().all(StageCertification::is_certified));
+
+        let independent = certify(&m, &m, Comparison::IndependentRuns);
+        assert!(independent["batch"].is_certified());
+        assert_eq!(
+            independent["merge"],
+            StageCertification::OrderRecorded {
+                blocking: names(&["merge"])
+            }
+        );
+        assert_eq!(
+            independent["fold"],
+            StageCertification::OrderRecorded {
+                blocking: names(&["merge"])
+            }
+        );
+    }
+
+    #[test]
+    fn an_unordered_ancestor_outranks_a_recorded_one_and_both_are_named() {
+        let m = manifest(&[
+            ("a", &[], SingleInput),
+            ("b", &[], SingleInput),
+            ("loose", &["a", "b"], Unordered),
+            ("recorded", &["loose", "b"], Recorded),
+        ]);
+        let certs = certify(&m, &m, Comparison::IndependentRuns);
+        assert_eq!(
+            certs["recorded"],
+            StageCertification::NotOrderCertified {
+                blocking: names(&["loose", "recorded"])
+            }
+        );
+    }
+
+    #[test]
+    fn hydrating_join_with_one_stream_reader_certifies_in_both() {
+        let m = manifest(&[
+            ("accounts", &[], SingleInput),
+            ("ledger", &[], SingleInput),
+            ("posted", &["accounts", "ledger"], Structural),
+        ]);
+        for comparison in [Comparison::Replay, Comparison::IndependentRuns] {
+            assert!(certify(&m, &m, comparison)["posted"].is_certified());
+        }
+    }
+
+    #[test]
+    fn delivery_order_mismatch_blocks_the_stage() {
         let baseline = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], false),
+            ("a", &[], SingleInput),
+            ("b", &[], SingleInput),
+            ("merge", &["a", "b"], Recorded),
         ]);
         let candidate = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], true),
+            ("a", &[], SingleInput),
+            ("b", &[], SingleInput),
+            ("merge", &["a", "b"], Canonical),
         ]);
-        let certs = certify(&baseline, &candidate);
-        assert_eq!(
-            certs["merge"],
-            StageCertification::NotOrderCertified {
-                blocking: vec!["merge".to_string()]
-            }
-        );
+        for comparison in [Comparison::Replay, Comparison::IndependentRuns] {
+            assert_eq!(
+                certify(&baseline, &candidate, comparison)["merge"],
+                StageCertification::NotOrderCertified {
+                    blocking: names(&["merge"])
+                }
+            );
+        }
     }
 
     #[test]
     fn cycles_terminate_and_stay_uncertified() {
-        // Cycle members record ordered_delivery=false at build time.
         let m = manifest(&[
-            ("source", &[], true),
-            ("loop_a", &["source", "loop_b"], false),
-            ("loop_b", &["loop_a"], false),
+            ("source", &[], SingleInput),
+            ("loop_a", &["source", "loop_b"], Unordered),
+            ("loop_b", &["loop_a"], Unordered),
         ]);
-        let certs = certify(&m, &m);
+        let certs = certify(&m, &m, Comparison::Replay);
         assert!(!certs["loop_a"].is_certified());
         assert!(!certs["loop_b"].is_certified());
         assert!(certs["source"].is_certified());

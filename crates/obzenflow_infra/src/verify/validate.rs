@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use obzenflow_core::journal::ArchiveStatus;
 
-use super::certification::{certify, StageCertification};
+use super::certification::{certify, Comparison, StageCertification};
 use super::error::RefusalReason;
 use super::lineage::{identity_mode, IdentityMode};
 use super::source::RunSource;
@@ -103,10 +103,15 @@ pub(crate) fn validate(
         })
         .collect();
 
+    let identity = identity_mode(c_manifest);
+    let comparison = match identity {
+        IdentityMode::Lineage => Comparison::Replay,
+        IdentityMode::Positional => Comparison::IndependentRuns,
+    };
     Ok(ValidationPlan {
         mode,
-        identity: identity_mode(c_manifest),
-        certification: certify(b_manifest, c_manifest),
+        identity,
+        certification: certify(b_manifest, c_manifest, comparison),
         logic_version_changed,
     })
 }

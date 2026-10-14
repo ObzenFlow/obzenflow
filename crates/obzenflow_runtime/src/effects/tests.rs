@@ -7125,33 +7125,13 @@ async fn invariant_escape_resume_sequence(breaker_free: bool) {
         Some(Some(EffectAttemptOrdinal::new(3)))
     );
 
-    // FLOWIP-132a good-camper correction: effect control identity is stable
-    // across replay, but its admission sequence belongs to the run that
-    // appends it. Give every archived escape and terminal control an explicit
-    // old-run sequence so the replay below proves both clone paths re-author
-    // that coordinate instead of leaking it into the candidate run.
-    let mut sequenced_history = selected.clone();
-    let mut archived_sequence = 100_u64;
-    for controls in sequenced_history.escape_control_batches.values_mut() {
-        for event in controls {
-            event.admission_seq = Some(obzenflow_core::AdmissionSeq(archived_sequence));
-            archived_sequence += 1;
-        }
-    }
-    for event in sequenced_history
-        .terminal_group_events
-        .iter_mut()
-        .filter(|event| !event.consumes_data_credit())
-    {
-        event.admission_seq = Some(obzenflow_core::AdmissionSeq(archived_sequence));
-        archived_sequence += 1;
-    }
-    let archived_control_ids = sequenced_history
+    let archived_history = selected.clone();
+    let archived_control_ids = archived_history
         .escape_control_batches
         .values()
         .flatten()
         .chain(
-            sequenced_history
+            archived_history
                 .terminal_group_events
                 .iter()
                 .filter(|event| !event.consumes_data_credit()),
@@ -7163,9 +7143,9 @@ async fn invariant_escape_resume_sequence(breaker_free: bool) {
         EffectHistory::from_cursor_history_for_test(
             cursor.recorded_flow_id.clone(),
             cursor.clone(),
-            sequenced_history,
+            archived_history,
         )
-        .expect("sequenced cursor history remains valid replay evidence"),
+        .expect("archived cursor history remains valid replay evidence"),
     );
 
     if breaker_free {
@@ -7208,15 +7188,6 @@ async fn invariant_escape_resume_sequence(breaker_free: bool) {
         .filter(|envelope| archived_control_ids.contains(&envelope.envelope.provenance.event.id))
         .collect::<Vec<_>>();
     assert_eq!(replayed_controls.len(), archived_control_ids.len());
-    assert!(
-        replayed_controls.iter().all(|envelope| envelope
-            .envelope
-            .provenance
-            .event
-            .admission_seq
-            .is_none()),
-        "replayed escape and terminal controls must request a fresh current-run sequence"
-    );
     assert_eq!(
         comparable_effect_journal(&terminal),
         comparable_effect_journal(&replay),

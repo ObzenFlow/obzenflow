@@ -12,7 +12,7 @@ use crate::event::status::processing_status::ProcessingStatus;
 use crate::event::vector_clock::VectorClock;
 use crate::id::{CycleDepth, SccId};
 use crate::ingress::IngressContext;
-use crate::{AdmissionSeq, EventId, JournalWriterId, WriterId};
+use crate::{EventId, JournalWriterId, WriterId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -47,8 +47,6 @@ pub struct ChainEventProvenance {
     pub cycle_scc_id: Option<SccId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect_provenance: Option<EffectProvenance>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub admission_seq: Option<AdmissionSeq>,
     /// The position after this source fact (FLOWIP-134i B11); never derived.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_progress: Option<crate::source::SourceProgress>,
@@ -100,7 +98,6 @@ pub trait RecordProvenance {
     fn id(&self) -> &EventId;
     fn writer_id(&self) -> &WriterId;
     fn event_type(&self) -> &str;
-    fn admission_seq(&self) -> Option<AdmissionSeq>;
 }
 impl RecordProvenance for ChainEventProvenance {
     fn id(&self) -> &EventId {
@@ -112,9 +109,6 @@ impl RecordProvenance for ChainEventProvenance {
     fn event_type(&self) -> &str {
         &self.event_type
     }
-    fn admission_seq(&self) -> Option<AdmissionSeq> {
-        self.admission_seq
-    }
 }
 impl RecordProvenance for SystemEventProvenance {
     fn id(&self) -> &EventId {
@@ -125,9 +119,6 @@ impl RecordProvenance for SystemEventProvenance {
     }
     fn event_type(&self) -> &str {
         &self.event_type
-    }
-    fn admission_seq(&self) -> Option<AdmissionSeq> {
-        None
     }
 }
 

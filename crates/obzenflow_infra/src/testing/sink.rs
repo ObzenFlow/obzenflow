@@ -12,13 +12,14 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryResult};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, StageFatalRecorded,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME};
 use obzenflow_core::metrics::SinkOperationFailureMetric;
-use obzenflow_core::{AdmissionSeq, EventId, StageId, TypedPayload};
+use obzenflow_core::{EventId, StageId, TypedPayload};
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::stages::sink::{SinkDestinationErrorCode, SinkWriteFailureDisposition};
 use obzenflow_runtime::testing::sink::{
@@ -599,7 +600,9 @@ fn latest_run_dir(root: &Path) -> Option<PathBuf> {
     runs.pop()
 }
 
-async fn read_chain_journal(path: &Path) -> Result<Vec<ChainEvent>, SinkConformanceFailure> {
+async fn read_chain_journal(
+    path: &Path,
+) -> Result<Vec<(ChainEvent, VectorClock)>, SinkConformanceFailure> {
     let journal = DiskJournal::<ChainEvent>::with_owner(
         path.to_path_buf(),
         JournalOwner::stage(StageId::new()),
@@ -615,7 +618,8 @@ async fn read_chain_journal(path: &Path) -> Result<Vec<ChainEvent>, SinkConforma
         .await
         .map_err(|error| failure("journal", path.display().to_string(), error.to_string()))?
     {
-        events.push(envelope.into_authored());
+        let clock = envelope.envelope.provenance.journal.vector_clock.clone();
+        events.push((envelope.into_authored(), clock));
     }
     Ok(events)
 }
@@ -691,10 +695,11 @@ fn normalised_forwarded_control(
 
 fn record_chain_event_projection(
     chain_events: &mut Vec<ChainEvent>,
+    clocks: &mut HashMap<EventId, VectorClock>,
     projections: &mut HashMap<EventId, ChainEventProjection>,
     stage_key: &str,
     route: SinkJournalRoute,
-    event: ChainEvent,
+    (event, clock): (ChainEvent, VectorClock),
 ) -> Result<(), SinkConformanceFailure> {
     let Some(existing) = projections.get_mut(&event.id) else {
         let event_index = chain_events.len();
@@ -706,6 +711,7 @@ fn record_chain_event_projection(
                 stage_keys: vec![stage_key.to_string()],
             },
         );
+        clocks.insert(event.id, clock);
         chain_events.push(event);
         return Ok(());
     };
@@ -746,6 +752,7 @@ fn record_chain_event_projection(
         canonical.writer_id.as_stage() == Some(&canonical.flow_context.stage_id);
     let current_is_authored_here = event.writer_id.as_stage() == Some(&event.flow_context.stage_id);
     if current_is_authored_here && !canonical_is_authored_here {
+        clocks.insert(event.id, clock);
         chain_events[existing.event_index] = event;
     }
     existing.stage_keys.push(stage_key.to_string());
@@ -876,17 +883,20 @@ fn write_failure_route_matches(
         && journal_route == Some(&expected_error_route(&operation.kind))
 }
 
-fn require_admission_order(
+fn require_happened_before(
+    clocks: &HashMap<EventId, VectorClock>,
     earlier: &ChainEvent,
     later: &ChainEvent,
     edge: &str,
 ) -> Result<(), SinkConformanceFailure> {
-    match (earlier.admission_seq, later.admission_seq) {
-        (Some(AdmissionSeq(before)), Some(AdmissionSeq(after))) if before < after => Ok(()),
+    match (clocks.get(&earlier.id), clocks.get(&later.id)) {
+        (Some(before), Some(after)) if CausalOrderingService::happened_before(before, after) => {
+            Ok(())
+        }
         _ => Err(failure(
             "journal-truth",
             edge,
-            "causal successors must have strictly increasing journal admission sequence",
+            "causal successors must have journal vector clocks ordered by happened-before",
         )),
     }
 }
@@ -1148,12 +1158,14 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
     let manifest = parse_current_manifest(&raw)?;
 
     let mut chain_events = Vec::new();
+    let mut clocks = HashMap::new();
     let mut projections = HashMap::new();
     for (stage_key, stage) in &manifest.stages {
         let data_events = read_chain_journal(&run_dir.join(&stage.data_journal_file)).await?;
         for event in data_events {
             record_chain_event_projection(
                 &mut chain_events,
+                &mut clocks,
                 &mut projections,
                 stage_key,
                 SinkJournalRoute::Data,
@@ -1164,6 +1176,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
         for event in error_events {
             record_chain_event_projection(
                 &mut chain_events,
+                &mut clocks,
                 &mut projections,
                 stage_key,
                 SinkJournalRoute::Error,
@@ -1409,7 +1422,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                         "write failure does not reconstruct I -> R -> O with the exact stage and destination",
                     ));
             }
-            require_admission_order(receipt, event, "R-to-O")?;
+            require_happened_before(&clocks, receipt, event, "R-to-O")?;
 
             let routes = chain_events
                 .iter()
@@ -1441,7 +1454,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                     "operation successor is not a fresh, correctly routed error copy of the input",
                 ));
             }
-            require_admission_order(event, route, "O-to-X")?;
+            require_happened_before(&clocks, event, route, "O-to-X")?;
 
             let lifecycle_matches = lifecycle_causes
                 .iter()
@@ -1745,7 +1758,7 @@ mod tests {
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::event::provenance::causality_context::CausalityContext;
     use obzenflow_core::event::provenance::FlowContext;
-    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::event::{CausalCoordinate, ChainEventFactory};
     use obzenflow_core::WriterId;
     use obzenflow_dsl::{flow, sink, source};
     use obzenflow_runtime::stages::sink::{InlineSink, SinkDescription, SinkWriteFailure};
@@ -1832,6 +1845,15 @@ mod tests {
         operation_event: ChainEvent,
         operation: SinkOperationFailed,
         route: ChainEvent,
+        clocks: HashMap<EventId, VectorClock>,
+    }
+
+    fn clock_at(coordinate: &CausalCoordinate, sequence: u64) -> VectorClock {
+        let mut clock = VectorClock::new();
+        for _ in 0..sequence {
+            CausalOrderingService::increment(&mut clock, coordinate).expect("clock fits");
+        }
+        clock
     }
 
     fn failure_projection_fixture() -> FailureProjectionFixture {
@@ -1844,14 +1866,13 @@ mod tests {
             stage_id,
             stage_type,
         };
-        let mut input = ChainEventFactory::data_event(
+        let input = ChainEventFactory::data_event(
             WriterId::from(source_stage),
             "failure.projection.input",
             std::num::NonZeroU32::MIN,
             serde_json::json!({"id": 7}),
         )
         .with_flow_context(context("inputs", source_stage, StageType::FiniteSource));
-        input.admission_seq = Some(AdmissionSeq(1));
 
         let mut receipt_payload =
             obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome::failed(
@@ -1860,7 +1881,7 @@ mod tests {
                 "redacted failure",
             );
         receipt_payload.destination = "projection-output".to_string();
-        let mut receipt = ChainEventFactory::delivery_event(
+        let receipt = ChainEventFactory::delivery_event(
             WriterId::from(sink_stage),
             DeliveryPayload {
                 subject: obzenflow_core::event::payloads::delivery_payload::DeliverySubject {
@@ -1879,7 +1900,6 @@ mod tests {
         )
         .with_flow_context(context("output", sink_stage, StageType::Sink))
         .with_causality(CausalityContext::with_parent(input.id));
-        receipt.admission_seq = Some(AdmissionSeq(2));
 
         let operation = SinkOperationFailed {
             stage_id: sink_stage,
@@ -1894,7 +1914,7 @@ mod tests {
             destination_error_code: None,
             detail: "redacted failure".to_string(),
         };
-        let mut operation_event = ChainEventFactory::data_event(
+        let operation_event = ChainEventFactory::data_event(
             WriterId::from(sink_stage),
             SinkOperationFailed::event_type_name(),
             SinkOperationFailed::payload_schema_version(),
@@ -1903,9 +1923,8 @@ mod tests {
         .with_flow_context(context("output", sink_stage, StageType::Sink))
         .with_causality(CausalityContext::with_parent(receipt.id))
         .mark_as_error("redacted failure", ErrorKind::Remote);
-        operation_event.admission_seq = Some(AdmissionSeq(3));
 
-        let mut route = ChainEventFactory::data_event(
+        let route = ChainEventFactory::data_event(
             WriterId::from(sink_stage),
             "failure.projection.input",
             std::num::NonZeroU32::MIN,
@@ -1914,7 +1933,13 @@ mod tests {
         .with_flow_context(context("output", sink_stage, StageType::Sink))
         .with_causality(CausalityContext::with_parent(operation_event.id))
         .mark_as_error("redacted failure", ErrorKind::Remote);
-        route.admission_seq = Some(AdmissionSeq(4));
+
+        let coordinate = CausalCoordinate::new(obzenflow_core::JournalWriterId::new());
+        let clocks = [input.id, receipt.id, operation_event.id, route.id]
+            .into_iter()
+            .zip(1..)
+            .map(|(id, sequence)| (id, clock_at(&coordinate, sequence)))
+            .collect();
 
         FailureProjectionFixture {
             input,
@@ -1922,6 +1947,7 @@ mod tests {
             operation_event,
             operation,
             route,
+            clocks,
         }
     }
 
@@ -2026,21 +2052,42 @@ mod tests {
     }
 
     #[test]
-    fn outward_projection_rejects_reversed_or_missing_admission_order() {
+    fn outward_projection_rejects_reversed_or_missing_causal_order() {
         let mut fixture = failure_projection_fixture();
-        require_admission_order(&fixture.receipt, &fixture.operation_event, "R-to-O")
-            .expect("canonical receipt-to-operation order");
-        require_admission_order(&fixture.operation_event, &fixture.route, "O-to-X")
-            .expect("canonical operation-to-route order");
+        require_happened_before(
+            &fixture.clocks,
+            &fixture.receipt,
+            &fixture.operation_event,
+            "R-to-O",
+        )
+        .expect("canonical receipt-to-operation order");
+        require_happened_before(
+            &fixture.clocks,
+            &fixture.operation_event,
+            &fixture.route,
+            "O-to-X",
+        )
+        .expect("canonical operation-to-route order");
 
-        fixture.operation_event.admission_seq = Some(AdmissionSeq(1));
-        assert!(
-            require_admission_order(&fixture.receipt, &fixture.operation_event, "R-to-O").is_err()
-        );
-        fixture.route.admission_seq = None;
-        assert!(
-            require_admission_order(&fixture.operation_event, &fixture.route, "O-to-X").is_err()
-        );
+        let input_clock = fixture.clocks[&fixture.input.id].clone();
+        fixture
+            .clocks
+            .insert(fixture.operation_event.id, input_clock);
+        assert!(require_happened_before(
+            &fixture.clocks,
+            &fixture.receipt,
+            &fixture.operation_event,
+            "R-to-O",
+        )
+        .is_err());
+        fixture.clocks.remove(&fixture.route.id);
+        assert!(require_happened_before(
+            &fixture.clocks,
+            &fixture.operation_event,
+            &fixture.route,
+            "O-to-X",
+        )
+        .is_err());
     }
 
     #[test]
@@ -2065,21 +2112,24 @@ mod tests {
         forwarded.runtime = None;
 
         let mut events = Vec::new();
+        let mut clocks = HashMap::new();
         let mut projections = HashMap::new();
         record_chain_event_projection(
             &mut events,
+            &mut clocks,
             &mut projections,
             "output",
             SinkJournalRoute::Data,
-            forwarded.clone(),
+            (forwarded.clone(), VectorClock::new()),
         )
         .expect("forwarded projection is recorded first");
         record_chain_event_projection(
             &mut events,
+            &mut clocks,
             &mut projections,
             "inputs",
             SinkJournalRoute::Data,
-            authored.clone(),
+            (authored.clone(), VectorClock::new()),
         )
         .expect("equivalent authored projection coalesces");
         assert_eq!(events.len(), 1);
@@ -2087,10 +2137,11 @@ mod tests {
 
         let same_stage = record_chain_event_projection(
             &mut events,
+            &mut clocks,
             &mut projections,
             "inputs",
             SinkJournalRoute::Data,
-            authored.clone(),
+            (authored.clone(), VectorClock::new()),
         )
         .expect_err("one physical stage projection cannot repeat an id");
         assert!(same_stage.detail().contains("within the Data journal"));
@@ -2099,20 +2150,22 @@ mod tests {
         conflicting.causality.parent_ids.push(EventId::new());
         let conflict = record_chain_event_projection(
             &mut events,
+            &mut clocks,
             &mut projections,
             "other",
             SinkJournalRoute::Data,
-            conflicting,
+            (conflicting, VectorClock::new()),
         )
         .expect_err("same-id control with different durable content must fail");
         assert!(conflict.detail().contains("conflicting reuse"));
 
         let route_conflict = record_chain_event_projection(
             &mut events,
+            &mut clocks,
             &mut projections,
             "errors",
             SinkJournalRoute::Error,
-            authored,
+            (authored, VectorClock::new()),
         )
         .expect_err("a data projection cannot reappear on the error route");
         assert!(route_conflict.detail().contains("conflicting reuse"));

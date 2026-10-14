@@ -10,17 +10,17 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkDestinationErrorCode, SinkOperationFailed, SinkOperationPhase,
     SinkWritePhase, SystemEvent,
 };
-use obzenflow_core::journal::archive::ReplayArchive;
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest};
-use obzenflow_core::{AdmissionSeq, EventId, FlowId, JournalId, JournalRecord, TypedPayload};
+use obzenflow_core::{EventId, FlowId, JournalId, JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::{disk_journals, DiskJournalFactory};
@@ -45,11 +45,11 @@ enum AppendBoundary {
     Returned,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct AppendObservation {
     fact: &'static str,
     boundary: AppendBoundary,
-    admission_seq: Option<AdmissionSeq>,
+    vector_clock: Option<VectorClock>,
 }
 
 type AppendProbe = Arc<Mutex<Vec<AppendObservation>>>;
@@ -58,7 +58,6 @@ struct ProbedJournal<T: obzenflow_core::event::JournalEvent> {
     inner: Arc<dyn Journal<T>>,
     probe: AppendProbe,
     fact: fn(&T) -> Option<&'static str>,
-    admission_seq: fn(&T) -> Option<AdmissionSeq>,
 }
 
 #[async_trait]
@@ -86,7 +85,7 @@ impl<T: obzenflow_core::event::JournalEvent> obzenflow_core::journal::JournalSto
                 .push(AppendObservation {
                     fact,
                     boundary: AppendBoundary::Begin,
-                    admission_seq: (self.admission_seq)(&event),
+                    vector_clock: None,
                 });
         }
         let result = self.inner.append(event, options).await;
@@ -97,7 +96,7 @@ impl<T: obzenflow_core::event::JournalEvent> obzenflow_core::journal::JournalSto
                 .push(AppendObservation {
                     fact,
                     boundary: AppendBoundary::Returned,
-                    admission_seq: (self.admission_seq)(&envelope.authored()),
+                    vector_clock: Some(envelope.envelope.provenance.journal.vector_clock.clone()),
                 });
         }
         result
@@ -165,10 +164,6 @@ fn chain_fact(event: &ChainEvent) -> Option<&'static str> {
     }
 }
 
-fn chain_admission_seq(event: &ChainEvent) -> Option<AdmissionSeq> {
-    event.admission_seq
-}
-
 struct ProbedDiskJournalFactory {
     inner: DiskJournalFactory,
     probe: AppendProbe,
@@ -189,7 +184,6 @@ impl FlowJournalFactory for ProbedDiskJournalFactory {
             inner,
             probe: self.probe.clone(),
             fact: chain_fact,
-            admission_seq: chain_admission_seq,
         }))
     }
 
@@ -207,10 +201,6 @@ impl FlowJournalFactory for ProbedDiskJournalFactory {
 
     fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
         FlowJournalFactory::write_run_manifest(&self.inner, manifest)
-    }
-
-    fn seed_admission_from_archive(&self, archive: &dyn ReplayArchive) {
-        FlowJournalFactory::seed_admission_from_archive(&self.inner, archive);
     }
 }
 
@@ -750,12 +740,16 @@ fn failure_chain(
         .map(|envelope| envelope.authored())
         .find(|event| event.id == receipt_id)
         .expect("failed receipt exists");
-    let routes = errors
+    let route_records = errors
+        .iter()
+        .filter(|envelope| {
+            direct_parent(&envelope.authored())
+                == Some(operation_envelope.envelope.provenance.event.id)
+        })
+        .collect::<Vec<_>>();
+    let routes = route_records
         .iter()
         .map(|envelope| envelope.authored())
-        .filter(|event| {
-            direct_parent(event) == Some(operation_envelope.envelope.provenance.event.id)
-        })
         .collect::<Vec<_>>();
     assert_eq!(
         routes.len(),
@@ -778,8 +772,11 @@ fn failure_chain(
         ProcessingStatus::Error { .. }
     ));
     assert!(
-        operation_envelope.envelope.provenance.event.admission_seq < route.admission_seq,
-        "journal-stamped O must precede X"
+        CausalOrderingService::happened_before(
+            &operation_envelope.envelope.provenance.journal.vector_clock,
+            &route_records[0].envelope.provenance.journal.vector_clock,
+        ),
+        "O must happen before X"
     );
 
     FailureChain {
@@ -1162,7 +1159,7 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn poisoned_failure_awaits_each_unstamped_r_o_x_p_append() {
+async fn poisoned_failure_awaits_each_r_o_x_p_append() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let calls = Arc::new(Mutex::new(Vec::new()));
     let append_probe = Arc::new(Mutex::new(Vec::new()));
@@ -1195,30 +1192,23 @@ async fn poisoned_failure_awaits_each_unstamped_r_o_x_p_append() {
         "each successor append must begin only after its predecessor returned"
     );
 
-    for observation in observations.iter().filter(|observation| {
-        observation.boundary == AppendBoundary::Begin && observation.fact != "P"
-    }) {
-        assert_eq!(
-            observation.admission_seq, None,
-            "{} must arrive at append without a pre-filled admission sequence",
-            observation.fact
-        );
-    }
-    let stamped = observations
+    let committed = observations
         .iter()
         .filter(|observation| {
             observation.boundary == AppendBoundary::Returned && observation.fact != "P"
         })
         .map(|observation| {
             observation
-                .admission_seq
-                .expect("journal stamps sequence")
-                .0
+                .vector_clock
+                .clone()
+                .expect("a returned append carries its journal clock")
         })
         .collect::<Vec<_>>();
     assert!(
-        stamped.windows(2).all(|window| window[0] < window[1]),
-        "journal-stamped R -> O -> X admission order must increase: {stamped:?}"
+        committed
+            .windows(2)
+            .all(|window| CausalOrderingService::happened_before(&window[0], &window[1])),
+        "committed R -> O -> X must be ordered by happened-before: {committed:?}"
     );
 }
 
