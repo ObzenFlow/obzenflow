@@ -10,7 +10,8 @@
 //! By default (`JoinReferenceMode::FiniteEof`), joins follow a hydrate-then-enrich model:
 //! reference loads to EOF before stream processing begins. In `JoinReferenceMode::Live`,
 //! the join processes stream events continuously while the reference side can keep
-//! receiving updates.
+//! receiving updates. `JoinReferenceMode::FiniteThenLive` runs the two in sequence:
+//! batch catalog, then batch stream, then live over every input (FLOWIP-084q).
 //!
 //! # Key Features
 //! - Reference-first convention (no left/right confusion)
@@ -29,13 +30,14 @@ pub mod builder;
 pub mod config;
 pub mod fsm;
 pub mod handle;
+pub(crate) mod phase;
 pub mod strategies;
 pub mod supervisor;
 
 // Public API - only expose builder, handle, and essential types
 pub use crate::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};
 pub use builder::JoinBuilder;
-pub use config::{JoinConfig, JoinReferenceMode};
+pub use config::{JoinConfig, JoinReferenceMode, PhaseWitness, PhaseWitnesses};
 pub use fsm::{JoinEvent, JoinState};
 pub use handle::JoinHandle;
 
@@ -90,6 +92,30 @@ where
         .build(join_fn)
 }
 
+/// Construct an inner join that completes its batch inputs before going live
+/// (FLOWIP-084q): it hydrates the batch catalog, enriches the batch stream, and
+/// then runs live over every input.
+pub fn inner_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
+    catalog_key: CatalogKeyFn,
+    stream_key: StreamKeyFn,
+    join_fn: JoinFn,
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
+where
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
+    K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
+    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
+    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
+    JoinFn: Fn(C, S) -> E + Send + Sync + Clone,
+{
+    InnerJoinBuilder::<C, S, E>::new()
+        .catalog_key(catalog_key)
+        .stream_key(stream_key)
+        .then_live()
+        .build(join_fn)
+}
+
 /// Construct a left join with a finite reference side.
 pub fn left<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
@@ -133,6 +159,30 @@ where
         .build(join_fn)
 }
 
+/// Construct a left join that completes its batch inputs before going live
+/// (FLOWIP-084q): it hydrates the batch catalog, enriches the batch stream, and
+/// then runs live over every input.
+pub fn left_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
+    catalog_key: CatalogKeyFn,
+    stream_key: StreamKeyFn,
+    join_fn: JoinFn,
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
+where
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
+    K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
+    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
+    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
+    JoinFn: Fn(Option<C>, S) -> E + Send + Sync + Clone,
+{
+    LeftJoinBuilder::<C, S, E>::new()
+        .catalog_key(catalog_key)
+        .stream_key(stream_key)
+        .then_live()
+        .build(join_fn)
+}
+
 /// Construct a strict join with a finite reference side.
 pub fn strict<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
@@ -173,6 +223,30 @@ where
         .catalog_key(catalog_key)
         .stream_key(stream_key)
         .live()
+        .build(join_fn)
+}
+
+/// Construct a strict join that completes its batch inputs before going live
+/// (FLOWIP-084q): it hydrates the batch catalog, enriches the batch stream, and
+/// then runs live over every input.
+pub fn strict_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
+    catalog_key: CatalogKeyFn,
+    stream_key: StreamKeyFn,
+    join_fn: JoinFn,
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
+where
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
+    K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
+    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
+    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
+    JoinFn: Fn(C, S) -> E + Send + Sync + Clone,
+{
+    StrictJoinBuilder::<C, S, E>::new()
+        .catalog_key(catalog_key)
+        .stream_key(stream_key)
+        .then_live()
         .build(join_fn)
 }
 
@@ -258,5 +332,26 @@ mod helper_tests {
             |_reference: Reference, _stream: Stream| Output,
         );
         assert_reference_mode(&strict_live, JoinReferenceMode::Live);
+
+        let inner_then_live = inner_then_live(
+            |reference: &Reference| reference.key,
+            |stream: &Stream| stream.key,
+            |_reference: Reference, _stream: Stream| Output,
+        );
+        assert_reference_mode(&inner_then_live, JoinReferenceMode::FiniteThenLive);
+
+        let left_then_live = left_then_live(
+            |reference: &Reference| reference.key,
+            |stream: &Stream| stream.key,
+            |_reference: Option<Reference>, _stream: Stream| Output,
+        );
+        assert_reference_mode(&left_then_live, JoinReferenceMode::FiniteThenLive);
+
+        let strict_then_live = strict_then_live(
+            |reference: &Reference| reference.key,
+            |stream: &Stream| stream.key,
+            |_reference: Reference, _stream: Stream| Output,
+        );
+        assert_reference_mode(&strict_then_live, JoinReferenceMode::FiniteThenLive);
     }
 }

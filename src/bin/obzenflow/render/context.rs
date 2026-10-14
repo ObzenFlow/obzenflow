@@ -69,6 +69,7 @@ pub(super) struct Context {
     journal_label_updates: BTreeSet<obzenflow_core::JournalId>,
     references: BTreeMap<String, Reference>,
     insertion_order: VecDeque<String>,
+    pub join_phases: super::join_phase::JoinPhases,
 }
 
 impl Context {
@@ -131,6 +132,7 @@ impl Context {
             references: BTreeMap::new(),
             supervisors: BTreeMap::new(),
             insertion_order: VecDeque::new(),
+            join_phases: Default::default(),
         }
     }
 

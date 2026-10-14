@@ -47,7 +47,9 @@ use obzenflow_runtime::{
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
-        join::{JoinBuilder, JoinConfig, JoinEvent, JoinReferenceMode, JoinState},
+        join::{JoinBuilder, JoinConfig, JoinEvent, JoinReferenceMode, JoinState, PhaseWitnesses},
+        merge::{MergeBuilder, MergeConfig, MergeEvent, MergeState},
+        merges::MergeStrategyKind,
         sink::journal_sink::{
             JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState,
             SinkDeliveryBoundary,
@@ -429,6 +431,15 @@ pub enum PolicyGuardSurface {
     Sink,
 }
 
+/// A join's mode and the built-in variant its handler names, which the
+/// then-live build diagnostics quote (FLOWIP-084q).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JoinShape {
+    pub mode: JoinReferenceMode,
+    /// `inner`, `left` or `strict`; `None` for an author-written join.
+    pub label: Option<&'static str>,
+}
+
 /// Trait for stage descriptors that know how to create their supervisors
 #[async_trait]
 pub trait StageDescriptor: sealed::Sealed + Send + Sync {
@@ -526,6 +537,29 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// Set the reference stage ID (only for join stages, used by DSL)
     fn set_reference_stage_id(&mut self, _id: StageId) {
         // Default: no-op for non-join stages
+    }
+
+    /// A join's mode and built-in variant name, `None` for every other stage
+    /// (FLOWIP-084q).
+    fn join_shape(&self) -> Option<JoinShape> {
+        None
+    }
+
+    /// Install the natural EOFs that end a then-live join's holding states,
+    /// computed by the flow build (FLOWIP-084q B5, B8).
+    fn set_phase_witnesses(&mut self, _witnesses: PhaseWitnesses) {
+        // Default: no-op for every stage but a join
+    }
+
+    /// A merge's strategy, `None` for every other stage (FLOWIP-084q B7).
+    fn merge_strategy(&self) -> Option<MergeStrategyKind> {
+        None
+    }
+
+    /// Install a merge's batch and live producers, classified by the flow
+    /// build (FLOWIP-084q B8).
+    fn set_merge_producers(&mut self, _batch: Vec<StageId>, _live: Vec<StageId>) {
+        // Default: no-op for every stage but a merge
     }
 
     /// Create the handle for this stage with the flow's shared control-plane
@@ -2906,6 +2940,7 @@ pub(crate) struct JoinDescriptor<H: UnifiedJoinHandler + 'static> {
     pub(crate) reference_stage_var: Option<&'static str>, // For DSL resolution - stage variable name
     pub(crate) handler: H,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) phase_witnesses: Option<PhaseWitnesses>,
 }
 
 #[async_trait]
@@ -2961,6 +2996,17 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
 
     fn set_reference_stage_id(&mut self, id: StageId) {
         self.reference_stage_id = id;
+    }
+
+    fn join_shape(&self) -> Option<JoinShape> {
+        Some(JoinShape {
+            mode: self.handler.reference_mode(),
+            label: self.handler.strategy_label(),
+        })
+    }
+
+    fn set_phase_witnesses(&mut self, witnesses: PhaseWitnesses) {
+        self.phase_witnesses = Some(witnesses);
     }
 
     /// FLOWIP-095d: a hydrating join is a structural deterministic orderer.
@@ -3043,6 +3089,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
         .with_observer_bindings(placement.observers.into_bindings());
         join_config.reference_mode = reference_mode;
         join_config.reference_batch_cap = reference_batch_cap;
+        join_config.phase_witnesses = self.phase_witnesses;
         join_config.control_strategy = Some(control_strategy.clone());
         join_config.upstream_stages = resources.upstream_stages.clone();
 
@@ -3079,7 +3126,8 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
             StageType::Join,
             translate_stage_event_to_join,
             check_join_state,
-        );
+        )
+        .with_reference_mode_label(reference_mode.metrics_label());
 
         Ok(Box::new(adapter) as BoxedStageHandle)
     }
@@ -3114,6 +3162,133 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
     }
 }
 
+// ============================================================================
+// Merge Descriptor
+// ============================================================================
+
+/// Descriptor for merge stages (FLOWIP-084q B7 to B9). A merge runs no author
+/// code, so it carries no handler and no middleware.
+pub(crate) struct MergeDescriptor {
+    pub(crate) name: String,
+    pub(crate) strategy: MergeStrategyKind,
+    pub(crate) batch_producers: Vec<StageId>,
+    pub(crate) live_producers: Vec<StageId>,
+    pub(crate) backpressure: Option<BackpressureClause>,
+}
+
+#[async_trait]
+impl StageDescriptor for MergeDescriptor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Merge
+    }
+
+    fn sink_description(&self) -> Option<&SinkDescription> {
+        None
+    }
+
+    fn source_continuation(&self) -> Option<SourceContinuation> {
+        None
+    }
+
+    fn merge_strategy(&self) -> Option<MergeStrategyKind> {
+        Some(self.strategy)
+    }
+
+    fn set_merge_producers(&mut self, batch: Vec<StageId>, live: Vec<StageId>) {
+        self.batch_producers = batch;
+        self.live_producers = live;
+    }
+
+    /// The strategy fixes the merged order: canonical over the batch
+    /// producers, then live producers in recorded order (FLOWIP-084q B6, B8).
+    fn is_deterministic_input_orderer(&self) -> bool {
+        true
+    }
+
+    async fn create_handle(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        let control_strategy = create_default_signal_strategy();
+        let mut instrumentation =
+            StageInstrumentation::new_with_config(InstrumentationConfig::default());
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
+            control_middleware;
+        instrumentation
+            .bind_control_plane(&config.stage_id, &control_provider, false, false)
+            .map_err(|e| e.to_string())?;
+
+        let mut merge_config = MergeConfig::new(
+            config.stage_id,
+            &config.name,
+            &config.flow_name,
+            self.strategy,
+            self.batch_producers,
+            self.live_producers,
+        );
+        merge_config.control_strategy = Some(control_strategy.clone());
+        let upstream_journals = resources.upstream_journals.clone();
+        let handle =
+            MergeBuilder::new(merge_config, resources, upstream_journals, control_strategy)
+                .with_instrumentation(Arc::new(instrumentation))
+                .build()
+                .await
+                .map_err(|e| format!("Failed to build merge stage: {e:?}"))?;
+
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Merge,
+            translate_stage_event_to_merge,
+            check_merge_state,
+        );
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+fn translate_stage_event_to_merge(event: StageEvent) -> Result<MergeEvent, String> {
+    match event {
+        StageEvent::Initialize => Ok(MergeEvent::Initialize),
+        StageEvent::Ready | StageEvent::Start => Ok(MergeEvent::Ready),
+        StageEvent::BeginDrain => Ok(MergeEvent::BeginDrain),
+        StageEvent::ForceShutdown => Ok(MergeEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
+        _ => Err(format!("Unsupported stage event for merge: {event:?}")),
+    }
+}
+
+fn check_merge_state(state: &MergeState) -> crate::stage_handle_adapter::StageStatus {
+    use crate::stage_handle_adapter::StageStatus;
+    match state {
+        MergeState::Created => StageStatus::Created,
+        MergeState::Initializing => StageStatus::Initializing,
+        MergeState::Initialized => StageStatus::Ready,
+        MergeState::Starting => StageStatus::Starting,
+        MergeState::Batch | MergeState::Live => StageStatus::Running,
+        MergeState::Draining => StageStatus::Draining,
+        MergeState::Finalising => StageStatus::Finalising,
+        MergeState::Drained => StageStatus::Drained,
+        MergeState::Failing(_) => StageStatus::Failing,
+        MergeState::Failed(_) => StageStatus::Failed,
+        MergeState::Cancelling(_) => StageStatus::Cancelling,
+        MergeState::Cancelled(_) => StageStatus::Cancelled,
+    }
+}
+
 impl<H: UnifiedFiniteSourceHandler + 'static> sealed::Sealed for FiniteSourceDescriptor<H> {}
 impl<H: UnifiedAsyncFiniteSourceHandler + 'static> sealed::Sealed
     for AsyncFiniteSourceDescriptor<H>
@@ -3131,6 +3306,7 @@ impl sealed::Sealed for ConfiguredSinkDescriptor {}
 impl<H: UnifiedStatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
 impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
 impl<H: UnifiedJoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}
+impl sealed::Sealed for MergeDescriptor {}
 
 #[cfg(test)]
 mod tests {

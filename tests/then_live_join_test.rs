@@ -1,0 +1,703 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! FLOWIP-084q: a then-live join behind two `then_live` merges, proven from
+//! the journals. Live rows are queued before the run starts, the hardest race
+//! for the hold, and must still post after every batch row.
+
+mod replay_testkit;
+
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use obzenflow::flow::backpressure::enforced;
+use obzenflow::stages::sources::{ChannelSource, ValuesSource};
+use obzenflow::stages::{joins, merges};
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, JoinPhaseFact};
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
+use obzenflow_core::{StageKey, TypedPayload};
+use obzenflow_dsl::{async_infinite_source, flow, join, merge, sink, source, FlowDefinition};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
+use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::stages::common::handlers::{InlineSink, SinkDescription, SinkWriteFailure};
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, Notify};
+
+static THEN_LIVE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Account {
+    key: String,
+}
+impl TypedPayload for Account {
+    const EVENT_TYPE: &'static str = "then_live_test.account";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Entry {
+    key: String,
+    note: String,
+}
+impl TypedPayload for Entry {
+    const EVENT_TYPE: &'static str = "then_live_test.entry";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Posted {
+    key: String,
+    note: String,
+}
+impl TypedPayload for Posted {
+    const EVENT_TYPE: &'static str = "then_live_test.posted";
+}
+
+fn account(key: &str) -> Account {
+    Account { key: key.into() }
+}
+
+fn entry(key: &str, note: &str) -> Entry {
+    Entry {
+        key: key.into(),
+        note: note.into(),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Collect {
+    notes: Arc<Mutex<Vec<String>>>,
+    arrived: Arc<Notify>,
+}
+
+#[async_trait]
+impl InlineSink for Collect {
+    type Input = Posted;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+        )
+        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(&mut self, posted: Posted) -> Result<(), SinkWriteFailure> {
+        self.notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(posted.note);
+        self.arrived.notify_one();
+        Ok(())
+    }
+}
+
+struct Inputs {
+    batch_entries: Vec<Entry>,
+    live_accounts: mpsc::Receiver<Account>,
+    live_entries: mpsc::Receiver<Entry>,
+    batch_rate: Option<f64>,
+    /// `(window, stall_timeout_ms)` for a flow that enforces backpressure.
+    enforce: Option<(u64, u64)>,
+}
+
+fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition {
+    let inputs = Mutex::new(Some(inputs));
+    FlowDefinition::materialize(move |_runtime_config| {
+        let Inputs {
+            batch_entries,
+            live_accounts,
+            live_entries,
+            batch_rate,
+            enforce,
+        } = inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("the flow is built once");
+        let batch_accounts_source = ValuesSource::new(vec![account("acct-1"), account("acct-2")]);
+        let batch_tx_source = ValuesSource::new(batch_entries);
+        let live_accounts_source = ChannelSource::new(live_accounts);
+        let live_tx_source = ChannelSource::new(live_entries);
+        let post_entry = joins::inner_then_live(
+            |account: &Account| account.key.clone(),
+            |entry: &Entry| entry.key.clone(),
+            |_account: Account, entry: Entry| Posted {
+                key: entry.key,
+                note: entry.note,
+            },
+        );
+        let collector = sink.clone();
+        let rate = batch_rate.unwrap_or(10_000.0);
+        let journals = journal_base.clone();
+
+        // The flows differ only in whether they enforce backpressure.
+        macro_rules! then_live_flow {
+            ($($backpressure:tt)*) => {
+                flow! {
+                    name: "then_live_join_test",
+                    journals: disk_journals(journals),
+                    $($backpressure)*
+
+                    stages: {
+                        batch_accounts = source!(Account => batch_accounts_source);
+                        batch_tx = source!(Entry => batch_tx_source with {
+                            obzenflow_adapters::middleware::rate_limit(rate)
+                        });
+                        live_accounts = async_infinite_source!(Account => live_accounts_source);
+                        live_tx = async_infinite_source!(Entry => live_tx_source);
+
+                        accounts = merge!(Account => merges::then_live);
+                        transactions = merge!(Entry => merges::then_live);
+                        posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                        collector = sink!(Posted => collector);
+                    },
+
+                    topology: {
+                        batch_accounts |> accounts;
+                        live_accounts |> accounts;
+                        batch_tx |> transactions;
+                        live_tx |> transactions;
+                        (accounts, transactions) |> posted;
+                        posted |> collector;
+                    }
+                }
+            };
+        }
+
+        Ok(match enforce {
+            Some((window, stall_timeout_ms)) => then_live_flow! {
+                backpressure: enforced(window).stall_timeout_ms(stall_timeout_ms),
+            },
+            None => then_live_flow! {},
+        })
+    })
+}
+
+async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
+    let mut rx = handle.state_receiver();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(*rx.borrow(), PipelineState::Running) {
+                return Ok(());
+            }
+            rx.changed()
+                .await
+                .map_err(|_| anyhow!("pipeline state channel closed"))?;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for the pipeline to run"))?
+}
+
+async fn wait_for_postings(sink: &Collect, count: usize) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let arrived = sink.arrived.notified();
+            if sink.notes.lock().map(|notes| notes.len()).unwrap_or(0) >= count {
+                return;
+            }
+            arrived.await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for {count} postings"))
+}
+
+async fn stop(handle: &FlowHandle) -> Result<()> {
+    handle.stop_graceful(Duration::from_secs(10)).await?;
+    tokio::time::timeout(Duration::from_secs(15), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the pipeline to stop"))??;
+    Ok(())
+}
+
+/// One journal row as the assertions read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Row {
+    Data(String),
+    Phase(JoinPhaseFact),
+    Eof { kind: EofKind },
+}
+
+fn rows(records: &[JournalRecord<ChainPayload>]) -> Vec<Row> {
+    records
+        .iter()
+        .filter_map(|record| match &record.payload {
+            ChainPayload::Fact(value) => Some(Row::Data(
+                value
+                    .get("note")
+                    .or_else(|| value.get("key"))
+                    .and_then(|note| note.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            )),
+            ChainPayload::Execution(ExecutionPayload::JoinPhase(fact)) => {
+                Some(Row::Phase(fact.clone()))
+            }
+            ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
+                Some(Row::Eof { kind: *kind })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+async fn stage_rows(run: &Path, stage: &str) -> Vec<Row> {
+    rows(&replay_testkit::read_stage_envelopes_appended(run, stage).await)
+}
+
+fn data(rows: &[Row]) -> Vec<&str> {
+    rows.iter()
+        .filter_map(|row| match row {
+            Row::Data(note) => Some(note.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn position(rows: &[Row], wanted: impl Fn(&Row) -> bool) -> usize {
+    rows.iter()
+        .position(wanted)
+        .unwrap_or_else(|| panic!("row missing from {rows:?}"))
+}
+
+fn batch_entries() -> Vec<Entry> {
+    (1..=6)
+        .map(|n| {
+            entry(
+                if n % 2 == 0 { "acct-2" } else { "acct-1" },
+                &format!("batch-{n}"),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<()> {
+    let _guard = THEN_LIVE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (accounts_tx, live_accounts) = mpsc::channel(8);
+    let (entries_tx, live_entries) = mpsc::channel(8);
+    accounts_tx.send(account("acct-3")).await?;
+    entries_tx.send(entry("acct-1", "live-1")).await?;
+    entries_tx.send(entry("acct-2", "live-2")).await?;
+
+    let sink = Collect {
+        notes: Arc::default(),
+        arrived: Arc::default(),
+    };
+    let handle = build(
+        journal_base.clone(),
+        Inputs {
+            batch_entries: batch_entries(),
+            live_accounts,
+            live_entries,
+            batch_rate: None,
+            enforce: None,
+        },
+        sink.clone(),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow!("{error:?}"))?;
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+    wait_for_postings(&sink, 8).await?;
+    stop(&handle).await?;
+    let run = replay_testkit::latest_run_dir(&journal_base);
+
+    // Each merge journals every batch row before any live row (B8).
+    assert_eq!(
+        data(&stage_rows(&run, "transactions").await),
+        ["batch-1", "batch-2", "batch-3", "batch-4", "batch-5", "batch-6", "live-1", "live-2"]
+    );
+    assert_eq!(
+        data(&stage_rows(&run, "accounts").await),
+        ["acct-1", "acct-2", "acct-3"]
+    );
+
+    // The join journals each phase it enters between the EOF that ended the
+    // phase before and the next phase's first row (B11).
+    let posted = stage_rows(&run, "posted").await;
+    let enriching = position(&posted, |row| {
+        matches!(row, Row::Phase(JoinPhaseFact::EnrichingEntered { .. }))
+    });
+    let live = position(&posted, |row| {
+        matches!(row, Row::Phase(JoinPhaseFact::LiveEntered { .. }))
+    });
+    let first_batch = position(&posted, |row| *row == Row::Data("batch-1".into()));
+    let last_batch = position(&posted, |row| *row == Row::Data("batch-6".into()));
+    let first_live = position(&posted, |row| *row == Row::Data("live-1".into()));
+    assert!(
+        enriching < first_batch && last_batch < live && live < first_live,
+        "{posted:?}"
+    );
+    assert_eq!(
+        posted[enriching],
+        Row::Phase(JoinPhaseFact::EnrichingEntered {
+            generation: 0,
+            ended_by: vec![StageKey::from("batch_accounts")],
+        })
+    );
+    assert_eq!(
+        posted[live],
+        Row::Phase(JoinPhaseFact::LiveEntered {
+            generation: 0,
+            ended_by: vec![StageKey::from("batch_tx")],
+        })
+    );
+
+    // The manifest records both merges as merge stages.
+    let manifest = replay_testkit::archive_manifest(&run).to_string();
+    assert_eq!(manifest.matches("\"Merge\"").count(), 2, "{manifest}");
+
+    // A strict replay reproduces the merged order and every phase fact.
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            run.as_os_str().to_os_string(),
+        ])
+        .run_async(build(
+            journal_base.clone(),
+            Inputs {
+                batch_entries: batch_entries(),
+                live_accounts: mpsc::channel(1).1,
+                live_entries: mpsc::channel(1).1,
+                batch_rate: None,
+                enforce: None,
+            },
+            Collect {
+                notes: Arc::default(),
+                arrived: Arc::default(),
+            },
+        ))
+        .await
+        .map_err(|error| anyhow!("{error:?}"))?;
+    let replay = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(run, replay);
+    for stage in ["transactions", "accounts"] {
+        assert_eq!(
+            data(&stage_rows(&run, stage).await),
+            data(&stage_rows(&replay, stage).await),
+            "{stage}"
+        );
+    }
+    let replayed = stage_rows(&replay, "posted").await;
+    let phases = |rows: &[Row]| {
+        rows.iter()
+            .filter(|row| matches!(row, Row::Phase(_) | Row::Data(_)))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(phases(&posted), phases(&replayed));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()> {
+    let _guard = THEN_LIVE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (_accounts_tx, live_accounts) = mpsc::channel(8);
+    let (entries_tx, live_entries) = mpsc::channel(8);
+    entries_tx.send(entry("acct-1", "live-1")).await?;
+
+    let sink = Collect {
+        notes: Arc::default(),
+        arrived: Arc::default(),
+    };
+    let handle = build(
+        journal_base.clone(),
+        Inputs {
+            batch_entries: batch_entries(),
+            live_accounts,
+            live_entries,
+            batch_rate: Some(2.0),
+            enforce: None,
+        },
+        sink.clone(),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow!("{error:?}"))?;
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+    wait_for_postings(&sink, 1).await?;
+    stop(&handle).await?;
+    let run = replay_testkit::latest_run_dir(&journal_base);
+
+    // The merge never read its live producer, and authored the stop's kind (B2).
+    let transactions = stage_rows(&run, "transactions").await;
+    assert!(!data(&transactions).contains(&"live-1"), "{transactions:?}");
+    assert!(data(&transactions).len() < 6, "{transactions:?}");
+    assert_eq!(
+        transactions.last(),
+        Some(&Row::Eof {
+            kind: EofKind::Truncated
+        })
+    );
+
+    // The join left its batch phase open: no live fact and no live posting.
+    let posted = stage_rows(&run, "posted").await;
+    assert!(
+        !posted
+            .iter()
+            .any(|row| matches!(row, Row::Phase(JoinPhaseFact::LiveEntered { .. }))),
+        "{posted:?}"
+    );
+    assert!(!data(&posted).contains(&"live-1"), "{posted:?}");
+    assert_eq!(
+        posted.last(),
+        Some(&Row::Eof {
+            kind: EofKind::Truncated
+        })
+    );
+    Ok(())
+}
+
+/// Under `enforce`, a batch that holds a live edge for several stall ceilings
+/// completes without a stall, because the held edge renews (B3, B10), and the
+/// held rows then post.
+#[tokio::test]
+async fn a_hold_longer_than_the_stall_ceiling_completes_under_enforce() -> Result<()> {
+    let _guard = THEN_LIVE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (_accounts_tx, live_accounts) = mpsc::channel(8);
+    let (entries_tx, live_entries) = mpsc::channel(8);
+    for n in 1..=5 {
+        entries_tx
+            .send(entry("acct-1", &format!("live-{n}")))
+            .await?;
+    }
+
+    let sink = Collect {
+        notes: Arc::default(),
+        arrived: Arc::default(),
+    };
+    let handle = build(
+        journal_base.clone(),
+        Inputs {
+            batch_entries: batch_entries(),
+            live_accounts,
+            live_entries,
+            // Two rows at once, then four at two a second: four ceilings.
+            batch_rate: Some(2.0),
+            enforce: Some((2, 500)),
+        },
+        sink.clone(),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow!("{error:?}"))?;
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+    wait_for_postings(&sink, 11).await?;
+    stop(&handle).await?;
+    let run = replay_testkit::latest_run_dir(&journal_base);
+
+    for stage in [
+        "batch_accounts",
+        "batch_tx",
+        "live_accounts",
+        "live_tx",
+        "accounts",
+        "transactions",
+        "posted",
+    ] {
+        let records = replay_testkit::read_stage_envelopes_appended(&run, stage).await;
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.event_type().ends_with("stall_detected")),
+            "{stage} stalled"
+        );
+        assert!(
+            !rows(&records).contains(&Row::Eof {
+                kind: EofKind::Poison
+            }),
+            "{stage} ended in poison"
+        );
+    }
+    assert_eq!(
+        data(&stage_rows(&run, "posted").await),
+        [
+            "batch-1", "batch-2", "batch-3", "batch-4", "batch-5", "batch-6", "live-1", "live-2",
+            "live-3", "live-4", "live-5"
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_join_with_no_batch_stream_input_journals_only_live_entered() -> Result<()> {
+    let _guard = THEN_LIVE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (_accounts_tx, live_accounts) = mpsc::channel::<Account>(8);
+    let (entries_tx, live_entries) = mpsc::channel(8);
+    entries_tx.send(entry("acct-1", "live-1")).await?;
+    let sink = Collect {
+        notes: Arc::default(),
+        arrived: Arc::default(),
+    };
+    let collector = sink.clone();
+    let journals = journal_base.clone();
+    let inputs = Mutex::new(Some((live_accounts, live_entries)));
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let (live_accounts, live_entries) = inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("the flow is built once");
+        let batch_accounts_source = ValuesSource::new(vec![account("acct-1")]);
+        let live_accounts_source = ChannelSource::new(live_accounts);
+        let live_tx_source = ChannelSource::new(live_entries);
+        let post_entry = joins::inner_then_live(
+            |account: &Account| account.key.clone(),
+            |entry: &Entry| entry.key.clone(),
+            |_account: Account, entry: Entry| Posted {
+                key: entry.key,
+                note: entry.note,
+            },
+        );
+        let collector = collector.clone();
+        Ok(flow! {
+            name: "then_live_join_live_stream_test",
+            journals: disk_journals(journals.clone()),
+
+            stages: {
+                batch_accounts = source!(Account => batch_accounts_source);
+                live_accounts = async_infinite_source!(Account => live_accounts_source);
+                live_tx = async_infinite_source!(Entry => live_tx_source);
+                accounts = merge!(Account => merges::then_live);
+                posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                collector = sink!(Posted => collector);
+            },
+
+            topology: {
+                batch_accounts |> accounts;
+                live_accounts |> accounts;
+                (accounts, live_tx) |> posted;
+                posted |> collector;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow!("{error:?}"))?;
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+    wait_for_postings(&sink, 1).await?;
+    stop(&handle).await?;
+    let run = replay_testkit::latest_run_dir(&journal_base);
+
+    let posted = stage_rows(&run, "posted").await;
+    let phases: Vec<&Row> = posted
+        .iter()
+        .filter(|row| matches!(row, Row::Phase(_)))
+        .collect();
+    assert_eq!(
+        phases,
+        [&Row::Phase(JoinPhaseFact::LiveEntered {
+            generation: 0,
+            ended_by: vec![StageKey::from("batch_accounts")],
+        })]
+    );
+    assert_eq!(data(&posted), ["live-1"]);
+    Ok(())
+}
+
+/// B2 for `FiniteEof`: a hydration a stop ends drains without joining held
+/// stream rows against a partial catalog.
+#[tokio::test]
+async fn a_finite_eof_join_stopped_while_hydrating_posts_nothing() -> Result<()> {
+    let _guard = THEN_LIVE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let journals = journal_base.clone();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let catalog_source = ValuesSource::new(
+            (1..=12)
+                .map(|n| account(&format!("acct-{n}")))
+                .collect::<Vec<_>>(),
+        );
+        let stream_source = ValuesSource::new(vec![entry("acct-1", "batch-1")]);
+        let post_entry = joins::inner(
+            |account: &Account| account.key.clone(),
+            |entry: &Entry| entry.key.clone(),
+            |_account: Account, entry: Entry| Posted {
+                key: entry.key,
+                note: entry.note,
+            },
+        );
+        let collector = Collect {
+            notes: Arc::default(),
+            arrived: Arc::default(),
+        };
+        Ok(flow! {
+            name: "finite_eof_stopped_hydration_test",
+            journals: disk_journals(journals.clone()),
+
+            stages: {
+                catalog = source!(Account => catalog_source with {
+                    obzenflow_adapters::middleware::rate_limit(2.0)
+                });
+                ledger = source!(Entry => stream_source);
+                posted = join!(catalog catalog: Account, Entry -> Posted => post_entry);
+                collector = sink!(Posted => collector);
+            },
+
+            topology: {
+                (catalog, ledger) |> posted;
+                posted |> collector;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow!("{error:?}"))?;
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+    let probe = journal_base.clone();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(run) = std::fs::read_dir(probe.join("flows"))
+                .ok()
+                .and_then(|mut runs| runs.next())
+                .and_then(|run| run.ok())
+            {
+                let catalog = stage_rows(&run.path(), "catalog").await;
+                if data(&catalog).len() >= 3 {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("the catalog never started"))?;
+    stop(&handle).await?;
+    let run = replay_testkit::latest_run_dir(&journal_base);
+
+    let posted = stage_rows(&run, "posted").await;
+    assert!(data(&posted).is_empty(), "{posted:?}");
+    assert!(
+        !posted.iter().any(|row| matches!(row, Row::Phase(_))),
+        "{posted:?}"
+    );
+    assert_eq!(
+        posted.last(),
+        Some(&Row::Eof {
+            kind: EofKind::Truncated
+        })
+    );
+    Ok(())
+}

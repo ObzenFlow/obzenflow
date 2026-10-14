@@ -356,6 +356,12 @@ where
     /// Never advanced while a watermark head is merely held.
     generation_by_reader: Vec<ReaderGeneration>,
 
+    /// Generation a stage that held this subscription promoted it to when it
+    /// crossed its catch-up boundary without reading it (FLOWIP-084q B1). Its
+    /// remaining recorded rows were held in the killed run too, so they are
+    /// new work in that generation. Never applied to watermark accounting.
+    promoted_generation: ReaderGeneration,
+
     /// Generation of the last delivered event: the delivering reader's
     /// generation at delivery time (a watermark delivers at the generation it
     /// closes, not the one it announces).
@@ -704,7 +710,7 @@ where
     /// below a finite source author its own watermark.
     pub fn all_readers_caught_up(&self, target: ReaderGeneration) -> bool {
         (0..self.readers.len()).all(|index| {
-            self.generation_by_reader[index] >= target || self.state.is_reader_eof(index)
+            self.effective_generation(index) >= target || self.state.is_reader_eof(index)
         })
     }
 
@@ -712,11 +718,22 @@ where
     /// flip target when an authored EOF, not a watermark, completes the
     /// frontier. `ReaderGeneration(0)` when no watermark has delivered.
     pub fn max_reader_generation(&self) -> ReaderGeneration {
-        self.generation_by_reader
-            .iter()
-            .copied()
+        (0..self.generation_by_reader.len())
+            .map(|index| self.effective_generation(index))
             .max()
             .unwrap_or_default()
+    }
+
+    /// A reader's generation for scoping and ordering: its own, or the
+    /// generation this subscription was promoted to (FLOWIP-084q B1).
+    pub(crate) fn effective_generation(&self, index: usize) -> ReaderGeneration {
+        self.generation_by_reader[index].max(self.promoted_generation)
+    }
+
+    /// Promote every reader of a subscription its stage held through a
+    /// catch-up crossing to `generation` (FLOWIP-084q B1). Monotonic.
+    pub(crate) fn promote_held_readers(&mut self, generation: ReaderGeneration) {
+        self.promoted_generation = self.promoted_generation.max(generation);
     }
 
     /// Check if there are any upstream journals

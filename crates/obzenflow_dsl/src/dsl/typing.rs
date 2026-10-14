@@ -1160,6 +1160,7 @@ where
         reference_stage_var: Some(reference_stage_var),
         handler: TypedJoinHandlerAdapter::new(handler),
         observers,
+        phase_witnesses: None,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -1200,7 +1201,37 @@ where
             PrimaryOutput,
         >::new(message)),
         observers,
+        phase_witnesses: None,
     });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Canonical admission factory for a merge stage (FLOWIP-084q B7, B9). The
+/// type appears once, so a merge passes on exactly what its producers emit.
+#[doc(hidden)]
+pub fn merge_descriptor<T, S>(
+    name: impl Into<String>,
+    strategy: S,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    S: obzenflow_runtime::stages::merges::MergeStrategy,
+{
+    let metadata = StageTypingMetadata::transform(
+        TypeHint::exact_payload::<T>(),
+        TypeHint::exact_payload::<T>(),
+        false,
+        None,
+    );
+    let descriptor: Box<dyn StageDescriptor> =
+        Box::new(crate::dsl::stage_descriptor::MergeDescriptor {
+            name: name.into(),
+            strategy: strategy.kind(),
+            batch_producers: Vec::new(),
+            live_producers: Vec::new(),
+            backpressure,
+        });
     wrap_typed_descriptor(descriptor, metadata)
 }
 
@@ -1744,6 +1775,22 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.set_reference_stage_id(id);
     }
 
+    fn join_shape(&self) -> Option<crate::dsl::stage_descriptor::JoinShape> {
+        self.inner.join_shape()
+    }
+
+    fn set_phase_witnesses(&mut self, witnesses: obzenflow_runtime::stages::join::PhaseWitnesses) {
+        self.inner.set_phase_witnesses(witnesses);
+    }
+
+    fn merge_strategy(&self) -> Option<obzenflow_runtime::stages::merges::MergeStrategyKind> {
+        self.inner.merge_strategy()
+    }
+
+    fn set_merge_producers(&mut self, batch: Vec<StageId>, live: Vec<StageId>) {
+        self.inner.set_merge_producers(batch, live);
+    }
+
     async fn create_handle(
         self: Box<Self>,
         config: StageConfig,
@@ -2164,7 +2211,7 @@ pub fn validate_stage_typing_metadata(
                     });
                 }
             }
-            StageType::Transform | StageType::Stateful => {
+            StageType::Transform | StageType::Stateful | StageType::Merge => {
                 if unspecified(&meta.input_type) {
                     return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
                         stage_name: name.clone(),
@@ -2777,6 +2824,26 @@ pub fn derive_delivery_orders(
             continue;
         };
         let upstreams = inbound.get(&stage_id).cloned().unwrap_or_default();
+        // FLOWIP-084q: a merge's strategy fixes its order. It records the race
+        // between several live producers, merges several batch producers
+        // canonically, and is otherwise ordered by its phase alone.
+        if descriptor.stage_type() == StageType::Merge {
+            let live = upstreams
+                .iter()
+                .filter(|upstream| has_live_root(**upstream, &inbound, &live_roots, &mut live_memo))
+                .count();
+            let order = if topology.is_in_cycle(stage_id.to_topology_id()) {
+                DeliveryOrder::Unordered
+            } else if live > 1 {
+                DeliveryOrder::Recorded
+            } else if upstreams.len() - live > 1 {
+                DeliveryOrder::Canonical
+            } else {
+                DeliveryOrder::Structural
+            };
+            orders.insert(stage_id, order);
+            continue;
+        }
         let marked = deterministic_fan_in_stages.contains(&stage_id);
         let hydrating_join = descriptor.stage_type() == StageType::Join
             && descriptor.is_deterministic_input_orderer();
@@ -2935,6 +3002,22 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn set_reference_stage_id(&mut self, id: StageId) {
         self.inner.set_reference_stage_id(id);
+    }
+
+    fn join_shape(&self) -> Option<crate::dsl::stage_descriptor::JoinShape> {
+        self.inner.join_shape()
+    }
+
+    fn set_phase_witnesses(&mut self, witnesses: obzenflow_runtime::stages::join::PhaseWitnesses) {
+        self.inner.set_phase_witnesses(witnesses);
+    }
+
+    fn merge_strategy(&self) -> Option<obzenflow_runtime::stages::merges::MergeStrategyKind> {
+        self.inner.merge_strategy()
+    }
+
+    fn set_merge_producers(&mut self, batch: Vec<StageId>, live: Vec<StageId>) {
+        self.inner.set_merge_producers(batch, live);
     }
 
     async fn create_handle(

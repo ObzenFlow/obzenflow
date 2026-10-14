@@ -30,6 +30,10 @@ pub enum StageType {
 
     /// Stage that joins events from two upstream sources
     Join,
+
+    /// Stage that combines producers of one type under a framework strategy
+    /// (FLOWIP-084q)
+    Merge,
 }
 
 impl StageType {
@@ -67,6 +71,7 @@ impl StageType {
             StageType::Sink => "sink",
             StageType::Stateful => "stateful",
             StageType::Join => "join",
+            StageType::Merge => "merge",
         }
     }
 }
@@ -90,7 +95,7 @@ impl StageType {
     pub fn simple(&self) -> SimpleStageType {
         match self {
             StageType::FiniteSource | StageType::InfiniteSource => SimpleStageType::Source,
-            StageType::Transform | StageType::Stateful | StageType::Join => {
+            StageType::Transform | StageType::Stateful | StageType::Join | StageType::Merge => {
                 SimpleStageType::Transform
             }
             StageType::Sink => SimpleStageType::Sink,

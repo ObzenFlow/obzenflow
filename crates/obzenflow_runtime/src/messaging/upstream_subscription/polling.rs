@@ -441,7 +441,7 @@ where
             }
             self.generation_by_reader[reader_index] = announced;
         }
-        self.last_delivered_generation = Some(reader_generation);
+        self.last_delivered_generation = Some(reader_generation.max(self.promoted_generation));
         let mut envelope = DeliveredRecord::from(envelope);
         if let Some(specs) = self.composite_entries_by_stage.get(&stage_id) {
             if let Some(event) =
@@ -1053,7 +1053,7 @@ where
         // watermark sorts at its reader's current (pre-advance) generation.
         let tiebreak = |index: usize| {
             (
-                self.generation_by_reader[index],
+                self.effective_generation(index),
                 self.delivered_count_by_reader[index].next_ordinal(),
                 &self.reader_tiebreak_keys[index],
             )
@@ -1112,7 +1112,7 @@ where
         let head = self.held_heads.get(index)?.as_ref()?;
         let key = self.reader_tiebreak_keys.get(index)?;
         Some(MergeCandidateMeta {
-            generation: self.generation_by_reader[index],
+            generation: self.effective_generation(index),
             ordinal: self.delivered_count_by_reader[index].next_ordinal(),
             key,
             vector_clock: &head.envelope.envelope.provenance.journal.vector_clock,

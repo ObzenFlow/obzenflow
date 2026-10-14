@@ -195,6 +195,7 @@ where
             held_heads: readers.iter().map(|_| None).collect(),
             delivered_count_by_reader: vec![DeliveredCount::default(); readers.len()],
             generation_by_reader: vec![obzenflow_core::ReaderGeneration::default(); readers.len()],
+            promoted_generation: obzenflow_core::ReaderGeneration::default(),
             last_delivered_generation: None,
             reader_tiebreak_keys,
             readers,

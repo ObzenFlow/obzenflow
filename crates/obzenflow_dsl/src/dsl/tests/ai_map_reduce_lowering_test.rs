@@ -724,6 +724,7 @@ mod tests {
                 }
                 obzenflow_core::event::context::StageType::Stateful => TopologyStageType::Stateful,
                 obzenflow_core::event::context::StageType::Join => TopologyStageType::Join,
+                obzenflow_core::event::context::StageType::Merge => TopologyStageType::Merge,
             };
             let mut info = TopologyStageInfo::new(topology_id, name.clone(), topology_kind);
             if let Some(membership) = artifacts.stage_subgraphs.get(name) {
@@ -819,6 +820,7 @@ mod tests {
                 }
                 obzenflow_core::event::context::StageType::Stateful => TopologyStageType::Stateful,
                 obzenflow_core::event::context::StageType::Join => TopologyStageType::Join,
+                obzenflow_core::event::context::StageType::Merge => TopologyStageType::Merge,
             };
             let mut info = TopologyStageInfo::new(id.to_topology_id(), name.clone(), topology_kind);
             if let Some(membership) = artifacts.stage_subgraphs.get(name) {
@@ -1017,6 +1019,7 @@ mod tests {
                 S::Sink => T::Sink,
                 S::Stateful => T::Stateful,
                 S::Join => T::Join,
+                S::Merge => T::Merge,
             }
         }
 

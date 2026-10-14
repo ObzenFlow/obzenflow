@@ -1277,6 +1277,7 @@ impl PrometheusProjection {
         let has_backpressure_metrics = !snapshot.backpressure_window.is_empty()
             || !snapshot.backpressure_in_flight.is_empty()
             || !snapshot.backpressure_credits.is_empty()
+            || !snapshot.backpressure_hold_renewals_total.is_empty()
             || !snapshot.backpressure_blocked.is_empty()
             || !snapshot.backpressure_min_reader_seq.is_empty()
             || !snapshot.backpressure_writer_seq.is_empty()
@@ -1484,6 +1485,65 @@ impl PrometheusProjection {
                         escape_label(upstream_name),
                         escape_label(downstream_name),
                         credits
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Edge-scoped hold renewals (FLOWIP-084q B3)
+        if !snapshot.backpressure_hold_renewals_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_hold_renewals_total Renewals the edge's reader published while holding the edge by rule"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_backpressure_hold_renewals_total counter"
+            )?;
+
+            for ((upstream, downstream), renewals) in &snapshot.backpressure_hold_renewals_total {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_hold_renewals_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        renewals
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_hold_renewals_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        renewals
                     )?;
                 }
             }
@@ -2881,6 +2941,40 @@ mod tests {
             escape_label(&stage_id.to_string())
         );
         assert!(output.contains(&expected));
+    }
+
+    #[test]
+    fn hold_renewals_are_an_edge_counter_with_the_edge_series_labels() {
+        let exporter = PrometheusProjection::new();
+        let (upstream, downstream) = (StageId::new(), StageId::new());
+        let mut snapshot = AppMetricsSnapshot::default();
+        for (stage_id, name) in [(upstream, "live_tx"), (downstream, "posted")] {
+            snapshot.stage_metadata.insert(
+                stage_id,
+                StageMetadata {
+                    name: name.to_string(),
+                    flow_name: "http_ingestion_piggy_bank_demo".to_string(),
+                    stage_type: obzenflow_core::event::context::StageType::Transform,
+                    reference_mode: None,
+                    flow_id: None,
+                },
+            );
+        }
+        snapshot
+            .backpressure_hold_renewals_total
+            .insert((upstream, downstream), 41872);
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+
+        let output = exporter.render(&view).unwrap();
+        assert!(output.contains("# TYPE obzenflow_backpressure_hold_renewals_total counter"));
+        assert!(output.contains(&format!(
+            "obzenflow_backpressure_hold_renewals_total{{flow=\"http_ingestion_piggy_bank_demo\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"live_tx\",downstream=\"posted\"}} 41872",
+            escape_label(&upstream.to_string()),
+            escape_label(&downstream.to_string()),
+        )));
     }
 
     #[test]

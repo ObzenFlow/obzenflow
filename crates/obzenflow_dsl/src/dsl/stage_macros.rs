@@ -5839,6 +5839,78 @@ macro_rules! transform {
     ($($tokens:tt)*) => { $crate::__obzenflow_attachment_syntax!(@before __obzenflow_transform_attachment_contract, [], $($tokens)*) };
 }
 
+/// Declares a merge stage, which combines several producers of one type in the
+/// order its framework strategy decides (FLOWIP-084q B7, B9).
+///
+/// ```
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "merge_doc.fact"; }
+/// use obzenflow_runtime::stages::merges;
+/// let _stage = obzenflow_dsl::merge!(Fact => merges::then_live);
+/// ```
+///
+/// A merge has no default strategy.
+///
+/// ```compile_fail
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "merge_doc.fact"; }
+/// let _stage = obzenflow_dsl::merge!(Fact);
+/// ```
+///
+/// A merge runs no author code, so a type outside `merges` does not compile.
+///
+/// ```compile_fail
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "merge_doc.fact"; }
+/// #[derive(Clone, Copy)]
+/// struct PreferStore;
+/// let _stage = obzenflow_dsl::merge!(Fact => PreferStore);
+/// ```
+///
+/// A merge has no handler, so it takes no `with` clause.
+///
+/// ```compile_fail
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "merge_doc.fact"; }
+/// # use obzenflow_adapters::middleware::rate_limit;
+/// use obzenflow_runtime::stages::merges;
+/// let _stage = obzenflow_dsl::merge!(Fact => merges::then_live with rate_limit(10.0));
+/// ```
+#[macro_export]
+macro_rules! merge {
+    (@backpressure) => { None };
+    (@backpressure $bp:expr) => { Some($bp) };
+    (name: $name:literal, $ty:ty => $($strategy:ident)::+ $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::dsl::typing::merge_descriptor::<$ty, _>(
+            $name,
+            $($strategy)::+,
+            $crate::merge!(@backpressure $($bp)?),
+        )
+    };
+    (name: $name:literal, $ty:ty => $($strategy:ident)::+ with $($rest:tt)*) => {
+        compile_error!("merge! takes no `with` clause. A merge runs no author code, so middleware has nothing to attach to.")
+    };
+    (name: $name:literal, $ty:ty $(,)?) => {
+        compile_error!("merge! needs a strategy, for example `merge!(AccountOpened => merges::then_live)`.\nA merge has no default strategy.")
+    };
+    (name: $($rest:tt)*) => {
+        compile_error!("expected `merge!(name: \"stage\", Type => merges::strategy)`")
+    };
+    ($ty:ty => $($strategy:ident)::+ $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::merge!(name: "__obzenflow_binding_derived_name__", $ty => $($strategy)::+ $(, backpressure: $bp)?)
+    };
+    ($ty:ty => $($strategy:ident)::+ with $($rest:tt)*) => {
+        compile_error!("merge! takes no `with` clause. A merge runs no author code, so middleware has nothing to attach to.")
+    };
+    ($ty:ty $(,)?) => {
+        compile_error!("merge! needs a strategy, for example `merge!(AccountOpened => merges::then_live)`.\nA merge has no default strategy.")
+    };
+}
+
 /// Shared attachment spelling for a generated composite's local role.
 #[doc(hidden)]
 #[macro_export]

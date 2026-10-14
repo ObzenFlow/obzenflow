@@ -899,6 +899,9 @@ impl StageResourcesBuilder {
                         obzenflow_topology::StageType::Join => {
                             obzenflow_core::event::context::StageType::Join
                         }
+                        obzenflow_topology::StageType::Merge => {
+                            obzenflow_core::event::context::StageType::Merge
+                        }
                     },
                     ..obzenflow_core::event::provenance::FlowContext::new(
                         stage_info.name.clone(),

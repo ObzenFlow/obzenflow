@@ -566,6 +566,13 @@ fn durable_execution_contract_child() {
         .expect("the plan parses");
     let args = std::iter::once("obzenflow".to_string()).chain(plan.args);
     let mut app = FlowApplication::builder().with_cli_args(args);
+    if plan.scenario.then_live {
+        if let Err(error) = app.run_blocking(then_live::build_flow(&plan.scenario)) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let web = match plan.scenario.http {
         Some(_) => WebOrders::Http(app.http_ingress(
             HttpOrders,
@@ -590,6 +597,9 @@ struct Scenario {
     inputs: PathBuf,
     /// The port of an HTTP history's server; every run of it serves there.
     http: Option<u16>,
+    /// Runs the FLOWIP-084q then-live flow in place of the payment flow.
+    #[serde(default)]
+    then_live: bool,
 }
 
 impl Scenario {
@@ -621,7 +631,12 @@ impl Scenario {
         let root = Self::directory(name);
         let inputs = root.join("inputs");
         std::fs::create_dir(&inputs).expect("create the inputs");
-        let scenario = Self { root, inputs, http };
+        let scenario = Self {
+            root,
+            inputs,
+            http,
+            then_live: false,
+        };
         std::fs::write(scenario.store_input(), store_input()).expect("write store orders");
         scenario
     }
@@ -634,6 +649,7 @@ impl Scenario {
             root: Self::directory(name),
             inputs: from.inputs.clone(),
             http: from.http,
+            then_live: from.then_live,
         };
         let copy = scenario
             .journals()
@@ -2176,4 +2192,302 @@ async fn durable_execution_contract_over_http() {
     strict_replay(&mut history, &last).await;
     history.check(None);
     history.report();
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-084q: a then-live join behind two `then_live` merges, killed in each
+// phase that holds inputs and resumed. Each merge's batch phase is cut by the
+// hydrating and enriching rows. The batch order is canonical, so each row
+// checks the resumed lineage against the inputs' own order.
+
+mod then_live {
+    use super::*;
+    use obzenflow::flow::{join, merge};
+    use obzenflow::middleware::rate_limit;
+    use obzenflow::stages::sources::ChannelSource;
+    use obzenflow::stages::{joins, merges};
+    use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
+    use obzenflow_core::StageKey;
+
+    const ACCOUNTS: [&str; 4] = ["a-1", "a-2", "a-3", "a-4"];
+    const ENTRIES: [(&str, &str); 5] = [
+        ("a-1", "e-1"),
+        ("a-2", "e-2"),
+        ("a-3", "e-3"),
+        ("a-4", "e-4"),
+        ("a-1", "e-5"),
+    ];
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Account {
+        account_id: String,
+    }
+    impl TypedPayload for Account {
+        const EVENT_TYPE: &'static str = "durable_contract.then_live.account";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Entry {
+        account_id: String,
+        note: String,
+    }
+    impl TypedPayload for Entry {
+        const EVENT_TYPE: &'static str = "durable_contract.then_live.entry";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Posted {
+        account_id: String,
+        note: String,
+    }
+    impl TypedPayload for Posted {
+        const EVENT_TYPE: &'static str = "durable_contract.then_live.posted";
+    }
+
+    #[derive(Clone, Debug)]
+    struct AccountYaml;
+    impl YamlDecoder for AccountYaml {
+        type Output = Account;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<Account, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EntryYaml;
+    impl YamlDecoder for EntryYaml {
+        type Output = Entry;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<Entry, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    fn accounts_input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("accounts.yaml")
+    }
+
+    fn entries_input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("entries.yaml")
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let root = Scenario::directory(name);
+        let inputs = root.join("inputs");
+        std::fs::create_dir(&inputs).expect("create the inputs");
+        let scenario = Scenario {
+            root,
+            inputs,
+            http: None,
+            then_live: true,
+        };
+        let accounts: String = ACCOUNTS
+            .iter()
+            .map(|account| format!("  - account_id: \"{account}\"\n"))
+            .collect();
+        std::fs::write(accounts_input(&scenario), format!("accounts:\n{accounts}"))
+            .expect("write accounts");
+        let entries: String = ENTRIES
+            .iter()
+            .map(|(account, note)| format!("  - account_id: \"{account}\"\n    note: \"{note}\"\n"))
+            .collect();
+        std::fs::write(entries_input(&scenario), format!("entries:\n{entries}"))
+            .expect("write entries");
+        scenario
+    }
+
+    fn yaml<D: YamlDecoder>(decoder: D, path: PathBuf, pointer: &str) -> YamlSource<D> {
+        YamlSource::builder(decoder)
+            .path(path)
+            .selection(YamlSelection::SequenceAt(pointer.into()))
+            .batch_size(1)
+            .build()
+            .expect("the batch channel is configured")
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        let batch_accounts_input = yaml(AccountYaml, accounts_input(scenario), "/accounts");
+        let batch_tx_input = yaml(EntryYaml, entries_input(scenario), "/entries");
+        let (account_sender, live_accounts_input) = tokio::sync::mpsc::channel::<Account>(1);
+        let (entry_sender, live_tx_input) = tokio::sync::mpsc::channel::<Entry>(1);
+        // The senders outlive the run, so the live inputs stay open until a stop.
+        Box::leak(Box::new((account_sender, entry_sender)));
+        let live_accounts_input = ChannelSource::new(live_accounts_input);
+        let live_tx_input = ChannelSource::new(live_tx_input);
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let post_entry = joins::inner_then_live(
+                |account: &Account| account.account_id.clone(),
+                |entry: &Entry| entry.account_id.clone(),
+                |_account: Account, entry: Entry| Posted {
+                    account_id: entry.account_id,
+                    note: entry.note,
+                },
+            );
+            let ledger = DiscardSink::<Posted>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_then_live",
+                journals: disk_journals(journals),
+
+                stages: {
+                    batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
+                    batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
+                    live_accounts = async_infinite_source!(Account => live_accounts_input);
+                    live_tx = async_infinite_source!(Entry => live_tx_input);
+                    accounts = merge!(Account => merges::then_live);
+                    transactions = merge!(Entry => merges::then_live);
+                    posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                    ledger = sink!(Posted => ledger);
+                },
+
+                topology: {
+                    batch_accounts |> accounts;
+                    live_accounts |> accounts;
+                    batch_tx |> transactions;
+                    live_tx |> transactions;
+                    (accounts, transactions) |> posted;
+                    posted |> ledger;
+                }
+            })
+        })
+    }
+
+    fn postings(archive: &Archive) -> Vec<String> {
+        archive
+            .facts::<Posted>("posted")
+            .map(|(_, posted)| posted.note)
+            .collect()
+    }
+
+    fn phases(archive: &Archive) -> Vec<JoinPhaseFact> {
+        archive
+            .rows("posted", RunJournalKind::Data)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::JoinPhase(fact)) => Some(fact.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Cut {
+        Hydrating,
+        Enriching,
+        Live,
+    }
+
+    impl Cut {
+        fn holds(self, archive: &Archive) -> bool {
+            let phases = phases(archive);
+            match self {
+                Self::Hydrating => {
+                    archive.facts::<Account>("accounts").count() >= 1
+                        && phases.is_empty()
+                        && archive.eof("batch_accounts").is_none()
+                }
+                Self::Enriching => {
+                    phases.len() == 1
+                        && !postings(archive).is_empty()
+                        && archive.eof("batch_tx").is_none()
+                }
+                Self::Live => phases.len() == 2,
+            }
+        }
+    }
+
+    /// Kill the run at `cut`, resume it to the end of the batch, check the
+    /// resumed lineage and strict-replay it.
+    async fn row(name: &str, cut: Cut, generations: (u64, u64)) {
+        let scenario = fresh(name);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive| cut.holds(archive)).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let resumed = child.run().await;
+        until(&resumed, name, |archive| {
+            postings(archive).len() == ENTRIES.len() && phases(archive).len() == 2
+        })
+        .await;
+        child.signal(Signal::Term);
+        assert!(
+            child.exit().await.success(),
+            "{name}: the resumed run stops"
+        );
+
+        let archive = Archive::read(&resumed).await;
+        let notes: Vec<String> = ENTRIES.iter().map(|(_, note)| (*note).into()).collect();
+        assert_eq!(
+            postings(&archive),
+            notes,
+            "{name}: each batch entry posts once"
+        );
+        assert_eq!(
+            archive
+                .facts::<Entry>("transactions")
+                .map(|(_, entry)| entry.note)
+                .collect::<Vec<_>>(),
+            notes,
+            "{name}: the merged entries"
+        );
+        assert_eq!(
+            archive
+                .facts::<Account>("accounts")
+                .map(|(_, account)| account.account_id)
+                .collect::<Vec<_>>(),
+            ACCOUNTS,
+            "{name}: the merged accounts"
+        );
+        assert_eq!(
+            phases(&archive),
+            [
+                JoinPhaseFact::EnrichingEntered {
+                    generation: generations.0,
+                    ended_by: vec![StageKey::from("batch_accounts")],
+                },
+                JoinPhaseFact::LiveEntered {
+                    generation: generations.1,
+                    ended_by: vec![StageKey::from("batch_tx")],
+                },
+            ],
+            "{name}: one fact per transition, in the generation that made it"
+        );
+
+        remove_input(&accounts_input(&scenario));
+        remove_input(&entries_input(&scenario));
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let verdict = std::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+            .args(["verify", "--baseline"])
+            .arg(&resumed)
+            .arg("--candidate")
+            .arg(&replayed)
+            .output()
+            .expect("obzenflow verify runs");
+        assert_eq!(
+            verdict.status.code(),
+            Some(0),
+            "{name}: {}",
+            String::from_utf8_lossy(&verdict.stdout)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_while_hydrating_resumes_into_the_batch() {
+        row("then_live_hydrating", Cut::Hydrating, (1, 1)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_while_enriching_resumes_the_batch_once() {
+        row("then_live_enriching", Cut::Enriching, (0, 1)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_once_live_reconstructs_both_phases() {
+        row("then_live_live", Cut::Live, (0, 0)).await;
+    }
 }

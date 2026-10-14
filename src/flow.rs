@@ -69,7 +69,7 @@
 pub use obzenflow_dsl::backpressure;
 pub use obzenflow_dsl::{
     ai_map_reduce, async_infinite_source, async_source, effectful_stateful, effectful_transform,
-    flow, handler_set, inference, infinite_source, join, placeholder, sink, source, stateful,
-    transform, FlowBuildError, FlowBuildFailure, FlowDefinition, StageCreationError,
+    flow, handler_set, inference, infinite_source, join, merge, placeholder, sink, source,
+    stateful, transform, FlowBuildError, FlowBuildFailure, FlowDefinition, StageCreationError,
     StageCreationResult,
 };

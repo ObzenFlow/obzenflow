@@ -30,6 +30,7 @@ use crate::messaging::upstream_subscription::{selection_failure, NamedHead, Reco
 use crate::stages::join::fsm::{
     JoinEvent, JoinResources, JoinSubscriptionSide, PendingSubscriptionAck,
 };
+use crate::stages::join::phase::PhaseReads;
 
 pub(super) async fn dispatch_live<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -187,6 +188,7 @@ async fn handle_reference_envelope<
                         sup.stream_subscription.as_ref(),
                         ctx,
                         *announced,
+                        PhaseReads::Both,
                     )
                     .await,
                 ));
@@ -200,6 +202,7 @@ async fn handle_reference_envelope<
                     Some(&*subscription),
                     sup.stream_subscription.as_ref(),
                     ctx,
+                    PhaseReads::Both,
                 )
                 .await
                 {
@@ -561,6 +564,7 @@ async fn handle_stream_envelope<
                         sup.stream_subscription.as_ref(),
                         ctx,
                         *announced,
+                        PhaseReads::Both,
                     )
                     .await,
                 ));
@@ -577,6 +581,7 @@ async fn handle_stream_envelope<
                     sup.reference_subscription.as_ref(),
                     Some(&*subscription),
                     ctx,
+                    PhaseReads::Both,
                 )
                 .await
                 {

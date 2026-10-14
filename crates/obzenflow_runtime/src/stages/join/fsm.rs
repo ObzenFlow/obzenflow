@@ -12,19 +12,20 @@ use crate::messaging::DeliveredRecord;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, JoinPhaseFact};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, StageKey, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use super::config::JoinReferenceMode;
+use super::config::{JoinReferenceMode, PhaseWitnesses};
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
@@ -236,8 +237,13 @@ pub enum JoinEvent<H> {
     /// Received EOF from upstream (subscription context determines which one)
     ReceivedEOF,
 
-    /// Reference upstream is complete (triggers transition to Enriching)
-    ReferenceComplete,
+    /// Every input that ends the current state that holds inputs ended
+    /// naturally (FLOWIP-084q B2, B11).
+    HoldCompleted(HoldCompletion),
+
+    /// Every input the state that holds inputs reads ended, not all naturally;
+    /// the join drains without reading the inputs it holds (FLOWIP-084q B2).
+    HoldLeftOpen,
 
     /// Begin draining process
     BeginDrain,
@@ -263,7 +269,8 @@ impl<H> std::fmt::Debug for JoinEvent<H> {
 
             Self::Ready => write!(f, "Ready"),
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
-            Self::ReferenceComplete => write!(f, "ReferenceComplete"),
+            Self::HoldCompleted(completion) => write!(f, "HoldCompleted({completion:?})"),
+            Self::HoldLeftOpen => write!(f, "HoldLeftOpen"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::DrainComplete => write!(f, "DrainComplete"),
             Self::Error(msg) => write!(f, "Error({msg:?})"),
@@ -290,7 +297,8 @@ impl<H: Clone + Send + Sync + 'static>
             Self::Initialize
             | Self::Ready
             | Self::ReceivedEOF
-            | Self::ReferenceComplete
+            | Self::HoldCompleted(_)
+            | Self::HoldLeftOpen
             | Self::BeginDrain
             | Self::DrainComplete => None,
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
@@ -309,13 +317,22 @@ impl<H: Clone + Send + Sync + 'static> EventVariant for JoinEvent<H> {
 
             JoinEvent::Ready => "Ready",
             JoinEvent::ReceivedEOF => "ReceivedEOF",
-            JoinEvent::ReferenceComplete => "ReferenceComplete",
+            JoinEvent::HoldCompleted(_) => "HoldCompleted",
+            JoinEvent::HoldLeftOpen => "HoldLeftOpen",
             JoinEvent::BeginDrain => "BeginDrain",
             JoinEvent::DrainComplete => "DrainComplete",
             JoinEvent::Error(_) => "Error",
             JoinEvent::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
+}
+
+/// How a state that holds inputs completed (FLOWIP-084q B11): the generation of
+/// the delivery that ended it and the stages whose natural EOFs ended it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoldCompletion {
+    pub generation: u64,
+    pub ended_by: Vec<StageKey>,
 }
 
 // ============================================================================
@@ -335,6 +352,9 @@ pub enum JoinAction<H> {
     /// Publish running event to journal
     PublishRunning,
     EmitHydrationHeartbeat,
+
+    /// Journal the phase this transition entered (FLOWIP-084q B11).
+    RecordPhase(JoinPhaseFact),
 
     /// Hydrate reference catalog from reference event
     HydrateCatalog,
@@ -369,6 +389,7 @@ impl<H> std::fmt::Debug for JoinAction<H> {
             Self::InitializeHandlerState => write!(f, "InitializeHandlerState"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::EmitHydrationHeartbeat => write!(f, "EmitHydrationHeartbeat"),
+            Self::RecordPhase(fact) => write!(f, "RecordPhase({fact:?})"),
             Self::HydrateCatalog => write!(f, "HydrateCatalog"),
             Self::EnrichEvent => write!(f, "EnrichEvent"),
             Self::ForwardEOF => write!(f, "ForwardEOF"),
@@ -505,8 +526,30 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     pub reference_subscription_factory: BoundSubscriptionFactory,
     pub stream_subscription_factory: BoundSubscriptionFactory,
 
-    /// Reference join mode (FiniteEof vs Live).
+    /// Reference join mode (FiniteEof, Live or FiniteThenLive).
     pub reference_mode: JoinReferenceMode,
+
+    /// Then-live phase witnesses (FLOWIP-084q B5, B8); `None` in other modes.
+    pub(crate) phase_witnesses: Option<PhaseWitnesses>,
+
+    /// Witness stage keys by every stage ID their EOFs may carry in this run,
+    /// current or archived (FLOWIP-084q).
+    pub(crate) witness_keys: HashMap<StageId, StageKey>,
+
+    /// Natural-or-not EOFs witnessed so far in the current holding state.
+    pub(crate) witnessed_eofs: HashMap<StageKey, EofKind>,
+
+    /// A holding state ended without completing: drain without reading the
+    /// inputs it held and without end-of-input finalization (FLOWIP-084q B2).
+    pub(crate) drain_without_held_inputs: bool,
+
+    /// The side a phase-scoped catch-up crossing promoted, applied at the next
+    /// dispatch (FLOWIP-084q B1).
+    pub(crate) pending_promotion: Option<(JoinSubscriptionSide, obzenflow_core::ReaderGeneration)>,
+
+    /// Phases the archive's own journal records this join entering, with the
+    /// generation that entered each (FLOWIP-084q B1, B11).
+    pub(crate) archived_phases: Vec<JoinPhaseFact>,
 
     /// Live-mode fairness cap (see `JoinConfig.reference_batch_cap`).
     pub reference_batch_cap: Option<usize>,
@@ -550,7 +593,7 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
 
     /// Start of the current backpressure stall episode; anchored at the
     /// first credit miss, cleared on successful reserve (FLOWIP-115e).
-    pub(crate) backpressure_stall: Option<tokio::time::Instant>,
+    pub(crate) backpressure_stall: crate::backpressure::StallEpisode,
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
@@ -574,11 +617,18 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     pub(crate) resources: Option<JoinResources<H>>,
     pub(crate) instrumentation: Arc<StageInstrumentation>,
     pub(crate) reference_mode: JoinReferenceMode,
+    /// A then-live join with no batch stream input goes from `Hydrating`
+    /// straight to `Live` (FLOWIP-084q).
+    pub(crate) batch_phase_empty: bool,
 }
 impl<H: UnifiedJoinHandler> JoinContext<H> {
     pub(crate) fn new(resources: JoinResources<H>) -> Self {
         Self {
             reference_mode: resources.reference_mode,
+            batch_phase_empty: resources
+                .phase_witnesses
+                .as_ref()
+                .is_some_and(|witnesses| witnesses.batch_stream.is_empty()),
             instrumentation: resources.instrumentation.clone(),
             resources: Some(resources),
         }
@@ -626,6 +676,37 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                             obzenflow_fsm::FsmError::HandlerError(error.to_string())
                         })?;
                 }
+                Ok(())
+            }
+            JoinAction::RecordPhase(fact) => {
+                let writer_id = ctx.writer_id.ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(
+                        "No writer ID available to journal the join's phase".to_string(),
+                    )
+                })?;
+                let event = ChainEventFactory::execution_event(
+                    writer_id,
+                    ExecutionPayload::JoinPhase(fact.clone()),
+                )
+                .with_flow_context(make_flow_context(
+                    &ctx.flow_name,
+                    &ctx.flow_id.to_string(),
+                    &ctx.stage_name,
+                    ctx.stage_id,
+                    StageType::Join,
+                ));
+                crate::supervised_base::publication::append(
+                    &ctx.data_journal,
+                    event,
+                    Default::default(),
+                )
+                .await
+                .map_err(|error| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to journal the join's phase: {error}"
+                    ))
+                })?;
+                ctx.witnessed_eofs.clear();
                 Ok(())
             }
             JoinAction::AllocateResources => {
@@ -720,6 +801,15 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 );
 
                 ctx.stream_subscription = Some(stream_subscription);
+
+                // FLOWIP-084q B1: a join that replays or resumes reads the
+                // phases its archive entered, to check where it crosses.
+                if let Some(archive) = ctx.runtime_execution.archive_for_io().cloned() {
+                    ctx.archived_phases =
+                        super::phase::load_archived_phases(&archive, &ctx.stage_name)
+                            .await
+                            .map_err(obzenflow_fsm::FsmError::HandlerError)?;
+                }
 
                 if let Some(recorded) = &ctx.recorded {
                     ctx.recorded_order = Some(recorded.order().await.map_err(|error| {

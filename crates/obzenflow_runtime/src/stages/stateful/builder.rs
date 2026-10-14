@@ -181,7 +181,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             pending_ack_upstream: None,
             backpressure_pulse:
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
-            backpressure_stall: None,
+            backpressure_stall: Default::default(),
             heartbeat,
             catch_up_flip: None,
         };

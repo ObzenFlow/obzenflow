@@ -440,7 +440,7 @@ pub struct FiniteSourceResources<H> {
 
     /// Start of the current backpressure stall episode; anchored at the
     /// first credit miss, cleared on successful reserve (FLOWIP-115e).
-    pub(crate) backpressure_stall: Option<tokio::time::Instant>,
+    pub(crate) backpressure_stall: crate::backpressure::StallEpisode,
 
     /// Committed source diagnostic the lifecycle failure links to (084n B2).
     pub(crate) failure_causal_event_id: Option<obzenflow_core::EventId>,
@@ -486,7 +486,7 @@ impl<H> FiniteSourceResources<H> {
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
-            backpressure_stall: None,
+            backpressure_stall: Default::default(),
             failure_causal_event_id: None,
             _marker: PhantomData,
         }

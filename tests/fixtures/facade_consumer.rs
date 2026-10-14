@@ -18,7 +18,7 @@ use self::async_trait::async_trait;
 use self::of::effects::{Effects, StageCompletion};
 use self::of::prelude::*;
 use self::of::schema::{StageFactSet, TypedFactSet};
-use self::of::stages::{joins, sinks, sources, stateful, transforms};
+use self::of::stages::{joins, merges, sinks, sources, stateful, transforms};
 use self::serde::{Deserialize, Serialize};
 use self::std::prelude::rust_2021::*;
 use self::std::vec;
@@ -294,6 +294,26 @@ fn renamed_facade_macros_and_constructors_compile() {
         |_reference: Fact, fact: Fact| fact,
     );
     let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => joined);
+    // FLOWIP-084q: merges and then-live joins through the facade.
+    let _ = merge!(Fact => merges::then_live);
+    let _ = of::flow::merge!(Fact => merges::then_live);
+    let then_live = joins::inner_then_live(
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |_reference: Fact, fact: Fact| fact,
+    );
+    let _ = join!(catalog input: Fact, Fact -> Fact => then_live);
+    let _ = joins::left_then_live(
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |_reference: Option<Fact>, fact: Fact| fact,
+    );
+    let _ = joins::strict_then_live(
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |_reference: Fact, fact: Fact| fact,
+    );
+    let _ = joins::JoinReferenceMode::FiniteThenLive;
     let _ = source!(Fact => Pure);
     let _ = async_source!(Fact => Pure);
     let _ = infinite_source!(Fact => Pure);

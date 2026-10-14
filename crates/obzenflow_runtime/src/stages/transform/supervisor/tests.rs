@@ -153,7 +153,7 @@ async fn build_cycle_entry_harness<
         pending_ack_upstream: None,
         backpressure_pulse:
             crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
-        backpressure_stall: None,
+        backpressure_stall: Default::default(),
         backpressure_registry: std::sync::Arc::new(registry.clone()),
         cycle_guard_config: Some(cycle_guard_config),
         external_eofs_received: std::collections::HashSet::new(),
@@ -514,7 +514,7 @@ async fn build_transform_harness<
         pending_ack_upstream: None,
         backpressure_pulse:
             crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
-        backpressure_stall: None,
+        backpressure_stall: Default::default(),
         backpressure_registry: std::sync::Arc::new(registry.clone()),
         cycle_guard_config: None,
         external_eofs_received: std::collections::HashSet::new(),

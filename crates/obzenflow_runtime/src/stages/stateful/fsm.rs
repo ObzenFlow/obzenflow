@@ -647,7 +647,7 @@ pub struct StatefulResources<H: UnifiedStatefulHandler> {
 
     /// Start of the current backpressure stall episode; anchored at the
     /// first credit miss, cleared on successful reserve (FLOWIP-115e).
-    pub(crate) backpressure_stall: Option<tokio::time::Instant>,
+    pub(crate) backpressure_stall: crate::backpressure::StallEpisode,
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,

@@ -133,6 +133,7 @@ fn format_stage_type(stage_type: StageType) -> &'static str {
         StageType::Sink => "sink",
         StageType::Stateful => "stateful",
         StageType::Join => "join",
+        StageType::Merge => "merge",
     }
 }
 

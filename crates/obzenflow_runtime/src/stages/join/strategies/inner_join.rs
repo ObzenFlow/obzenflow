@@ -133,6 +133,13 @@ where
         self
     }
 
+    /// Hydrate the batch catalog, then enrich the batch stream, then go live
+    /// (FLOWIP-084q).
+    pub fn then_live(mut self) -> Self {
+        self.reference_mode = JoinReferenceMode::FiniteThenLive;
+        self
+    }
+
     pub fn build<J>(self, join_fn: J) -> InnerJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
         J: Fn(C, S) -> E + Send + Sync + Clone,
@@ -232,6 +239,13 @@ where
         self
     }
 
+    /// Hydrate the batch catalog, then enrich the batch stream, then go live
+    /// (FLOWIP-084q).
+    pub fn then_live(mut self) -> Self {
+        self.reference_mode = JoinReferenceMode::FiniteThenLive;
+        self
+    }
+
     pub fn join<J>(
         self,
         join_fn: J,
@@ -277,6 +291,7 @@ where
     type StreamType = S;
     type EnrichedType = E;
     type Key = K;
+    const LABEL: &'static str = "inner";
 
     fn match_reference(
         &self,

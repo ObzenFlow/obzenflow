@@ -5,7 +5,8 @@
 //! Typed join constructors owned by the runtime join capability.
 
 pub use obzenflow_runtime::stages::join::{
-    inner, inner_live, left, left_live, strict, strict_live,
+    inner, inner_live, inner_then_live, left, left_live, left_then_live, strict, strict_live,
+    strict_then_live,
 };
 
 pub use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};

@@ -6,6 +6,8 @@
 
 pub mod common;
 pub mod join;
+pub mod merge;
+pub mod merges;
 pub mod observer;
 pub mod resources_builder;
 pub mod sink;

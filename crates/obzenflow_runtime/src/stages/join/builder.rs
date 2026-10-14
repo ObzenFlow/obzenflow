@@ -137,7 +137,10 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 crate::messaging::upstream_subscription::ReaderSelectionPolicy::CanonicalMerge;
         }
         let recorded = match self.config.reference_mode {
-            super::config::JoinReferenceMode::Live => {
+            // FLOWIP-084q B6: a then-live join records its order from phase 3,
+            // exactly as a live join does.
+            super::config::JoinReferenceMode::Live
+            | super::config::JoinReferenceMode::FiniteThenLive => {
                 stream_subscription_factory.recorded = None;
                 reference_subscription_factory.recorded.take()
             }
@@ -212,6 +215,15 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             reference_subscription_factory,
             stream_subscription_factory,
             reference_mode: self.config.reference_mode,
+            witness_keys: super::phase::witness_keys(
+                self.config.phase_witnesses.as_ref(),
+                self.resources.runtime_execution.archive_for_io(),
+            ),
+            phase_witnesses: self.config.phase_witnesses.clone(),
+            witnessed_eofs: std::collections::HashMap::new(),
+            drain_without_held_inputs: false,
+            pending_promotion: None,
+            archived_phases: Vec::new(),
             reference_batch_cap: self.config.reference_batch_cap,
             reference_since_last_stream: 0,
             events_since_last_heartbeat: 0,
@@ -225,7 +237,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             pending_subscription_ack: None,
             backpressure_pulse:
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
-            backpressure_stall: None,
+            backpressure_stall: Default::default(),
             heartbeat,
             deterministic_fan_in,
             recorded,

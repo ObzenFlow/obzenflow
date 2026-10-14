@@ -1454,6 +1454,7 @@ mod tests {
             reference_stage_var: None,
             handler: TypedJoinHandlerAdapter::new(ExactJoin),
             observers: vec![],
+            phase_witnesses: None,
         };
         assert!(descriptor.is_deterministic_input_orderer());
     }
@@ -1502,6 +1503,7 @@ mod tests {
             reference_stage_var: None,
             handler: TypedJoinHandlerAdapter::new(LiveModeJoin),
             observers: vec![],
+            phase_witnesses: None,
         };
         assert!(!descriptor.is_deterministic_input_orderer());
     }
@@ -1781,6 +1783,7 @@ mod tests {
                 reference_stage_var: None,
                 handler: TypedJoinHandlerAdapter::new(ObserverLiveJoin),
                 observers: vec![],
+                phase_witnesses: None,
             }),
         );
 

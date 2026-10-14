@@ -134,6 +134,9 @@ struct EdgeState {
     window: u64,
     stall_timeout: Duration,
     reader_seq: AtomicU64,
+    /// Bumped only by this edge's reader while a state of its holds the edge
+    /// by rule (FLOWIP-084q B3). It never wakes the writer.
+    hold_renewals: AtomicU64,
     /// The upstream writer's waker; fired by `ack_consumed` after credit is
     /// published, so a blocked writer wakes on the ack rather than a timer.
     upstream_waker: CreditWaker,
@@ -156,6 +159,9 @@ struct StageState {
     wait_nanos_total: AtomicU64,
     credit_waker: CreditWaker,
     downstream_edges: Vec<Arc<EdgeState>>,
+    /// Edges into this stage, renewed when the stage, blocked only by held
+    /// edges, relays their holds to its own inputs (FLOWIP-084q B3).
+    upstream_edges: Vec<Arc<EdgeState>>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +175,9 @@ pub struct BackpressureMetricsSnapshot {
     pub edge_window: HashMap<(StageId, StageId), u64>,
     pub edge_in_flight: HashMap<(StageId, StageId), u64>,
     pub edge_credits: HashMap<(StageId, StageId), u64>,
+    /// Renewals each edge's reader has published while holding it by rule
+    /// (FLOWIP-084q B3).
+    pub edge_hold_renewals: HashMap<(StageId, StageId), u64>,
     pub stage_blocked: HashMap<StageId, bool>,
     pub stage_min_reader_seq: HashMap<StageId, u64>,
     pub stage_writer_seq: HashMap<StageId, u64>,
@@ -190,6 +199,7 @@ impl BackpressureRegistry {
             .collect();
 
         let mut outgoing: HashMap<StageId, Vec<Arc<EdgeState>>> = HashMap::new();
+        let mut incoming: HashMap<StageId, Vec<Arc<EdgeState>>> = HashMap::new();
         let mut edges: HashMap<(StageId, StageId), Arc<EdgeState>> = HashMap::new();
 
         for edge in topology.edges() {
@@ -213,6 +223,7 @@ impl BackpressureRegistry {
                 window,
                 stall_timeout,
                 reader_seq: AtomicU64::new(0),
+                hold_renewals: AtomicU64::new(0),
                 upstream_waker: wakers
                     .get(&upstream)
                     .cloned()
@@ -229,12 +240,17 @@ impl BackpressureRegistry {
             }
 
             edges.insert((upstream, downstream), edge_state.clone());
+            incoming
+                .entry(downstream)
+                .or_default()
+                .push(edge_state.clone());
             outgoing.entry(upstream).or_default().push(edge_state);
         }
 
         let mut stages: HashMap<StageId, Arc<StageState>> = HashMap::new();
         for stage_id in stage_ids {
             let downstream_edges = outgoing.remove(&stage_id).unwrap_or_default();
+            let upstream_edges = incoming.remove(&stage_id).unwrap_or_default();
             let credit_waker = wakers
                 .get(&stage_id)
                 .cloned()
@@ -248,6 +264,7 @@ impl BackpressureRegistry {
                     wait_nanos_total: AtomicU64::new(0),
                     credit_waker,
                     downstream_edges,
+                    upstream_edges,
                 }),
             );
         }
@@ -288,6 +305,9 @@ impl BackpressureRegistry {
                     .edge_in_flight
                     .insert(edge_key, effective_writer.saturating_sub(reader_seq));
                 snapshot.edge_credits.insert(edge_key, credit);
+                snapshot
+                    .edge_hold_renewals
+                    .insert(edge_key, edge.hold_renewals.load(Ordering::Relaxed));
             }
 
             snapshot
@@ -449,32 +469,105 @@ impl BackpressureWriter {
         self.state.as_ref().map(|s| s.credit_waker.clone())
     }
 
-    /// The limiting downstream edge of the current credit computation:
-    /// minimum credit, ties broken by lowest downstream stage id so the
-    /// stall record is deterministic.
-    pub fn limiting_detail(&self) -> Option<LimitingEdgeDetail> {
+    /// One look by a writer whose reservation of `n` rows just missed credit
+    /// (FLOWIP-084q B3, B10).
+    ///
+    /// Each edge without credit for `n` rows runs its own clock: it starts at
+    /// the writer's first credit miss on that edge and restarts at each look
+    /// that finds the edge's renewal counter moved. An edge whose clock reaches
+    /// its own ceiling stalls; when several do, the one with least credit, then
+    /// the lowest downstream ID, is named. When every edge without credit
+    /// renewed since the previous look, the writer renews its own inputs.
+    pub(crate) fn look(
+        &self,
+        episode: &mut StallEpisode,
+        n: u64,
+        now: tokio::time::Instant,
+    ) -> Option<StallVerdict> {
         let state = self.state.as_ref()?;
         if state.downstream_edges.is_empty() {
             return None;
         }
-
         let effective_writer = state.effective_writer.load(Ordering::Acquire);
+        let first_look = episode.clocks.is_empty();
+        let mut every_short_edge_renewed = !first_look;
+        let mut clocks = Vec::with_capacity(episode.clocks.len().max(1));
+        let mut expired: Option<(LimitingEdgeDetail, Duration)> = None;
+        let mut bound = Duration::MAX;
 
-        state
-            .downstream_edges
-            .iter()
-            .map(|edge| {
-                let reader_seq = edge.reader_seq.load(Ordering::Acquire);
-                let allowed = reader_seq.saturating_add(edge.window);
-                LimitingEdgeDetail {
-                    credit: allowed.saturating_sub(effective_writer).min(edge.window),
+        for edge in &state.downstream_edges {
+            let reader_seq = edge.reader_seq.load(Ordering::Acquire);
+            let credit = reader_seq
+                .saturating_add(edge.window)
+                .saturating_sub(effective_writer)
+                .min(edge.window);
+            if credit >= n {
+                continue;
+            }
+            let renewals = edge.hold_renewals.load(Ordering::Acquire);
+            let clock = match episode
+                .clocks
+                .iter()
+                .find(|clock| clock.downstream == edge.downstream)
+            {
+                Some(clock) if clock.renewals_seen != renewals => EdgeClock {
+                    since: now,
+                    renewals_seen: renewals,
+                    ..*clock
+                },
+                Some(clock) => {
+                    every_short_edge_renewed = false;
+                    *clock
+                }
+                // Never earlier than the writer's first credit miss on this edge.
+                None => {
+                    every_short_edge_renewed = false;
+                    EdgeClock {
+                        downstream: edge.downstream,
+                        since: now,
+                        renewals_seen: renewals,
+                    }
+                }
+            };
+            let elapsed = now.saturating_duration_since(clock.since);
+            if elapsed >= edge.stall_timeout {
+                let detail = LimitingEdgeDetail {
+                    credit,
                     downstream: edge.downstream,
                     window: edge.window,
                     stall_timeout: edge.stall_timeout,
                     in_flight: effective_writer.saturating_sub(reader_seq),
+                };
+                let named = expired.as_ref().is_some_and(|(current, _)| {
+                    (current.credit, current.downstream) <= (detail.credit, detail.downstream)
+                });
+                if !named {
+                    expired = Some((detail, elapsed));
                 }
-            })
-            .min_by_key(|detail| (detail.credit, detail.downstream))
+            } else {
+                bound = bound.min(edge.stall_timeout - elapsed);
+            }
+            clocks.push(clock);
+        }
+        episode.clocks = clocks;
+
+        if let Some((edge, elapsed)) = expired {
+            return Some(StallVerdict::Stalled { edge, elapsed });
+        }
+        let relay = every_short_edge_renewed && !episode.clocks.is_empty();
+        if relay {
+            for input in &state.upstream_edges {
+                input.hold_renewals.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        Some(StallVerdict::Wait {
+            bound: if episode.clocks.is_empty() {
+                Duration::ZERO
+            } else {
+                bound
+            },
+            relay,
+        })
     }
 
     pub fn min_downstream_credit_detail(&self) -> Option<(u64, StageId)> {
@@ -626,6 +719,47 @@ pub struct LimitingEdgeDetail {
     pub window: u64,
     pub stall_timeout: Duration,
     pub in_flight: u64,
+}
+
+/// A blocked writer's stall clocks, one per edge without credit (FLOWIP-084q
+/// B10). Empty outside an episode; a successful reservation ends it.
+#[derive(Debug, Default)]
+pub(crate) struct StallEpisode {
+    clocks: Vec<EdgeClock>,
+}
+
+impl StallEpisode {
+    /// End the episode after a successful reservation.
+    pub(crate) fn end(&mut self) {
+        self.clocks.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_open(&self) -> bool {
+        !self.clocks.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeClock {
+    downstream: StageId,
+    /// The writer's first credit miss on this edge, or the last look that saw
+    /// a renewal there.
+    since: tokio::time::Instant,
+    renewals_seen: u64,
+}
+
+/// What one look at a blocked writer's edges decided.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum StallVerdict {
+    /// Wait at most `bound`; `relay` records that the writer renewed its own
+    /// inputs because every edge holding it back renewed since its last look.
+    Wait { bound: Duration, relay: bool },
+    /// The named edge stayed without credit or renewal for its full ceiling.
+    Stalled {
+        edge: LimitingEdgeDetail,
+        elapsed: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -1118,6 +1252,15 @@ impl BackpressureReader {
     pub fn edge_ids(&self) -> Option<(StageId, StageId)> {
         self.state.as_ref().map(|s| (s.upstream, s.downstream))
     }
+
+    /// Renew this reader's hold on its edge (FLOWIP-084q B3). Only a state
+    /// that holds the edge by rule calls this, on each dispatch. It publishes
+    /// no credit and wakes no writer; a blocked writer reads it at its next look.
+    pub fn renew_hold(&self) {
+        if let Some(state) = &self.state {
+            state.hold_renewals.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 }
 
 fn publish_acknowledgements(state: &EdgeState, n: u64) {
@@ -1179,6 +1322,7 @@ mod direct_fact_tests {
             window,
             stall_timeout: Duration::from_secs(1),
             reader_seq: AtomicU64::new(0),
+            hold_renewals: AtomicU64::new(0),
             upstream_waker: credit_waker.clone(),
             ack_gate: None,
         });
@@ -1189,6 +1333,7 @@ mod direct_fact_tests {
             wait_nanos_total: AtomicU64::new(0),
             credit_waker,
             downstream_edges: vec![edge.clone()],
+            upstream_edges: Vec::new(),
         });
         (
             BackpressureWriter {
@@ -1218,6 +1363,7 @@ mod direct_fact_tests {
             window: enforced_window,
             stall_timeout: Duration::from_secs(1),
             reader_seq: AtomicU64::new(0),
+            hold_renewals: AtomicU64::new(0),
             upstream_waker: credit_waker.clone(),
             ack_gate: None,
         });
@@ -1227,6 +1373,7 @@ mod direct_fact_tests {
             window: u64::MAX,
             stall_timeout: Duration::MAX,
             reader_seq: AtomicU64::new(0),
+            hold_renewals: AtomicU64::new(0),
             upstream_waker: credit_waker.clone(),
             ack_gate: None,
         });
@@ -1237,6 +1384,7 @@ mod direct_fact_tests {
             wait_nanos_total: AtomicU64::new(0),
             credit_waker,
             downstream_edges: vec![enforced.clone(), tracked.clone()],
+            upstream_edges: Vec::new(),
         });
         (
             BackpressureWriter {
@@ -1612,6 +1760,218 @@ mod direct_fact_tests {
             admission.close().expect("admission closes"),
             3,
             "completion includes reconstruction and resumed live rows"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stall_clock_tests {
+    //! FLOWIP-084q B3 and B10: per-edge stall clocks, renewals and the relay.
+    use super::*;
+
+    struct Writer {
+        writer: BackpressureWriter,
+        readers: Vec<BackpressureReader>,
+        input: Arc<EdgeState>,
+    }
+
+    fn edge(upstream: StageId, downstream: StageId, window: u64, ceiling_secs: u64) -> EdgeState {
+        EdgeState {
+            upstream,
+            downstream,
+            window,
+            stall_timeout: Duration::from_secs(ceiling_secs),
+            reader_seq: AtomicU64::new(0),
+            hold_renewals: AtomicU64::new(0),
+            upstream_waker: CreditWaker::new(),
+            ack_gate: None,
+        }
+    }
+
+    /// A writer with one downstream edge per `(window, ceiling)` and one input.
+    fn writer(edges: &[(u64, u64)]) -> Writer {
+        let stage = StageId::new();
+        let input = Arc::new(edge(StageId::new(), stage, 4, 30));
+        let downstream: Vec<Arc<EdgeState>> = edges
+            .iter()
+            .map(|(window, ceiling)| Arc::new(edge(stage, StageId::new(), *window, *ceiling)))
+            .collect();
+        let state = Arc::new(StageState {
+            effective_writer: AtomicU64::new(0),
+            writer_seq: AtomicU64::new(0),
+            reserved: AtomicU64::new(0),
+            wait_nanos_total: AtomicU64::new(0),
+            credit_waker: CreditWaker::new(),
+            downstream_edges: downstream.clone(),
+            upstream_edges: vec![input.clone()],
+        });
+        Writer {
+            writer: BackpressureWriter {
+                state: Some(state),
+                direct_fact_admission: None,
+            },
+            readers: downstream
+                .into_iter()
+                .map(|state| BackpressureReader { state: Some(state) })
+                .collect(),
+            input,
+        }
+    }
+
+    fn fill(writer: &BackpressureWriter, rows: u64) {
+        writer.reserve(rows).expect("credit").commit(rows);
+    }
+
+    fn at(t0: tokio::time::Instant, secs: u64) -> tokio::time::Instant {
+        t0 + Duration::from_secs(secs)
+    }
+
+    fn stalled_on(verdict: Option<StallVerdict>) -> Option<(StageId, Duration)> {
+        match verdict.expect("blocked writer") {
+            StallVerdict::Stalled { edge, elapsed } => Some((edge.downstream, elapsed)),
+            StallVerdict::Wait { .. } => None,
+        }
+    }
+
+    #[test]
+    fn stall_clock_starts_at_the_first_credit_miss_not_the_last_consumption() {
+        // Window 2, ceiling 30 s. The reader goes quiet at t=0 and the writer
+        // first misses at t=50; a clock dated from the last consumption would
+        // stall at that miss.
+        let w = writer(&[(2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 2);
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, at(t0, 50))), None);
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, at(t0, 79))), None);
+        // The slow handler returns at t=60: credit returns and the commit ends
+        // the episode.
+        w.readers[0].ack_consumed(1);
+        fill(&w.writer, 1);
+        episode.end();
+        assert!(!episode.is_open());
+    }
+
+    #[test]
+    fn a_reader_that_never_acknowledges_stalls_one_ceiling_after_the_first_miss() {
+        let w = writer(&[(2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 2);
+        let mut episode = StallEpisode::default();
+        let downstream = w.readers[0].edge_ids().unwrap().1;
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, at(t0, 50))), None);
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 80))),
+            Some((downstream, Duration::from_secs(30)))
+        );
+    }
+
+    #[test]
+    fn renewals_restart_only_their_own_edges_clock() {
+        // k1 is held and renews; k2 is wedged. The stall fires one ceiling
+        // after the first miss and names k2.
+        let w = writer(&[(1, 30), (1, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 1);
+        let wedged = w.readers[1].edge_ids().unwrap().1;
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, t0)), None);
+        for secs in [10, 20] {
+            w.readers[0].renew_hold();
+            assert_eq!(
+                stalled_on(w.writer.look(&mut episode, 1, at(t0, secs))),
+                None
+            );
+        }
+        w.readers[0].renew_hold();
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 30))),
+            Some((wedged, Duration::from_secs(30)))
+        );
+    }
+
+    #[test]
+    fn a_held_edge_fails_one_ceiling_after_its_last_renewal() {
+        let w = writer(&[(1, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 1);
+        let held = w.readers[0].edge_ids().unwrap().1;
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, t0)), None);
+        // The hold outlasts the ceiling while it renews.
+        for secs in (10..=100).step_by(10) {
+            w.readers[0].renew_hold();
+            assert_eq!(
+                stalled_on(w.writer.look(&mut episode, 1, at(t0, secs))),
+                None
+            );
+        }
+        // Renewals stop at t=100.
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 129))),
+            None
+        );
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 130))),
+            Some((held, Duration::from_secs(30)))
+        );
+    }
+
+    #[test]
+    fn each_edge_fails_against_its_own_ceiling() {
+        let w = writer(&[(1, 30), (1, 10)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 1);
+        let short_ceiling = w.readers[1].edge_ids().unwrap().1;
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, t0)), None);
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 10))),
+            Some((short_ceiling, Duration::from_secs(10)))
+        );
+    }
+
+    #[test]
+    fn the_writer_relays_only_when_every_edge_holding_it_back_renewed() {
+        let w = writer(&[(1, 30), (1, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 1);
+        let relays = |verdict: Option<StallVerdict>| match verdict.expect("blocked writer") {
+            StallVerdict::Wait { relay, .. } => relay,
+            StallVerdict::Stalled { .. } => panic!("no stall expected"),
+        };
+        let mut episode = StallEpisode::default();
+        // The first miss takes the baseline and never relays.
+        w.readers[0].renew_hold();
+        w.readers[1].renew_hold();
+        assert!(!relays(w.writer.look(&mut episode, 1, t0)));
+        assert_eq!(w.input.hold_renewals.load(Ordering::Acquire), 0);
+        // One of two short edges renewed: no relay.
+        w.readers[0].renew_hold();
+        assert!(!relays(w.writer.look(&mut episode, 1, at(t0, 1))));
+        assert_eq!(w.input.hold_renewals.load(Ordering::Acquire), 0);
+        // Both renewed since the last look: the writer renews its input.
+        w.readers[0].renew_hold();
+        w.readers[1].renew_hold();
+        assert!(relays(w.writer.look(&mut episode, 1, at(t0, 2))));
+        assert_eq!(w.input.hold_renewals.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_lease_on_a_trickling_edge_stalls_at_one_ceiling() {
+        // A two-row lease waits on an edge whose reader consumes one row at a
+        // time. Consumption that leaves the edge short never restarts its clock.
+        let w = writer(&[(2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 2);
+        let trickling = w.readers[0].edge_ids().unwrap().1;
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 2, t0)), None);
+        w.readers[0].ack_consumed(1);
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 2, at(t0, 20))), None);
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 2, at(t0, 30))),
+            Some((trickling, Duration::from_secs(30)))
         );
     }
 }
