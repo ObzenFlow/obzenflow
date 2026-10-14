@@ -236,6 +236,10 @@ impl RunSnapshot {
     pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {
         self.state.journals.iter().map(|selected| &selected.journal)
     }
+    /// The run's place in its history, read now from manifests and claims.
+    pub fn lineage(&self) -> Result<RunLineage, JournalReadError> {
+        read_run_lineage(&self.state.run_dir)
+    }
     pub async fn next(&mut self) -> Result<Option<RunRecord>, JournalReadError> {
         self.state.next(true).await
     }

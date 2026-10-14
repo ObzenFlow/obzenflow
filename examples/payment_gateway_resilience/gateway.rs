@@ -16,8 +16,8 @@
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    CancelledOrder, OrderCancellationReason, PaymentAuthorizationUnavailable, PaymentAuthorized,
-    PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
+    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
+    PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
 use obzenflow::effects::{
@@ -157,8 +157,7 @@ impl Effect for AuthorizePayment {
 /// The named payment facts (`PaymentAuthorized`, `PaymentDeclined`) ARE the
 /// recorded effect outcome group (FLOWIP-120m): `fx.perform` records whichever
 /// fact happened and returns the transient carrier, so the handler never
-/// re-emits them. The handler emits only derived consequences
-/// (`CancelledOrder`) and the non-performance fact
+/// re-emits them. The handler emits only the non-performance fact
 /// (`PaymentAuthorizationUnavailable`).
 #[derive(Debug, Clone)]
 pub struct GatewayTransform {
@@ -169,7 +168,6 @@ pub struct GatewayTransform {
 type GatewayOutput = obzenflow::schema::stage_fact_set![
     PaymentAuthorized,
     PaymentDeclined,
-    CancelledOrder,
     PaymentAuthorizationUnavailable
 ];
 type GatewayAllowedEffects = obzenflow::effects::effect_set![AuthorizePayment];
@@ -247,16 +245,11 @@ impl EffectfulTransformHandler for GatewayTransform {
         let outcome = fx.perform(authorization).await;
 
         match outcome {
-            Ok(AuthorizePaymentOutcome::Authorized(_)) => {
-                // The PaymentAuthorized outcome fact is already recorded by
-                // fx.perform; authorization has no derived consequence here.
-            }
-            Ok(AuthorizePaymentOutcome::Declined(declined)) => {
-                // Fact first, consequence second: the recorded PaymentDeclined
-                // outcome fact is the gateway's decision, and the derived
-                // lifecycle consequence is that the order is cancelled.
-                emit_cancelled_order(declined, fx).await?;
-            }
+            // fx.perform already recorded the gateway's decision as its named
+            // outcome fact, which reaches its own delivery; a decline is a
+            // payment outcome, not an order cancellation.
+            Ok(AuthorizePaymentOutcome::Authorized(_)) => {}
+            Ok(AuthorizePaymentOutcome::Declined(_)) => {}
             Err(err) => {
                 // Gateway failure or breaker prevention: recorded under the
                 // effect cursor either way, so replay reproduces it; no payment
@@ -274,7 +267,7 @@ impl EffectfulTransformHandler for GatewayTransform {
     }
 
     fn stage_logic_version(&self) -> &str {
-        "payment-gateway-v1"
+        "payment-gateway-v2"
     }
 }
 
@@ -289,27 +282,10 @@ fn authorization_unavailable_reason(err: EffectError) -> String {
     err.semantic_reason().into_owned()
 }
 
-async fn emit_cancelled_order(
-    declined: PaymentDeclined,
-    fx: &mut Effects<GatewayOutput, GatewayAllowedEffects>,
-) -> Result<(), HandlerError> {
-    fx.emit(CancelledOrder {
-        order_id: declined.order_id,
-        customer_id: declined.customer_id,
-        amount_cents: declined.amount_cents,
-        phase: declined.phase,
-        reason: OrderCancellationReason::PaymentDeclined {
-            reason: declined.reason,
-        },
-    })
-    .await
-    .map_err(|e| HandlerError::Other(e.to_string()))
-}
-
-/// Deliberately no cancellation here: unavailability means no payment decision
-/// was reached, and manufacturing an order fate out of a gateway outage would
-/// be a fake outcome (the FLOWIP-120m non-performance doctrine). These orders
-/// go to manual review.
+/// Deliberately not a decline: unavailability means no payment decision was
+/// reached, and manufacturing one out of a gateway outage would be a fake
+/// outcome (the FLOWIP-120m non-performance doctrine). These orders go to
+/// manual review.
 async fn emit_authorization_unavailable(
     order: ValidatedOrder,
     reason: String,

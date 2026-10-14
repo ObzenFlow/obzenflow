@@ -338,6 +338,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         std::env::var_os("NO_COLOR").is_some(),
         snapshot.journals(),
     );
+    renderer.name_ancestor_journals(ancestor_journals(&snapshot).await);
     renderer.begin(&mut output, snapshot.identity(), view.follow)?;
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
@@ -381,6 +382,27 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         || tokio::time::sleep(Duration::from_millis(100)),
     )
     .await
+}
+
+async fn ancestor_journals(snapshot: &RunSnapshot) -> Vec<(RunJournal, String)> {
+    let Ok(lineage) = snapshot.lineage() else {
+        return Vec::new();
+    };
+    let mut journals = Vec::new();
+    for holder in lineage.evidence.iter().filter(|holder| !holder.missing) {
+        let Ok(run) = open_disk_run(&holder.run).await else {
+            continue;
+        };
+        let label = holder.generation.map_or_else(
+            || run.identity().flow_id.to_string(),
+            |generation| format!("gen {generation}"),
+        );
+        journals.extend(
+            run.journals()
+                .map(|journal| (journal.clone(), label.clone())),
+        );
+    }
+    journals
 }
 
 /// The wait is reached only after the real tail read and settlement decision.

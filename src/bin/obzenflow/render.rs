@@ -136,6 +136,13 @@ impl Renderer {
         }
     }
 
+    pub(super) fn name_ancestor_journals(
+        &mut self,
+        journals: impl IntoIterator<Item = (RunJournal, String)>,
+    ) {
+        self.context.name_ancestor_journals(journals);
+    }
+
     pub(super) fn begin(
         &mut self,
         output: &mut impl Write,

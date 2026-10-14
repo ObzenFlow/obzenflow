@@ -1519,6 +1519,38 @@ fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
 }
 
 #[test]
+fn clocks_name_journals_from_earlier_runs_in_the_lineage() {
+    let mut renderer = renderer();
+    let mut ancestor = fact(1, 100, &[], json!({})).journal;
+    ancestor.id = *coordinate(3).journal_writer_id.as_journal_id();
+    renderer.name_ancestor_journals([(ancestor, "gen 0".to_string())]);
+    let mut source = fact(1, 100, &[], json!({}));
+    if let RunRecordData::Chain(row) = &mut source.record {
+        row.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .clocks
+            .insert(coordinate(3), 12);
+    }
+    let mut output = Vec::new();
+    renderer.record(&mut output, source).unwrap();
+    renderer.flush_pending(&mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("⟨1:100,3:12⟩"), "{text}");
+    assert!(text.contains("3 thermometer (gen 0)"), "{text}");
+    assert!(!text.contains(&format!("journal_{}", id(3))), "{text}");
+    let matrix = matrix_text(&renderer, &RunReadProgress::default());
+    assert!(
+        matrix
+            .lines()
+            .any(|line| line.split_whitespace().collect::<Vec<_>>()
+                == ["3", "thermometer", "(gen", "0)", "—", "—", "—"]),
+        "{matrix}"
+    );
+}
+
+#[test]
 fn compact_clock_rows_follow_output_equations_without_truncating_counts() {
     let mut renderer = renderer();
     renderer.width = 60;

@@ -135,15 +135,13 @@ impl TypedPayload for InvalidOrder {
 
 /// Why an order's lifecycle ended in cancellation.
 ///
-/// Cancellation is a lifecycle consequence derived from a more specific fact:
-/// local validation failed (`InvalidOrder`) or the gateway declined payment
-/// (`PaymentDeclined`). The specific fact stays in the journal as provenance;
-/// this reason carries enough for subscribers that only care about the order's
-/// fate.
+/// Cancellation is a lifecycle consequence derived from a more specific fact,
+/// local validation failed (`InvalidOrder`). The specific fact stays in the
+/// journal as provenance; this reason carries enough for subscribers that only
+/// care about the order's fate.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum OrderCancellationReason {
     LocalValidationFailed { reason: InvalidOrderReason },
-    PaymentDeclined { reason: PaymentDeclineReason },
 }
 
 impl OrderCancellationReason {
@@ -152,22 +150,19 @@ impl OrderCancellationReason {
             Self::LocalValidationFailed { reason } => {
                 format!("local validation failed: {}", reason.label())
             }
-            Self::PaymentDeclined { reason } => {
-                format!("payment declined: {}", reason.label())
-            }
         }
     }
 }
 
 /// Lifecycle fact: this order will not proceed and is cancelled.
 ///
-/// Authored by whichever stage decided the order's fate: `validate_order` for
-/// locally invalid orders, `authorize_payment` for gateway declines. Both write
-/// the same named fact, so a single cancelled-orders subscriber sees every
-/// cancellation regardless of origin.
+/// Authored by `validate_order` for locally invalid orders. A gateway decline
+/// is a payment outcome, not a cancellation, so it reaches its own sink as
+/// `PaymentDeclined`; a subscriber that wants every failed order joins the two
+/// feeds downstream.
 ///
-/// A gateway that was merely unavailable does not cancel: no decision was
-/// reached, so those orders go to manual review instead.
+/// A gateway that was merely unavailable reaches no decision, so those orders
+/// go to manual review instead.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CancelledOrder {
     pub order_id: String,

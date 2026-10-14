@@ -39,19 +39,22 @@ pub(super) struct JournalContext {
     pub last_clock: Option<ObservedClock>,
 }
 
+fn journal_name(journal: &RunJournal) -> String {
+    match (&journal.stage, journal.kind) {
+        (Some(stage), RunJournalKind::Error) => format!("{}/error", stage.key),
+        (Some(stage), _) => stage.key.clone(),
+        (_, RunJournalKind::System) => "pipeline".into(),
+        (_, RunJournalKind::MetricsCoordination) => "metrics/coordination".into(),
+        (_, RunJournalKind::MetricsExport) => "metrics/export".into(),
+        _ => journal.id.to_string(),
+    }
+}
+
 impl JournalContext {
     fn new(journal: &RunJournal) -> Self {
-        let name = match (&journal.stage, journal.kind) {
-            (Some(stage), RunJournalKind::Error) => format!("{}/error", stage.key),
-            (Some(stage), _) => stage.key.clone(),
-            (_, RunJournalKind::System) => "pipeline".into(),
-            (_, RunJournalKind::MetricsCoordination) => "metrics/coordination".into(),
-            (_, RunJournalKind::MetricsExport) => "metrics/export".into(),
-            _ => journal.id.to_string(),
-        };
         Self {
             journal: journal.clone(),
-            name,
+            name: journal_name(journal),
             last_clock: None,
         }
     }
@@ -61,6 +64,7 @@ pub(super) struct Context {
     pub stages: Vec<Stage>,
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
     pub journals: BTreeMap<obzenflow_core::JournalId, JournalContext>,
+    ancestor_names: BTreeMap<obzenflow_core::JournalId, String>,
     journal_numbers: BTreeMap<obzenflow_core::JournalId, usize>,
     journal_label_updates: BTreeSet<obzenflow_core::JournalId>,
     references: BTreeMap<String, Reference>,
@@ -121,6 +125,7 @@ impl Context {
                 })
                 .collect(),
             journals: journal_contexts,
+            ancestor_names: BTreeMap::new(),
             journal_numbers,
             journal_label_updates,
             references: BTreeMap::new(),
@@ -257,17 +262,28 @@ impl Context {
         self.journal_numbers[id]
     }
 
+    pub fn name_ancestor_journals(
+        &mut self,
+        journals: impl IntoIterator<Item = (RunJournal, String)>,
+    ) {
+        for (journal, run) in journals {
+            self.ancestor_names
+                .insert(journal.id, format!("{} ({run})", journal_name(&journal)));
+        }
+    }
+
+    pub fn journal_label(&self, id: &obzenflow_core::JournalId) -> String {
+        self.journals
+            .get(id)
+            .map(|journal| journal.name.clone())
+            .or_else(|| self.ancestor_names.get(id).cloned())
+            .unwrap_or_else(|| id.to_string())
+    }
+
     pub fn take_journal_labels(&mut self) -> Vec<(usize, String)> {
         let mut labels: Vec<_> = std::mem::take(&mut self.journal_label_updates)
             .into_iter()
-            .map(|id| {
-                let name = self
-                    .journals
-                    .get(&id)
-                    .map(|journal| journal.name.clone())
-                    .unwrap_or_else(|| id.to_string());
-                (self.journal_number(&id), name)
-            })
+            .map(|id| (self.journal_number(&id), self.journal_label(&id)))
             .collect();
         labels.sort_by_key(|(number, _)| *number);
         labels
