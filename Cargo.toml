@@ -390,8 +390,3 @@ required-features = ["postgres", "e2e"]
 name = "postgres_public_consumer_test"
 path = "tests/postgres_public_consumer_test.rs"
 required-features = ["postgres"]
-
-# TEMPORARY (FLOWIP-084q): obzenflow-topology 0.7.0 adds StageType::Merge and is
-# not published yet. Remove this patch once 0.7.0 is on crates.io.
-[patch.crates-io]
-obzenflow-topology = { path = "../obzenflow-topology" }
