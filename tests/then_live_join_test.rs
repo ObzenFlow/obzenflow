@@ -266,15 +266,19 @@ fn position(rows: &[Row], wanted: impl Fn(&Row) -> bool) -> usize {
         .unwrap_or_else(|| panic!("row missing from {rows:?}"))
 }
 
-fn batch_entries() -> Vec<Entry> {
-    (1..=6)
+fn entries(prefix: &str, count: usize) -> Vec<Entry> {
+    (1..=count)
         .map(|n| {
             entry(
                 if n % 2 == 0 { "acct-2" } else { "acct-1" },
-                &format!("batch-{n}"),
+                &format!("{prefix}-{n}"),
             )
         })
         .collect()
+}
+
+fn batch_entries() -> Vec<Entry> {
+    entries("batch", 6)
 }
 
 #[tokio::test]
@@ -699,5 +703,203 @@ async fn a_finite_eof_join_stopped_while_hydrating_posts_nothing() -> Result<()>
             kind: EofKind::Truncated
         })
     );
+    Ok(())
+}
+
+/// Two batch and two live producers on one merge, under a then-live join whose
+/// catalog is batch only. `batch_a` is paced so its EOF lands well after
+/// `batch_b`'s.
+fn build_two_per_side(
+    journal_base: PathBuf,
+    live: (mpsc::Receiver<Entry>, mpsc::Receiver<Entry>),
+    sink: Collect,
+) -> FlowDefinition {
+    let live = Mutex::new(Some(live));
+    FlowDefinition::materialize(move |_runtime_config| {
+        let (live_a, live_b) = live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("the flow is built once");
+        let batch_accounts_source = ValuesSource::new(vec![account("acct-1"), account("acct-2")]);
+        let batch_a_source = ValuesSource::new(entries("batch-a", 4));
+        let batch_b_source = ValuesSource::new(entries("batch-b", 2));
+        let live_a_source = ChannelSource::new(live_a);
+        let live_b_source = ChannelSource::new(live_b);
+        let post_entry = joins::inner_then_live(
+            |account: &Account| account.key.clone(),
+            |entry: &Entry| entry.key.clone(),
+            |_account: Account, entry: Entry| Posted {
+                key: entry.key,
+                note: entry.note,
+            },
+        );
+        let collector = sink.clone();
+        Ok(flow! {
+            name: "then_live_two_per_side_test",
+            journals: disk_journals(journal_base.clone()),
+
+            stages: {
+                batch_accounts = source!(Account => batch_accounts_source);
+                batch_a = source!(Entry => batch_a_source with {
+                    obzenflow_adapters::middleware::rate_limit(2.0)
+                });
+                batch_b = source!(Entry => batch_b_source);
+                live_a = async_infinite_source!(Entry => live_a_source);
+                live_b = async_infinite_source!(Entry => live_b_source);
+
+                transactions = merge!(Entry => merges::then_live);
+                posted = join!(catalog batch_accounts: Account, Entry -> Posted => post_entry);
+                collector = sink!(Posted => collector);
+            },
+
+            topology: {
+                batch_a |> transactions;
+                batch_b |> transactions;
+                live_a |> transactions;
+                live_b |> transactions;
+                (batch_accounts, transactions) |> posted;
+                posted |> collector;
+            }
+        })
+    })
+}
+
+/// B8 with two producers per side: the merge reads no live row until every
+/// batch producer has ended naturally, and records the order between its live
+/// producers, so a strict replay reproduces it.
+#[tokio::test]
+async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()> {
+    let _guard = THEN_LIVE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (live_a_tx, live_a) = mpsc::channel(8);
+    let (live_b_tx, live_b) = mpsc::channel(8);
+    for n in 1..=2 {
+        live_a_tx
+            .send(entry("acct-1", &format!("live-a-{n}")))
+            .await?;
+        live_b_tx
+            .send(entry("acct-2", &format!("live-b-{n}")))
+            .await?;
+    }
+
+    let sink = Collect {
+        notes: Arc::default(),
+        arrived: Arc::default(),
+    };
+    let handle = build_two_per_side(journal_base.clone(), (live_a, live_b), sink.clone())
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|error| anyhow!("{error:?}"))?;
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+    wait_for_postings(&sink, 10).await?;
+    stop(&handle).await?;
+    let run = replay_testkit::latest_run_dir(&journal_base);
+
+    // Every batch row precedes every live row, and each producer keeps its
+    // own order.
+    let transactions = stage_rows(&run, "transactions").await;
+    let merged = data(&transactions);
+    assert_eq!(merged.len(), 10, "{transactions:?}");
+    assert!(
+        merged[..6].iter().all(|note| note.starts_with("batch-"))
+            && merged[6..].iter().all(|note| note.starts_with("live-")),
+        "{merged:?}"
+    );
+    let from = |producer: &str| {
+        merged
+            .iter()
+            .copied()
+            .filter(|note| note.starts_with(producer))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        from("batch-a-"),
+        ["batch-a-1", "batch-a-2", "batch-a-3", "batch-a-4"]
+    );
+    assert_eq!(from("batch-b-"), ["batch-b-1", "batch-b-2"]);
+    assert_eq!(from("live-a-"), ["live-a-1", "live-a-2"]);
+    assert_eq!(from("live-b-"), ["live-b-1", "live-b-2"]);
+
+    // Both batch producers' natural EOFs pass on before the first live row.
+    let first_live = position(
+        &transactions,
+        |row| matches!(row, Row::Data(note) if note.starts_with("live-")),
+    );
+    let natural = Row::Eof {
+        kind: EofKind::Natural,
+    };
+    assert_eq!(
+        transactions[..first_live]
+            .iter()
+            .filter(|row| **row == natural)
+            .count(),
+        2,
+        "{transactions:?}"
+    );
+
+    // Only the live side records its order (B6, B8).
+    let records = replay_testkit::read_stage_envelopes_appended(&run, "transactions").await;
+    let last_batch = records
+        .iter()
+        .rposition(|record| {
+            matches!(&record.payload, ChainPayload::Fact(value)
+                if value
+                    .get("note")
+                    .and_then(|note| note.as_str())
+                    .is_some_and(|note| note.starts_with("batch-")))
+        })
+        .expect("the merge journalled batch rows");
+    let selections: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.event_type().ends_with("input_selected"))
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        !selections.is_empty() && selections.iter().all(|index| *index > last_batch),
+        "selections at {selections:?}, last batch row at {last_batch}"
+    );
+
+    // The join posts in the merged order and goes live on both batch EOFs.
+    let posted = stage_rows(&run, "posted").await;
+    assert_eq!(data(&posted), merged);
+    let mut ended_by = posted
+        .iter()
+        .find_map(|row| match row {
+            Row::Phase(JoinPhaseFact::LiveEntered { ended_by, .. }) => Some(ended_by.clone()),
+            _ => None,
+        })
+        .expect("the join went live");
+    ended_by.sort();
+    assert_eq!(
+        ended_by,
+        [StageKey::from("batch_a"), StageKey::from("batch_b")]
+    );
+
+    // A strict replay reproduces the canonical batch order and the recorded
+    // live order.
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            run.as_os_str().to_os_string(),
+        ])
+        .run_async(build_two_per_side(
+            journal_base.clone(),
+            (mpsc::channel(1).1, mpsc::channel(1).1),
+            Collect {
+                notes: Arc::default(),
+                arrived: Arc::default(),
+            },
+        ))
+        .await
+        .map_err(|error| anyhow!("{error:?}"))?;
+    let replay = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(run, replay);
+    assert_eq!(merged, data(&stage_rows(&replay, "transactions").await));
+    assert_eq!(data(&posted), data(&stage_rows(&replay, "posted").await));
     Ok(())
 }
