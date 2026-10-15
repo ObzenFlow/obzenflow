@@ -51,7 +51,7 @@ pub enum StatefulState<H> {
 
     Initializing,
     Starting,
-    Finalising,
+    Finalizing,
     ValidatingTerminal,
     ForwardingTerminal,
     ProducingFinalOutput,
@@ -93,7 +93,7 @@ impl<H> Clone for StatefulState<H> {
             Self::Created => Self::Created,
             Self::Initializing => Self::Initializing,
             Self::Starting => Self::Starting,
-            Self::Finalising => Self::Finalising,
+            Self::Finalizing => Self::Finalizing,
             Self::ValidatingTerminal => Self::ValidatingTerminal,
             Self::ForwardingTerminal => Self::ForwardingTerminal,
             Self::ProducingFinalOutput => Self::ProducingFinalOutput,
@@ -121,7 +121,7 @@ impl<H> std::fmt::Debug for StatefulState<H> {
             Self::Created => write!(f, "Created"),
             Self::Initializing => write!(f, "Initializing"),
             Self::Starting => write!(f, "Starting"),
-            Self::Finalising => write!(f, "Finalising"),
+            Self::Finalizing => write!(f, "Finalizing"),
             Self::ValidatingTerminal => write!(f, "ValidatingTerminal"),
             Self::ForwardingTerminal => write!(f, "ForwardingTerminal"),
             Self::ProducingFinalOutput => write!(f, "ProducingFinalOutput"),
@@ -149,7 +149,7 @@ impl<H: Send + Sync> PartialEq for StatefulState<H> {
             (StatefulState::Created, StatefulState::Created) => true,
             (Self::Initializing, Self::Initializing) => true,
             (Self::Starting, Self::Starting) => true,
-            (Self::Finalising, Self::Finalising) => true,
+            (Self::Finalizing, Self::Finalizing) => true,
             (Self::ValidatingTerminal, Self::ValidatingTerminal) => true,
             (Self::ForwardingTerminal, Self::ForwardingTerminal) => true,
             (Self::ProducingFinalOutput, Self::ProducingFinalOutput) => true,
@@ -177,7 +177,7 @@ impl<H: Send + Sync + 'static> StateVariant for StatefulState<H> {
             StatefulState::Created => "Created",
             Self::Initializing => "Initializing",
             Self::Starting => "Starting",
-            Self::Finalising => "Finalising",
+            Self::Finalizing => "Finalizing",
             Self::ValidatingTerminal => "ValidatingTerminal",
             Self::ForwardingTerminal => "ForwardingTerminal",
             Self::ProducingFinalOutput => "ProducingFinalOutput",
@@ -218,7 +218,7 @@ impl<H> StatefulState<H> {
             Self::Initializing => Phase::Initializing,
             Self::Initialized => Phase::Initialized,
             Self::Accumulating | Self::Emitting => Phase::Active,
-            Self::Finalising => Phase::Finalising,
+            Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
             Self::Drained => Phase::Completed,
@@ -245,7 +245,7 @@ pub enum StatefulEvent<H> {
     FinalOutputPending,
 
     ActivationCompleted,
-    FinalisationCompleted,
+    FinalizationCompleted,
     TerminationSettled,
 
     /// Ready to start processing (stateful stages start immediately)
@@ -289,7 +289,7 @@ impl<H> Clone for StatefulEvent<H> {
             Self::FinalOutputPending => Self::FinalOutputPending,
 
             Self::ActivationCompleted => Self::ActivationCompleted,
-            Self::FinalisationCompleted => Self::FinalisationCompleted,
+            Self::FinalizationCompleted => Self::FinalizationCompleted,
             Self::TerminationSettled => Self::TerminationSettled,
 
             Self::Ready => Self::Ready,
@@ -317,7 +317,7 @@ impl<H> std::fmt::Debug for StatefulEvent<H> {
             Self::FinalOutputPending => write!(f, "FinalOutputPending"),
 
             Self::ActivationCompleted => write!(f, "ActivationCompleted"),
-            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::FinalizationCompleted => write!(f, "FinalizationCompleted"),
             Self::TerminationSettled => write!(f, "TerminationSettled"),
 
             Self::Ready => write!(f, "Ready"),
@@ -346,7 +346,7 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             Self::Error(message) => Some(message.as_str()),
             Self::InitializationCompleted
             | Self::ActivationCompleted
-            | Self::FinalisationCompleted
+            | Self::FinalizationCompleted
             | Self::TerminationSettled
             | Self::DrainInputsCompleted
             | Self::TerminalValidated
@@ -378,7 +378,7 @@ impl<H: Send + Sync + 'static> EventVariant for StatefulEvent<H> {
             Self::FinalOutputPending => "FinalOutputPending",
 
             Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::FinalizationCompleted => "FinalizationCompleted",
             Self::TerminationSettled => "TerminationSettled",
 
             StatefulEvent::Ready => "Ready",

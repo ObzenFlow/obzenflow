@@ -2,7 +2,7 @@
 # development service supplies its passwordless connection, schema, and transport
 # when this config is launched through `cargo xtask postgres run`.
 
-# The generated map and finalise roles each reserve their complete three-row
+# The generated map and finalize roles each reserve their complete three-row
 # direct-fact bound before starting a live chat continuation.
 [runtime.backpressure.flow]
 mode = "enforce"

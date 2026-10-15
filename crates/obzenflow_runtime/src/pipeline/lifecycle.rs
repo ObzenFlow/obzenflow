@@ -36,7 +36,7 @@ pub enum PipelineState {
     Draining,
     CancellingChildren,
     PublishingTerminal,
-    FinalisingMetrics,
+    FinalizingMetrics,
     PublishingFinalMarker,
     Drained,
     FailingChildren {
@@ -66,7 +66,7 @@ impl StateVariant for PipelineState {
             Self::Draining => "Draining",
             Self::CancellingChildren => "CancellingChildren",
             Self::PublishingTerminal => "PublishingTerminal",
-            Self::FinalisingMetrics => "FinalisingMetrics",
+            Self::FinalizingMetrics => "FinalizingMetrics",
             Self::PublishingFinalMarker => "PublishingFinalMarker",
             Self::Drained => "Drained",
             Self::FailingChildren { .. } => "FailingChildren",

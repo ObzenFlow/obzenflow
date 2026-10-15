@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::ai::{ChatCompletion, ChatCompletionBuildError};
 use obzenflow_adapters::ai::{ChatEffects, ChatOperationError};
 use obzenflow_core::ai::{
-    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceMapInput,
+    AiFinalizeRole, AiMapReduceChunkFailed, AiMapReduceFinalizeFailed, AiMapReduceMapInput,
     AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind,
     ChunkEnvelope,
 };
@@ -19,9 +19,9 @@ use std::fmt;
 use std::sync::Arc;
 
 pub(super) const MAP_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.map.chat_completion";
-pub(super) const FINALISE_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.finalise.chat_completion";
+pub(super) const FINALIZE_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.finalize.chat_completion";
 
-type GeneratedFinaliseTypes<Seed, Collected, Out> = fn() -> (Seed, Collected, Out);
+type GeneratedFinalizeTypes<Seed, Collected, Out> = fn() -> (Seed, Collected, Out);
 
 pub(super) struct GeneratedAiMapHandler<Item, Partial, Role> {
     role: Arc<Role>,
@@ -54,12 +54,12 @@ impl<Item, Partial, Role> fmt::Debug for GeneratedAiMapHandler<Item, Partial, Ro
     }
 }
 
-pub(super) struct GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
+pub(super) struct GeneratedAiFinalizeHandler<Seed, Collected, Out, Role> {
     role: Arc<Role>,
-    _types: std::marker::PhantomData<GeneratedFinaliseTypes<Seed, Collected, Out>>,
+    _types: std::marker::PhantomData<GeneratedFinalizeTypes<Seed, Collected, Out>>,
 }
 
-impl<Seed, Collected, Out, Role> Clone for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
+impl<Seed, Collected, Out, Role> Clone for GeneratedAiFinalizeHandler<Seed, Collected, Out, Role> {
     fn clone(&self) -> Self {
         Self {
             role: self.role.clone(),
@@ -68,7 +68,7 @@ impl<Seed, Collected, Out, Role> Clone for GeneratedAiFinaliseHandler<Seed, Coll
     }
 }
 
-impl<Seed, Collected, Out, Role> GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
+impl<Seed, Collected, Out, Role> GeneratedAiFinalizeHandler<Seed, Collected, Out, Role> {
     pub(super) fn new(role: Role) -> Self {
         Self {
             role: Arc::new(role),
@@ -78,11 +78,11 @@ impl<Seed, Collected, Out, Role> GeneratedAiFinaliseHandler<Seed, Collected, Out
 }
 
 impl<Seed, Collected, Out, Role> fmt::Debug
-    for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>
+    for GeneratedAiFinalizeHandler<Seed, Collected, Out, Role>
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GeneratedAiFinaliseHandler")
+            .debug_struct("GeneratedAiFinalizeHandler")
             .finish_non_exhaustive()
     }
 }
@@ -347,15 +347,15 @@ where
 
 #[async_trait]
 impl<Seed, Collected, Out, Role> EffectfulTransformHandler
-    for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>
+    for GeneratedAiFinalizeHandler<Seed, Collected, Out, Role>
 where
     Seed: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     Collected: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     Out: TypedPayload + Clone + Send + Sync + 'static,
-    Role: AiFinaliseRole<Seed, Collected, Out>,
+    Role: AiFinalizeRole<Seed, Collected, Out>,
 {
     type Input = obzenflow_core::ai::AiMapReduceReduceInput<Seed, Collected>;
-    type Output = obzenflow_core::stage_fact_set![Out, AiMapReduceFinaliseFailed,];
+    type Output = obzenflow_core::stage_fact_set![Out, AiMapReduceFinalizeFailed,];
     type AllowedEffects = obzenflow_runtime::effect_set![ChatCompletion];
 
     async fn process(
@@ -370,7 +370,7 @@ where
             Ok(request) => request,
             Err(logic) => {
                 return fx
-                    .complete_with_pre_effect_fact(AiMapReduceFinaliseFailed {
+                    .complete_with_pre_effect_fact(AiMapReduceFinalizeFailed {
                         job_key,
                         cause: AiMapReduceRoleFailure::Logic { logic },
                     })
@@ -379,13 +379,13 @@ where
             }
         };
         let reply = match fx
-            .chat_completion(FINALISE_CHAT_COMPLETION_LABEL, request.clone())
+            .chat_completion(FINALIZE_CHAT_COMPLETION_LABEL, request.clone())
             .await
         {
             Ok(reply) => reply,
             Err(ChatOperationError::Build(error)) => {
                 return fx
-                    .complete_with_pre_effect_fact(AiMapReduceFinaliseFailed {
+                    .complete_with_pre_effect_fact(AiMapReduceFinalizeFailed {
                         job_key,
                         cause: request_canonicalization_failure(error),
                     })
@@ -394,7 +394,7 @@ where
             }
             Err(ChatOperationError::Effect(error)) => {
                 let cause = role_failure_from_effect(error)?;
-                fx.emit(AiMapReduceFinaliseFailed { job_key, cause })
+                fx.emit(AiMapReduceFinalizeFailed { job_key, cause })
                     .await
                     .map_err(emit_failure)?;
                 return fx.complete().map_err(emit_failure);
@@ -404,7 +404,7 @@ where
         match self.role.interpret(seed, collected, request, reply) {
             Ok(output) => fx.emit(output).await.map_err(emit_failure)?,
             Err(logic) => {
-                fx.emit(AiMapReduceFinaliseFailed {
+                fx.emit(AiMapReduceFinalizeFailed {
                     job_key,
                     cause: AiMapReduceRoleFailure::Logic { logic },
                 })

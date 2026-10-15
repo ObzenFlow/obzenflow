@@ -253,7 +253,7 @@ The current incident/scale timeout inventory separates these responsibilities:
 | Cycle convergence | Five-second phase guards and ten-second completion guard; the separately configured five-second graceful deadline is product behaviour, verified by its durable terminal cause |
 | CLI host/viewer | Two-second HTTP operations and fifteen-second discovery/fact/exit guards; absence assertions require owned completion or a controlled viewer decision |
 | Composed Studio cases | 15-second application guard, 60 seconds for the 100-stage stress case, and five-second delivery guard; the remaining one/two-second reader controls guard individual acknowledgements |
-| Metrics finalisation | The five-second attempt is the product's existing drain budget; causal completion/export/drain ordering remains a correctness obligation |
+| Metrics finalization | The five-second attempt is the product's existing drain budget; causal completion/export/drain ordering remains a correctness obligation |
 | Effect cancellation | Configured 100 ms graceful deadline with a 900 ms scheduling allowance for observing the aborted future; ancillary cleanup has its own five-second guard |
 | Stateful emission, limiter and breaker clocks | Interval and cooldown assertions verify configured behaviour; they are not throughput thresholds |
 | Criterion operations | Thirty-second invalid-sample guards on asynchronous completion; expired work cannot contribute a sample |

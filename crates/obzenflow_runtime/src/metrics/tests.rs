@@ -470,7 +470,7 @@ pub async fn metrics_pending_refresh_does_not_block_publication_or_other_journal
             == Some(&500)
     })
     .await;
-    // Even finalisation uses the available buffer, without waiting for this read.
+    // Even finalization uses the available buffer, without waiting for this read.
     system
         .append(
             SystemEventFactory::new(SystemId::new()).pipeline_not_started(),

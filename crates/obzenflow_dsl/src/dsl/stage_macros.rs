@@ -4737,9 +4737,9 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
         out_type = ($out_ty:ty),
         chunker = ($chunker:expr),
         map_role = ($map_role:expr),
-        finalise_role = ($finalise_role:expr),
+        finalize_role = ($finalize_role:expr),
         map_effect_row = ($map_effect_row:expr),
-        finalise_effect_row = ($finalise_effect_row:expr)
+        finalize_effect_row = ($finalize_effect_row:expr)
     ) => {{
         $crate::dsl::composites::ai_map_reduce::generated_map_reduce::<
             $($seed_ty)+,
@@ -4750,8 +4750,8 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
             _,
         >(
             $name,
-            ($chunker, $map_role, $finalise_role),
-            ($map_effect_row, $finalise_effect_row),
+            ($chunker, $map_role, $finalize_role),
+            ($map_effect_row, $finalize_effect_row),
         )
     }};
 }
@@ -4770,10 +4770,10 @@ macro_rules! __obzenflow_ai_map_reduce_build {
         reduce_out_type = ($reduce_out_ty:ty),
         map_role = ($map_role:expr),
         map_middleware = ($map_middleware:expr),
-        finalise_role = ($finalise_role:expr),
-        finalise_middleware = ($finalise_middleware:expr),
+        finalize_role = ($finalize_role:expr),
+        finalize_middleware = ($finalize_middleware:expr),
         map_row = { $($map_row:tt)* },
-        finalise_row = { $($finalise_row:tt)* },
+        finalize_row = { $($finalize_row:tt)* },
         chunking = {
             estimator: $estimator:expr,
             $($chunking:tt)*
@@ -4794,22 +4794,22 @@ macro_rules! __obzenflow_ai_map_reduce_build {
         reduce_out_type = ($reduce_out_ty:ty),
         map_role = ($map_role:expr),
         map_middleware = ($map_middleware:expr),
-        finalise_role = ($finalise_role:expr),
-        finalise_middleware = ($finalise_middleware:expr),
+        finalize_role = ($finalize_role:expr),
+        finalize_middleware = ($finalize_middleware:expr),
         map_row = { $($map_row:tt)* },
-        finalise_row = { $($finalise_row:tt)* },
+        finalize_row = { $($finalize_row:tt)* },
         chunking = { $($chunking:tt)+ }
     ) => {{
         let mut __map_effect_row = $crate::__obzenflow_effect_entries!(
             @generated_chat surface = "ai_map_reduce!",
             row = { $($map_row)* }
         );
-        let mut __finalise_effect_row = $crate::__obzenflow_effect_entries!(
+        let mut __finalize_effect_row = $crate::__obzenflow_effect_entries!(
             @generated_chat surface = "ai_map_reduce!",
-            row = { $($finalise_row)* }
+            row = { $($finalize_row)* }
         );
         __map_effect_row.implementation_middleware = $map_middleware;
-        __finalise_effect_row.implementation_middleware = $finalise_middleware;
+        __finalize_effect_row.implementation_middleware = $finalize_middleware;
         let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
             seed_type = ($($seed_ty)+),
             item_type = ($item_ty),
@@ -4833,9 +4833,9 @@ macro_rules! __obzenflow_ai_map_reduce_build {
             out_type = ($out_ty),
             chunker = (__chunker),
             map_role = ($map_role),
-            finalise_role = ($finalise_role),
+            finalize_role = ($finalize_role),
             map_effect_row = (__map_effect_row),
-            finalise_effect_row = (__finalise_effect_row)
+            finalize_effect_row = (__finalize_effect_row)
         )
     }};
 }
@@ -5021,7 +5021,7 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
         role = [$($map_role:tt)+],
         remaining = [
             , reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty])
-                -> { $($finalise_row:tt)* } $reduce_out_ty:ty => $($rest:tt)*
+                -> { $($finalize_row:tt)* } $reduce_out_ty:ty => $($rest:tt)*
         ]
     ) => {
         compile_error!("ai_map_reduce!: arrow-embedded effect rows were removed; write `reduce: (Seed, [Partial]) -> Output uses Effect => reduce_role`")
@@ -5124,7 +5124,7 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
                 reduce_seed_type = [$reduce_seed_ty],
                 reduce_partial_type = [$reduce_partial_ty],
                 reduce_out_type = [$($reduce_out_ty)+],
-                finalise_row = [$($row)*],
+                finalize_row = [$($row)*],
                 chunking = [$($chunking)+],
                 role = [],
                 remaining = [$($rest)+]
@@ -5241,7 +5241,7 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
                 reduce_seed_type = [$reduce_seed_ty],
                 reduce_partial_type = [$reduce_partial_ty],
                 reduce_out_type = [$($reduce_out_ty)+],
-                finalise_row = [$($row)*],
+                finalize_row = [$($row)*],
                 chunking = [$($chunking)+],
                 role = [],
                 remaining = [$($rest)+]
@@ -5294,9 +5294,9 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
         reduce_seed_type = [$reduce_seed_ty:ty],
         reduce_partial_type = [$reduce_partial_ty:ty],
         reduce_out_type = [$($reduce_out_ty:tt)+],
-        finalise_row = [$($finalise_row:tt)*],
+        finalize_row = [$($finalize_row:tt)*],
         chunking = [$($chunking:tt)+],
-        role = [$($finalise_role:tt)*],
+        role = [$($finalize_role:tt)*],
         remaining = [$token:tt $($rest:tt)*]
     ) => {
         $crate::__obzenflow_ai_map_reduce_uses_contract!(
@@ -5311,9 +5311,9 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
             reduce_seed_type = [$reduce_seed_ty],
             reduce_partial_type = [$reduce_partial_ty],
             reduce_out_type = [$($reduce_out_ty)+],
-            finalise_row = [$($finalise_row)*],
+            finalize_row = [$($finalize_row)*],
             chunking = [$($chunking)+],
-            role = [$($finalise_role)* $token],
+            role = [$($finalize_role)* $token],
             remaining = [$($rest)*]
         )
     };
@@ -5329,9 +5329,9 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
         reduce_seed_type = [$reduce_seed_ty:ty],
         reduce_partial_type = [$reduce_partial_ty:ty],
         reduce_out_type = [$($reduce_out_ty:tt)+],
-        finalise_row = [$($finalise_row:tt)*],
+        finalize_row = [$($finalize_row:tt)*],
         chunking = [$($chunking:tt)+],
-        role = [$($finalise_role:tt)+],
+        role = [$($finalize_role:tt)+],
         remaining = []
     ) => {
         $crate::__obzenflow_ai_map_reduce_uses_contract!(
@@ -5346,8 +5346,8 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
             reduce_seed_type = [$reduce_seed_ty],
             reduce_partial_type = [$reduce_partial_ty],
             reduce_out_type = [$($reduce_out_ty)+],
-            finalise_row = [$($finalise_row)*],
-            finalise_role = [$($finalise_role)+],
+            finalize_row = [$($finalize_row)*],
+            finalize_role = [$($finalize_role)+],
             chunking = [$($chunking)+]
         )
     };
@@ -5364,12 +5364,12 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
         reduce_seed_type = [$reduce_seed_ty:ty],
         reduce_partial_type = [$reduce_partial_ty:ty],
         reduce_out_type = [$reduce_out_ty:ty],
-        finalise_row = [$($finalise_row:tt)*],
-        finalise_role = [$($finalise_role:tt)+],
+        finalize_row = [$($finalize_row:tt)*],
+        finalize_role = [$($finalize_role:tt)+],
         chunking = [$($chunking:tt)+]
     ) => {{
         let (__map_role, __map_middleware) = $crate::__obzenflow_role_attachments!($($map_role)+);
-        let (__finalise_role, __finalise_middleware) = $crate::__obzenflow_role_attachments!($($finalise_role)+);
+        let (__finalize_role, __finalize_middleware) = $crate::__obzenflow_role_attachments!($($finalize_role)+);
         $crate::__obzenflow_ai_map_reduce_build!(
             name = $name,
             seed_type = ($seed_ty),
@@ -5381,10 +5381,10 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
             reduce_out_type = ($reduce_out_ty),
             map_role = (__map_role),
             map_middleware = (__map_middleware),
-            finalise_role = (__finalise_role),
-            finalise_middleware = (__finalise_middleware),
+            finalize_role = (__finalize_role),
+            finalize_middleware = (__finalize_middleware),
             map_row = { $($map_row)* },
-            finalise_row = { $($finalise_row)* },
+            finalize_row = { $($finalize_row)* },
             chunking = { $($chunking)+ }
         )
     }};
@@ -5400,8 +5400,8 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
         reduce_seed_type = [$reduce_seed_ty:ty],
         reduce_partial_type = [$reduce_partial_ty:ty],
         reduce_out_type = [$reduce_out_ty:ty],
-        finalise_row = [$($finalise_row:tt)*],
-        finalise_role = [$finalise_role_head:ident $(:: $finalise_role_tail:ident)* $(,)?],
+        finalize_row = [$($finalize_row:tt)*],
+        finalize_role = [$finalize_role_head:ident $(:: $finalize_role_tail:ident)* $(,)?],
         chunking = [$($chunking:tt)+]
     ) => {
         $crate::__obzenflow_effect_entries!(
@@ -5410,7 +5410,7 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
             then = {
                 $crate::__obzenflow_effect_entries!(
                     @generated_chat_then surface = "ai_map_reduce!",
-                    row = { $($finalise_row)* },
+                    row = { $($finalize_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
                             "ai_map_reduce! map role",
@@ -5433,8 +5433,8 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
         reduce_seed_type = [$reduce_seed_ty:ty],
         reduce_partial_type = [$reduce_partial_ty:ty],
         reduce_out_type = [$reduce_out_ty:ty],
-        finalise_row = [$($finalise_row:tt)*],
-        finalise_role = [$finalise_role:expr $(,)?],
+        finalize_row = [$($finalize_row:tt)*],
+        finalize_role = [$finalize_role:expr $(,)?],
         chunking = [$($chunking:tt)+]
     ) => {
         $crate::__obzenflow_effect_entries!(
@@ -5443,7 +5443,7 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
             then = {
                 $crate::__obzenflow_effect_entries!(
                     @generated_chat_then surface = "ai_map_reduce!",
-                    row = { $($finalise_row)* },
+                    row = { $($finalize_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
                             "ai_map_reduce! reduce role",
@@ -5466,8 +5466,8 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
         reduce_seed_type = [$reduce_seed_ty:ty],
         reduce_partial_type = [$reduce_partial_ty:ty],
         reduce_out_type = [$reduce_out_ty:ty],
-        finalise_row = [$($finalise_row:tt)*],
-        finalise_role = [$finalise_role:expr $(,)?],
+        finalize_row = [$($finalize_row:tt)*],
+        finalize_role = [$finalize_role:expr $(,)?],
         chunking = [$($chunking:tt)+]
     ) => {
         $crate::__obzenflow_effect_entries!(
@@ -5476,7 +5476,7 @@ macro_rules! __obzenflow_ai_map_reduce_uses_contract {
             then = {
                 $crate::__obzenflow_effect_entries!(
                     @generated_chat_then surface = "ai_map_reduce!",
-                    row = { $($finalise_row)* },
+                    row = { $($finalize_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
                             "ai_map_reduce! roles",

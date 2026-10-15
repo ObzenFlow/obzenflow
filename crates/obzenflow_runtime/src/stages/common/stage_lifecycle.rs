@@ -73,7 +73,7 @@ pub enum LifecyclePhase {
     Initialized,
     Ready,
     Active,
-    Finalising,
+    Finalizing,
     Failing(String),
     Cancelling(String),
     Completed,

@@ -23,7 +23,7 @@ use obzenflow_adapters::ai::{
     ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
 };
 use obzenflow_core::ai::{
-    AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
+    AiClientError, AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
     ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
     HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
@@ -110,9 +110,9 @@ impl AiMapRole<BuildOnlyItem, BuildOnlyPartial> for BuildMapRole {
     }
 }
 
-struct BuildFinaliseRole;
+struct BuildFinalizeRole;
 
-impl AiFinaliseRole<BuildOnlySeed, Many<BuildOnlyPartial>, BuildOnlyOut> for BuildFinaliseRole {
+impl AiFinalizeRole<BuildOnlySeed, Many<BuildOnlyPartial>, BuildOnlyOut> for BuildFinalizeRole {
     fn prepare(
         &self,
         _seed: &BuildOnlySeed,
@@ -200,7 +200,7 @@ macro_rules! generated_digest {
     ($chat:expr) => {{
         let chat = $chat;
         let map_role = BuildMapRole;
-        let finalise_role = BuildFinaliseRole;
+        let finalize_role = BuildFinalizeRole;
         ai_map_reduce!(
             BuildOnlySeed -> BuildOnlyOut => {
                 map: [BuildOnlyItem] -> BuildOnlyPartial
@@ -212,7 +212,7 @@ macro_rules! generated_digest {
                     uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                    => finalise_role,
+                    => finalize_role,
             },
             chunking: by_budget {
                 items: |seed: &BuildOnlySeed| {
@@ -378,7 +378,7 @@ async fn materializer_scope_remains_visible_to_ai_effect_bindings() {
     let result = FlowDefinition::materialize(|_runtime_config| {
         let chat = test_binding("deterministic");
         let bound_map_role = BuildMapRole;
-        let bound_finalise_role = BuildFinaliseRole;
+        let bound_finalize_role = BuildFinalizeRole;
         let seed_handler = NoEventSource;
         let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
@@ -398,7 +398,7 @@ async fn materializer_scope_remains_visible_to_ai_effect_bindings() {
                             uses at_least_once(ChatCompletion)
                                 via chat
                                 with obzenflow_adapters::middleware::control::ai_resilience()
-                            => bound_finalise_role,
+                            => bound_finalize_role,
                     },
                     chunking: by_budget {
                         items: |seed: &BuildOnlySeed| {
@@ -433,7 +433,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
     let result = async {
         let chat = test_binding("deterministic");
         let bound_map_role = BuildMapRole;
-        let bound_finalise_role = BuildFinaliseRole;
+        let bound_finalize_role = BuildFinalizeRole;
         let seed_handler = NoEventSource;
         let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
@@ -453,7 +453,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
                             uses at_least_once(ChatCompletion)
                                 via chat
                                 with obzenflow_adapters::middleware::control::ai_resilience()
-                            => bound_finalise_role,
+                            => bound_finalize_role,
                     },
                     chunking: by_budget {
                         items: |seed: &BuildOnlySeed| {
@@ -623,7 +623,7 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     assert_eq!(
         total.load(Ordering::SeqCst),
         15,
-        "collector should route tagged partials and finalise their sum"
+        "collector should route tagged partials and finalize their sum"
     );
 
     let rendered = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()

@@ -190,7 +190,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
     println!("Running flow to trigger circuit breaker state transitions...");
 
     // Source admission pauses instead of rejecting inputs. Completion waits for
-    // metrics finalisation, so the exported snapshot is ready when run returns.
+    // metrics finalization, so the exported snapshot is ready when run returns.
     flow_handle
         .run()
         .await

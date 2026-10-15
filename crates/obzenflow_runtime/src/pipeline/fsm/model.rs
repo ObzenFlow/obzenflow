@@ -26,7 +26,7 @@ pub(crate) enum PipelineFsmState {
     CancellingChildren,
     FailingChildren { cause: String },
     PublishingTerminal,
-    FinalisingMetrics,
+    FinalizingMetrics,
     PublishingFinalMarker,
     Finished { outcome: ExecutionOutcome },
 }
@@ -72,7 +72,7 @@ pub(crate) enum PipelineFsmEvent {
     StartPublished,
     RunningPublished,
     TerminalPublished,
-    FinalisationCompleted {
+    FinalizationCompleted {
         error: Option<String>,
     },
     GracefulStopExpired,
@@ -105,7 +105,7 @@ impl EventVariant for PipelineFsmEvent {
             Self::StartPublished => "StartPublished",
             Self::RunningPublished => "RunningPublished",
             Self::TerminalPublished => "TerminalPublished",
-            Self::FinalisationCompleted { .. } => "FinalisationCompleted",
+            Self::FinalizationCompleted { .. } => "FinalizationCompleted",
             Self::GracefulStopExpired => "GracefulStopExpired",
             Self::StageCleanupExpired => "StageCleanupExpired",
             Self::MetricsExpired => "MetricsExpired",
@@ -155,7 +155,7 @@ impl StateVariant for PipelineFsmState {
             Self::Draining => "Draining",
             Self::CancellingChildren => "CancellingChildren",
             Self::PublishingTerminal => "PublishingTerminal",
-            Self::FinalisingMetrics => "FinalisingMetrics",
+            Self::FinalizingMetrics => "FinalizingMetrics",
             Self::PublishingFinalMarker => "PublishingFinalMarker",
             Self::FailingChildren { .. } => "FailingChildren",
             Self::Finished { .. } => "Finished",
@@ -178,7 +178,7 @@ impl PipelineFsmState {
             Self::Draining => PipelineState::Draining,
             Self::CancellingChildren => PipelineState::CancellingChildren,
             Self::PublishingTerminal => PipelineState::PublishingTerminal,
-            Self::FinalisingMetrics => PipelineState::FinalisingMetrics,
+            Self::FinalizingMetrics => PipelineState::FinalizingMetrics,
             Self::PublishingFinalMarker => PipelineState::PublishingFinalMarker,
             Self::FailingChildren { cause } => PipelineState::FailingChildren {
                 cause: cause.clone(),

@@ -1616,7 +1616,7 @@ async fn replacement_authority_query_failures_and_timeouts_close_unverified_sess
         },
     )
     .await
-    .expect_err("an unfinalised replacement authority check times out closed");
+    .expect_err("an unfinalized replacement authority check times out closed");
     match error {
         HandlerError::SinkWrite(failure) => {
             assert_eq!(failure.phase(), SinkWritePhase::Acquire);

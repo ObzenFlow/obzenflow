@@ -40,7 +40,7 @@ pub use hashing::{
     LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
-    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
+    AiFinalizeRole, AiMapReduceChunkFailed, AiMapReduceFinalizeFailed, AiMapReduceJobFailed,
     AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningFailure,
     AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
     AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, AiRoleLogicFailure, Many,

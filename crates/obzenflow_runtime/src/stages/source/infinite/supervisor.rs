@@ -222,7 +222,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> Supervisor
 
             state InfiniteSourceState::Draining {
                 on InfiniteSourceEvent::Completed => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: InfiniteSourceState::Finalising, actions: vec![InfiniteSourceAction::SendEOF, InfiniteSourceAction::WriteStageCompleted, InfiniteSourceAction::Cleanup, InfiniteSourceAction::Host(SupervisorAction::Cleanup), InfiniteSourceAction::Host(SupervisorAction::CloseMailbox), InfiniteSourceAction::Host(SupervisorAction::SettlePublications), InfiniteSourceAction::Host(SupervisorAction::Emit(InfiniteSourceEvent::FinalisationCompleted))] }) })
+                    Box::pin(async move { Ok(Transition { next_state: InfiniteSourceState::Finalizing, actions: vec![InfiniteSourceAction::SendEOF, InfiniteSourceAction::WriteStageCompleted, InfiniteSourceAction::Cleanup, InfiniteSourceAction::Host(SupervisorAction::Cleanup), InfiniteSourceAction::Host(SupervisorAction::CloseMailbox), InfiniteSourceAction::Host(SupervisorAction::SettlePublications), InfiniteSourceAction::Host(SupervisorAction::Emit(InfiniteSourceEvent::FinalizationCompleted))] }) })
                 };
                 on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     let InfiniteSourceEvent::Error(cause) = event else { unreachable!() };
@@ -234,8 +234,8 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> Supervisor
                 };
             }
 
-            state InfiniteSourceState::Finalising {
-                on InfiniteSourceEvent::FinalisationCompleted => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+            state InfiniteSourceState::Finalizing {
+                on InfiniteSourceEvent::FinalizationCompleted => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: InfiniteSourceState::Drained, actions: vec![] }) })
                 };
                 on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
@@ -517,7 +517,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         match state {
             InfiniteSourceState::Initializing
             | InfiniteSourceState::Starting
-            | InfiniteSourceState::Finalising
+            | InfiniteSourceState::Finalizing
             | InfiniteSourceState::Failing(_)
             | InfiniteSourceState::Cancelling(_) => Ok(EventLoopDirective::Continue),
             InfiniteSourceState::Cancelled(_) => Ok(EventLoopDirective::Terminate),

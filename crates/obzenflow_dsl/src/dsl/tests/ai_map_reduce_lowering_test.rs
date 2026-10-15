@@ -23,7 +23,7 @@ mod tests {
         ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
     };
     use obzenflow_core::ai::{
-        AiFinaliseRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
+        AiFinalizeRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
         AiMapReduceTaggedPartial, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage,
         ChatParams, ChatRequestSpec, ChatTarget, HeuristicTokenEstimator, Many,
         ResolvedTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
@@ -135,9 +135,9 @@ mod tests {
         }
     }
 
-    struct TestFinaliseRole;
+    struct TestFinalizeRole;
 
-    impl AiFinaliseRole<TestSeed, Many<TestPartial>, TestOut> for TestFinaliseRole {
+    impl AiFinalizeRole<TestSeed, Many<TestPartial>, TestOut> for TestFinalizeRole {
         fn prepare(
             &self,
             _seed: &TestSeed,
@@ -220,7 +220,7 @@ mod tests {
                     uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                    => TestFinaliseRole,
+                    => TestFinalizeRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -393,7 +393,7 @@ mod tests {
                     uses at_least_once(ChatCompletion)
                         via chat
                         with { obzenflow_adapters::middleware::rate_limit(10.0) }
-                    => TestFinaliseRole with { obzenflow_adapters::middleware::circuit_breaker().consecutive_failures(3) },
+                    => TestFinalizeRole with { obzenflow_adapters::middleware::circuit_breaker().consecutive_failures(3) },
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -448,7 +448,7 @@ mod tests {
                         with Box::new(
                             obzenflow_adapters::middleware::rate_limit(1.0)
                         )
-                    => TestFinaliseRole,
+                    => TestFinalizeRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -494,13 +494,13 @@ mod tests {
     #[test]
     fn ai_map_reduce_rejects_equal_but_separately_constructed_chat_contracts() {
         let map_chat = test_chat_binding("test-model", "test-model");
-        let finalise_chat = test_chat_binding("test-model", "test-model");
+        let finalize_chat = test_chat_binding("test-model", "test-model");
         assert_eq!(
             map_chat.evidence().target(),
-            finalise_chat.evidence().target()
+            finalize_chat.evidence().target()
         );
         assert!(
-            !map_chat.shares_construction_family(&finalise_chat),
+            !map_chat.shares_construction_family(&finalize_chat),
             "the witness needs equal metadata from distinct construction decisions"
         );
         let digest = crate::ai_map_reduce!(
@@ -512,9 +512,9 @@ mod tests {
                     => TestMapRole,
                 reduce: (TestSeed, [TestPartial]) -> TestOut
                     uses at_least_once(ChatCompletion)
-                        via finalise_chat
+                        via finalize_chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                    => TestFinaliseRole,
+                    => TestFinalizeRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -1118,7 +1118,7 @@ mod tests {
         contract digest__chunk key=composite_data/ai.map_reduce.planning_manifest@1 visibility=routable
         contract digest__collect key=composite_data/ai.map_reduce.job_failed@1 visibility=unrouted
         contract digest__collect key=composite_data/ai.map_reduce.reduce_input@2 visibility=routable
-        contract digest__finalize key=composite_data/ai.map_reduce.finalise_failed@1 visibility=unrouted
+        contract digest__finalize key=composite_data/ai.map_reduce.finalize_failed@1 visibility=unrouted
         contract digest__finalize key=fact/test.ai_map_reduce.out@1 visibility=unrouted
         contract digest__map key=composite_data/ai.map_reduce.chunk_failed@2 visibility=routable
         contract digest__map key=composite_data/ai.map_reduce.planning_manifest@1 visibility=routable

@@ -45,7 +45,7 @@ pub enum MergeState {
     /// Every batch producer authored natural EOF; reads the live producers.
     Live,
     Draining,
-    Finalising,
+    Finalizing,
     Drained,
     Failing(String),
     Failed(String),
@@ -72,7 +72,7 @@ impl MergeState {
             Self::Initializing => Phase::Initializing,
             Self::Initialized => Phase::Initialized,
             Self::Batch | Self::Live => Phase::Active,
-            Self::Finalising => Phase::Finalising,
+            Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
             Self::Drained => Phase::Completed,
@@ -99,7 +99,7 @@ pub enum MergeEvent {
     ReceivedEOF,
     BeginDrain,
     DrainComplete,
-    FinalisationCompleted,
+    FinalizationCompleted,
     TerminationSettled,
     Error(String),
 }

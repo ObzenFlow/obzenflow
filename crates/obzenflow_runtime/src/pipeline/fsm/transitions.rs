@@ -417,8 +417,8 @@ pub(super) fn children_settled<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -
         ctx.cleanup_deadline = None;
         if ctx.resources.publications.first_failure().is_some() {
             return Ok(change(
-                S::FinalisingMetrics,
-                vec![A::FinishChildren, A::FinaliseMetrics, A::CancelMetrics],
+                S::FinalizingMetrics,
+                vec![A::FinishChildren, A::FinalizeMetrics, A::CancelMetrics],
             ));
         }
         let outcome = selected_outcome(ctx);
@@ -454,14 +454,14 @@ pub(super) fn children_settled<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -
     })
 }
 pub(super) fn terminal_published<'a>(_: &'a S, _: &'a E, _: &'a mut C) -> Decision<'a> {
-    decided(change(S::FinalisingMetrics, vec![A::FinaliseMetrics]))
+    decided(change(S::FinalizingMetrics, vec![A::FinalizeMetrics]))
 }
 pub(super) fn late_failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
     let message = match event {
         E::OperationalFailure { message } => message.clone(),
         E::Abort { reason } => reason.clone(),
         E::ChildFailed(failure) => failure.cause.to_string(),
-        _ => "Finalisation failed".into(),
+        _ => "Finalization failed".into(),
     };
     ctx.resources
         .retain_failure(Box::new(std::io::Error::other(message.clone())));
@@ -475,10 +475,10 @@ pub(super) fn late_failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> De
     ctx.termination.fail(message, violation);
     decided(match state {
         S::PublishingTerminal => change(
-            S::FinalisingMetrics,
-            vec![A::FinaliseMetrics, A::CancelMetrics],
+            S::FinalizingMetrics,
+            vec![A::FinalizeMetrics, A::CancelMetrics],
         ),
-        S::FinalisingMetrics => change(state.clone(), vec![A::CancelMetrics]),
+        S::FinalizingMetrics => change(state.clone(), vec![A::CancelMetrics]),
         _ => change(state.clone(), vec![]),
     })
 }
@@ -519,7 +519,7 @@ pub(super) fn expire_metrics<'a>(state: &'a S, _: &'a E, ctx: &'a mut C) -> Deci
     decided(change(state.clone(), vec![A::CancelMetrics]))
 }
 pub(super) fn finish<'a>(_: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
-    if let E::FinalisationCompleted {
+    if let E::FinalizationCompleted {
         error: Some(message),
     } = event
     {

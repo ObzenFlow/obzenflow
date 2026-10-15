@@ -29,7 +29,7 @@ enum State {
     Created,
     Initializing,
     Running,
-    Finalising,
+    Finalizing,
     Failing(String),
     Completed,
     Failed(String),
@@ -97,8 +97,8 @@ fn failing<'a>(
         unreachable!()
     };
     let cause = cause.clone();
-    // Finalising has already selected cleanup. Its failed result must not repeat it.
-    let actions = if matches!(state, State::Finalising) {
+    // Finalizing has already selected cleanup. Its failed result must not repeat it.
+    let actions = if matches!(state, State::Finalizing) {
         vec![
             Action::Host(SupervisorAction::SettlePublications),
             Action::Host(SupervisorAction::Emit(Event::Settled)),
@@ -142,11 +142,11 @@ impl Supervisor for CleanupSupervisor {
             }
             state State::Running {
                 on Event::Finish => |_: &State, _: &Event, _: &mut Context| {
-                    Box::pin(async { Ok(Transition { next_state: State::Finalising, actions: vec![Action::Host(SupervisorAction::Cleanup), Action::Host(SupervisorAction::SettlePublications), Action::Host(SupervisorAction::Emit(Event::Settled))] }) })
+                    Box::pin(async { Ok(Transition { next_state: State::Finalizing, actions: vec![Action::Host(SupervisorAction::Cleanup), Action::Host(SupervisorAction::SettlePublications), Action::Host(SupervisorAction::Emit(Event::Settled))] }) })
                 };
                 on Event::Error => failing;
             }
-            state State::Finalising {
+            state State::Finalizing {
                 on Event::Settled => |_: &State, _: &Event, _: &mut Context| {
                     Box::pin(async { Ok(Transition { next_state: State::Completed, actions: vec![] }) })
                 };
@@ -212,7 +212,7 @@ impl HandlerSupervised for CleanupSupervisor {
         match state {
             State::Initializing => LifecyclePhase::Initializing,
             State::Running => LifecyclePhase::Active,
-            State::Finalising => LifecyclePhase::Finalising,
+            State::Finalizing => LifecyclePhase::Finalizing,
             State::Failing(cause) => LifecyclePhase::Failing(cause.clone()),
             State::Failed(cause) => LifecyclePhase::Failed(cause.clone()),
             State::Completed => LifecyclePhase::Completed,

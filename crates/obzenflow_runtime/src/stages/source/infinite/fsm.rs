@@ -47,7 +47,7 @@ pub enum InfiniteSourceState<H> {
 
     Initializing,
     Starting,
-    Finalising,
+    Finalizing,
     AcquiringInput,
     Failing(String),
     Cancelling(String),
@@ -83,7 +83,7 @@ impl<H> Clone for InfiniteSourceState<H> {
             Self::Created => Self::Created,
             Self::Initializing => Self::Initializing,
             Self::Starting => Self::Starting,
-            Self::Finalising => Self::Finalising,
+            Self::Finalizing => Self::Finalizing,
             Self::AcquiringInput => Self::AcquiringInput,
             Self::Failing(cause) => Self::Failing(cause.clone()),
             Self::Cancelling(cause) => Self::Cancelling(cause.clone()),
@@ -106,7 +106,7 @@ impl<H> std::fmt::Debug for InfiniteSourceState<H> {
             Self::Created => write!(f, "Created"),
             Self::Initializing => write!(f, "Initializing"),
             Self::Starting => write!(f, "Starting"),
-            Self::Finalising => write!(f, "Finalising"),
+            Self::Finalizing => write!(f, "Finalizing"),
             Self::AcquiringInput => write!(f, "AcquiringInput"),
             Self::Failing(cause) => write!(f, "Failing({cause:?})"),
             Self::Cancelling(cause) => write!(f, "Cancelling({cause:?})"),
@@ -129,7 +129,7 @@ impl<H: Send + Sync> PartialEq for InfiniteSourceState<H> {
             (InfiniteSourceState::Created, InfiniteSourceState::Created) => true,
             (Self::Initializing, Self::Initializing) => true,
             (Self::Starting, Self::Starting) => true,
-            (Self::Finalising, Self::Finalising) => true,
+            (Self::Finalizing, Self::Finalizing) => true,
             (Self::AcquiringInput, Self::AcquiringInput) => true,
             (Self::Failing(a), Self::Failing(b)) => a == b,
             (Self::Cancelling(a), Self::Cancelling(b)) => a == b,
@@ -152,7 +152,7 @@ impl<H: Send + Sync + 'static> StateVariant for InfiniteSourceState<H> {
             InfiniteSourceState::Created => "Created",
             Self::Initializing => "Initializing",
             Self::Starting => "Starting",
-            Self::Finalising => "Finalising",
+            Self::Finalizing => "Finalizing",
             Self::AcquiringInput => "AcquiringInput",
             Self::Failing(..) => "Failing",
             Self::Cancelling(..) => "Cancelling",
@@ -198,7 +198,7 @@ impl<H> InfiniteSourceState<H> {
     /// The exit whose transition schedules cleanup (FLOWIP-134i B2).
     pub(crate) fn exit(&self) -> Option<SourceExit> {
         match self {
-            Self::Finalising => Some(SourceExit::Finalising),
+            Self::Finalizing => Some(SourceExit::Finalizing),
             Self::Failing(_) => Some(SourceExit::Failing),
             Self::Cancelling(_) => Some(SourceExit::Cancelling),
             _ => None,
@@ -212,7 +212,7 @@ impl<H> InfiniteSourceState<H> {
             Self::Initialized => Phase::Initialized,
             Self::WaitingForGun => Phase::Ready,
             Self::Running => Phase::Active,
-            Self::Finalising => Phase::Finalising,
+            Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
             Self::Drained => Phase::Completed,
@@ -233,7 +233,7 @@ pub enum InfiniteSourceEvent<H> {
     Initialize,
     InitializationCompleted,
     ActivationCompleted,
-    FinalisationCompleted,
+    FinalizationCompleted,
     TerminationSettled,
     InputAcquired,
     ResumeLiveInput,
@@ -265,7 +265,7 @@ impl<H> Clone for InfiniteSourceEvent<H> {
             Self::Initialize => Self::Initialize,
             Self::InitializationCompleted => Self::InitializationCompleted,
             Self::ActivationCompleted => Self::ActivationCompleted,
-            Self::FinalisationCompleted => Self::FinalisationCompleted,
+            Self::FinalizationCompleted => Self::FinalizationCompleted,
             Self::TerminationSettled => Self::TerminationSettled,
             Self::InputAcquired => Self::InputAcquired,
             Self::ResumeLiveInput => Self::ResumeLiveInput,
@@ -286,7 +286,7 @@ impl<H> std::fmt::Debug for InfiniteSourceEvent<H> {
             Self::Initialize => write!(f, "Initialize"),
             Self::InitializationCompleted => write!(f, "InitializationCompleted"),
             Self::ActivationCompleted => write!(f, "ActivationCompleted"),
-            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::FinalizationCompleted => write!(f, "FinalizationCompleted"),
             Self::TerminationSettled => write!(f, "TerminationSettled"),
             Self::InputAcquired => write!(f, "InputAcquired"),
             Self::ResumeLiveInput => write!(f, "ResumeLiveInput"),
@@ -314,7 +314,7 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             Self::Error(message) => Some(message.as_str()),
             Self::InitializationCompleted
             | Self::ActivationCompleted
-            | Self::FinalisationCompleted
+            | Self::FinalizationCompleted
             | Self::TerminationSettled
             | Self::InputAcquired
             | Self::ResumeLiveInput => None,
@@ -332,7 +332,7 @@ impl<H: Send + Sync + 'static> EventVariant for InfiniteSourceEvent<H> {
             InfiniteSourceEvent::Initialize => "Initialize",
             Self::InitializationCompleted => "InitializationCompleted",
             Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::FinalizationCompleted => "FinalizationCompleted",
             Self::TerminationSettled => "TerminationSettled",
             Self::InputAcquired => "InputAcquired",
             Self::ResumeLiveInput => "ResumeLiveInput",

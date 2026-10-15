@@ -45,7 +45,7 @@ pub enum MetricsAggregatorState {
     Exporting,
     DrainingExport,
     Draining,
-    Finalising,
+    Finalizing,
     Failing { error: String },
     Cancelling { reason: String },
     Drained { last_event_id: Option<EventId> },
@@ -62,7 +62,7 @@ impl StateVariant for MetricsAggregatorState {
             Self::Exporting => "Exporting",
             Self::DrainingExport => "DrainingExport",
             Self::Draining => "Draining",
-            Self::Finalising => "Finalising",
+            Self::Finalizing => "Finalizing",
             Self::Failing { .. } => "Failing",
             Self::Cancelling { .. } => "Cancelling",
             Self::Drained { .. } => "Drained",
@@ -80,7 +80,7 @@ pub enum MetricsAggregatorEvent {
     ExportCompleted,
     StartDraining,
     FlowTerminal,
-    FinalisationCompleted,
+    FinalizationCompleted,
     TerminationSettled,
     Cancel,
     Error(String),
@@ -104,7 +104,7 @@ impl EventVariant for MetricsAggregatorEvent {
             Self::ExportCompleted => "ExportCompleted",
             Self::StartDraining => "StartDraining",
             Self::FlowTerminal => "FlowTerminal",
-            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::FinalizationCompleted => "FinalizationCompleted",
             Self::TerminationSettled => "TerminationSettled",
             Self::Cancel => "Cancel",
             Self::Error(_) => "Error",
@@ -1672,13 +1672,13 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             on E::ExportMetrics => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::DrainingExport, actions: vec![A::ExportMetrics] }) }) };
             on E::FlowTerminal => |_state: &S, _event: &E, ctx: &mut MetricsAggregatorContext| {
                 let last_event_id = ctx.metrics_store.last_event_id;
-                Box::pin(async move { Ok(Transition { next_state: S::Finalising, actions: vec![A::Host(H::CloseMailbox), A::Host(H::Cleanup), A::ExportMetrics, A::PublishDrainComplete { last_event_id }, A::PublishShutdown, A::Host(H::SettlePublications), A::Host(H::Emit(E::FinalisationCompleted))] }) })
+                Box::pin(async move { Ok(Transition { next_state: S::Finalizing, actions: vec![A::Host(H::CloseMailbox), A::Host(H::Cleanup), A::ExportMetrics, A::PublishDrainComplete { last_event_id }, A::PublishShutdown, A::Host(H::SettlePublications), A::Host(H::Emit(E::FinalizationCompleted))] }) })
             };
             on E::Error => metrics_failed;
             on E::Cancel => metrics_cancelled;
         }
-        state S::Finalising {
-            on E::FinalisationCompleted => |_state: &S, _event: &E, ctx: &mut MetricsAggregatorContext| {
+        state S::Finalizing {
+            on E::FinalizationCompleted => |_state: &S, _event: &E, ctx: &mut MetricsAggregatorContext| {
                 let last_event_id = ctx.metrics_store.last_event_id;
                 Box::pin(async move { Ok(Transition { next_state: S::Drained { last_event_id }, actions: vec![] }) })
             };

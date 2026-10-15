@@ -93,7 +93,7 @@ pub const BINDING_DERIVED_NAME_SENTINEL: &str = "__obzenflow_binding_derived_nam
 
 fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
     // No built-in observers (FLOWIP-115m Part 2). Runtime instrumentation and
-    // output finalisation remain framework-owned; user observers attach only
+    // output finalization remain framework-owned; user observers attach only
     // through the explicit passive lane.
     StageObserverSet::default()
 }
@@ -2382,7 +2382,7 @@ fn check_finite_source_state<H>(
         FiniteSourceState::Created => StageStatus::Created,
         FiniteSourceState::Initializing => StageStatus::Initializing,
         FiniteSourceState::Starting => StageStatus::Starting,
-        FiniteSourceState::Finalising => StageStatus::Finalising,
+        FiniteSourceState::Finalizing => StageStatus::Finalizing,
         FiniteSourceState::AcquiringInput => StageStatus::AcquiringInput,
         FiniteSourceState::Failing(_) => StageStatus::Failing,
         FiniteSourceState::Cancelling(_) => StageStatus::Cancelling,
@@ -2421,7 +2421,7 @@ fn check_infinite_source_state<H>(
         InfiniteSourceState::Created => StageStatus::Created,
         InfiniteSourceState::Initializing => StageStatus::Initializing,
         InfiniteSourceState::Starting => StageStatus::Starting,
-        InfiniteSourceState::Finalising => StageStatus::Finalising,
+        InfiniteSourceState::Finalizing => StageStatus::Finalizing,
         InfiniteSourceState::AcquiringInput => StageStatus::AcquiringInput,
         InfiniteSourceState::Failing(_) => StageStatus::Failing,
         InfiniteSourceState::Cancelling(_) => StageStatus::Cancelling,
@@ -2451,7 +2451,7 @@ fn check_transform_state<H>(state: &TransformState<H>) -> crate::stage_handle_ad
         TransformState::Created => StageStatus::Created,
         TransformState::Initializing => StageStatus::Initializing,
         TransformState::Starting => StageStatus::Starting,
-        TransformState::Finalising => StageStatus::Finalising,
+        TransformState::Finalizing => StageStatus::Finalizing,
         TransformState::Failing(_) => StageStatus::Failing,
         TransformState::Cancelling(_) => StageStatus::Cancelling,
         TransformState::Cancelled(_) => StageStatus::Cancelled,
@@ -2482,7 +2482,7 @@ fn check_sink_state<H>(state: &JournalSinkState<H>) -> crate::stage_handle_adapt
         JournalSinkState::Created => StageStatus::Created,
         JournalSinkState::Initializing => StageStatus::Initializing,
         JournalSinkState::Starting => StageStatus::Starting,
-        JournalSinkState::Finalising => StageStatus::Finalising,
+        JournalSinkState::Finalizing => StageStatus::Finalizing,
         JournalSinkState::Flushing => StageStatus::Flushing,
         JournalSinkState::DrainingWriter => StageStatus::DrainingWriter,
         JournalSinkState::CheckingContracts => StageStatus::CheckingContracts,
@@ -2905,7 +2905,7 @@ fn check_stateful_state<H>(state: &StatefulState<H>) -> crate::stage_handle_adap
         StatefulState::Created => StageStatus::Created,
         StatefulState::Initializing => StageStatus::Initializing,
         StatefulState::Starting => StageStatus::Starting,
-        StatefulState::Finalising => StageStatus::Finalising,
+        StatefulState::Finalizing => StageStatus::Finalizing,
         StatefulState::ValidatingTerminal => StageStatus::ValidatingTerminal,
         StatefulState::ForwardingTerminal => StageStatus::ForwardingTerminal,
         StatefulState::ProducingFinalOutput => StageStatus::ProducingFinalOutput,
@@ -3142,7 +3142,7 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
         JoinState::Created => StageStatus::Created,
         JoinState::Initializing => StageStatus::Initializing,
         JoinState::Starting => StageStatus::Starting,
-        JoinState::Finalising => StageStatus::Finalising,
+        JoinState::Finalizing => StageStatus::Finalizing,
         JoinState::Failing(_) => StageStatus::Failing,
         JoinState::Cancelling(_) => StageStatus::Cancelling,
         JoinState::Cancelled(_) => StageStatus::Cancelled,
@@ -3265,7 +3265,7 @@ fn check_merge_state(state: &MergeState) -> crate::stage_handle_adapter::StageSt
         MergeState::Starting => StageStatus::Starting,
         MergeState::Batch | MergeState::Live => StageStatus::Running,
         MergeState::Draining => StageStatus::Draining,
-        MergeState::Finalising => StageStatus::Finalising,
+        MergeState::Finalizing => StageStatus::Finalizing,
         MergeState::Drained => StageStatus::Drained,
         MergeState::Failing(_) => StageStatus::Failing,
         MergeState::Failed(_) => StageStatus::Failed,

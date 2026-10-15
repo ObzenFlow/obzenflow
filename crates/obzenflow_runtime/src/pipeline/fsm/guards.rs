@@ -19,7 +19,7 @@ impl PipelineFsmState {
             Self::Draining | Self::CancellingChildren | Self::FailingChildren { .. } => {
                 ctx.outstanding_children.is_empty()
             }
-            Self::FinalisingMetrics => ctx.resources.metrics_join.is_none(),
+            Self::FinalizingMetrics => ctx.resources.metrics_join.is_none(),
             _ => false,
         }
     }
@@ -53,7 +53,7 @@ impl PipelineFsmState {
             Self::FailingChildren { .. } => ctx
                 .cleanup_deadline
                 .map(|at| (at, PipelineDeadline::StageCleanup)),
-            Self::FinalisingMetrics => ctx
+            Self::FinalizingMetrics => ctx
                 .metrics_deadline
                 .filter(|_| ctx.resources.metrics_join.is_some())
                 .map(|at| (at, PipelineDeadline::Metrics)),

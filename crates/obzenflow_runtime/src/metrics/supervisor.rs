@@ -106,7 +106,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             MetricsAggregatorState::Initializing => L::Initializing,
             MetricsAggregatorState::Starting => L::Initialized,
             MetricsAggregatorState::Running => L::Active,
-            MetricsAggregatorState::Finalising => L::Finalising,
+            MetricsAggregatorState::Finalizing => L::Finalizing,
             MetricsAggregatorState::Failing { error } => L::Failing(error.clone()),
             MetricsAggregatorState::Cancelling { reason } => L::Cancelling(reason.clone()),
             MetricsAggregatorState::Drained { .. } => L::Completed,

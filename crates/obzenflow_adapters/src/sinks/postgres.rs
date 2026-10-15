@@ -383,7 +383,7 @@ fn validate_insert_body(value: &str) -> Result<String, PostgresConfigError> {
 
 /// An opaque accumulator for PostgreSQL parameter values.
 ///
-/// Its fields, constructor, and finaliser are private so a binder can append
+/// Its fields, constructor, and finalizer are private so a binder can append
 /// values without receiving the adapter-owned statement, query, transaction, or
 /// raw SQLx arguments.
 pub struct PostgresBindings {
@@ -1076,7 +1076,7 @@ impl PostgresSessionAuthority {
 ///
 /// The shared verdict is sound only because this private pool is permanently
 /// capped at one connection and the writer is serially borrowed. Every new
-/// physical connection finalises the verdict before SQLx can expose it.
+/// physical connection finalizes the verdict before SQLx can expose it.
 struct PostgresSessionPool {
     pool: PgPool,
     authority: PostgresSessionAuthority,

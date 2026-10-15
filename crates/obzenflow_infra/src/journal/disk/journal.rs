@@ -416,7 +416,7 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
 }
 
 // The complete commit unit outlives a cancelled waiter. Runtime retains its
-// own receipt until this task has finalised clocks and indexes as well as bytes.
+// own receipt until this task has finalized clocks and indexes as well as bytes.
 async fn retain_commit<R: Send + 'static>(
     poisoned: Arc<AtomicBool>,
     operation: impl std::future::Future<Output = Result<R, JournalError>> + Send + 'static,

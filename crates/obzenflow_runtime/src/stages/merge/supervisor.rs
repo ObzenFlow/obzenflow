@@ -188,14 +188,14 @@ impl Supervisor for MergeSupervisor {
                 on MergeEvent::DrainComplete => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
                     Box::pin(async move {
                         Ok(Transition {
-                            next_state: MergeState::Finalising,
+                            next_state: MergeState::Finalizing,
                             actions: vec![
                                 MergeAction::ForwardEOF,
                                 MergeAction::SendCompletion,
                                 MergeAction::Cleanup,
                                 MergeAction::Host(SupervisorAction::CloseMailbox),
                                 MergeAction::Host(SupervisorAction::SettlePublications),
-                                MergeAction::Host(SupervisorAction::Emit(MergeEvent::FinalisationCompleted)),
+                                MergeAction::Host(SupervisorAction::Emit(MergeEvent::FinalizationCompleted)),
                             ],
                         })
                     })
@@ -203,8 +203,8 @@ impl Supervisor for MergeSupervisor {
                 on MergeEvent::Error => merge_error_arm!();
             }
 
-            state MergeState::Finalising {
-                on MergeEvent::FinalisationCompleted => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
+            state MergeState::Finalizing {
+                on MergeEvent::FinalizationCompleted => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
                     Box::pin(async move { Ok(Transition { next_state: MergeState::Drained, actions: vec![] }) })
                 };
                 on MergeEvent::Error => merge_error_arm!();

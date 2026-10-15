@@ -368,7 +368,7 @@ impl FsmContext for CompletionContext {}
 enum CompletionState {
     Created,
     Initializing,
-    Finalising,
+    Finalizing,
     Failing(String),
     Drained,
     Failed(String),
@@ -438,11 +438,11 @@ impl Supervisor for CompletionSupervisor {
             }
             state CompletionState::Initializing {
                 on CompletionEvent::Initialized => |_: &CompletionState, _: &CompletionEvent, _: &mut CompletionContext| {
-                    Box::pin(async { Ok(Transition { next_state: CompletionState::Finalising, actions: vec![CompletionAction::Work, CompletionAction::Host(SupervisorAction::CloseMailbox), CompletionAction::Host(SupervisorAction::SettlePublications), CompletionAction::Host(SupervisorAction::Emit(CompletionEvent::Settled))] }) })
+                    Box::pin(async { Ok(Transition { next_state: CompletionState::Finalizing, actions: vec![CompletionAction::Work, CompletionAction::Host(SupervisorAction::CloseMailbox), CompletionAction::Host(SupervisorAction::SettlePublications), CompletionAction::Host(SupervisorAction::Emit(CompletionEvent::Settled))] }) })
                 };
                 on CompletionEvent::Error => completion_failure;
             }
-            state CompletionState::Finalising {
+            state CompletionState::Finalizing {
                 on CompletionEvent::Settled => |_: &CompletionState, _: &CompletionEvent, _: &mut CompletionContext| {
                     Box::pin(async { Ok(Transition { next_state: CompletionState::Drained, actions: vec![] }) })
                 };
@@ -516,7 +516,7 @@ impl HandlerSupervised for CompletionSupervisor {
         match state {
             CompletionState::Created => LifecyclePhase::Other,
             CompletionState::Initializing => LifecyclePhase::Initializing,
-            CompletionState::Finalising => LifecyclePhase::Finalising,
+            CompletionState::Finalizing => LifecyclePhase::Finalizing,
             CompletionState::Failing(cause) => LifecyclePhase::Failing(cause.clone()),
             CompletionState::Drained => LifecyclePhase::Completed,
             CompletionState::Failed(cause) => LifecyclePhase::Failed(cause.clone()),
@@ -617,7 +617,7 @@ async fn terminal_mailbox_preserves_commands_and_failure_during_owned_completion
             .await
             .unwrap();
         entered.notified().await;
-        assert_eq!(handle.current_state(), CompletionState::Finalising);
+        assert_eq!(handle.current_state(), CompletionState::Finalizing);
         handle
             .send_event(CompletionEvent::Initialize)
             .await

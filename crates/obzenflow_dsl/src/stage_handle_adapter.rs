@@ -39,7 +39,7 @@ pub enum StageStatus {
     ForwardingTerminal,
     ProducingFinalOutput,
     DrainingFinalOutput,
-    Finalising,
+    Finalizing,
     Drained,
     Failing,
     Failed,

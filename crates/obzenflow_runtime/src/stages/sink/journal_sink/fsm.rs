@@ -64,7 +64,7 @@ pub enum JournalSinkState<H> {
 
     Initializing,
     Starting,
-    Finalising,
+    Finalizing,
     DrainingWriter,
     CheckingContracts,
     Failing(String),
@@ -101,7 +101,7 @@ impl<H> Clone for JournalSinkState<H> {
             Self::Created => Self::Created,
             Self::Initializing => Self::Initializing,
             Self::Starting => Self::Starting,
-            Self::Finalising => Self::Finalising,
+            Self::Finalizing => Self::Finalizing,
             Self::DrainingWriter => Self::DrainingWriter,
             Self::CheckingContracts => Self::CheckingContracts,
             Self::Failing(cause) => Self::Failing(cause.clone()),
@@ -125,7 +125,7 @@ impl<H> std::fmt::Debug for JournalSinkState<H> {
             Self::Created => write!(f, "Created"),
             Self::Initializing => write!(f, "Initializing"),
             Self::Starting => write!(f, "Starting"),
-            Self::Finalising => write!(f, "Finalising"),
+            Self::Finalizing => write!(f, "Finalizing"),
             Self::DrainingWriter => write!(f, "DrainingWriter"),
             Self::CheckingContracts => write!(f, "CheckingContracts"),
             Self::Failing(cause) => write!(f, "Failing({cause:?})"),
@@ -149,7 +149,7 @@ impl<H: Send + Sync> PartialEq for JournalSinkState<H> {
             (JournalSinkState::Created, JournalSinkState::Created) => true,
             (Self::Initializing, Self::Initializing) => true,
             (Self::Starting, Self::Starting) => true,
-            (Self::Finalising, Self::Finalising) => true,
+            (Self::Finalizing, Self::Finalizing) => true,
             (Self::DrainingWriter, Self::DrainingWriter) => true,
             (Self::CheckingContracts, Self::CheckingContracts) => true,
             (Self::Failing(a), Self::Failing(b)) => a == b,
@@ -173,7 +173,7 @@ impl<H: Send + Sync + 'static> StateVariant for JournalSinkState<H> {
             JournalSinkState::Created => "Created",
             Self::Initializing => "Initializing",
             Self::Starting => "Starting",
-            Self::Finalising => "Finalising",
+            Self::Finalizing => "Finalizing",
             Self::DrainingWriter => "DrainingWriter",
             Self::CheckingContracts => "CheckingContracts",
             Self::Failing(..) => "Failing",
@@ -207,7 +207,7 @@ impl<H> JournalSinkState<H> {
             Self::Initializing => Phase::Initializing,
             Self::Initialized => Phase::Initialized,
             Self::Running => Phase::Active,
-            Self::Finalising => Phase::Finalising,
+            Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
             Self::Drained => Phase::Completed,
@@ -228,7 +228,7 @@ pub enum JournalSinkEvent<H> {
     Initialize,
     InitializationCompleted,
     ActivationCompleted,
-    FinalisationCompleted,
+    FinalizationCompleted,
     TerminationSettled,
     WriterDrained,
     ContractsAccepted,
@@ -263,7 +263,7 @@ impl<H> Clone for JournalSinkEvent<H> {
             Self::Initialize => Self::Initialize,
             Self::InitializationCompleted => Self::InitializationCompleted,
             Self::ActivationCompleted => Self::ActivationCompleted,
-            Self::FinalisationCompleted => Self::FinalisationCompleted,
+            Self::FinalizationCompleted => Self::FinalizationCompleted,
             Self::TerminationSettled => Self::TerminationSettled,
             Self::WriterDrained => Self::WriterDrained,
             Self::ContractsAccepted => Self::ContractsAccepted,
@@ -285,7 +285,7 @@ impl<H> std::fmt::Debug for JournalSinkEvent<H> {
             Self::Initialize => write!(f, "Initialize"),
             Self::InitializationCompleted => write!(f, "InitializationCompleted"),
             Self::ActivationCompleted => write!(f, "ActivationCompleted"),
-            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::FinalizationCompleted => write!(f, "FinalizationCompleted"),
             Self::TerminationSettled => write!(f, "TerminationSettled"),
             Self::WriterDrained => write!(f, "WriterDrained"),
             Self::ContractsAccepted => write!(f, "ContractsAccepted"),
@@ -307,7 +307,7 @@ impl<H: Send + Sync + 'static> ExternalControlEvent for JournalSinkEvent<H> {
             Self::Error(message) => Some(message.as_str()),
             Self::InitializationCompleted
             | Self::ActivationCompleted
-            | Self::FinalisationCompleted
+            | Self::FinalizationCompleted
             | Self::TerminationSettled
             | Self::WriterDrained
             | Self::ContractsAccepted => None,
@@ -328,7 +328,7 @@ impl<H: Send + Sync + 'static> EventVariant for JournalSinkEvent<H> {
             JournalSinkEvent::Initialize => "Initialize",
             Self::InitializationCompleted => "InitializationCompleted",
             Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::FinalizationCompleted => "FinalizationCompleted",
             Self::TerminationSettled => "TerminationSettled",
             Self::WriterDrained => "WriterDrained",
             Self::ContractsAccepted => "ContractsAccepted",
@@ -1679,7 +1679,7 @@ mod tests {
         fixture.handle.received_eof().await.unwrap();
         let exit = fixture.handle.wait_for_stage_exit().await;
         assert!(matches!(exit, LifecycleExit::Completed(_)), "{exit:?}");
-        assert_eq!(*probe.drop_states.lock().unwrap(), ["Finalising"]);
+        assert_eq!(*probe.drop_states.lock().unwrap(), ["Finalizing"]);
         let rows = fixture.data.read_all_unordered().await.unwrap();
         assert_eq!(
             rows.iter()
@@ -1948,7 +1948,7 @@ mod tests {
         fixture.handle.received_eof().await.unwrap();
         let exit = fixture.handle.wait_for_stage_exit().await;
         assert!(matches!(exit, LifecycleExit::Completed(_)), "{exit:?}");
-        assert_eq!(*probe.drop_states.lock().unwrap(), ["Finalising"]);
+        assert_eq!(*probe.drop_states.lock().unwrap(), ["Finalizing"]);
         let released_on = probe
             .drop_thread
             .lock()
@@ -1962,7 +1962,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_publication_remains_finalising_until_it_settles() {
+    async fn completion_publication_remains_finalizing_until_it_settles() {
         let probe = Arc::new(Probe::default());
         probe.block_flush.store(true, Ordering::SeqCst);
         let fixture = fixture(probe.clone());
@@ -1975,7 +1975,7 @@ mod tests {
             ))));
         probe.release_flush.notify_one();
         entered.notified().await;
-        assert_eq!(fixture.handle.current_state(), JournalSinkState::Finalising);
+        assert_eq!(fixture.handle.current_state(), JournalSinkState::Finalizing);
         assert_eq!(probe.flushes.load(Ordering::SeqCst), 1);
         assert_eq!(probe.drains.load(Ordering::SeqCst), 1);
         assert!(fixture
@@ -1986,7 +1986,7 @@ mod tests {
         release.notify_one();
         let exit = fixture.handle.wait_for_stage_exit().await;
         assert!(matches!(exit, LifecycleExit::Completed(_)), "{exit:?}");
-        assert_eq!(*probe.drop_states.lock().unwrap(), ["Finalising"]);
+        assert_eq!(*probe.drop_states.lock().unwrap(), ["Finalizing"]);
         assert_eq!(fixture.handle.current_state(), JournalSinkState::Drained);
         assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
         let rows = fixture.data.read_all_unordered().await.unwrap();

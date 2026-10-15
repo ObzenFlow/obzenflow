@@ -38,7 +38,7 @@ use obzenflow_adapters::middleware::control::{
 };
 use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{
-    chat_binding_fingerprint, AiClientError, AiFinaliseRole, AiMapReduceChunkFailed,
+    chat_binding_fingerprint, AiClientError, AiFinalizeRole, AiMapReduceChunkFailed,
     AiMapReduceJobFailed, AiMapReduceMapInput, AiMapReducePlanningFailed,
     AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
     AiMapReduceTaggedPartial, AiMapRole, AiProvider, AiProviderFailureKind, AiRoleLogicFailure,
@@ -161,9 +161,9 @@ impl AiMapRole<DigestItem, DigestPartial> for MapRole {
     }
 }
 
-struct FinaliseRole;
+struct FinalizeRole;
 
-impl AiFinaliseRole<DigestSeed, Many<DigestPartial>, DigestOut> for FinaliseRole {
+impl AiFinalizeRole<DigestSeed, Many<DigestPartial>, DigestOut> for FinalizeRole {
     fn prepare(
         &self,
         _seed: &DigestSeed,
@@ -633,7 +633,7 @@ fn build_flow_with_chunk_plan(
             fail_interpret: map_interpret_failure,
             prepare_calls: map_prepare_calls,
         };
-        let finalise_role = FinaliseRole;
+        let finalize_role = FinalizeRole;
         let collected = CollectOut { outputs };
 
         Ok(flow! {
@@ -654,7 +654,7 @@ fn build_flow_with_chunk_plan(
                             uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                            => finalise_role,
+                            => finalize_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -693,7 +693,7 @@ fn build_recovery_flow(
             fail_interpret: false,
             prepare_calls: None,
         };
-        let finalise_role = FinaliseRole;
+        let finalize_role = FinalizeRole;
         let recovery_collected = CollectOut { outputs };
 
         Ok(flow! {
@@ -714,7 +714,7 @@ fn build_recovery_flow(
                             uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                            => finalise_role,
+                            => finalize_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -753,7 +753,7 @@ fn build_credit_flow(
             fail_interpret: false,
             prepare_calls: Some(prepare_calls),
         };
-        let finalise_role = FinaliseRole;
+        let finalize_role = FinalizeRole;
         let credit_collected = CollectOut { outputs };
 
         Ok(flow! {
@@ -774,7 +774,7 @@ fn build_credit_flow(
                             uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                            => finalise_role,
+                            => finalize_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -812,7 +812,7 @@ fn build_chunk_interruption_flow(
             fail_interpret: false,
             prepare_calls: None,
         };
-        let finalise_role = FinaliseRole;
+        let finalize_role = FinalizeRole;
         let interrupt_collected = CollectOut { outputs };
 
         Ok(flow! {
@@ -833,7 +833,7 @@ fn build_chunk_interruption_flow(
                             uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                            => finalise_role,
+                            => finalize_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -993,7 +993,7 @@ async fn assert_zero_chunk_archive(
     let chunk = stage_envelopes(run_dir, "digest__chunk").await;
     let map = stage_envelopes(run_dir, "digest__map").await;
     let collect = stage_envelopes(run_dir, "digest__collect").await;
-    let finalise = stage_envelopes(run_dir, "digest__finalize").await;
+    let finalize = stage_envelopes(run_dir, "digest__finalize").await;
 
     assert_generated_chunk_authorship(run_dir, &seed, &chunk, 0);
     assert_eq!(
@@ -1102,21 +1102,21 @@ async fn assert_zero_chunk_archive(
     assert_eq!(reduce_input.collected.planning, manifest.planning);
 
     assert_eq!(
-        finalise
+        finalize
             .iter()
             .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         1,
-        "an empty collected value still enters the existing finalise effect once"
+        "an empty collected value still enters the existing finalize effect once"
     );
-    assert_atomic_completion_groups(&finalise, 1);
+    assert_atomic_completion_groups(&finalize, 1);
     assert_completion_contract(
-        &finalise,
+        &finalize,
         1,
-        "ai_map_reduce.finalise.chat_completion",
+        "ai_map_reduce.finalize.chat_completion",
         &target(),
     );
-    effect_evidence_ids(&finalise)
+    effect_evidence_ids(&finalize)
 }
 
 async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<ChainPayload>> {
@@ -1657,7 +1657,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
 }
 
 #[tokio::test]
-async fn zero_chunk_jobs_skip_map_but_finalise_live_and_replay_without_live_chat() {
+async fn zero_chunk_jobs_skip_map_but_finalize_live_and_replay_without_live_chat() {
     struct Case {
         name: &'static str,
         seed_count: u64,
@@ -1729,24 +1729,24 @@ async fn zero_chunk_jobs_skip_map_but_finalise_live_and_replay_without_live_chat
         assert_eq!(
             live_resolutions.load(Ordering::SeqCst),
             1,
-            "{}: only the finalise effect resolves the chat port",
+            "{}: only the finalize effect resolves the chat port",
             case.name
         );
         assert_eq!(
             live_calls.load(Ordering::SeqCst),
             1,
-            "{}: the deterministic live fixture makes one finalise provider call and no map call",
+            "{}: the deterministic live fixture makes one finalize provider call and no map call",
             case.name
         );
         assert_eq!(
             *live_outputs.lock().expect("live output lock"),
             vec![DigestOut { total: 0 }],
-            "{}: the finalise role remains the sole authority for Out",
+            "{}: the finalize role remains the sole authority for Out",
             case.name
         );
 
         let live_archive = latest_run_dir(&journal_base);
-        let live_finalise_ids = assert_zero_chunk_archive(
+        let live_finalize_ids = assert_zero_chunk_archive(
             &live_archive,
             case.expected_input_items,
             case.expected_excluded_items,
@@ -1786,7 +1786,7 @@ async fn zero_chunk_jobs_skip_map_but_finalise_live_and_replay_without_live_chat
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "{}: strict replay rematerialises the finalise effect: {error}",
+                    "{}: strict replay rematerialises the finalize effect: {error}",
                     case.name
                 )
             });
@@ -1796,18 +1796,18 @@ async fn zero_chunk_jobs_skip_map_but_finalise_live_and_replay_without_live_chat
         assert_eq!(
             *replay_outputs.lock().expect("replay output lock"),
             vec![DigestOut { total: 0 }],
-            "{}: replay preserves the successful empty finalisation",
+            "{}: replay preserves the successful empty finalization",
             case.name
         );
 
         let replay_archive = latest_run_dir(&journal_base);
-        let replay_finalise_ids = assert_zero_chunk_archive(
+        let replay_finalize_ids = assert_zero_chunk_archive(
             &replay_archive,
             case.expected_input_items,
             case.expected_excluded_items,
         )
         .await;
-        assert_eq!(replay_finalise_ids, live_finalise_ids);
+        assert_eq!(replay_finalize_ids, live_finalize_ids);
     }
 }
 
@@ -1846,7 +1846,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     let live_seed = stage_envelopes(&live_archive, "seed").await;
     let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
     let live_map = stage_envelopes(&live_archive, "digest__map").await;
-    let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
+    let live_finalize = stage_envelopes(&live_archive, "digest__finalize").await;
     let manifests = live_chunk
         .iter()
         .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
@@ -1862,7 +1862,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     assert_eq!(
         live_calls.load(Ordering::SeqCst),
         expected_map_calls + 1,
-        "N map completions plus one finalise completion"
+        "N map completions plus one finalize completion"
     );
     assert_eq!(
         live_map
@@ -1872,14 +1872,14 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         expected_map_calls
     );
     assert_eq!(
-        live_finalise
+        live_finalize
             .iter()
             .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         1
     );
     assert_atomic_completion_groups(&live_map, expected_map_calls);
-    assert_atomic_completion_groups(&live_finalise, 1);
+    assert_atomic_completion_groups(&live_finalize, 1);
     assert_completion_contract(
         &live_map,
         expected_map_calls,
@@ -1887,13 +1887,13 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         &target(),
     );
     assert_completion_contract(
-        &live_finalise,
+        &live_finalize,
         1,
-        "ai_map_reduce.finalise.chat_completion",
+        "ai_map_reduce.finalize.chat_completion",
         &target(),
     );
     let live_map_ids = effect_evidence_ids(&live_map);
-    let live_finalise_ids = effect_evidence_ids(&live_finalise);
+    let live_finalize_ids = effect_evidence_ids(&live_finalize);
 
     let manifest_path = live_archive.join("run_manifest.json");
     let original_manifest =
@@ -1937,7 +1937,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         .as_array_mut()
         .expect("bounded admission rows")
         .pop()
-        .expect("the witness has generated map and finalise rows");
+        .expect("the witness has generated map and finalize rows");
     incompatible_archives.push((
         "missing generated plan row",
         missing_plan_row,
@@ -2059,7 +2059,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     let replay_seed = stage_envelopes(&replay_archive, "seed").await;
     let replay_chunk = stage_envelopes(&replay_archive, "digest__chunk").await;
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
-    let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;
+    let replay_finalize = stage_envelopes(&replay_archive, "digest__finalize").await;
     assert_generated_chunk_authorship(
         &replay_archive,
         &replay_seed,
@@ -2069,21 +2069,21 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     assert_eq!(
         *replay_outputs.lock().expect("replay output lock"),
         vec![DigestOut { total: 15 }],
-        "map event types: {:?}; finalise event types: {:?}",
+        "map event types: {:?}; finalize event types: {:?}",
         replay_map
             .iter()
             .map(|envelope| envelope.event_type())
             .collect::<Vec<_>>(),
-        replay_finalise
+        replay_finalize
             .iter()
             .map(|envelope| envelope.event_type())
             .collect::<Vec<_>>()
     );
 
     assert_eq!(effect_evidence_ids(&replay_map), live_map_ids);
-    assert_eq!(effect_evidence_ids(&replay_finalise), live_finalise_ids);
+    assert_eq!(effect_evidence_ids(&replay_finalize), live_finalize_ids);
     assert_atomic_completion_groups(&replay_map, expected_map_calls);
-    assert_atomic_completion_groups(&replay_finalise, 1);
+    assert_atomic_completion_groups(&replay_finalize, 1);
 
     let verification = verify_run_dirs(
         &live_archive,
@@ -2269,8 +2269,8 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
             .count(),
         1
     );
-    let finalise = stage_envelopes(&abandonment_archive, "recovery_digest__finalize").await;
-    assert!(!finalise.iter().any(|envelope| {
+    let finalize = stage_envelopes(&abandonment_archive, "recovery_digest__finalize").await;
+    assert!(!finalize.iter().any(|envelope| {
         EffectAttemptStarted::matches_event_type(&envelope.event_type())
             || chat_completion_reply(&envelope.authored()).is_some()
     }));
@@ -2635,9 +2635,9 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     );
 
     let archive = latest_run_dir(&journal_base);
-    let finalise = stage_envelopes(&archive, "digest__finalize").await;
+    let finalize = stage_envelopes(&archive, "digest__finalize").await;
     let sink = stage_envelopes(&archive, "digest_summary").await;
-    let receipts = stable_delivery_receipts(&finalise, &sink);
+    let receipts = stable_delivery_receipts(&finalize, &sink);
     let [receipt] = receipts.as_slice() else {
         panic!(
             "the PostgreSQL HN treatment must emit one receipt, found {}",
@@ -2776,9 +2776,9 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_archive = latest_run_dir(&journal_base);
     let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
     let live_map = stage_envelopes(&live_archive, "digest__map").await;
-    let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
+    let live_finalize = stage_envelopes(&live_archive, "digest__finalize").await;
     let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
-    let live_delivery_receipts = stable_delivery_receipts(&live_finalise, &live_digest_summary);
+    let live_delivery_receipts = stable_delivery_receipts(&live_finalize, &live_digest_summary);
     assert!(
         !live_delivery_receipts.is_empty(),
         "the production digest summary must journal at least one stable delivery receipt"
@@ -2804,13 +2804,13 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         &production_target,
     );
     assert_completion_contract(
-        &live_finalise,
+        &live_finalize,
         1,
-        "ai_map_reduce.finalise.chat_completion",
+        "ai_map_reduce.finalize.chat_completion",
         &production_target,
     );
     let live_map_ids = effect_evidence_ids(&live_map);
-    let live_finalise_ids = effect_evidence_ids(&live_finalise);
+    let live_finalize_ids = effect_evidence_ids(&live_finalize);
 
     let storage = obzenflow_infra::testing::journal::audit_archive(&live_archive)
         .expect("the current-schema production HN archive is fully decodable");
@@ -2880,12 +2880,12 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     assert!(live_packets.iter().any(serde_json::Value::is_null));
     assert_eq!(replay_packets, live_packets);
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
-    let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;
+    let replay_finalize = stage_envelopes(&replay_archive, "digest__finalize").await;
     let replay_digest_summary = stage_envelopes(&replay_archive, "digest_summary").await;
     let replay_delivery_receipts =
-        stable_delivery_receipts(&replay_finalise, &replay_digest_summary);
+        stable_delivery_receipts(&replay_finalize, &replay_digest_summary);
     assert_eq!(effect_evidence_ids(&replay_map), live_map_ids);
-    assert_eq!(effect_evidence_ids(&replay_finalise), live_finalise_ids);
+    assert_eq!(effect_evidence_ids(&replay_finalize), live_finalize_ids);
     assert_eq!(replay_delivery_receipts, live_delivery_receipts);
 
     let verification = verify_run_dirs(
@@ -2983,7 +2983,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     let archive = latest_run_dir(&journal_base);
     let chunks = stage_envelopes(&archive, "digest__chunk").await;
     let map = stage_envelopes(&archive, "digest__map").await;
-    let finalise = stage_envelopes(&archive, "digest__finalize").await;
+    let finalize = stage_envelopes(&archive, "digest__finalize").await;
     let manifest = chunks
         .iter()
         .find_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
@@ -2997,7 +2997,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
         "two fake downstream attempts remain opaque inside each chat invocation"
     );
 
-    let generated = [&map, &finalise];
+    let generated = [&map, &finalize];
     let starts = generated
         .iter()
         .flat_map(|stage| stage.iter())

@@ -340,7 +340,7 @@ fn state_diagnostic_label(state: &PipelineState) -> &'static str {
         PipelineState::Draining => "draining",
         PipelineState::CancellingChildren => "cancelling_children",
         PipelineState::PublishingTerminal => "publishing_terminal",
-        PipelineState::FinalisingMetrics => "finalising_metrics",
+        PipelineState::FinalizingMetrics => "finalizing_metrics",
         PipelineState::PublishingFinalMarker => "publishing_final_marker",
         PipelineState::Drained => "drained",
         PipelineState::FailingChildren { .. } => "failing_children",

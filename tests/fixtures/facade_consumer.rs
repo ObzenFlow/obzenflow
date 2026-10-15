@@ -342,7 +342,7 @@ fn renamed_facade_macros_and_constructors_compile() {
 }
 
 use self::of::ai::{
-    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatCompletion, ChatCompletionReply,
+    AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatCompletion, ChatCompletionReply,
     ChatMessage, ChatParams, ChatRequestSpec, ChunkInfo, InferenceHandler, Many, TokenCount,
 };
 
@@ -390,7 +390,7 @@ impl AiMapRole<u64, Fact> for Pure {
     }
 }
 
-impl AiFinaliseRole<Fact, Many<Fact>, Fact> for Pure {
+impl AiFinalizeRole<Fact, Many<Fact>, Fact> for Pure {
     fn prepare(
         &self,
         _seed: &Fact,
@@ -416,13 +416,13 @@ fn ai_stages(chat: of::effects::EffectBinding<ChatCompletion>) {
             via chat with of::middleware::ai_resilience() => handler
     );
     let map_role = Pure;
-    let finalise_role = Pure;
+    let finalize_role = Pure;
     let _ = of::flow::ai_map_reduce!(
         Fact -> Fact => {
             map: [u64] -> Fact uses at_least_once(ChatCompletion)
                 via chat with of::middleware::ai_resilience() => map_role,
             reduce: (Fact, [Fact]) -> Fact uses at_least_once(ChatCompletion)
-                via chat with of::middleware::ai_resilience() => finalise_role,
+                via chat with of::middleware::ai_resilience() => finalize_role,
         },
         chunking: by_budget {
             items: |seed: &Fact| vec![seed.0],

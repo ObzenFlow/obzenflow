@@ -1590,8 +1590,8 @@ mod direct_fact_tests {
     }
 
     #[tokio::test]
-    async fn frozen_collectors_fence_map_and_finalise_at_exactly_three_rows() {
-        for role in ["map", "finalise"] {
+    async fn frozen_collectors_fence_map_and_finalize_at_exactly_three_rows() {
+        for role in ["map", "finalize"] {
             let (writer, reader, state) = enforced_writer(3);
             let effect_ordinals = Arc::new(AtomicU64::new(0));
             let chat_invocations = Arc::new(AtomicU64::new(0));

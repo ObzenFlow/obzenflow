@@ -344,10 +344,10 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                     Box::pin(async move {
 
                         Ok(Transition {
-                            next_state: JoinState::Finalising,
+                            next_state: JoinState::Finalizing,
                             actions: vec![JoinAction::ForwardEOF,
                                 JoinAction::SendCompletion,
-                                JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::FinalisationCompleted))],
+                                JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::FinalizationCompleted))],
                         })
                     })
                 };
@@ -406,8 +406,8 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                 };
             }
 
-            state JoinState::Finalising {
-                on JoinEvent::FinalisationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+            state JoinState::Finalizing {
+                on JoinEvent::FinalizationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let next_state = JoinState::Drained;
                     let _ = ctx;
                     Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
@@ -615,7 +615,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSuper
         match state {
             JoinState::Initializing
             | JoinState::Starting
-            | JoinState::Finalising
+            | JoinState::Finalizing
             | JoinState::Failing(_)
             | JoinState::Cancelling(_) => Ok(EventLoopDirective::Continue),
 

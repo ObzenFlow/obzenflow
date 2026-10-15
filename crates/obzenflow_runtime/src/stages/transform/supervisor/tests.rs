@@ -1182,7 +1182,7 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
 }
 
 #[tokio::test]
-async fn transform_finalisation_records_queued_controls_before_terminal_dispatch() {
+async fn transform_finalization_records_queued_controls_before_terminal_dispatch() {
     for state in [
         TransformState::Failed("archive corruption".into()),
         TransformState::Drained,
@@ -1219,7 +1219,7 @@ async fn transform_finalisation_records_queued_controls_before_terminal_dispatch
         );
         let pending = match &state {
             TransformState::Failed(cause) => TransformState::Failing(cause.clone()),
-            TransformState::Drained => TransformState::Finalising,
+            TransformState::Drained => TransformState::Finalizing,
             _ => unreachable!(),
         };
         wrapped.close_mailbox(&pending).await.unwrap();

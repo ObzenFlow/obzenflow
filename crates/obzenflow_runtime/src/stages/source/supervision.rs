@@ -574,7 +574,7 @@ pub(crate) async fn commit_reader_acquired(
 /// machine enters it (FLOWIP-134i B2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceExit {
-    Finalising,
+    Finalizing,
     Failing,
     Cancelling,
 }
@@ -598,7 +598,7 @@ impl SourceRelease {
     ) -> Self {
         let trigger = match (exit, completion) {
             (Some(SourceExit::Failing), _) => SourceCleanupTrigger::Failed,
-            (Some(SourceExit::Finalising), SourceCompletionCause::Exhausted) => {
+            (Some(SourceExit::Finalizing), SourceCompletionCause::Exhausted) => {
                 SourceCleanupTrigger::Exhausted
             }
             _ => SourceCleanupTrigger::Stopped,
