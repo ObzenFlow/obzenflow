@@ -37,7 +37,7 @@ pub(crate) enum PipelineAction {
         event: Box<SystemEvent>,
         outcome: ExecutionOutcome,
     },
-    FinaliseMetrics,
+    FinalizeMetrics,
     CancelMetrics,
     PublishFinalMarker,
 }
@@ -310,7 +310,7 @@ impl PipelineAction {
                 PublicationStep::Terminal,
                 Some(outcome.clone()),
             )?,
-            Self::FinaliseMetrics => {
+            Self::FinalizeMetrics => {
                 ctx.metrics_deadline = Some(
                     tokio::time::Instant::now()
                         + std::time::Duration::from_millis(ctx.metrics_drain_timeout_ms),
@@ -384,7 +384,7 @@ impl PipelineAction {
                                 None => Ok(()),
                             };
                             let settlement = scope.join().await;
-                            E::FinalisationCompleted {
+                            E::FinalizationCompleted {
                                 error: append
                                     .err()
                                     .map(|error| error.to_string())

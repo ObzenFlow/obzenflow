@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{
-    AiClientError, AiFinaliseRole, AiMapReduceFinaliseFailed, AiMapReducePlanningManifest,
+    AiClientError, AiFinalizeRole, AiMapReduceFinalizeFailed, AiMapReducePlanningManifest,
     AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply, ChatMessage, ChatParams,
     ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget, ChunkInfo, HeuristicTokenEstimator,
     Many, ResolvedTokenEstimator, TokenCount, TokenEstimatorFallbackReason,
@@ -197,15 +197,15 @@ impl AiMapRole<u64, Partial> for SumMap {
     }
 }
 
-struct SumFinalise;
+struct SumFinalize;
 
-impl AiFinaliseRole<Seed, Many<Partial>, Row> for SumFinalise {
+impl AiFinalizeRole<Seed, Many<Partial>, Row> for SumFinalize {
     fn prepare(
         &self,
         seed: &Seed,
         _collected: &Many<Partial>,
     ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        Ok(request(format!("finalise {}", seed.id)))
+        Ok(request(format!("finalize {}", seed.id)))
     }
 
     fn interpret(
@@ -215,7 +215,7 @@ impl AiFinaliseRole<Seed, Many<Partial>, Row> for SumFinalise {
         _request: ChatRequestSpec,
         _reply: ChatCompletionReply,
     ) -> Result<Row, AiRoleLogicFailure> {
-        // A different payload family in the same finalise journal must never
+        // A different payload family in the same finalize journal must never
         // be decoded as Row by either side of a downstream join.
         if seed.id == 4 {
             return Err(AiRoleLogicFailure::Parse {
@@ -234,13 +234,13 @@ macro_rules! digest {
     ($chat:expr) => {{
         let chat = $chat;
         let map_role = SumMap;
-        let finalise_role = SumFinalise;
+        let finalize_role = SumFinalize;
         ai_map_reduce!(
             Seed -> Row => {
                 map: [u64] -> Partial
                     uses at_least_once(ChatCompletion) via chat with ai_resilience() => map_role,
                 reduce: (Seed, [Partial]) -> Row
-                    uses at_least_once(ChatCompletion) via chat with ai_resilience() => finalise_role,
+                    uses at_least_once(ChatCompletion) via chat with ai_resilience() => finalize_role,
             },
             chunking: by_budget {
                 items: |seed: &Seed| seed.values.clone(),
@@ -556,13 +556,13 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
     }
     assert_eq!(counts, BTreeMap::from([(1, 3), (2, 0), (3, 2), (4, 1)]));
 
-    let finalise = stage_records(run, "digest__finalize").await;
-    let reduced = typed::<Row>(&finalise);
+    let finalize = stage_records(run, "digest__finalize").await;
+    let reduced = typed::<Row>(&finalize);
     assert_eq!(reduced.len(), 3);
     for (row, record) in &reduced {
         assert_activation(record, &activations[&row.id]);
     }
-    let failed = typed::<AiMapReduceFinaliseFailed>(&finalise);
+    let failed = typed::<AiMapReduceFinalizeFailed>(&finalize);
     assert_eq!(failed.len(), 1, "the deliberate failure remains durable");
     assert_eq!(failed[0].0.job_key, activations[&4].activation);
     assert_activation(failed[0].1, &activations[&4]);
@@ -660,7 +660,7 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
         assert_eq!(*eofs[0].0, EofKind::Natural);
         assert_eq!(eofs[0].1[&kind].0, count);
         if stage == "digest__finalize" {
-            assert_eq!(eofs[0].1[&AiMapReduceFinaliseFailed::descriptor()].0, 1);
+            assert_eq!(eofs[0].1[&AiMapReduceFinalizeFailed::descriptor()].0, 1);
         }
     }
 
@@ -802,7 +802,7 @@ async fn exercise(placement: Placement) {
         assert_eq!(
             counters.chat_calls.load(Ordering::SeqCst),
             if replay { 0 } else { 10 },
-            "six map calls and four finalise calls; replay performs neither"
+            "six map calls and four finalize calls; replay performs neither"
         );
         assert_eq!(counters.source_reads.load(Ordering::SeqCst) == 0, replay);
         assert_eq!(*delivered.lock().unwrap(), placement.expected());

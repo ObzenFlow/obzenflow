@@ -356,6 +356,8 @@ where
     /// Never advanced while a watermark head is merely held.
     generation_by_reader: Vec<ReaderGeneration>,
 
+    promoted_generation: ReaderGeneration,
+
     /// Generation of the last delivered event: the delivering reader's
     /// generation at delivery time (a watermark delivers at the generation it
     /// closes, not the one it announces).
@@ -704,7 +706,7 @@ where
     /// below a finite source author its own watermark.
     pub fn all_readers_caught_up(&self, target: ReaderGeneration) -> bool {
         (0..self.readers.len()).all(|index| {
-            self.generation_by_reader[index] >= target || self.state.is_reader_eof(index)
+            self.effective_generation(index) >= target || self.state.is_reader_eof(index)
         })
     }
 
@@ -712,11 +714,18 @@ where
     /// flip target when an authored EOF, not a watermark, completes the
     /// frontier. `ReaderGeneration(0)` when no watermark has delivered.
     pub fn max_reader_generation(&self) -> ReaderGeneration {
-        self.generation_by_reader
-            .iter()
-            .copied()
+        (0..self.generation_by_reader.len())
+            .map(|index| self.effective_generation(index))
             .max()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn effective_generation(&self, index: usize) -> ReaderGeneration {
+        self.generation_by_reader[index].max(self.promoted_generation)
+    }
+
+    pub(crate) fn promote_held_readers(&mut self, generation: ReaderGeneration) {
+        self.promoted_generation = self.promoted_generation.max(generation);
     }
 
     /// Check if there are any upstream journals

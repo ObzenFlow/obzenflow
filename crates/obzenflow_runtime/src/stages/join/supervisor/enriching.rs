@@ -14,11 +14,11 @@ use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, StageKey};
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -29,6 +29,9 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{
     JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
 };
+use crate::stages::join::phase::{
+    enriching_holds_catalog, observe_hold_eof, HoldOutcome, PhaseReads,
+};
 
 pub(super) async fn dispatch_enriching<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -38,6 +41,10 @@ pub(super) async fn dispatch_enriching<
     ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
+    let holds_catalog = enriching_holds_catalog(ctx.reference_mode);
+    if holds_catalog {
+        common::renew_held_inputs(ctx, JoinSubscriptionSide::Reference);
+    }
 
     ctx.instrumentation
         .event_loops_total
@@ -91,6 +98,7 @@ pub(super) async fn dispatch_enriching<
                             sup.stream_subscription.as_ref(),
                             ctx,
                             *announced,
+                            PhaseReads::Stream,
                         )
                         .await);
                     }
@@ -107,6 +115,7 @@ pub(super) async fn dispatch_enriching<
                             sup.reference_subscription.as_ref(),
                             Some(&*subscription),
                             ctx,
+                            PhaseReads::Stream,
                         )
                         .await
                         {
@@ -159,6 +168,64 @@ pub(super) async fn dispatch_enriching<
                         &ctx.stage_name,
                     )
                     .await;
+
+                    if holds_catalog
+                        && envelope.is_eof()
+                        && matches!(
+                            resolution,
+                            ControlAction::Forward | ControlAction::ForwardAndDrain
+                        )
+                    {
+                        common::forward_control_to_journal(ctx, &envelope).await?;
+                        let _ = subscription.take_last_eof_outcome();
+                        let stream_final = last_eof_outcome
+                            .as_ref()
+                            .filter(|outcome| outcome.is_final)
+                            .map(|outcome| {
+                                (
+                                    outcome.worst_kind.unwrap_or(EofKind::Natural),
+                                    StageKey::from(outcome.stage_name.clone()),
+                                )
+                            });
+                        let generation =
+                            subscription.last_delivered_generation().unwrap_or_default();
+                        let directive = match observe_hold_eof(
+                            ctx,
+                            JoinSubscriptionSide::Stream,
+                            &envelope,
+                            stream_final,
+                            generation,
+                        ) {
+                            HoldOutcome::Holding => EventLoopDirective::Continue,
+                            HoldOutcome::Completed(completion) => {
+                                tracing::info!(
+                                    stage_name = %ctx.stage_name,
+                                    ended_by = ?completion.ended_by,
+                                    "Join batch completed on natural EOFs; going live"
+                                );
+                                EventLoopDirective::Transition(JoinEvent::HoldCompleted(completion))
+                            }
+                            HoldOutcome::LeftOpen => {
+                                tracing::info!(
+                                    stage_name = %ctx.stage_name,
+                                    "Join batch left open; draining without held inputs"
+                                );
+                                ctx.drain_without_held_inputs = true;
+                                EventLoopDirective::Transition(JoinEvent::HoldLeftOpen)
+                            }
+                        };
+                        subscription
+                            .maybe_check_contracts_tick(
+                                &mut ctx.stream_contract_state[..],
+                                &mut ctx.stream_last_contract_check,
+                            )
+                            .await
+                            .unwrap_or(
+                                crate::messaging::upstream_subscription::ContractStatus::Healthy,
+                            )
+                            .into_result()?;
+                        return Ok(directive);
+                    }
 
                     match resolution {
                         ControlAction::Forward => {

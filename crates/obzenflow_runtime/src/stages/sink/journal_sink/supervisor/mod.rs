@@ -163,8 +163,8 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> Supervisor
                 };
             }
 
-            state JournalSinkState::Finalising {
-                on JournalSinkEvent::FinalisationCompleted => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+            state JournalSinkState::Finalizing {
+                on JournalSinkEvent::FinalizationCompleted => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: JournalSinkState::Drained, actions: vec![] }) })
                 };
                 on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
@@ -250,7 +250,7 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> Supervisor
 
             state JournalSinkState::CheckingContracts {
                 on JournalSinkEvent::ContractsAccepted => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: JournalSinkState::Finalising, actions: vec![JournalSinkAction::SendCompletion, JournalSinkAction::Cleanup, JournalSinkAction::Host(SupervisorAction::CloseMailbox), JournalSinkAction::Host(SupervisorAction::SettlePublications), JournalSinkAction::Host(SupervisorAction::Emit(JournalSinkEvent::FinalisationCompleted))] }) })
+                    Box::pin(async move { Ok(Transition { next_state: JournalSinkState::Finalizing, actions: vec![JournalSinkAction::SendCompletion, JournalSinkAction::Cleanup, JournalSinkAction::Host(SupervisorAction::CloseMailbox), JournalSinkAction::Host(SupervisorAction::SettlePublications), JournalSinkAction::Host(SupervisorAction::Emit(JournalSinkEvent::FinalizationCompleted))] }) })
                 };
                 on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     let JournalSinkEvent::Error(cause) = event else { unreachable!() };
@@ -266,7 +266,7 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> Supervisor
                 let event = event.clone();
                 Box::pin(async move {
                     if matches!(event, JournalSinkEvent::Initialize | JournalSinkEvent::Ready | JournalSinkEvent::BeginDrain)
-                        || (matches!(event, JournalSinkEvent::BeginFlush | JournalSinkEvent::ReceivedEOF) && matches!(state, JournalSinkState::Flushing | JournalSinkState::DrainingWriter | JournalSinkState::CheckingContracts | JournalSinkState::Finalising))
+                        || (matches!(event, JournalSinkEvent::BeginFlush | JournalSinkEvent::ReceivedEOF) && matches!(state, JournalSinkState::Flushing | JournalSinkState::DrainingWriter | JournalSinkState::CheckingContracts | JournalSinkState::Finalizing))
                         || matches!(state, JournalSinkState::Failing(_) | JournalSinkState::Cancelling(_) | JournalSinkState::Failed(_) | JournalSinkState::Cancelled(_) | JournalSinkState::Drained)
                     {
                         return Ok(());
@@ -408,7 +408,7 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
         match state {
             JournalSinkState::Initializing
             | JournalSinkState::Starting
-            | JournalSinkState::Finalising
+            | JournalSinkState::Finalizing
             | JournalSinkState::Failing(_)
             | JournalSinkState::Cancelling(_)
             | JournalSinkState::DrainingWriter

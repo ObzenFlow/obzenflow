@@ -317,7 +317,7 @@ async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
         .with_metrics_exporter(metrics_model.clone());
-    // Own a unique directory for the entire run, including metrics finalisation.
+    // Own a unique directory for the entire run, including metrics finalization.
     let journals = tempfile::tempdir_in("target")?;
     let journal_root = journals.path().to_path_buf();
     eprintln!(
@@ -687,7 +687,7 @@ interval_ms = 250
                     && event.flow_context.stage_name == "high_volume_source"
                 {
                     assert_eq!(
-                        runtime.fsm_state, "Finalising",
+                        runtime.fsm_state, "Finalizing",
                         "the source is still settling its terminal publications when it authors EOF"
                     );
                 }
@@ -1746,7 +1746,7 @@ enabled = {prometheus}
                     SystemFact::PipelineLifecycle(PipelineFact::Drained)
                 ))]
             ));
-            let finalisation_ms = systems[drained]
+            let finalization_ms = systems[drained]
                 .envelope
                 .provenance
                 .journal
@@ -1754,8 +1754,8 @@ enabled = {prometheus}
                 .signed_duration_since(systems[terminal].envelope.provenance.journal.timestamp)
                 .num_milliseconds();
             assert!(
-                (0..5_000).contains(&finalisation_ms),
-                "metrics must finish inside the existing five-second attempt: {finalisation_ms}ms"
+                (0..5_000).contains(&finalization_ms),
+                "metrics must finish inside the existing five-second attempt: {finalization_ms}ms"
             );
             if count == JOURNAL_PROOF_INPUTS {
                 let snapshot = model.snapshot();
@@ -1772,9 +1772,9 @@ enabled = {prometheus}
                 let journal = journal_by_writer[&writer];
                 assert!(systems.iter().filter(|row| row.envelope.provenance.journal.timestamp < systems[terminal].envelope.provenance.journal.timestamp).any(|row| matches!(&row.payload,
                     SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark })
-                        if watermark.clocks.iter().any(|(coordinate, sequence)| coordinate.journal_writer_id == journal && *sequence > 0))), "live collection must advance before finalisation");
+                        if watermark.clocks.iter().any(|(coordinate, sequence)| coordinate.journal_writer_id == journal && *sequence > 0))), "live collection must advance before finalization");
             }
-            println!("Prometheus proof: {count} inputs, mode={mode:?}, metrics finalisation={finalisation_ms}ms, archive={}", archive.display());
+            println!("Prometheus proof: {count} inputs, mode={mode:?}, metrics finalization={finalization_ms}ms, archive={}", archive.display());
         } else {
             assert!(!systems
                 .iter()

@@ -112,6 +112,11 @@ pub trait TypedJoinHandler: Send + Sync {
         JoinReferenceMode::FiniteEof
     }
 
+    #[doc(hidden)]
+    fn strategy_label(&self) -> Option<&'static str> {
+        None
+    }
+
     fn admit_reference(
         &self,
         reference: &Self::Reference,
@@ -315,6 +320,10 @@ where
 
     fn reference_mode(&self) -> JoinReferenceMode {
         self.reference_mode
+    }
+
+    fn strategy_label(&self) -> Option<&'static str> {
+        self.handler.strategy_label()
     }
 
     fn reference_batch_cap(&self) -> Option<usize> {

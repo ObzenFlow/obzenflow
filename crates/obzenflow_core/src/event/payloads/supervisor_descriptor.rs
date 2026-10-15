@@ -19,6 +19,7 @@ pub enum SupervisorKind {
     Transform,
     Stateful,
     Join,
+    Merge,
     Sink,
 }
 
@@ -38,6 +39,7 @@ impl SupervisorKind {
             Self::Transform => "Transform",
             Self::Stateful => "Stateful",
             Self::Join => "Join",
+            Self::Merge => "Merge",
             Self::Sink => "Sink",
         }
     }

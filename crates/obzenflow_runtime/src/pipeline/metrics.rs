@@ -38,7 +38,7 @@ pub(super) async fn prepare_metrics(
                         obzenflow_core::metrics::StageMetadata {
                             name: stage.name.clone(),
                             stage_type: handle.stage_type(),
-                            reference_mode: None,
+                            reference_mode: handle.reference_mode_label().map(str::to_owned),
                             flow_name: context.flow_name.clone(),
                             flow_id: Some(context.flow_id),
                         },
@@ -84,6 +84,7 @@ pub(crate) fn compute_flow_lifecycle_metrics(
                 obzenflow_topology::StageType::Sink => CoreStageType::Sink,
                 obzenflow_topology::StageType::Stateful => CoreStageType::Stateful,
                 obzenflow_topology::StageType::Join => CoreStageType::Join,
+                obzenflow_topology::StageType::Merge => CoreStageType::Merge,
             };
 
             match core_type {

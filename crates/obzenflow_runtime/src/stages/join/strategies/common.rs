@@ -44,6 +44,7 @@ pub trait JoinStrategy {
     type StreamType: TypedPayload + Clone + Send + Sync;
     type EnrichedType: TypedPayload + Clone + Send + Sync;
     type Key: Eq + Hash + Clone + Send + Sync + std::fmt::Debug;
+    const LABEL: &'static str;
 
     fn match_reference(
         &self,
@@ -115,6 +116,10 @@ where
 
     fn reference_mode(&self) -> JoinReferenceMode {
         self.reference_mode
+    }
+
+    fn strategy_label(&self) -> Option<&'static str> {
+        Some(S::LABEL)
     }
 
     fn admit_reference(

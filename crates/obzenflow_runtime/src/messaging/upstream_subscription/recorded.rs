@@ -423,7 +423,7 @@ where
             .filter(|&index| {
                 !self.state.is_reader_eof(index)
                     && self.held_heads[index].is_none()
-                    && self.generation_by_reader[index] < self.entered_generation
+                    && self.effective_generation(index) < self.entered_generation
             })
             .map(|index| {
                 let slot = &self.readers[index];

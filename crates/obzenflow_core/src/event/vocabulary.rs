@@ -95,6 +95,10 @@ event_names! {
     backpressure => "backpressure" {
         STALL_DETECTED => "stall_detected",
     },
+    join => "join" {
+        ENRICHING_ENTERED => "enriching_entered",
+        LIVE_ENTERED => "live_entered",
+    },
     ingress => "ingress" {
         ATTEMPT_REFUSED => "attempt_refused",
         DUPLICATE_RECOGNIZED => "duplicate_recognized",

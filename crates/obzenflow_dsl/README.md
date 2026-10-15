@@ -74,7 +74,7 @@ cannot belong to a join; internal composite joins use
 ## AI stages
 
 - `inference!` makes one model decision for each already-bounded input.
-- `ai_map_reduce!` budgets and chunks input, collects map results, and finalises them.
+- `ai_map_reduce!` budgets and chunks input, collects map results, and finalizes them.
 
 Both use a declared chat effect and a lexical `EffectBinding<ChatCompletion>`
 through `via`. Handlers and roles prepare a `ChatRequestSpec`; the effect boundary

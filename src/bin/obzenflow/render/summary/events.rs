@@ -385,6 +385,7 @@ impl Renderer {
                                     | SupervisorKind::Transform
                                     | SupervisorKind::Stateful
                                     | SupervisorKind::Join
+                                    | SupervisorKind::Merge
                                     | SupervisorKind::Sink => "stage",
                                 };
                                 format!("{subject}.{suffix}")

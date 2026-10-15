@@ -253,7 +253,8 @@ impl ChainPayload {
                 | ExecutionPayload::HttpPullState(_)
                 | ExecutionPayload::AiChunkingPlanned(_)
                 | ExecutionPayload::AccumulatorProgress { .. }
-                | ExecutionPayload::JoinReferenceProgress { .. } => ReplayDisposition::ReAuthor,
+                | ExecutionPayload::JoinReferenceProgress { .. }
+                | ExecutionPayload::JoinPhase(_) => ReplayDisposition::ReAuthor,
             },
             ChainPayload::FlowControl(payload) => match payload {
                 // The catch-up boundary's meaning is its stream position, so

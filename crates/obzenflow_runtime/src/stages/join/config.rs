@@ -6,7 +6,7 @@
 
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::observer::StageObserverBindings;
-use obzenflow_core::StageId;
+use obzenflow_core::{StageId, StageKey};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -25,6 +25,45 @@ pub enum JoinReferenceMode {
 
     /// Live mode: consume reference updates and stream events concurrently (no reference EOF gate).
     Live,
+
+    /// Hydrate the batch catalog, then enrich the batch stream, then run live over
+    /// every input. Each phase ends only on the natural EOFs of its witnesses.
+    FiniteThenLive,
+}
+
+impl JoinReferenceMode {
+    /// Whether this mode reaches the `Live` state and records its order there.
+    pub fn goes_live(self) -> bool {
+        matches!(self, Self::Live | Self::FiniteThenLive)
+    }
+
+    /// The `reference_mode` label a join's stage metrics carry.
+    pub fn metrics_label(self) -> &'static str {
+        match self {
+            Self::FiniteEof => "finite_eof",
+            Self::Live => "live",
+            Self::FiniteThenLive => "finite_then_live",
+        }
+    }
+}
+
+/// One stage whose natural EOF ends a then-live join's holding state, by its
+/// stable key and its stage ID in this run.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhaseWitness {
+    pub stage_key: StageKey,
+    pub stage_id: StageId,
+}
+
+/// The authored natural EOFs that end a then-live join's holding states,
+/// computed by the flow build.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhaseWitnesses {
+    /// Stages whose natural EOFs, arriving on the catalog, end hydration.
+    pub catalog: Vec<PhaseWitness>,
+    /// Stages whose natural EOFs, arriving on the stream, end the batch. Empty
+    /// when the join has no batch stream input, so hydration leads to `Live`.
+    pub batch_stream: Vec<PhaseWitness>,
 }
 
 /// Configuration for a join stage
@@ -51,6 +90,9 @@ pub struct JoinConfig {
 
     /// Reference join mode (default: FiniteEof).
     pub reference_mode: JoinReferenceMode,
+
+    /// Then-live phase witnesses, `Some` exactly in `FiniteThenLive` mode.
+    pub phase_witnesses: Option<PhaseWitnesses>,
 
     /// Live-mode fairness cap: after N reference events without a stream event, prioritize a
     /// stream poll. `None` disables the cap (pure priority based on selection order).
@@ -82,6 +124,7 @@ impl JoinConfig {
             reference_source_id,
             stream_source_id,
             reference_mode: JoinReferenceMode::FiniteEof,
+            phase_witnesses: None,
             reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             control_strategy: None,
             upstream_stages: vec![reference_source_id, stream_source_id],

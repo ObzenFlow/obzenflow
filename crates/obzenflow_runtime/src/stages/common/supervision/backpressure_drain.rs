@@ -23,7 +23,9 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use std::sync::Arc;
 
-use crate::backpressure::{BackpressureWriter, DirectFactLease, LimitingEdgeDetail};
+use crate::backpressure::{
+    BackpressureWriter, DirectFactLease, LimitingEdgeDetail, StallEpisode, StallVerdict,
+};
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
@@ -44,9 +46,6 @@ pub(crate) enum DrainOutcome {
     BackedOff,
 }
 
-/// Runtime-owned bound on one blocked suspend: the loop re-enters
-/// `dispatch_state` at least this often so queued control is observed, while
-/// the anchored stall deadline alone decides the stall (FLOWIP-115e).
 pub(crate) const CONTROL_RESPONSIVENESS_CAP: std::time::Duration =
     std::time::Duration::from_millis(250);
 
@@ -100,7 +99,7 @@ pub(crate) async fn drain_one_pending(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut Option<tokio::time::Instant>,
+    backpressure_stall: &mut StallEpisode,
     output_contract: Option<&StageOutputContract>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
@@ -122,10 +121,6 @@ pub(crate) async fn drain_one_pending(
     {
         DrainAttempt::Committed { was_data } => Ok(DrainOutcome::Committed { was_data }),
         DrainAttempt::BackedOff { bound, waker } => {
-            // One chunk of the credit wait: wake on the downstream ack or at
-            // the chunk boundary, then return to dispatch_state either way.
-            // Only the anchored deadline in `backpressure_stall` can author
-            // the stall fact, so intermediate wakes never extend the episode.
             let wait_started = tokio::time::Instant::now();
             let _ = suspend_until(&WakeOn::Notify(waker), Some(bound)).await;
             let measured = wait_started.elapsed();
@@ -159,7 +154,7 @@ pub(crate) struct DirectFactLeaseRequest<'a> {
     pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
     pub instrumentation: &'a Arc<StageInstrumentation>,
     pub backpressure_pulse: &'a mut BackpressureActivityPulse,
-    pub backpressure_stall: &'a mut Option<tokio::time::Instant>,
+    pub backpressure_stall: &'a mut StallEpisode,
 }
 
 pub(crate) async fn acquire_direct_fact_lease(
@@ -177,42 +172,47 @@ pub(crate) async fn acquire_direct_fact_lease(
     } = request;
     match DirectFactLease::try_acquire(writer, bound) {
         Ok(Some(lease)) => {
-            *backpressure_stall = None;
+            backpressure_stall.end();
             Ok(Some(lease))
         }
         Err(message) => Err(message.into()),
         Ok(None) => {
-            let started = *backpressure_stall.get_or_insert_with(tokio::time::Instant::now);
-            let detail = writer.limiting_detail().ok_or_else(|| {
-                "generated direct-fact admission was blocked without an enforced edge".to_string()
-            })?;
-            let elapsed = started.elapsed();
-            if elapsed >= detail.stall_timeout {
-                emit_stalled_fact(
-                    stage_id,
-                    flow_context,
-                    &detail,
+            let verdict = writer
+                .look(backpressure_stall, bound.get(), tokio::time::Instant::now())
+                .ok_or_else(|| {
+                    "generated direct-fact admission was blocked without an enforced edge"
+                        .to_string()
+                })?;
+            let wait_bound = match verdict {
+                StallVerdict::Stalled {
+                    edge: detail,
                     elapsed,
-                    data_journal,
-                    instrumentation,
-                )
-                .await;
-                emit_poison_eof(stage_id, flow_context, data_journal, instrumentation).await;
-                return Err(format!(
-                    "backpressure.stalled: generated direct-fact admission for {} rows on \
-                     edge {stage_id}|>{} exceeded its stall ceiling ({} ms elapsed, timeout \
-                     {} ms, window {}, in flight {})",
-                    bound,
-                    detail.downstream,
-                    elapsed.as_millis(),
-                    detail.stall_timeout.as_millis(),
-                    detail.window,
-                    detail.in_flight,
-                )
-                .into());
-            }
-
-            let wait_bound = (detail.stall_timeout - elapsed).min(CONTROL_RESPONSIVENESS_CAP);
+                } => {
+                    emit_stalled_fact(
+                        stage_id,
+                        flow_context,
+                        &detail,
+                        elapsed,
+                        data_journal,
+                        instrumentation,
+                    )
+                    .await;
+                    emit_poison_eof(stage_id, flow_context, data_journal, instrumentation).await;
+                    return Err(format!(
+                        "backpressure.stalled: generated direct-fact admission for {} rows on \
+                         edge {stage_id}|>{} exceeded its stall ceiling ({} ms elapsed, timeout \
+                         {} ms, window {}, in flight {})",
+                        bound,
+                        detail.downstream,
+                        elapsed.as_millis(),
+                        detail.stall_timeout.as_millis(),
+                        detail.window,
+                        detail.in_flight,
+                    )
+                    .into());
+                }
+                StallVerdict::Wait { bound, .. } => bound.min(CONTROL_RESPONSIVENESS_CAP),
+            };
             let waker = writer
                 .credit_waker()
                 .ok_or_else(|| "generated direct-fact admission has no credit waker".to_string())?;
@@ -253,7 +253,7 @@ pub(crate) async fn drain_one_pending_resolve(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut Option<tokio::time::Instant>,
+    backpressure_stall: &mut StallEpisode,
     output_contract: Option<&StageOutputContract>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
@@ -311,7 +311,7 @@ pub(crate) async fn drain_one_pending_resolve(
                         reservation,
                     )
                     .await?;
-                *backpressure_stall = None;
+                backpressure_stall.end();
                 return Ok(DrainAttempt::Committed { was_data: true });
             }
 
@@ -330,40 +330,38 @@ pub(crate) async fn drain_one_pending_resolve(
             let Some(reservation) = backpressure_writer.reserve(1) else {
                 pending_outputs.push_front(pending);
 
-                // The stall episode anchors at the first credit miss and only
-                // its exhaustion against the CURRENT limiting edge's ceiling
-                // authors the stall fact; wakes and chunk boundaries never
-                // reset it.
-                let started = *backpressure_stall.get_or_insert_with(tokio::time::Instant::now);
-                let detail = backpressure_writer
-                    .limiting_detail()
+                let verdict = backpressure_writer
+                    .look(backpressure_stall, 1, tokio::time::Instant::now())
                     .expect("a blocked writer has enforced downstream edges");
-                let elapsed = started.elapsed();
-
-                if elapsed >= detail.stall_timeout {
-                    emit_stalled_fact(
-                        stage_id,
-                        flow_context,
-                        &detail,
+                let bound = match verdict {
+                    StallVerdict::Stalled {
+                        edge: detail,
                         elapsed,
-                        data_journal,
-                        instrumentation,
-                    )
-                    .await;
-                    emit_poison_eof(stage_id, flow_context, data_journal, instrumentation).await;
-                    return Err(format!(
-                        "backpressure.stalled: edge {stage_id}|>{} exceeded its stall ceiling \
+                    } => {
+                        emit_stalled_fact(
+                            stage_id,
+                            flow_context,
+                            &detail,
+                            elapsed,
+                            data_journal,
+                            instrumentation,
+                        )
+                        .await;
+                        emit_poison_eof(stage_id, flow_context, data_journal, instrumentation)
+                            .await;
+                        return Err(format!(
+                            "backpressure.stalled: edge {stage_id}|>{} exceeded its stall ceiling \
                      ({} ms elapsed, timeout {} ms, window {}, in flight {})",
-                        detail.downstream,
-                        elapsed.as_millis(),
-                        detail.stall_timeout.as_millis(),
-                        detail.window,
-                        detail.in_flight,
-                    )
-                    .into());
-                }
-
-                let bound = (detail.stall_timeout - elapsed).min(CONTROL_RESPONSIVENESS_CAP);
+                            detail.downstream,
+                            elapsed.as_millis(),
+                            detail.stall_timeout.as_millis(),
+                            detail.window,
+                            detail.in_flight,
+                        )
+                        .into());
+                    }
+                    StallVerdict::Wait { bound, .. } => bound.min(CONTROL_RESPONSIVENESS_CAP),
+                };
                 let waker = backpressure_writer
                     .credit_waker()
                     .expect("a blocked writer has backpressure state");
@@ -382,7 +380,7 @@ pub(crate) async fn drain_one_pending_resolve(
                 )
                 .await?;
 
-            *backpressure_stall = None;
+            backpressure_stall.end();
 
             Ok(DrainAttempt::Committed { was_data: true })
         } else {
@@ -440,9 +438,6 @@ async fn emit_bypass_pulse_if_needed(
     }
 }
 
-/// Author the `backpressure.stalled` fact (FLOWIP-115e): the continuous
-/// stall exceeded the limiting edge's ceiling. Live-scoped only; the caller
-/// then emits poison EOF and fails the stage through the dispatch error path.
 async fn emit_stalled_fact(
     stage_id: StageId,
     flow_context: &FlowContext,

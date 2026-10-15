@@ -9,6 +9,7 @@
 //! [`crate::effects`], and application hosting in [`crate::application`].
 
 pub mod joins;
+pub mod merges;
 pub mod sinks;
 pub mod sources;
 pub mod stateful;

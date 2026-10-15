@@ -18,7 +18,7 @@ use self::async_trait::async_trait;
 use self::of::effects::{Effects, StageCompletion};
 use self::of::prelude::*;
 use self::of::schema::{StageFactSet, TypedFactSet};
-use self::of::stages::{joins, sinks, sources, stateful, transforms};
+use self::of::stages::{joins, merges, sinks, sources, stateful, transforms};
 use self::serde::{Deserialize, Serialize};
 use self::std::prelude::rust_2021::*;
 use self::std::vec;
@@ -294,6 +294,25 @@ fn renamed_facade_macros_and_constructors_compile() {
         |_reference: Fact, fact: Fact| fact,
     );
     let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => joined);
+    let _ = merge!(Fact => merges::then_live);
+    let _ = of::flow::merge!(Fact => merges::then_live);
+    let then_live = joins::inner_then_live(
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |_reference: Fact, fact: Fact| fact,
+    );
+    let _ = join!(catalog input: Fact, Fact -> Fact => then_live);
+    let _ = joins::left_then_live(
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |_reference: Option<Fact>, fact: Fact| fact,
+    );
+    let _ = joins::strict_then_live(
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |_reference: Fact, fact: Fact| fact,
+    );
+    let _ = joins::JoinReferenceMode::FiniteThenLive;
     let _ = source!(Fact => Pure);
     let _ = async_source!(Fact => Pure);
     let _ = infinite_source!(Fact => Pure);
@@ -323,7 +342,7 @@ fn renamed_facade_macros_and_constructors_compile() {
 }
 
 use self::of::ai::{
-    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatCompletion, ChatCompletionReply,
+    AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatCompletion, ChatCompletionReply,
     ChatMessage, ChatParams, ChatRequestSpec, ChunkInfo, InferenceHandler, Many, TokenCount,
 };
 
@@ -371,7 +390,7 @@ impl AiMapRole<u64, Fact> for Pure {
     }
 }
 
-impl AiFinaliseRole<Fact, Many<Fact>, Fact> for Pure {
+impl AiFinalizeRole<Fact, Many<Fact>, Fact> for Pure {
     fn prepare(
         &self,
         _seed: &Fact,
@@ -397,13 +416,13 @@ fn ai_stages(chat: of::effects::EffectBinding<ChatCompletion>) {
             via chat with of::middleware::ai_resilience() => handler
     );
     let map_role = Pure;
-    let finalise_role = Pure;
+    let finalize_role = Pure;
     let _ = of::flow::ai_map_reduce!(
         Fact -> Fact => {
             map: [u64] -> Fact uses at_least_once(ChatCompletion)
                 via chat with of::middleware::ai_resilience() => map_role,
             reduce: (Fact, [Fact]) -> Fact uses at_least_once(ChatCompletion)
-                via chat with of::middleware::ai_resilience() => finalise_role,
+                via chat with of::middleware::ai_resilience() => finalize_role,
         },
         chunking: by_budget {
             items: |seed: &Fact| vec![seed.0],

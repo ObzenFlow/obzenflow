@@ -3,9 +3,9 @@
 // https://obzenflow.dev
 
 use super::domain::*;
-use super::handlers::{AccountBook, Checkbook};
+use super::handlers::Checkbook;
 use obzenflow::flow::{
-    async_infinite_source, flow, join, sink, source, stateful, transform, FlowBuildError,
+    async_infinite_source, flow, join, merge, sink, source, stateful, FlowBuildError,
     FlowDefinition,
 };
 use obzenflow::journal::disk_journals;
@@ -16,7 +16,7 @@ use obzenflow::stages::sources::{
     IngressDecoder, IngressRecord, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
     YamlSource,
 };
-use obzenflow::stages::{joins, sinks};
+use obzenflow::stages::{joins, merges, sinks};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -116,13 +116,7 @@ pub fn build_flow(
             .chunk_size(1)
             .build()
             .map_err(|error| FlowBuildError::StageResourcesFailed(error.to_string()))?;
-        let account_book = AccountBook;
-        let post_batch = joins::inner(
-            |account: &AccountOpened| account.account_id.clone(),
-            |entry: &LedgerEntry| entry.account_id.clone(),
-            post,
-        );
-        let post_live = joins::inner_live(
+        let post_entry = joins::inner_then_live(
             |account: &AccountOpened| account.account_id.clone(),
             |entry: &LedgerEntry| entry.account_id.clone(),
             post,
@@ -188,22 +182,19 @@ pub fn build_flow(
 
             stages: {
                 // Ingestion
-                accounts = source!(AccountOpened => accounts_source);
-                ledger = source!(LedgerEntry => ledger_source with { rate_limit(2.0) });
-                new_accounts = async_infinite_source!(AccountOpened => new_accounts_source);
-                tx = async_infinite_source!(
+                batch_accounts = source!(AccountOpened => accounts_source);
+                batch_tx = source!(LedgerEntry => ledger_source with { rate_limit(2.0) });
+                live_accounts = async_infinite_source!(AccountOpened => new_accounts_source);
+                live_tx = async_infinite_source!(
                     LedgerEntry => tx_source with { rate_limit(50.0) }
                 );
 
                 // Processing
-                all_accounts = transform!(AccountOpened -> AccountOpened => account_book);
-                posted_batch = join!(
+                accounts = merge!(AccountOpened => merges::then_live);
+                transactions = merge!(LedgerEntry => merges::then_live);
+                posted = join!(
                     catalog accounts: AccountOpened,
-                    LedgerEntry -> PostedEntry => post_batch
-                );
-                posted_live = join!(
-                    catalog all_accounts: AccountOpened,
-                    LedgerEntry -> PostedEntry => post_live
+                    LedgerEntry -> PostedEntry => post_entry
                 );
                 checkbook = stateful!(
                     PostedEntry -> CheckbookSnapshot => checkbook_handler
@@ -216,12 +207,12 @@ pub fn build_flow(
             },
 
             topology: {
-                accounts |> all_accounts;
-                new_accounts |> all_accounts;
-                (accounts, ledger) |> posted_batch;
-                (all_accounts, tx) |> posted_live;
-                posted_batch |> checkbook;
-                posted_live |> checkbook;
+                batch_accounts |> accounts;
+                live_accounts |> accounts;
+                batch_tx |> transactions;
+                live_tx |> transactions;
+                (accounts, transactions) |> posted;
+                posted |> checkbook;
                 checkbook |> printer;
             }
         })

@@ -48,7 +48,7 @@ pub enum FiniteSourceState<H> {
 
     Initializing,
     Starting,
-    Finalising,
+    Finalizing,
     AcquiringInput,
     Failing(String),
     Cancelling(String),
@@ -84,7 +84,7 @@ impl<H> Clone for FiniteSourceState<H> {
             Self::Created => Self::Created,
             Self::Initializing => Self::Initializing,
             Self::Starting => Self::Starting,
-            Self::Finalising => Self::Finalising,
+            Self::Finalizing => Self::Finalizing,
             Self::AcquiringInput => Self::AcquiringInput,
             Self::Failing(cause) => Self::Failing(cause.clone()),
             Self::Cancelling(cause) => Self::Cancelling(cause.clone()),
@@ -107,7 +107,7 @@ impl<H> std::fmt::Debug for FiniteSourceState<H> {
             Self::Created => write!(f, "Created"),
             Self::Initializing => write!(f, "Initializing"),
             Self::Starting => write!(f, "Starting"),
-            Self::Finalising => write!(f, "Finalising"),
+            Self::Finalizing => write!(f, "Finalizing"),
             Self::AcquiringInput => write!(f, "AcquiringInput"),
             Self::Failing(cause) => write!(f, "Failing({cause:?})"),
             Self::Cancelling(cause) => write!(f, "Cancelling({cause:?})"),
@@ -130,7 +130,7 @@ impl<H: Send + Sync> PartialEq for FiniteSourceState<H> {
             (FiniteSourceState::Created, FiniteSourceState::Created) => true,
             (Self::Initializing, Self::Initializing) => true,
             (Self::Starting, Self::Starting) => true,
-            (Self::Finalising, Self::Finalising) => true,
+            (Self::Finalizing, Self::Finalizing) => true,
             (Self::AcquiringInput, Self::AcquiringInput) => true,
             (Self::Failing(a), Self::Failing(b)) => a == b,
             (Self::Cancelling(a), Self::Cancelling(b)) => a == b,
@@ -153,7 +153,7 @@ impl<H: Send + Sync + 'static> StateVariant for FiniteSourceState<H> {
             FiniteSourceState::Created => "Created",
             Self::Initializing => "Initializing",
             Self::Starting => "Starting",
-            Self::Finalising => "Finalising",
+            Self::Finalizing => "Finalizing",
             Self::AcquiringInput => "AcquiringInput",
             Self::Failing(..) => "Failing",
             Self::Cancelling(..) => "Cancelling",
@@ -197,7 +197,7 @@ impl<H> FiniteSourceState<H> {
     /// The exit whose transition schedules cleanup (FLOWIP-134i B2).
     pub(crate) fn exit(&self) -> Option<SourceExit> {
         match self {
-            Self::Finalising => Some(SourceExit::Finalising),
+            Self::Finalizing => Some(SourceExit::Finalizing),
             Self::Failing(_) => Some(SourceExit::Failing),
             Self::Cancelling(_) => Some(SourceExit::Cancelling),
             _ => None,
@@ -211,7 +211,7 @@ impl<H> FiniteSourceState<H> {
             Self::Initialized => Phase::Initialized,
             Self::WaitingForGun => Phase::Ready,
             Self::Running => Phase::Active,
-            Self::Finalising => Phase::Finalising,
+            Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
             Self::Drained => Phase::Completed,
@@ -232,7 +232,7 @@ pub enum FiniteSourceEvent<H> {
     Initialize,
     InitializationCompleted,
     ActivationCompleted,
-    FinalisationCompleted,
+    FinalizationCompleted,
     TerminationSettled,
     InputAcquired,
 
@@ -264,7 +264,7 @@ impl<H> Clone for FiniteSourceEvent<H> {
             Self::Initialize => Self::Initialize,
             Self::InitializationCompleted => Self::InitializationCompleted,
             Self::ActivationCompleted => Self::ActivationCompleted,
-            Self::FinalisationCompleted => Self::FinalisationCompleted,
+            Self::FinalizationCompleted => Self::FinalizationCompleted,
             Self::TerminationSettled => Self::TerminationSettled,
             Self::InputAcquired => Self::InputAcquired,
 
@@ -284,7 +284,7 @@ impl<H> std::fmt::Debug for FiniteSourceEvent<H> {
             Self::Initialize => write!(f, "Initialize"),
             Self::InitializationCompleted => write!(f, "InitializationCompleted"),
             Self::ActivationCompleted => write!(f, "ActivationCompleted"),
-            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::FinalizationCompleted => write!(f, "FinalizationCompleted"),
             Self::TerminationSettled => write!(f, "TerminationSettled"),
             Self::InputAcquired => write!(f, "InputAcquired"),
 
@@ -311,7 +311,7 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             Self::Error(message) => Some(message.as_str()),
             Self::InitializationCompleted
             | Self::ActivationCompleted
-            | Self::FinalisationCompleted
+            | Self::FinalizationCompleted
             | Self::TerminationSettled
             | Self::InputAcquired => None,
             Self::Initialize | Self::Ready | Self::Start | Self::BeginDrain | Self::Completed => {
@@ -328,7 +328,7 @@ impl<H: Send + Sync + 'static> EventVariant for FiniteSourceEvent<H> {
             FiniteSourceEvent::Initialize => "Initialize",
             Self::InitializationCompleted => "InitializationCompleted",
             Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::FinalizationCompleted => "FinalizationCompleted",
             Self::TerminationSettled => "TerminationSettled",
             Self::InputAcquired => "InputAcquired",
 
@@ -440,7 +440,7 @@ pub struct FiniteSourceResources<H> {
 
     /// Start of the current backpressure stall episode; anchored at the
     /// first credit miss, cleared on successful reserve (FLOWIP-115e).
-    pub(crate) backpressure_stall: Option<tokio::time::Instant>,
+    pub(crate) backpressure_stall: crate::backpressure::StallEpisode,
 
     /// Committed source diagnostic the lifecycle failure links to (084n B2).
     pub(crate) failure_causal_event_id: Option<obzenflow_core::EventId>,
@@ -486,7 +486,7 @@ impl<H> FiniteSourceResources<H> {
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
-            backpressure_stall: None,
+            backpressure_stall: Default::default(),
             failure_causal_event_id: None,
             _marker: PhantomData,
         }
@@ -1195,8 +1195,8 @@ pub(crate) mod tests {
                         ($event::InputAcquired, "Starting"),
                         ($event::ActivationCompleted, "Running"),
                         ($event::BeginDrain, "Draining"),
-                        ($event::Completed, "Finalising"),
-                        ($event::FinalisationCompleted, "Drained"),
+                        ($event::Completed, "Finalizing"),
+                        ($event::FinalizationCompleted, "Drained"),
                     ] {
                         let old_entry = Instant::now() - Duration::from_secs(60);
                         *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
@@ -1221,7 +1221,7 @@ pub(crate) mod tests {
                         ChainPayload::FlowControl(FlowControlPayload::SourceContract { .. }))).count(),
                         usize::from($finite));
                     let eof = events.iter().find(|env| env.is_eof()).expect("authored EOF");
-                    assert_eq!(eof.envelope.observability.as_ref().unwrap().runtime_snapshot.as_ref().unwrap().fsm_state, "Finalising");
+                    assert_eq!(eof.envelope.observability.as_ref().unwrap().runtime_snapshot.as_ref().unwrap().fsm_state, "Finalizing");
                     for env in &events {
                         if matches!(env.payload, ChainPayload::FlowControl(
                             FlowControlPayload::SourceContract { .. })) {
@@ -1237,7 +1237,7 @@ pub(crate) mod tests {
                     // Failure is visible in the pending state before settlement actions.
                     for initial in [$state::Created, $state::Initializing, $state::Initialized,
                         $state::WaitingForGun, $state::AcquiringInput, $state::Starting,
-                        $state::Running, $state::Draining, $state::Finalising,
+                        $state::Running, $state::Draining, $state::Finalizing,
                         $state::Failing("first".into())] {
                         ctx.instrumentation.transition_to_state(initial.variant_name());
                         let old_entry = Instant::now() - Duration::from_secs(60);

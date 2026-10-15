@@ -122,7 +122,7 @@ where
     }
 }
 
-/// Internal transport payload delivered to the finalise (reduce) stage.
+/// Internal transport payload delivered to the finalize (reduce) stage.
 ///
 /// The key ergonomic constraint is that the user-facing reduce contract is
 /// `(Seed, Collected) -> Out`. The composite therefore pairs the original seed
@@ -291,9 +291,9 @@ pub trait AiMapRole<Item, Partial>: Send + Sync + 'static {
     ) -> Result<Partial, AiRoleLogicFailure>;
 }
 
-/// User-authored finalisation role. The generated adapter owns the single chat
+/// User-authored finalization role. The generated adapter owns the single chat
 /// effect and only exposes the domain seed and collected value.
-pub trait AiFinaliseRole<Seed, Collected, Out>: Send + Sync + 'static {
+pub trait AiFinalizeRole<Seed, Collected, Out>: Send + Sync + 'static {
     const LOGIC_VERSION: &'static str = "1";
 
     fn prepare(
@@ -354,13 +354,13 @@ impl TypedPayload for AiMapReducePlanningFailed {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiMapReduceFinaliseFailed {
+pub struct AiMapReduceFinalizeFailed {
     pub job_key: EventId,
     pub cause: AiMapReduceRoleFailure,
 }
 
-impl TypedPayload for AiMapReduceFinaliseFailed {
-    const EVENT_TYPE: &'static str = "ai.map_reduce.finalise_failed";
+impl TypedPayload for AiMapReduceFinalizeFailed {
+    const EVENT_TYPE: &'static str = "ai.map_reduce.finalize_failed";
     const SCHEMA_VERSION: u32 = 1;
 
     const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
@@ -374,7 +374,7 @@ impl TypedPayload for AiMapReduceFinaliseFailed {
     fn accepts_payload(payload: &ChainPayload) -> bool {
         matches!(
             payload,
-            ChainPayload::CompositeData(CompositeDataPayload::FinaliseFailed(_))
+            ChainPayload::CompositeData(CompositeDataPayload::FinalizeFailed(_))
         )
     }
 }

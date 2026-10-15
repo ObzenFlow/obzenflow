@@ -8,7 +8,7 @@ use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::Result;
 use obzenflow::ai::{
-    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
+    AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
     ChatRequestSpec, ChatResponse, ChatTarget, Many,
 };
 use obzenflow::ai::{
@@ -239,17 +239,17 @@ struct DigestReduceCtx {
     chat_prompt_system: SystemPrompt,
 }
 
-struct HnFinaliseRole {
+struct HnFinalizeRole {
     context: DigestReduceCtx,
 }
 
-impl HnFinaliseRole {
+impl HnFinalizeRole {
     fn new(context: DigestReduceCtx) -> Self {
         Self { context }
     }
 }
 
-impl AiFinaliseRole<HnTopStories, Many<HnDigestGroupSummary>, HnDigestSummary> for HnFinaliseRole {
+impl AiFinalizeRole<HnTopStories, Many<HnDigestGroupSummary>, HnDigestSummary> for HnFinalizeRole {
     fn prepare(
         &self,
         seed: &HnTopStories,
@@ -435,7 +435,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 interests: interests.clone(),
             },
         );
-        let finalize_role = HnFinaliseRole::new(DigestReduceCtx {
+        let finalize_role = HnFinalizeRole::new(DigestReduceCtx {
             mode_label,
             base_url: base_url_for_summary,
             ai_provider: chat_target.provider.to_string(),

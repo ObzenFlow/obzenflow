@@ -25,6 +25,7 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
 use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
 };
@@ -149,18 +150,45 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                     })
                 };
 
-                on JoinEvent::ReceivedEOF => |_state: &JoinState<H>, event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
-                    let event = event.clone();
+                on JoinEvent::HoldCompleted => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+                    let JoinEvent::HoldCompleted(completion) = event else { unreachable!() };
+                    let completion = completion.clone();
+                    let straight_to_live = ctx.reference_mode == JoinReferenceMode::FiniteThenLive
+                        && ctx.batch_phase_empty;
                     Box::pin(async move {
-                        if let JoinEvent::ReceivedEOF = event {
-
-                            Ok(Transition {
-                                next_state: JoinState::Enriching,
-                                actions: vec![JoinAction::EmitHydrationHeartbeat],
-                            })
+                        let (next_state, fact) = if straight_to_live {
+                            (
+                                JoinState::Live,
+                                JoinPhaseFact::LiveEntered {
+                                    generation: completion.generation,
+                                    ended_by: completion.ended_by,
+                                },
+                            )
                         } else {
-                            unreachable!()
-                        }
+                            (
+                                JoinState::Enriching,
+                                JoinPhaseFact::EnrichingEntered {
+                                    generation: completion.generation,
+                                    ended_by: completion.ended_by,
+                                },
+                            )
+                        };
+                        Ok(Transition {
+                            next_state,
+                            actions: vec![
+                                JoinAction::EmitHydrationHeartbeat,
+                                JoinAction::RecordPhase(fact),
+                            ],
+                        })
+                    })
+                };
+
+                on JoinEvent::HoldLeftOpen => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JoinState::Draining,
+                            actions: vec![JoinAction::EmitHydrationHeartbeat],
+                        })
                     })
                 };
 
@@ -246,6 +274,29 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                     })
                 };
 
+                on JoinEvent::HoldCompleted => |_state: &JoinState<H>, event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                    let JoinEvent::HoldCompleted(completion) = event else { unreachable!() };
+                    let fact = JoinPhaseFact::LiveEntered {
+                        generation: completion.generation,
+                        ended_by: completion.ended_by.clone(),
+                    };
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JoinState::Live,
+                            actions: vec![JoinAction::RecordPhase(fact)],
+                        })
+                    })
+                };
+
+                on JoinEvent::HoldLeftOpen => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JoinState::Draining,
+                            actions: vec![],
+                        })
+                    })
+                };
+
                 on JoinEvent::ReceivedEOF => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
                     Box::pin(async move {
 
@@ -293,10 +344,10 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                     Box::pin(async move {
 
                         Ok(Transition {
-                            next_state: JoinState::Finalising,
+                            next_state: JoinState::Finalizing,
                             actions: vec![JoinAction::ForwardEOF,
                                 JoinAction::SendCompletion,
-                                JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::FinalisationCompleted))],
+                                JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::FinalizationCompleted))],
                         })
                     })
                 };
@@ -341,7 +392,10 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
 
             state JoinState::Starting {
                 on JoinEvent::ActivationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let next_state = match ctx.reference_mode { JoinReferenceMode::FiniteEof => JoinState::Hydrating, JoinReferenceMode::Live => JoinState::Live };
+                    let next_state = match ctx.reference_mode {
+                        JoinReferenceMode::FiniteEof | JoinReferenceMode::FiniteThenLive => JoinState::Hydrating,
+                        JoinReferenceMode::Live => JoinState::Live,
+                    };
                     let _ = ctx;
                     Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
                 };
@@ -352,8 +406,8 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                 };
             }
 
-            state JoinState::Finalising {
-                on JoinEvent::FinalisationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+            state JoinState::Finalizing {
+                on JoinEvent::FinalizationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let next_state = JoinState::Drained;
                     let _ = ctx;
                     Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
@@ -561,7 +615,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSuper
         match state {
             JoinState::Initializing
             | JoinState::Starting
-            | JoinState::Finalising
+            | JoinState::Finalizing
             | JoinState::Failing(_)
             | JoinState::Cancelling(_) => Ok(EventLoopDirective::Continue),
 

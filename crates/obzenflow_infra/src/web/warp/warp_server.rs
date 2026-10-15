@@ -885,7 +885,7 @@ fn reply_from_response(response: Response) -> Result<Box<dyn Reply>, Rejection> 
 
 /// Response metadata is untrusted endpoint output. Select the fallback before
 /// observing the request, so journalled snapshots describe the reply on the wire.
-fn finalise_unary(
+fn finalize_unary(
     response: Response,
     method: HttpMethod,
     route: &str,
@@ -1035,7 +1035,7 @@ async fn handle_request_no_body(
                 }
             }
 
-            Ok(finalise_unary(
+            Ok(finalize_unary(
                 response,
                 method,
                 endpoint.path(),
@@ -1217,7 +1217,7 @@ async fn handle_request_with_body(
                 }
             }
 
-            Ok(finalise_unary(
+            Ok(finalize_unary(
                 response,
                 method,
                 endpoint.path(),

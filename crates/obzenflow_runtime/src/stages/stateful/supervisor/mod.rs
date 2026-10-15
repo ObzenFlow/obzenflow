@@ -396,7 +396,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
                     Box::pin(async move { Ok(Transition { next_state: StatefulState::DrainingFinalOutput, actions: vec![StatefulAction::DrainFinalOutput] }) })
                 };
                 on StatefulEvent::DrainComplete => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: StatefulState::Finalising, actions: vec![StatefulAction::ForwardEOF, StatefulAction::SendCompletion, StatefulAction::Cleanup, StatefulAction::Host(SupervisorAction::CloseMailbox), StatefulAction::Host(SupervisorAction::SettlePublications), StatefulAction::Host(SupervisorAction::Emit(StatefulEvent::FinalisationCompleted))] }) })
+                    Box::pin(async move { Ok(Transition { next_state: StatefulState::Finalizing, actions: vec![StatefulAction::ForwardEOF, StatefulAction::SendCompletion, StatefulAction::Cleanup, StatefulAction::Host(SupervisorAction::CloseMailbox), StatefulAction::Host(SupervisorAction::SettlePublications), StatefulAction::Host(SupervisorAction::Emit(StatefulEvent::FinalizationCompleted))] }) })
                 };
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
                     let StatefulEvent::Error(cause) = event else { unreachable!() };
@@ -405,8 +405,8 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
                 };
             }
 
-            state StatefulState::Finalising {
-                on StatefulEvent::FinalisationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+            state StatefulState::Finalizing {
+                on StatefulEvent::FinalizationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
                     let next_state = StatefulState::Drained;
                     let _ = ctx;
                     Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
@@ -635,7 +635,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> HandlerS
         match state {
             StatefulState::Initializing
             | StatefulState::Starting
-            | StatefulState::Finalising
+            | StatefulState::Finalizing
             | StatefulState::Failing(_)
             | StatefulState::Cancelling(_) => Ok(EventLoopDirective::Continue),
             StatefulState::Cancelled(_) => Ok(EventLoopDirective::Terminate),

@@ -6,7 +6,7 @@
 //! closed protocol shape; application values nested inside it remain untouched.
 
 use crate::ai::{
-    AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed, AiMapReduceMapInput,
+    AiMapReduceChunkFailed, AiMapReduceFinalizeFailed, AiMapReduceJobFailed, AiMapReduceMapInput,
     AiMapReducePlanningFailed, AiMapReducePlanningManifest, AiMapReduceReduceInput,
     AiMapReduceTaggedPartial, ChunkEnvelope,
 };
@@ -22,7 +22,7 @@ pub enum CompositeDataPayload {
     PlanningFailed(AiMapReducePlanningFailed),
     ChunkFailed(AiMapReduceChunkFailed),
     JobFailed(AiMapReduceJobFailed),
-    FinaliseFailed(AiMapReduceFinaliseFailed),
+    FinalizeFailed(AiMapReduceFinalizeFailed),
 }
 
 impl CompositeDataPayload {
@@ -42,7 +42,7 @@ impl CompositeDataPayload {
             Self::PlanningFailed(_) => "ai.map_reduce.planning_failed",
             Self::ChunkFailed(_) => "ai.map_reduce.chunk_failed",
             Self::JobFailed(_) => "ai.map_reduce.job_failed",
-            Self::FinaliseFailed(_) => "ai.map_reduce.finalise_failed",
+            Self::FinalizeFailed(_) => "ai.map_reduce.finalize_failed",
         }
     }
 
@@ -61,8 +61,8 @@ impl CompositeDataPayload {
             }
             "ai.map_reduce.chunk_failed" => serde_json::from_value(payload).map(Self::ChunkFailed),
             "ai.map_reduce.job_failed" => serde_json::from_value(payload).map(Self::JobFailed),
-            "ai.map_reduce.finalise_failed" => {
-                serde_json::from_value(payload).map(Self::FinaliseFailed)
+            "ai.map_reduce.finalize_failed" => {
+                serde_json::from_value(payload).map(Self::FinalizeFailed)
             }
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
                 "event descriptor does not match payload",
@@ -81,7 +81,7 @@ impl Serialize for CompositeDataPayload {
             Self::PlanningFailed(payload) => payload.serialize(serializer),
             Self::ChunkFailed(payload) => payload.serialize(serializer),
             Self::JobFailed(payload) => payload.serialize(serializer),
-            Self::FinaliseFailed(payload) => payload.serialize(serializer),
+            Self::FinalizeFailed(payload) => payload.serialize(serializer),
         }
     }
 }

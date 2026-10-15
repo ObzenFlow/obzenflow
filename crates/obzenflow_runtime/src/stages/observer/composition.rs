@@ -69,6 +69,7 @@ const EFFECTFUL_STATEFUL_SURFACES: &[ObserverSurface] = &[
     ObserverSurface::StageLifecycle,
 ];
 const JOIN_SURFACES: &[ObserverSurface] = &[ObserverSurface::Join, ObserverSurface::StageLifecycle];
+const MERGE_SURFACES: &[ObserverSurface] = &[];
 const SINK_SURFACES: &[ObserverSurface] = &[
     ObserverSurface::SinkDelivery,
     ObserverSurface::StageLifecycle,
@@ -84,6 +85,7 @@ pub fn observer_shell_surfaces_for_stage(stage_type: StageType) -> &'static [Obs
         StageType::Transform => TRANSFORM_SURFACES,
         StageType::Stateful => STATEFUL_SURFACES,
         StageType::Join => JOIN_SURFACES,
+        StageType::Merge => MERGE_SURFACES,
         StageType::Sink => SINK_SURFACES,
     }
 }

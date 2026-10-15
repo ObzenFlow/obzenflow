@@ -19,6 +19,7 @@ pub struct StageHandleAdapter<H, E, S> {
     stage_type: StageType,
     event_translator: Arc<dyn Fn(StageEvent) -> Result<E, String> + Send + Sync>,
     state_checker: Arc<dyn Fn(&S) -> StageStatus + Send + Sync>,
+    reference_mode_label: Option<&'static str>,
     _phantom: std::marker::PhantomData<(E, S)>,
 }
 
@@ -38,7 +39,7 @@ pub enum StageStatus {
     ForwardingTerminal,
     ProducingFinalOutput,
     DrainingFinalOutput,
-    Finalising,
+    Finalizing,
     Drained,
     Failing,
     Failed,
@@ -67,8 +68,15 @@ where
             stage_type,
             event_translator: Arc::new(event_translator),
             state_checker: Arc::new(state_checker),
+            reference_mode_label: None,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Label a join's stage metrics with its mode.
+    pub fn with_reference_mode_label(mut self, label: &'static str) -> Self {
+        self.reference_mode_label = Some(label);
+        self
     }
 }
 
@@ -89,6 +97,10 @@ where
 
     fn stage_type(&self) -> StageType {
         self.stage_type
+    }
+
+    fn reference_mode_label(&self) -> Option<&'static str> {
+        self.reference_mode_label
     }
 
     async fn initialize(&self) -> Result<(), StageError> {

@@ -81,6 +81,11 @@ pub trait UnifiedJoinHandler: sealed::Sealed + Send + Sync {
         JoinReferenceMode::FiniteEof
     }
 
+    #[doc(hidden)]
+    fn strategy_label(&self) -> Option<&'static str> {
+        None
+    }
+
     fn reference_batch_cap(&self) -> Option<usize> {
         Some(DEFAULT_REFERENCE_BATCH_CAP)
     }

@@ -17,7 +17,6 @@ use std::time::Instant;
 
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
-use crate::stages::join::config::JoinReferenceMode;
 use crate::stages::join::fsm::{
     JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
     PendingTransition,
@@ -34,7 +33,18 @@ pub(super) async fn dispatch_draining<
         heartbeat.state.mark_draining();
     }
 
-    if ctx.reference_mode == JoinReferenceMode::Live {
+    if ctx.drain_without_held_inputs {
+        common::ensure_subscriptions(sup, ctx);
+        match common::flush_pending_outputs(sup, ctx).await? {
+            FlushOutcome::Blocked => return Ok(EventLoopDirective::Continue),
+            FlushOutcome::DrainCompleteReady | FlushOutcome::Drained => {
+                ctx.pending_transition = None;
+                return Ok(EventLoopDirective::Transition(JoinEvent::DrainComplete));
+            }
+        }
+    }
+
+    if ctx.reference_mode.goes_live() {
         return dispatch_draining_live(sup, ctx).await;
     }
 

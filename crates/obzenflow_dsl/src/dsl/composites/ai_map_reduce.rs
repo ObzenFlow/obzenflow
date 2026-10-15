@@ -10,7 +10,7 @@
 
 mod effects;
 
-use self::effects::{GeneratedAiFinaliseHandler, GeneratedAiMapHandler};
+use self::effects::{GeneratedAiFinalizeHandler, GeneratedAiMapHandler};
 use crate::dsl::ai_effect::GeneratedChatEffectRow;
 use crate::dsl::composition::{CompositeBuildContext, CompositeBuildError, CompositeDescriptor};
 use crate::dsl::stage_descriptor::{
@@ -18,7 +18,7 @@ use crate::dsl::stage_descriptor::{
 };
 use crate::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use obzenflow_core::ai::{
-    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
+    AiFinalizeRole, AiMapReduceChunkFailed, AiMapReduceFinalizeFailed, AiMapReduceJobFailed,
     AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningManifest,
     AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapRole, ChunkEnvelope, Many,
 };
@@ -38,9 +38,9 @@ type GeneratedMapReduceTypes<Seed, Item, Partial, Out> = fn() -> (Seed, Item, Pa
 /// The concrete role adapters, effect declarations, collector, and
 /// direct-fact bounds are fixed as one generated call graph.
 #[doc(hidden)]
-pub fn generated_map_reduce<Seed, Item, Partial, Out, MapRole, FinaliseRole>(
+pub fn generated_map_reduce<Seed, Item, Partial, Out, MapRole, FinalizeRole>(
     name: impl Into<String>,
-    roles: (ChunkByBudgetTyped<Seed, Item>, MapRole, FinaliseRole),
+    roles: (ChunkByBudgetTyped<Seed, Item>, MapRole, FinalizeRole),
     effect_rows: (GeneratedChatEffectRow, GeneratedChatEffectRow),
 ) -> Box<dyn CompositeDescriptor>
 where
@@ -62,33 +62,33 @@ where
         + 'static,
     Out: Clone + TypedPayload + Send + Sync + 'static,
     MapRole: AiMapRole<Item, Partial>,
-    FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
+    FinalizeRole: AiFinalizeRole<Seed, Many<Partial>, Out>,
 {
-    let (chunker, map_role, finalise_role) = roles;
-    let (map_effect_row, finalise_effect_row) = effect_rows;
+    let (chunker, map_role, finalize_role) = roles;
+    let (map_effect_row, finalize_effect_row) = effect_rows;
     Box::new(GeneratedAiMapReduceCompositeDescriptor {
         name: name.into(),
         chunker,
         map_role,
-        finalise_role,
+        finalize_role,
         map_effect_row,
-        finalise_effect_row,
+        finalize_effect_row,
         _types: PhantomData,
     })
 }
 
-struct GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole, FinaliseRole> {
+struct GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole, FinalizeRole> {
     name: String,
     chunker: ChunkByBudgetTyped<Seed, Item>,
     map_role: MapRole,
-    finalise_role: FinaliseRole,
+    finalize_role: FinalizeRole,
     map_effect_row: GeneratedChatEffectRow,
-    finalise_effect_row: GeneratedChatEffectRow,
+    finalize_effect_row: GeneratedChatEffectRow,
     _types: PhantomData<GeneratedMapReduceTypes<Seed, Item, Partial, Out>>,
 }
 
-impl<Seed, Item, Partial, Out, MapRole, FinaliseRole> CompositeDescriptor
-    for GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole, FinaliseRole>
+impl<Seed, Item, Partial, Out, MapRole, FinalizeRole> CompositeDescriptor
+    for GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole, FinalizeRole>
 where
     Seed: Clone
         + fmt::Debug
@@ -108,7 +108,7 @@ where
         + 'static,
     Out: Clone + TypedPayload + Send + Sync + 'static,
     MapRole: AiMapRole<Item, Partial>,
-    FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
+    FinalizeRole: AiFinalizeRole<Seed, Many<Partial>, Out>,
 {
     fn name(&self) -> &str {
         &self.name
@@ -130,7 +130,7 @@ where
         if !self
             .map_effect_row
             .binding
-            .shares_construction_family(&self.finalise_effect_row.binding)
+            .shares_construction_family(&self.finalize_effect_row.binding)
         {
             return Err(CompositeBuildError::binding_configuration(
                 "chat",
@@ -224,24 +224,24 @@ where
 
         let GeneratedChatEffectRow {
             binding: _,
-            declarations: finalise_declarations,
-            policy_attachments: finalise_policy_attachments,
-            implementation_middleware: finalise_middleware,
-        } = self.finalise_effect_row;
-        let finalise_handler =
-            GeneratedAiFinaliseHandler::<Seed, Many<Partial>, Out, _>::new(self.finalise_role);
-        let finalise_descriptor = wrap_typed_descriptor(
+            declarations: finalize_declarations,
+            policy_attachments: finalize_policy_attachments,
+            implementation_middleware: finalize_middleware,
+        } = self.finalize_effect_row;
+        let finalize_handler =
+            GeneratedAiFinalizeHandler::<Seed, Many<Partial>, Out, _>::new(self.finalize_role);
+        let finalize_descriptor = wrap_typed_descriptor(
             Box::new(
                 EffectfulTransformDescriptor::generated::<
                     AiMapReduceReduceInput<Seed, Many<Partial>>,
                 >(
                     "finalize",
-                    finalise_handler,
-                    finalise_declarations,
-                    finalise_policy_attachments,
+                    finalize_handler,
+                    finalize_declarations,
+                    finalize_policy_attachments,
                     direct_bound,
                 )
-                .with_implementation_middleware(finalise_middleware),
+                .with_implementation_middleware(finalize_middleware),
             ),
             StageTypingMetadata::transform(
                 TypeHint::exact_payload::<AiMapReduceReduceInput<Seed, Many<Partial>>>(),
@@ -250,14 +250,14 @@ where
                 None,
             )
             .with_additional_output_contract(vec![TypeHint::exact_payload::<
-                AiMapReduceFinaliseFailed,
+                AiMapReduceFinalizeFailed,
             >()]),
         );
 
         ctx.member("chunk").descriptor(chunk_descriptor);
         ctx.member("map").descriptor(map_descriptor);
         ctx.member("collect").descriptor(collect_descriptor);
-        ctx.member("finalize").descriptor(finalise_descriptor);
+        ctx.member("finalize").descriptor(finalize_descriptor);
 
         ctx.feed("chunk", "map")
             .lane("data")

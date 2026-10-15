@@ -1674,9 +1674,9 @@ dependencies = [
 
 [[package]]
 name = "obzenflow-topology"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae6143262b2afae772a3626096e8db3cf86b3ff8995d2b23901a0b4aec6862b5"
+checksum = "3284eab2973b9bd78902cc6ae43f133630079d7ccf5ddf413caaeb87f5fda2d6"
 dependencies = [
  "obzenflow-idkit",
  "once_cell",
@@ -2453,9 +2453,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",

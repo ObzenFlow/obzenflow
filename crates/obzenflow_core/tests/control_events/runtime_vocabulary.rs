@@ -132,6 +132,28 @@ fn replay_wire_names_identify_the_recorded_occurrence() {
     }
 }
 
+#[test]
+fn join_phase_wire_names_and_fields_match_the_approved_spellings() {
+    let stage = StageId::new();
+    for (phase, name) in [
+        ("enriching_entered", "runtime.join.enriching_entered"),
+        ("live_entered", "runtime.join.live_entered"),
+    ] {
+        let payload: ExecutionPayload = serde_json::from_value(json!({
+            "execution_type": "join_phase",
+            "phase": phase,
+            "generation": 1,
+            "ended_by": ["batch_accounts"],
+        }))
+        .unwrap();
+        assert_chain(
+            ChainEventFactory::execution_event(stage.into(), payload),
+            name,
+            "execution",
+        );
+    }
+}
+
 /// FLOWIP-122i B2: the approved reattachment spellings. The envelope names the
 /// stage, so the payload carries none.
 #[test]

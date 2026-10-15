@@ -40,7 +40,7 @@ pub use obzenflow_runtime::stages::InferenceHandler;
 
 pub use obzenflow_core::ai::{
     plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget,
-    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatBindingFingerprint, ChatBudgetError,
+    AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatBindingFingerprint, ChatBudgetError,
     ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate, ChatCompletionReply,
     ChatMessage, ChatModelProfile, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
     ChatResponseFormat, ChatRole, ChatTarget, ChunkEnvelope, ChunkExclusionReason, ChunkInfo,

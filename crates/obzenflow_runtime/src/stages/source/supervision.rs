@@ -574,7 +574,7 @@ pub(crate) async fn commit_reader_acquired(
 /// machine enters it (FLOWIP-134i B2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceExit {
-    Finalising,
+    Finalizing,
     Failing,
     Cancelling,
 }
@@ -598,7 +598,7 @@ impl SourceRelease {
     ) -> Self {
         let trigger = match (exit, completion) {
             (Some(SourceExit::Failing), _) => SourceCleanupTrigger::Failed,
-            (Some(SourceExit::Finalising), SourceCompletionCause::Exhausted) => {
+            (Some(SourceExit::Finalizing), SourceCompletionCause::Exhausted) => {
                 SourceCleanupTrigger::Exhausted
             }
             _ => SourceCleanupTrigger::Stopped,
@@ -844,7 +844,7 @@ pub(crate) async fn drain_pending_outputs_sync(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut Option<tokio::time::Instant>,
+    backpressure_stall: &mut crate::backpressure::StallEpisode,
     output_contract: Option<&StageOutputContract>,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
@@ -904,7 +904,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut Option<tokio::time::Instant>,
+    backpressure_stall: &mut crate::backpressure::StallEpisode,
     output_contract: Option<&StageOutputContract>,
     committed: &mut Vec<EventId>,
     receive_control: impl std::future::Future<Output = Option<E>> + Send,
@@ -1445,7 +1445,7 @@ mod tests {
         );
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_stall: Option<tokio::time::Instant> = None;
+        let mut backpressure_stall = crate::backpressure::StallEpisode::default();
 
         let (sender, mut receiver, _watcher) = ChannelBuilder::<TestEvent, ()>::new()
             .with_event_buffer(1)
@@ -1529,7 +1529,7 @@ mod tests {
         };
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_stall: Option<tokio::time::Instant> = None;
+        let mut backpressure_stall = crate::backpressure::StallEpisode::default();
 
         // Keep the sender alive and never send: recv() pends, so the biased
         // select always resolves through the credit wait, which auto-advances

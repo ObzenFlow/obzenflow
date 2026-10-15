@@ -220,7 +220,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
 
             state FiniteSourceState::Draining {
                 on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Finalising, actions: vec![FiniteSourceAction::SendEOF, FiniteSourceAction::WriteStageCompleted, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::FinalisationCompleted))] }) })
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Finalizing, actions: vec![FiniteSourceAction::SendEOF, FiniteSourceAction::WriteStageCompleted, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::FinalizationCompleted))] }) })
                 };
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
@@ -232,8 +232,8 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
                 };
             }
 
-            state FiniteSourceState::Finalising {
-                on FiniteSourceEvent::FinalisationCompleted => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+            state FiniteSourceState::Finalizing {
+                on FiniteSourceEvent::FinalizationCompleted => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Drained, actions: vec![] }) })
                 };
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
@@ -517,7 +517,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         match state {
             FiniteSourceState::Initializing
             | FiniteSourceState::Starting
-            | FiniteSourceState::Finalising
+            | FiniteSourceState::Finalizing
             | FiniteSourceState::Failing(_)
             | FiniteSourceState::Cancelling(_) => Ok(EventLoopDirective::Continue),
             FiniteSourceState::Cancelled(_) => Ok(EventLoopDirective::Terminate),

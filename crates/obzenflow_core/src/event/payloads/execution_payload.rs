@@ -98,6 +98,8 @@ pub enum ExecutionPayload {
     JoinReferenceProgress {
         reference_inputs_since_last_report: u64,
     },
+    /// A join left a state that holds inputs.
+    JoinPhase(JoinPhaseFact),
     SinkAudit(super::delivery_payload::SinkAuditPayload),
     StageFatalRecorded(super::stage_fatal_payload::StageFatalRecorded),
     SinkOperationFailed(super::sink_operation_payload::SinkOperationFailed),
@@ -288,6 +290,52 @@ impl CircuitBreakerFact {
             } => vocabulary::circuit_breaker::HALF_OPEN_ENTERED,
             Self::Rejected { .. } => vocabulary::circuit_breaker::ADMISSION_REJECTED,
             Self::AttemptSettled { .. } => vocabulary::circuit_breaker::CALL_CLASSIFIED,
+        }
+    }
+}
+
+/// The phase a join entered when a state that holds inputs completed. The
+/// variant selects the occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum JoinPhaseFact {
+    EnrichingEntered {
+        /// Generation of the delivery that ended the previous phase.
+        generation: u64,
+        /// Stage keys whose natural EOFs ended it.
+        ended_by: Vec<crate::StageKey>,
+    },
+    LiveEntered {
+        /// Generation of the delivery that ended the previous phase.
+        generation: u64,
+        /// Stage keys whose natural EOFs ended it.
+        ended_by: Vec<crate::StageKey>,
+    },
+}
+
+impl JoinPhaseFact {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::EnrichingEntered { .. } => vocabulary::join::ENRICHING_ENTERED,
+            Self::LiveEntered { .. } => vocabulary::join::LIVE_ENTERED,
+        }
+    }
+
+    /// The generation of the delivery that ended the previous phase.
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::EnrichingEntered { generation, .. } | Self::LiveEntered { generation, .. } => {
+                *generation
+            }
+        }
+    }
+
+    /// The stage keys whose natural EOFs ended the previous phase.
+    pub fn ended_by(&self) -> &[crate::StageKey] {
+        match self {
+            Self::EnrichingEntered { ended_by, .. } | Self::LiveEntered { ended_by, .. } => {
+                ended_by
+            }
         }
     }
 }
@@ -654,6 +702,7 @@ impl ExecutionPayload {
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
             Self::JoinReferenceProgress { .. } => "join.reference_progress",
+            Self::JoinPhase(fact) => fact.event_type(),
             Self::SinkAudit(audit) => audit.event_type(),
             Self::StageFatalRecorded(_) => "obzenflow.stage_fatal_recorded",
             Self::SinkOperationFailed(_) => "obzenflow.sink_operation_failed",
@@ -702,7 +751,8 @@ impl ExecutionPayload {
             | Self::HttpPullState(_)
             | Self::AiChunkingPlanned(_)
             | Self::AccumulatorProgress { .. }
-            | Self::JoinReferenceProgress { .. } => false,
+            | Self::JoinReferenceProgress { .. }
+            | Self::JoinPhase(_) => false,
         }
     }
 }

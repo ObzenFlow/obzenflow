@@ -917,7 +917,7 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
         Arc::new(NoopJournal::new(JournalOwner::stage(t)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
     pending_outputs.push_back(
@@ -1192,7 +1192,7 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                         &stage_instrumentation,
                         &stage_writer,
                         &mut BackpressureActivityPulse::new(),
-                        &mut None,
+                        &mut crate::backpressure::StallEpisode::default(),
                         Some(&output_contract_for_event_type("x")),
                         &mut VecDeque::new(),
                     )
@@ -1283,7 +1283,7 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
@@ -1344,7 +1344,7 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("semantic.test");
 
@@ -1402,7 +1402,7 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("declared");
 
@@ -1467,7 +1467,7 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
 
     let event = ChainEventFactory::drain_event(WriterId::from(stage_id));
@@ -1537,7 +1537,7 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison,
     );
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
@@ -1632,7 +1632,7 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     }
 
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let error = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
@@ -1732,7 +1732,7 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
 
     let event = ChainEventFactory::data_event(
@@ -1817,7 +1817,7 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     let data_journal: Arc<dyn Journal<ChainEvent>> = checking.clone();
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
@@ -1850,7 +1850,7 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     // Committed, not requeued, and no stall episode was anchored.
     assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
     assert!(pending_outputs.is_empty(), "reconstruction never requeues");
-    assert!(stall.is_none(), "reconstruction anchors no stall episode");
+    assert!(!stall.is_open(), "reconstruction anchors no stall episode");
 
     // Accounting advanced past the window (track mode), so the resume handoff
     // sees the true in-flight backlog.
@@ -1968,7 +1968,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         Arc::new(NoopJournal::new(JournalOwner::stage(s)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut stall: Option<tokio::time::Instant> = None;
+    let mut stall = crate::backpressure::StallEpisode::default();
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
@@ -2011,7 +2011,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         Some(3),
         "catch-up accounting reflects the recorded backlog"
     );
-    assert!(stall.is_none(), "no stall episode during catch-up");
+    assert!(!stall.is_open(), "no stall episode during catch-up");
 
     // Handoff: the first live output gates on the true backlog (3 in flight
     // against a window of 2), returns BackedOff, and anchors the stall clock.
@@ -2046,7 +2046,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         "the first live output gates on the catch-up backlog"
     );
     assert!(
-        stall.is_some(),
+        stall.is_open(),
         "the stall clock starts at the first live-scoped block, not the handoff"
     );
 }

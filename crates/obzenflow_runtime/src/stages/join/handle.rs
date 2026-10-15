@@ -6,7 +6,6 @@
 
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
-use obzenflow_core::StageId;
 
 use super::fsm::{JoinEvent, JoinState};
 
@@ -20,17 +19,6 @@ pub trait JoinHandleExt<H> {
 
     /// Mark join as ready to start processing
     fn ready(&self) -> impl std::future::Future<Output = Result<(), HandleError>> + Send;
-
-    /// Notify that a specific upstream reached EOF
-    fn source_eof(
-        &self,
-        source_id: StageId,
-    ) -> impl std::future::Future<Output = Result<(), HandleError>> + Send;
-
-    /// Notify that reference upstream is complete
-    fn reference_complete(
-        &self,
-    ) -> impl std::future::Future<Output = Result<(), HandleError>> + Send;
 
     /// Begin draining the join
     fn begin_drain(&self) -> impl std::future::Future<Output = Result<(), HandleError>> + Send;
@@ -52,14 +40,6 @@ impl<H: UnifiedJoinHandler + Send + Sync + 'static> JoinHandleExt<H> for JoinHan
 
     async fn ready(&self) -> Result<(), HandleError> {
         self.send_event(JoinEvent::<H>::Ready).await
-    }
-
-    async fn source_eof(&self, _source_id: StageId) -> Result<(), HandleError> {
-        self.send_event(JoinEvent::<H>::ReceivedEOF).await
-    }
-
-    async fn reference_complete(&self) -> Result<(), HandleError> {
-        self.send_event(JoinEvent::<H>::ReferenceComplete).await
     }
 
     async fn begin_drain(&self) -> Result<(), HandleError> {

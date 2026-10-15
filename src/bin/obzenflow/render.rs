@@ -16,6 +16,8 @@ mod context;
 mod continuation;
 #[path = "render/event_counts.rs"]
 mod event_counts;
+#[path = "render/join_phase.rs"]
+mod join_phase;
 #[path = "render/payload.rs"]
 mod payload;
 #[path = "render/summary.rs"]
@@ -208,6 +210,7 @@ impl Renderer {
         self.records += 1;
         *self.journals.entry(journal.clone()).or_default() += 1;
         self.continuations.record(&record);
+        self.context.join_phases.record(&record);
         if !self.jsonl {
             self.context.register_supervisor(&record)?;
         }

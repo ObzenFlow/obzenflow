@@ -207,6 +207,11 @@ pub trait StageHandle: Send + Sync {
     /// Get the stage type (for pipeline decisions)
     fn stage_type(&self) -> StageType;
 
+    /// A join's mode as its metrics label, `None` for every other stage.
+    fn reference_mode_label(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Initialize the stage (allocate resources, create subscriptions)
     async fn initialize(&self) -> Result<(), StageError>;
 

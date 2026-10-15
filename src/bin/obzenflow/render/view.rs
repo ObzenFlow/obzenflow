@@ -46,6 +46,7 @@ pub(super) struct HeaderView<'a> {
     pub reporter: Cow<'a, str>,
     pub journal: JournalNumber,
     pub read_model: bool,
+    pub phase: Option<String>,
 }
 
 pub(super) enum InputsView<'a> {
@@ -137,6 +138,7 @@ impl<'a> EventView<'a> {
             read_model: self.record.journal.stage.as_ref().is_some_and(|stage| {
                 matches!(stage.stage_type, StageType::Stateful | StageType::Join)
             }),
+            phase: self.context.join_phases.heading_suffix(self.record),
         }
     }
 
@@ -262,6 +264,7 @@ pub(super) fn stage_heading(stage_type: StageType, is_effectful: bool) -> &'stat
         StageType::Stateful if is_effectful => "EFFECTFUL STATEFUL",
         StageType::Stateful => "STATEFUL",
         StageType::Join => "JOIN",
+        StageType::Merge => "MERGE",
         StageType::Sink => "SINK",
     }
 }
@@ -313,6 +316,7 @@ fn gloss(record: &RunRecord) -> &'static str {
                 Some(StageType::Join) => "Join stage emitted a fact using its recorded inputs.",
                 Some(StageType::Transform) if record.journal.stage.as_ref().is_some_and(|stage| stage.is_effectful) => "Effectful transform emitted a domain fact; this fact alone does not imply an external call.",
                 Some(StageType::Transform) => "Transform stage derived a fact from upstream input.",
+                Some(StageType::Merge) => "Merge stage passed on a producer's fact, in the order its strategy decides.",
                 _ => "This stage recorded a domain fact; its recorded parents appear on the input side when available.",
             },
             ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(_)) => "The runtime recorded the start of an effect attempt; this does not prove external completion.",
@@ -320,6 +324,7 @@ fn gloss(record: &RunRecord) -> &'static str {
             ChainPayload::Execution(ExecutionPayload::EffectRecoveryAbandoned(_)) => "Recorded effect recovery was abandoned; this row is not a new effect invocation.",
             ChainPayload::Execution(ExecutionPayload::AccumulatorProgress { .. }) => "Stateful stage folded inputs into its accumulated state.",
             ChainPayload::Execution(ExecutionPayload::JoinReferenceProgress { .. }) => "Join stage accumulated reference inputs for matching later stream records.",
+            ChainPayload::Execution(ExecutionPayload::JoinPhase(_)) => "The join entered a phase once the natural EOFs named in ended_by had arrived; its later facts are headed with this phase.",
             ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Drained { .. })) => "This stage reported that it finished draining.",
             ChainPayload::Execution(ExecutionPayload::StageLifecycle(_)) => "The stage reported a lifecycle milestone or outcome from its own perspective.",
             ChainPayload::Execution(ExecutionPayload::ContractResult { .. }) => "The evaluator records a scoped verification outcome and the evidence available at this phase.",

@@ -168,7 +168,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                     Box::pin(async move { Ok(Transition { next_state: TransformState::Draining, actions: vec![] }) })
                 };
                 on TransformEvent::DrainComplete => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: TransformState::Finalising, actions: vec![TransformAction::DrainHandler, TransformAction::ForwardEOF, TransformAction::SendCompletion, TransformAction::Cleanup, TransformAction::Host(SupervisorAction::CloseMailbox), TransformAction::Host(SupervisorAction::SettlePublications), TransformAction::Host(SupervisorAction::Emit(TransformEvent::FinalisationCompleted))] }) })
+                    Box::pin(async move { Ok(Transition { next_state: TransformState::Finalizing, actions: vec![TransformAction::DrainHandler, TransformAction::ForwardEOF, TransformAction::SendCompletion, TransformAction::Cleanup, TransformAction::Host(SupervisorAction::CloseMailbox), TransformAction::Host(SupervisorAction::SettlePublications), TransformAction::Host(SupervisorAction::Emit(TransformEvent::FinalizationCompleted))] }) })
                 };
                 on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     let TransformEvent::Error(cause) = event else { unreachable!() };
@@ -180,8 +180,8 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                 };
             }
 
-            state TransformState::Finalising {
-                on TransformEvent::FinalisationCompleted => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+            state TransformState::Finalizing {
+                on TransformEvent::FinalizationCompleted => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: TransformState::Drained, actions: vec![] }) })
                 };
                 on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
@@ -380,7 +380,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
         match state {
             TransformState::Initializing
             | TransformState::Starting
-            | TransformState::Finalising
+            | TransformState::Finalizing
             | TransformState::Failing(_)
             | TransformState::Cancelling(_) => Ok(EventLoopDirective::Continue),
             TransformState::Cancelled(_) => Ok(EventLoopDirective::Terminate),

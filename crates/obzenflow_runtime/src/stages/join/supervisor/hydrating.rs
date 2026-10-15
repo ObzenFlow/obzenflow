@@ -9,9 +9,10 @@ use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::supervised_base::EventLoopDirective;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::StageKey;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -21,6 +22,7 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{
     JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
 };
+use crate::stages::join::phase::{observe_hold_eof, HoldOutcome, PhaseReads};
 
 pub(super) async fn dispatch_hydrating<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -30,6 +32,7 @@ pub(super) async fn dispatch_hydrating<
     ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
+    common::renew_held_inputs(ctx, JoinSubscriptionSide::Stream);
 
     let loop_count = ctx
         .instrumentation
@@ -95,6 +98,7 @@ pub(super) async fn dispatch_hydrating<
                             sup.stream_subscription.as_ref(),
                             ctx,
                             *announced,
+                            PhaseReads::Reference,
                         )
                         .await);
                     }
@@ -107,6 +111,7 @@ pub(super) async fn dispatch_hydrating<
                             Some(&*subscription),
                             sup.stream_subscription.as_ref(),
                             ctx,
+                            PhaseReads::Reference,
                         )
                         .await
                         {
@@ -143,35 +148,52 @@ pub(super) async fn dispatch_hydrating<
                     .await;
 
                     match resolution {
-                        ControlAction::Forward => {
-                            common::forward_control_to_journal(ctx, &envelope).await?;
-
-                            if envelope.is_eof() {
-                                if let Some(outcome) = subscription.take_last_eof_outcome() {
-                                    tracing::info!(
-                                        target: "flowip-080o",
-                                        stage_name = %ctx.stage_name,
-                                        upstream_stage_id = ?outcome.stage_id,
-                                        upstream_stage_name = %outcome.stage_name,
-                                        reader_index = outcome.reader_index,
-                                        eof_count = outcome.eof_count,
-                                        total_readers = outcome.total_readers,
-                                        is_final = outcome.is_final,
-                                        "Join (Hydrating) evaluated EOF outcome for reference side"
-                                    );
-                                }
-                            }
-
-                            EventLoopDirective::Continue
-                        }
-                        ControlAction::ForwardAndDrain => {
+                        ControlAction::Forward | ControlAction::ForwardAndDrain => {
                             common::forward_control_to_journal(ctx, &envelope).await?;
 
                             if envelope.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
+                                let catalog_final = last_eof_outcome
+                                    .as_ref()
+                                    .filter(|outcome| outcome.is_final)
+                                    .map(|outcome| {
+                                        (
+                                            outcome.worst_kind.unwrap_or(EofKind::Natural),
+                                            StageKey::from(outcome.stage_name.clone()),
+                                        )
+                                    });
+                                let generation =
+                                    subscription.last_delivered_generation().unwrap_or_default();
+                                match observe_hold_eof(
+                                    ctx,
+                                    JoinSubscriptionSide::Reference,
+                                    &envelope,
+                                    catalog_final,
+                                    generation,
+                                ) {
+                                    HoldOutcome::Holding => EventLoopDirective::Continue,
+                                    HoldOutcome::Completed(completion) => {
+                                        tracing::info!(
+                                            stage_name = %ctx.stage_name,
+                                            ended_by = ?completion.ended_by,
+                                            "Join hydration completed on natural EOFs"
+                                        );
+                                        EventLoopDirective::Transition(JoinEvent::HoldCompleted(
+                                            completion,
+                                        ))
+                                    }
+                                    HoldOutcome::LeftOpen => {
+                                        tracing::info!(
+                                            stage_name = %ctx.stage_name,
+                                            "Join hydration left open; draining without held inputs"
+                                        );
+                                        ctx.drain_without_held_inputs = true;
+                                        EventLoopDirective::Transition(JoinEvent::HoldLeftOpen)
+                                    }
+                                }
+                            } else {
+                                EventLoopDirective::Continue
                             }
-
-                            EventLoopDirective::Transition(JoinEvent::ReceivedEOF)
                         }
                         ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                             tracing::warn!(

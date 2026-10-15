@@ -865,6 +865,9 @@ async fn typed_join_errors_follow_the_locked_mode_matrix() {
                 completion.expect("live admission error remains per-record");
                 assert!(!failed, "live admission error remains per-record");
             }
+            JoinReferenceMode::FiniteThenLive => {
+                unreachable!("this matrix covers the finite and live modes")
+            }
         }
         assert_eq!(
             calls

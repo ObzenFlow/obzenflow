@@ -195,6 +195,9 @@ where
                 obzenflow_topology::StageType::Stateful
             }
             obzenflow_core::event::context::StageType::Join => obzenflow_topology::StageType::Join,
+            obzenflow_core::event::context::StageType::Merge => {
+                obzenflow_topology::StageType::Merge
+            }
         }
     }
 
@@ -431,6 +434,21 @@ where
                 kind: first.kind,
                 suggested_fix,
             });
+        }
+
+        let then_live_plan =
+            crate::dsl::then_live::plan(&topology, &descriptors, &name_to_id)?;
+        for (binding, witnesses) in &then_live_plan.witnesses {
+            descriptors
+                .get_mut(binding)
+                .expect("planned then-live join")
+                .set_phase_witnesses(witnesses.clone());
+        }
+        for (binding, batch, live) in &then_live_plan.merge_producers {
+            descriptors
+                .get_mut(binding)
+                .expect("planned merge")
+                .set_merge_producers(batch.clone(), live.clone());
         }
 
         // FLOWIP-095m: an order observer (an effect, a stateful fold, or a
@@ -705,6 +723,32 @@ where
                 .with_app_settings(__app_settings.clone()),
             )
         };
+
+        {
+            use crate::dsl::backpressure_clause::{resolve_edge_backpressure, EdgeBackpressure};
+            let mut enforced_edges = HashSet::new();
+            for (from_var, to_var, _kind) in &connections {
+                let from_key = obzenflow_core::StageKey::from(descriptors[from_var].name());
+                let to_key = obzenflow_core::StageKey::from(descriptors[to_var].name());
+                let (up_id, down_id) = (name_to_id[from_var], name_to_id[to_var]);
+                let (mode, mode_source) = __flow_effective.backpressure_mode_for(&from_key, &to_key);
+                let up_scc = topology.scc_id(to_topology_id(up_id));
+                let cycle_internal =
+                    up_scc.is_some() && up_scc == topology.scc_id(to_topology_id(down_id));
+                if matches!(
+                    resolve_edge_backpressure(mode, mode_source, cycle_internal),
+                    EdgeBackpressure::Enforce
+                ) {
+                    enforced_edges.insert((up_id, down_id));
+                }
+            }
+            then_live_plan.refuse_deadlocked_holds(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &enforced_edges,
+            )?;
+        }
 
         // FLOWIP-010: `runtime.cycle_max_iterations` is build-resolved; the
         // registry range check (1..=65535) replaced the old env warn/clamp.

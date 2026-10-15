@@ -150,7 +150,14 @@ impl TerminalRenderer {
             &[
                 Span::new(format!("{} (stage: ", header.heading), Role::Normal),
                 Span::new(&header.reporter, Role::Reporter),
-                Span::new(format!(", journal: {})", header.journal), Role::Normal),
+                Span::new(
+                    format!(
+                        ", journal: {}{})",
+                        header.journal,
+                        header.phase.as_deref().unwrap_or_default()
+                    ),
+                    Role::Normal,
+                ),
             ],
         )?;
         self.spans(output, &palette, &relation_spans)?;

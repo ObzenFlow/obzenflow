@@ -1756,3 +1756,89 @@ fn failed_processing_remains_distinct_from_a_successfully_produced_fact() {
     assert!(text.contains("processing error: calibration unavailable"));
     assert!(text.contains("\"sensor\": \"A\""));
 }
+
+fn join_row(event: u64, event_kind: &str, event_type: &str, payload: Value) -> RunRecord {
+    let kind = if event_kind == "fact" {
+        "stage_output"
+    } else {
+        "execution"
+    };
+    serde_json::from_value(json!({
+        "version": 3,
+        "run": {"flow_id": id(10), "pipeline_writer_id": {"type":"System", "id":id(11)}},
+        "journal": {"id":id(5), "kind":"data", "stage":{"key":"posted", "id":id(5), "stage_type":"Join","is_effectful":false}},
+        "position":event,
+        "kind":kind,
+        "record": {
+            "envelope": {"provenance": {
+                "event": {
+                    "id":id(event), "writer_id":{"type":"Stage", "id":id(5)},
+                    "event_kind":event_kind, "event_type":event_type, "payload_schema_version":1,
+                    "causality":{"parent_ids":[]},
+                    "flow_context":{"flow_name":"bank", "flow_id":id(10), "stage_name":"posted", "stage_id":id(5), "stage_type":"Join"},
+                    "processing":{"event_time":0, "status":"Success"}, "composite_activations":[]
+                },
+                "journal": {
+                    "journal_writer_id":id(5),
+                    "run_id":id(10),
+                    "previous":{"run_id":id(10),"journal_writer_id":id(5),"sequence":event-1,"event_id":id(event-1)},
+                    "vector_clock":{"entries":[{"journal_writer_id":id(5),"sequence":event}]},
+                    "timestamp":"2026-10-14T00:00:00Z", "journal_group_id":null, "journal_group_member":null
+                }
+            }},
+            "payload":payload
+        }
+    })).unwrap()
+}
+
+fn phase_row(event: u64, phase: &str, generation: u64) -> RunRecord {
+    join_row(
+        event,
+        "execution",
+        &format!("runtime.join.{phase}"),
+        json!({"execution_type":"join_phase", "phase":phase, "generation":generation, "ended_by":["batch_tx"]}),
+    )
+}
+
+fn posting(event: u64) -> RunRecord {
+    join_row(event, "fact", "bank.posted_entry", json!({"n": event}))
+}
+
+#[test]
+fn join_facts_are_headed_with_the_phase_their_join_had_journalled() {
+    let first = posting(201);
+    let mut renderer = Renderer::new(
+        &ViewArgs::default(),
+        false,
+        false,
+        [&first.journal].into_iter(),
+    );
+    renderer.width = 160;
+    let mut output = Vec::new();
+    for record in [
+        first,
+        phase_row(202, "enriching_entered", 0),
+        posting(203),
+        phase_row(204, "live_entered", 1),
+        posting(205),
+    ] {
+        renderer.record(&mut output, record).unwrap();
+    }
+    renderer.flush_pending(&mut output).unwrap();
+    let headings: Vec<String> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("JOIN (stage: posted"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(headings.len(), 3, "{headings:?}");
+    assert!(!headings[0].contains("phase:"), "{headings:?}");
+    assert!(
+        headings[1].ends_with(", phase: enriching since generation 0)"),
+        "{headings:?}"
+    );
+    assert!(
+        headings[2].ends_with(", phase: live since generation 1)"),
+        "{headings:?}"
+    );
+}

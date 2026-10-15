@@ -319,14 +319,14 @@ pub async fn metrics_budget_starts_after_terminal_publication_without_readback(
             .build_standard()
             .unwrap(),
     );
-    PipelineAction::FinaliseMetrics
+    PipelineAction::FinalizeMetrics
         .execute(&mut ctx)
         .await
         .unwrap();
     let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
     ctx.metrics_deadline = Some(deadline);
     let (_sender, receiver, watcher) =
-        ChannelBuilder::new().build(PipelineState::FinalisingMetrics);
+        ChannelBuilder::new().build(PipelineState::FinalizingMetrics);
     let mut supervisor = PipelineSupervisor::new(
         ctx.system_id,
         receiver,
@@ -335,7 +335,7 @@ pub async fn metrics_budget_starts_after_terminal_publication_without_readback(
     );
     assert!(matches!(
         supervisor
-            .dispatch_state(&PipelineFsmState::FinalisingMetrics, &mut ctx)
+            .dispatch_state(&PipelineFsmState::FinalizingMetrics, &mut ctx)
             .await
             .unwrap(),
         crate::supervised_base::EventLoopDirective::Transition(PipelineFsmEvent::MetricsExpired)
@@ -359,7 +359,7 @@ pub async fn drain_metrics_skips_when_metrics_not_started(
         Some(Arc::new(RecordingSnapshots::default())),
     );
 
-    PipelineAction::FinaliseMetrics
+    PipelineAction::FinalizeMetrics
         .execute(&mut ctx)
         .await
         .unwrap();
