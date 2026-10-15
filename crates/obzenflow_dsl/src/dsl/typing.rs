@@ -1206,8 +1206,6 @@ where
     wrap_typed_descriptor(descriptor, metadata)
 }
 
-/// Canonical admission factory for a merge stage (FLOWIP-084q B7, B9). The
-/// type appears once, so a merge passes on exactly what its producers emit.
 #[doc(hidden)]
 pub fn merge_descriptor<T, S>(
     name: impl Into<String>,
@@ -2824,9 +2822,6 @@ pub fn derive_delivery_orders(
             continue;
         };
         let upstreams = inbound.get(&stage_id).cloned().unwrap_or_default();
-        // FLOWIP-084q: a merge's strategy fixes its order. It records the race
-        // between several live producers, merges several batch producers
-        // canonically, and is otherwise ordered by its phase alone.
         if descriptor.stage_type() == StageType::Merge {
             let live = upstreams
                 .iter()

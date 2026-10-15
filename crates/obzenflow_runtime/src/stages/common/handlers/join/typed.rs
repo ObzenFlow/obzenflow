@@ -112,8 +112,6 @@ pub trait TypedJoinHandler: Send + Sync {
         JoinReferenceMode::FiniteEof
     }
 
-    /// The built-in variant name build diagnostics use, `None` for an
-    /// author-written join (FLOWIP-084q).
     #[doc(hidden)]
     fn strategy_label(&self) -> Option<&'static str> {
         None

@@ -294,7 +294,6 @@ fn renamed_facade_macros_and_constructors_compile() {
         |_reference: Fact, fact: Fact| fact,
     );
     let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => joined);
-    // FLOWIP-084q: merges and then-live joins through the facade.
     let _ = merge!(Fact => merges::then_live);
     let _ = of::flow::merge!(Fact => merges::then_live);
     let then_live = joins::inner_then_live(

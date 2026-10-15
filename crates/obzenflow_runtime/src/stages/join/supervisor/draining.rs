@@ -33,9 +33,6 @@ pub(super) async fn dispatch_draining<
         heartbeat.state.mark_draining();
     }
 
-    // FLOWIP-084q B2: a state that held inputs ended without completing. The
-    // join drains without reading the inputs it held and runs no end-of-input
-    // finalization under any kind; its EOF carries the worst kind it read.
     if ctx.drain_without_held_inputs {
         common::ensure_subscriptions(sup, ctx);
         match common::flush_pending_outputs(sup, ctx).await? {

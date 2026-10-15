@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-084q: a then-live join behind two `then_live` merges, proven from
-//! the journals. Live rows are queued before the run starts, the hardest race
-//! for the hold, and must still post after every batch row.
-
 mod replay_testkit;
 
 use anyhow::{anyhow, Result};
@@ -101,7 +97,6 @@ struct Inputs {
     live_accounts: mpsc::Receiver<Account>,
     live_entries: mpsc::Receiver<Entry>,
     batch_rate: Option<f64>,
-    /// `(window, stall_timeout_ms)` for a flow that enforces backpressure.
     enforce: Option<(u64, u64)>,
 }
 
@@ -135,7 +130,6 @@ fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition
         let rate = batch_rate.unwrap_or(10_000.0);
         let journals = journal_base.clone();
 
-        // The flows differ only in whether they enforce backpressure.
         macro_rules! then_live_flow {
             ($($backpressure:tt)*) => {
                 flow! {
@@ -216,7 +210,6 @@ async fn stop(handle: &FlowHandle) -> Result<()> {
     Ok(())
 }
 
-/// One journal row as the assertions read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Row {
     Data(String),
@@ -316,7 +309,6 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
     stop(&handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
-    // Each merge journals every batch row before any live row (B8).
     assert_eq!(
         data(&stage_rows(&run, "transactions").await),
         ["batch-1", "batch-2", "batch-3", "batch-4", "batch-5", "batch-6", "live-1", "live-2"]
@@ -326,8 +318,6 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
         ["acct-1", "acct-2", "acct-3"]
     );
 
-    // The join journals each phase it enters between the EOF that ended the
-    // phase before and the next phase's first row (B11).
     let posted = stage_rows(&run, "posted").await;
     let enriching = position(&posted, |row| {
         matches!(row, Row::Phase(JoinPhaseFact::EnrichingEntered { .. }))
@@ -357,11 +347,9 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
         })
     );
 
-    // The manifest records both merges as merge stages.
     let manifest = replay_testkit::archive_manifest(&run).to_string();
     assert_eq!(manifest.matches("\"Merge\"").count(), 2, "{manifest}");
 
-    // A strict replay reproduces the merged order and every phase fact.
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -437,7 +425,6 @@ async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()
     stop(&handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
-    // The merge never read its live producer, and authored the stop's kind (B2).
     let transactions = stage_rows(&run, "transactions").await;
     assert!(!data(&transactions).contains(&"live-1"), "{transactions:?}");
     assert!(data(&transactions).len() < 6, "{transactions:?}");
@@ -448,7 +435,6 @@ async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()
         })
     );
 
-    // The join left its batch phase open: no live fact and no live posting.
     let posted = stage_rows(&run, "posted").await;
     assert!(
         !posted
@@ -466,9 +452,6 @@ async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()
     Ok(())
 }
 
-/// Under `enforce`, a batch that holds a live edge for several stall ceilings
-/// completes without a stall, because the held edge renews (B3, B10), and the
-/// held rows then post.
 #[tokio::test]
 async fn a_hold_longer_than_the_stall_ceiling_completes_under_enforce() -> Result<()> {
     let _guard = THEN_LIVE_TEST_LOCK.lock().await;
@@ -492,7 +475,6 @@ async fn a_hold_longer_than_the_stall_ceiling_completes_under_enforce() -> Resul
             batch_entries: batch_entries(),
             live_accounts,
             live_entries,
-            // Two rows at once, then four at two a second: four ceilings.
             batch_rate: Some(2.0),
             enforce: Some((2, 500)),
         },
@@ -619,8 +601,6 @@ async fn a_join_with_no_batch_stream_input_journals_only_live_entered() -> Resul
     Ok(())
 }
 
-/// B2 for `FiniteEof`: a hydration a stop ends drains without joining held
-/// stream rows against a partial catalog.
 #[tokio::test]
 async fn a_finite_eof_join_stopped_while_hydrating_posts_nothing() -> Result<()> {
     let _guard = THEN_LIVE_TEST_LOCK.lock().await;
@@ -706,9 +686,6 @@ async fn a_finite_eof_join_stopped_while_hydrating_posts_nothing() -> Result<()>
     Ok(())
 }
 
-/// Two batch and two live producers on one merge, under a then-live join whose
-/// catalog is batch only. `batch_a` is paced so its EOF lands well after
-/// `batch_b`'s.
 fn build_two_per_side(
     journal_base: PathBuf,
     live: (mpsc::Receiver<Entry>, mpsc::Receiver<Entry>),
@@ -765,9 +742,6 @@ fn build_two_per_side(
     })
 }
 
-/// B8 with two producers per side: the merge reads no live row until every
-/// batch producer has ended naturally, and records the order between its live
-/// producers, so a strict replay reproduces it.
 #[tokio::test]
 async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()> {
     let _guard = THEN_LIVE_TEST_LOCK.lock().await;
@@ -798,8 +772,6 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
     stop(&handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
-    // Every batch row precedes every live row, and each producer keeps its
-    // own order.
     let transactions = stage_rows(&run, "transactions").await;
     let merged = data(&transactions);
     assert_eq!(merged.len(), 10, "{transactions:?}");
@@ -823,7 +795,6 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
     assert_eq!(from("live-a-"), ["live-a-1", "live-a-2"]);
     assert_eq!(from("live-b-"), ["live-b-1", "live-b-2"]);
 
-    // Both batch producers' natural EOFs pass on before the first live row.
     let first_live = position(
         &transactions,
         |row| matches!(row, Row::Data(note) if note.starts_with("live-")),
@@ -840,7 +811,6 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
         "{transactions:?}"
     );
 
-    // Only the live side records its order (B6, B8).
     let records = replay_testkit::read_stage_envelopes_appended(&run, "transactions").await;
     let last_batch = records
         .iter()
@@ -863,7 +833,6 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
         "selections at {selections:?}, last batch row at {last_batch}"
     );
 
-    // The join posts in the merged order and goes live on both batch EOFs.
     let posted = stage_rows(&run, "posted").await;
     assert_eq!(data(&posted), merged);
     let mut ended_by = posted
@@ -879,8 +848,6 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
         [StageKey::from("batch_a"), StageKey::from("batch_b")]
     );
 
-    // A strict replay reproduces the canonical batch order and the recorded
-    // live order.
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),

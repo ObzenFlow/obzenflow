@@ -26,9 +26,8 @@ pub enum JoinReferenceMode {
     /// Live mode: consume reference updates and stream events concurrently (no reference EOF gate).
     Live,
 
-    /// Then-live mode (FLOWIP-084q): hydrate the batch catalog, then enrich the
-    /// batch stream, then run live over every input. Each phase ends only on
-    /// the natural EOFs of its witnesses.
+    /// Hydrate the batch catalog, then enrich the batch stream, then run live over
+    /// every input. Each phase ends only on the natural EOFs of its witnesses.
     FiniteThenLive,
 }
 
@@ -49,7 +48,7 @@ impl JoinReferenceMode {
 }
 
 /// One stage whose natural EOF ends a then-live join's holding state, by its
-/// stable key and its stage ID in this run (FLOWIP-084q B5, B8).
+/// stable key and its stage ID in this run.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PhaseWitness {
     pub stage_key: StageKey,
@@ -57,7 +56,7 @@ pub struct PhaseWitness {
 }
 
 /// The authored natural EOFs that end a then-live join's holding states,
-/// computed by the flow build (FLOWIP-084q B5, B8).
+/// computed by the flow build.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PhaseWitnesses {
     /// Stages whose natural EOFs, arriving on the catalog, end hydration.
@@ -92,8 +91,7 @@ pub struct JoinConfig {
     /// Reference join mode (default: FiniteEof).
     pub reference_mode: JoinReferenceMode,
 
-    /// Then-live phase witnesses (FLOWIP-084q). `Some` exactly in
-    /// `FiniteThenLive` mode.
+    /// Then-live phase witnesses, `Some` exactly in `FiniteThenLive` mode.
     pub phase_witnesses: Option<PhaseWitnesses>,
 
     /// Live-mode fairness cap: after N reference events without a stream event, prioritize a

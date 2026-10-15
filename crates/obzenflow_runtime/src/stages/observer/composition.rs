@@ -69,7 +69,6 @@ const EFFECTFUL_STATEFUL_SURFACES: &[ObserverSurface] = &[
     ObserverSurface::StageLifecycle,
 ];
 const JOIN_SURFACES: &[ObserverSurface] = &[ObserverSurface::Join, ObserverSurface::StageLifecycle];
-/// A merge runs no author code and takes no `with` clause (FLOWIP-084q B9).
 const MERGE_SURFACES: &[ObserverSurface] = &[];
 const SINK_SURFACES: &[ObserverSurface] = &[
     ObserverSurface::SinkDelivery,

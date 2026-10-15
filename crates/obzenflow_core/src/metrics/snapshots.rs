@@ -166,8 +166,7 @@ pub struct AppMetricsSnapshot {
     /// Backpressure credits per edge (upstream, downstream) (FLOWIP-086k).
     pub backpressure_credits: HashMap<(StageId, StageId), u64>,
 
-    /// Hold renewals each edge's reader published while holding the edge by
-    /// rule (FLOWIP-084q B3).
+    /// Hold renewals each edge's reader published while holding the edge by rule.
     pub backpressure_hold_renewals_total: HashMap<(StageId, StageId), u64>,
 
     /// Backpressure blocked state by stage (0/1; blocked on any downstream edge) (FLOWIP-086k).

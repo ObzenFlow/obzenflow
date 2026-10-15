@@ -88,8 +88,6 @@ impl SupervisorBuilder for MergeBuilder {
             &self.resources.runtime_execution,
         );
 
-        // B8: the batch side always reads through the canonical merge; the
-        // live side records its order when it has several readers (A1).
         let mut batch_subscription_factory = self
             .resources
             .upstream_subscription_factory

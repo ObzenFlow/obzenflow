@@ -5839,8 +5839,8 @@ macro_rules! transform {
     ($($tokens:tt)*) => { $crate::__obzenflow_attachment_syntax!(@before __obzenflow_transform_attachment_contract, [], $($tokens)*) };
 }
 
-/// Declares a merge stage, which combines several producers of one type in the
-/// order its framework strategy decides (FLOWIP-084q B7, B9).
+/// Declares a merge stage, which runs no author code and combines several
+/// producers of one type in the order its framework strategy decides.
 ///
 /// ```
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -5859,7 +5859,7 @@ macro_rules! transform {
 /// let _stage = obzenflow_dsl::merge!(Fact);
 /// ```
 ///
-/// A merge runs no author code, so a type outside `merges` does not compile.
+/// The `=>` slot takes only a strategy from `merges`.
 ///
 /// ```compile_fail
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -5870,7 +5870,7 @@ macro_rules! transform {
 /// let _stage = obzenflow_dsl::merge!(Fact => PreferStore);
 /// ```
 ///
-/// A merge has no handler, so it takes no `with` clause.
+/// A merge takes no `with` clause.
 ///
 /// ```compile_fail
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

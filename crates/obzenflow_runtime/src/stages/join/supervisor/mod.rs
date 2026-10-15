@@ -150,8 +150,6 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                     })
                 };
 
-                // FLOWIP-084q B2, B11: hydration ends only on the natural EOFs that
-                // end it, and the transition journals the phase it enters.
                 on JoinEvent::HoldCompleted => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let JoinEvent::HoldCompleted(completion) = event else { unreachable!() };
                     let completion = completion.clone();
@@ -276,8 +274,6 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                     })
                 };
 
-                // FLOWIP-084q B2, B11: a then-live join's batch ends only on the
-                // natural EOFs that end it, and the transition journals `Live`.
                 on JoinEvent::HoldCompleted => |_state: &JoinState<H>, event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
                     let JoinEvent::HoldCompleted(completion) = event else { unreachable!() };
                     let fact = JoinPhaseFact::LiveEntered {

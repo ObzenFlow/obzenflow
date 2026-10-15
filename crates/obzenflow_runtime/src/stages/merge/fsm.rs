@@ -2,11 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FSM for merge stages (FLOWIP-084q B7, B8).
-//!
-//! A `then_live` merge reads its batch producers through the canonical merge
-//! and leaves its live producers unpolled until every batch producer has
-//! authored natural EOF, then reads its live producers. It runs no author code.
+//! FSM for merge stages. A `then_live` merge reads its batch producers first and
+//! polls its live producers only after every batch producer authored natural EOF.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -43,7 +40,7 @@ pub enum MergeState {
     Initialized,
     Starting,
     /// Reads only the batch producers; the live producers wait in their
-    /// journals and their edges are renewed as held (B3, B8).
+    /// journals and their edges are renewed as held.
     Batch,
     /// Every batch producer authored natural EOF; reads the live producers.
     Live,
@@ -93,10 +90,10 @@ pub enum MergeEvent {
     InitializationCompleted,
     Ready,
     ActivationCompleted,
-    /// Every batch producer authored natural EOF (B2, B8).
+    /// Every batch producer authored natural EOF.
     BatchCompleted,
     /// Every batch producer ended, not all naturally; the merge drains without
-    /// reading its live producers (B2).
+    /// reading its live producers.
     BatchLeftOpen,
     /// The live subscription ended.
     ReceivedEOF,
@@ -171,12 +168,9 @@ pub struct MergeContext {
     pub(crate) backpressure_stall: StallEpisode,
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
-    /// Worst-wins join over the terminal EOF kinds of the inputs it read.
     pub(crate) terminal_eof_kind: Option<EofKind>,
     pub(crate) buffered_eof: Option<ChainEvent>,
-    /// The batch phase ended without completing (B2).
     pub(crate) drain_without_held_inputs: bool,
-    /// The generation a batch-phase crossing promotes the live side to (B1).
     pub(crate) pending_promotion: Option<ReaderGeneration>,
     pub(crate) catch_up_flip: Option<ReaderGeneration>,
 }

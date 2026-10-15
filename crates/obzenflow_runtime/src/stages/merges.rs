@@ -2,12 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Framework merge strategies (FLOWIP-084q B7, B9).
-//!
-//! A merge stage combines several producers of one type and journals the merged
-//! stream. Its strategy decides the order, and the merge supervisor alone
-//! interprets it. This is a closed set: a merge runs no author code, and each
-//! further strategy arrives in its own FLOWIP.
+//! Framework merge strategies, a closed set that only the merge supervisor
+//! interprets. A strategy decides the order in which a merge journals its producers.
 
 mod sealed {
     pub trait Sealed {}
@@ -17,7 +13,7 @@ mod sealed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MergeStrategyKind {
     /// Every batch producer's rows, up to each one's natural EOF, before any
-    /// live producer's (B8).
+    /// live producer's.
     ThenLive,
 }
 
@@ -32,7 +28,7 @@ pub trait MergeStrategy: sealed::Sealed + Copy + Send + Sync + 'static {
 }
 
 /// Pass on every batch producer's rows, up to each one's natural EOF, before
-/// any live producer's (FLOWIP-084q B8).
+/// any live producer's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ThenLive;
 

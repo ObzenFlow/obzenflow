@@ -133,8 +133,7 @@ where
         self
     }
 
-    /// Hydrate the batch catalog, then enrich the batch stream, then go live
-    /// (FLOWIP-084q).
+    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self
@@ -239,8 +238,7 @@ where
         self
     }
 
-    /// Hydrate the batch catalog, then enrich the batch stream, then go live
-    /// (FLOWIP-084q).
+    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self

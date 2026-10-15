@@ -237,12 +237,11 @@ pub enum JoinEvent<H> {
     /// Received EOF from upstream (subscription context determines which one)
     ReceivedEOF,
 
-    /// Every input that ends the current state that holds inputs ended
-    /// naturally (FLOWIP-084q B2, B11).
+    /// Every input that ends the current holding state ended naturally.
     HoldCompleted(HoldCompletion),
 
-    /// Every input the state that holds inputs reads ended, not all naturally;
-    /// the join drains without reading the inputs it holds (FLOWIP-084q B2).
+    /// Every input the holding state reads ended, not all naturally; the join
+    /// drains without reading the inputs it holds.
     HoldLeftOpen,
 
     /// Begin draining process
@@ -327,8 +326,8 @@ impl<H: Clone + Send + Sync + 'static> EventVariant for JoinEvent<H> {
     }
 }
 
-/// How a state that holds inputs completed (FLOWIP-084q B11): the generation of
-/// the delivery that ended it and the stages whose natural EOFs ended it.
+/// The generation of the delivery that ended a holding state, and the stages
+/// whose natural EOFs ended it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HoldCompletion {
     pub generation: u64,
@@ -353,7 +352,7 @@ pub enum JoinAction<H> {
     PublishRunning,
     EmitHydrationHeartbeat,
 
-    /// Journal the phase this transition entered (FLOWIP-084q B11).
+    /// Journal the phase this transition entered.
     RecordPhase(JoinPhaseFact),
 
     /// Hydrate reference catalog from reference event
@@ -529,26 +528,16 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     /// Reference join mode (FiniteEof, Live or FiniteThenLive).
     pub reference_mode: JoinReferenceMode,
 
-    /// Then-live phase witnesses (FLOWIP-084q B5, B8); `None` in other modes.
     pub(crate) phase_witnesses: Option<PhaseWitnesses>,
 
-    /// Witness stage keys by every stage ID their EOFs may carry in this run,
-    /// current or archived (FLOWIP-084q).
     pub(crate) witness_keys: HashMap<StageId, StageKey>,
 
-    /// Natural-or-not EOFs witnessed so far in the current holding state.
     pub(crate) witnessed_eofs: HashMap<StageKey, EofKind>,
 
-    /// A holding state ended without completing: drain without reading the
-    /// inputs it held and without end-of-input finalization (FLOWIP-084q B2).
     pub(crate) drain_without_held_inputs: bool,
 
-    /// The side a phase-scoped catch-up crossing promoted, applied at the next
-    /// dispatch (FLOWIP-084q B1).
     pub(crate) pending_promotion: Option<(JoinSubscriptionSide, obzenflow_core::ReaderGeneration)>,
 
-    /// Phases the archive's own journal records this join entering, with the
-    /// generation that entered each (FLOWIP-084q B1, B11).
     pub(crate) archived_phases: Vec<JoinPhaseFact>,
 
     /// Live-mode fairness cap (see `JoinConfig.reference_batch_cap`).
@@ -617,8 +606,6 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     pub(crate) resources: Option<JoinResources<H>>,
     pub(crate) instrumentation: Arc<StageInstrumentation>,
     pub(crate) reference_mode: JoinReferenceMode,
-    /// A then-live join with no batch stream input goes from `Hydrating`
-    /// straight to `Live` (FLOWIP-084q).
     pub(crate) batch_phase_empty: bool,
 }
 impl<H: UnifiedJoinHandler> JoinContext<H> {
@@ -802,8 +789,6 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
 
                 ctx.stream_subscription = Some(stream_subscription);
 
-                // FLOWIP-084q B1: a join that replays or resumes reads the
-                // phases its archive entered, to check where it crosses.
                 if let Some(archive) = ctx.runtime_execution.archive_for_io().cloned() {
                     ctx.archived_phases =
                         super::phase::load_archived_phases(&archive, &ctx.stage_name)

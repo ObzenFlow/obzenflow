@@ -132,8 +132,6 @@ fn replay_wire_names_identify_the_recorded_occurrence() {
     }
 }
 
-/// FLOWIP-084q B11: the approved join phase spellings. Each fact names the
-/// phase entered, the generation that ended the previous one and its witnesses.
 #[test]
 fn join_phase_wire_names_and_fields_match_the_approved_spellings() {
     let stage = StageId::new();

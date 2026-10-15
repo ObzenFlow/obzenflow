@@ -2,17 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Merge supervisor (FLOWIP-084q B7 to B9).
-//!
-//! A `then_live` merge journals every batch producer's rows, through the
-//! canonical merge, before any live producer's. Its batch phase holds the live
-//! producers by leaving their subscription unpolled and renewing their edges
-//! (B3). It completes only when every batch producer authored natural EOF,
-//! passing those EOFs on, and otherwise drains without reading its live
-//! producers (B2). It crosses its catch-up boundary once its batch producers
-//! have crossed or ended, promoting its live producers (B1). It calls no
-//! author code (B9).
-
 use std::error::Error;
 use std::sync::atomic::Ordering;
 
@@ -49,20 +38,17 @@ use crate::supervised_base::{
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
-/// Which subscription a merge state reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
     Batch,
     Live,
 }
 
-/// Supervisor for merge stages.
 pub(crate) struct MergeSupervisor {
     pub(crate) name: String,
     pub(crate) stage_id: StageId,
     pub(crate) batch_subscription: Option<UpstreamSubscription<ChainEvent>>,
     pub(crate) live_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    /// The subscription whose delivery the pending outputs derive from.
     pending_side: Option<Side>,
 }
 
@@ -245,8 +231,6 @@ impl Supervisor for MergeSupervisor {
             state MergeState::Cancelled {}
 
             unhandled => |state: &MergeState, event: &MergeEvent, _ctx: &mut MergeContext| {
-                // A stop reaches the batch phase as non-natural EOFs (B2), so
-                // a drain request there is ignored, as a hydrating join does.
                 let ignored = matches!(
                     event,
                     MergeEvent::Initialize | MergeEvent::Ready | MergeEvent::BeginDrain
@@ -372,9 +356,6 @@ impl ExternalEventPolicy for MergeSupervisor {
     }
 }
 
-/// Move the subscriptions onto the supervisor, apply a pending promotion of
-/// the live side (B1), and count batch deliveries in the live side's decision
-/// rows (B8, as 095q's rows count every delivery since the run began).
 fn ensure_subscriptions(sup: &mut MergeSupervisor, ctx: &mut MergeContext) {
     if sup.batch_subscription.is_none() {
         sup.batch_subscription = ctx.batch_subscription.take();
@@ -397,7 +378,6 @@ fn ensure_subscriptions(sup: &mut MergeSupervisor, ctx: &mut MergeContext) {
     }
 }
 
-/// B3: the batch phase renews every live producer's edge once per dispatch.
 fn renew_live_holds(ctx: &MergeContext) {
     for producer in &ctx.live_producers {
         if let Some(reader) = ctx.backpressure_readers.get(producer) {
@@ -406,8 +386,6 @@ fn renew_live_holds(ctx: &MergeContext) {
     }
 }
 
-/// Flush outputs blocked on downstream credit, then acknowledge the input
-/// they came from. `false` when credit is still short.
 async fn flush_pending_outputs(
     sup: &mut MergeSupervisor,
     ctx: &mut MergeContext,
@@ -454,8 +432,6 @@ async fn flush_pending_outputs(
     Ok(true)
 }
 
-/// The merged copy of one delivered row: a derived fact with the same type and
-/// payload, written by this merge. Error rows pass through unchanged.
 fn merged_output(ctx: &MergeContext, event: &ChainEvent) -> Result<ChainEvent, BoxError> {
     if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
         return Ok(event.clone());
@@ -474,8 +450,6 @@ fn merged_output(ctx: &MergeContext, event: &ChainEvent) -> Result<ChainEvent, B
     })
 }
 
-/// Queue one delivered row for the merge's journal; it is committed through
-/// the backpressure gate before the next poll and acknowledged once written.
 fn queue_row(
     sup: &mut MergeSupervisor,
     ctx: &mut MergeContext,
@@ -511,9 +485,6 @@ fn queue_row(
     Ok(())
 }
 
-/// The catch-up crossing (FLOWIP-120n, 084q B1): the batch phase crosses once
-/// its batch producers have crossed or ended and promotes the live side; the
-/// live phase crosses once both sides have.
 async fn flip(
     sup: &MergeSupervisor,
     ctx: &mut MergeContext,
@@ -549,7 +520,7 @@ async fn flip(
             data_journal: &ctx.data_journal,
             instrumentation: &ctx.instrumentation,
         },
-        /* author_marker */ true,
+        true,
         &ctx.runtime_execution,
         &mut ctx.catch_up_flip,
     )
@@ -568,15 +539,11 @@ fn max_generation(sup: &MergeSupervisor) -> obzenflow_core::ReaderGeneration {
     side_max(sup.batch_subscription.as_ref()).max(side_max(sup.live_subscription.as_ref()))
 }
 
-/// What one delivered EOF on the side a state reads decided.
 enum EofStep {
     Continue,
-    /// Every reader of that side has authored its EOF, with this worst kind.
     SideEnded(EofKind),
 }
 
-/// Pass one control row on: watermarks cross, EOFs fold their kind and are
-/// forwarded with their author intact, and other control is forwarded.
 async fn handle_control(
     sup: &mut MergeSupervisor,
     ctx: &mut MergeContext,
@@ -611,7 +578,6 @@ async fn handle_control(
     };
 
     if envelope.is_eof() {
-        // FLOWIP-120n F17: an authored EOF can complete the caught-up frontier.
         let target = max_generation(sup);
         if target != obzenflow_core::ReaderGeneration(0) {
             if let CatchUpDisposition::Failed(message) = flip(sup, ctx, target, batch_phase).await {
@@ -642,7 +608,7 @@ async fn handle_control(
         last_eof_outcome.as_ref(),
         upstream_stage,
         reader_count,
-        /* drain_is_terminal */ false,
+        false,
         &ctx.stage_name,
     )
     .await;
@@ -663,7 +629,6 @@ async fn handle_control(
     if !envelope.is_eof() {
         return Ok(Ok(EofStep::Continue));
     }
-    // The side ends on its final EOF whether or not that EOF was forwarded.
     if let Some(subscription) = sup.subscription(side) {
         subscription.take_last_eof_outcome();
     }
@@ -702,7 +667,6 @@ async fn contract_tick(
     Ok(())
 }
 
-/// Poll one row from `side` and handle it. `Ok(None)` when nothing arrived.
 async fn poll_side(
     sup: &mut MergeSupervisor,
     state: &MergeState,
@@ -786,9 +750,6 @@ async fn dispatch_batch(
     match poll_side(sup, state, ctx, Side::Batch, true).await? {
         Err(directive) => Ok(directive),
         Ok(Some(EofStep::SideEnded(kind))) => {
-            // B2: the batch phase completes only when every batch producer
-            // authored natural EOF; otherwise the merge drains without
-            // reading its live producers.
             if kind == EofKind::Natural {
                 tracing::info!(stage_name = %ctx.stage_name, "Merge batch completed; going live");
                 Ok(EventLoopDirective::Transition(MergeEvent::BatchCompleted))

@@ -296,7 +296,7 @@ pub enum FlowBuildError {
         detail: &'static str,
     },
 
-    /// A then-live join or `then_live` merge the build refuses (FLOWIP-084q).
+    /// A then-live join or `then_live` merge the build refuses.
     #[error("{0}")]
     ThenLiveTopology(String),
 

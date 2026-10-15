@@ -436,9 +436,6 @@ where
             });
         }
 
-        // FLOWIP-084q: classify then-live joins and merges, refuse the shapes
-        // the build refuses, and hand each join its phase witnesses and each
-        // merge its batch and live producers.
         let then_live_plan =
             crate::dsl::then_live::plan(&topology, &descriptors, &name_to_id)?;
         for (binding, witnesses) in &then_live_plan.witnesses {
@@ -727,9 +724,6 @@ where
             )
         };
 
-        // FLOWIP-084q B4: once edge modes resolve, refuse a state that holds
-        // inputs whose end needs a stage that reaches a held input through
-        // enforced edges.
         {
             use crate::dsl::backpressure_clause::{resolve_edge_backpressure, EdgeBackpressure};
             let mut enforced_edges = HashSet::new();

@@ -1757,7 +1757,6 @@ fn failed_processing_remains_distinct_from_a_successfully_produced_fact() {
     assert!(text.contains("\"sensor\": \"A\""));
 }
 
-/// One row of a join's data journal (FLOWIP-084q B11).
 fn join_row(event: u64, event_kind: &str, event_type: &str, payload: Value) -> RunRecord {
     let kind = if event_kind == "fact" {
         "stage_output"

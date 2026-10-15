@@ -47,8 +47,6 @@ pub(super) fn ensure_subscriptions<
     if sup.stream_subscription.is_none() {
         sup.stream_subscription = ctx.stream_subscription.take();
     }
-    // FLOWIP-084q B1: the side a phase-scoped crossing held is promoted to the
-    // generation it crossed into before anything reads it.
     if let Some((side, generation)) = ctx.pending_promotion.take() {
         let held = match side {
             JoinSubscriptionSide::Reference => sup.reference_subscription.as_mut(),
@@ -68,12 +66,6 @@ pub(super) fn ensure_subscriptions<
     }
 }
 
-/// FLOWIP-120n: the join's catch-up flip for `target`. It requires every side
-/// the current state reads caught up (FLOWIP-084q B1): `Hydrating` reads the
-/// catalog, `Enriching` the stream, and every other state both. A side whose
-/// subscription does not exist yet counts as not caught up. A crossing in an
-/// earlier phase than the archive reached fails closed, and the side a holding
-/// state did not read is promoted to `target` at the next dispatch.
 async fn join_flip<H: UnifiedJoinHandler>(
     reference: Option<&UpstreamSubscription<ChainEvent>>,
     stream: Option<&UpstreamSubscription<ChainEvent>>,
@@ -129,9 +121,6 @@ async fn join_flip<H: UnifiedJoinHandler>(
     disposition
 }
 
-/// FLOWIP-120n: consume one side's delivered catch-up watermark. A one-sided
-/// arm reacts to either side's watermark; the flip happens when the last side
-/// the state reads crosses.
 pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
     reference: Option<&UpstreamSubscription<ChainEvent>>,
     stream: Option<&UpstreamSubscription<ChainEvent>>,
@@ -174,9 +163,6 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
     }
 }
 
-/// FLOWIP-084q B3: renew the hold on every edge of the side a holding state
-/// does not read, once per dispatch. Renewals publish no credit and wake no
-/// writer; a blocked writer reads them at its next look.
 pub(super) fn renew_held_inputs<H: UnifiedJoinHandler>(
     ctx: &JoinResources<H>,
     held: JoinSubscriptionSide,

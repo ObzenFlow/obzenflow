@@ -2,17 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Each join's phase, projected from the facts it journals as it enters each
-//! phase (FLOWIP-084q B11). A join fact is headed with the latest phase its
-//! join had journalled when the fact was read.
-
 use super::context::event_id;
 use super::{RunJournalKind, RunRecord, RunRecordData};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, JoinPhaseFact};
 use obzenflow_core::event::ChainPayload;
 use std::collections::{BTreeMap, VecDeque};
 
-/// Join facts read but not yet shown are bounded like causal references.
 const MAX_FACTS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +65,6 @@ impl JoinPhases {
         }
     }
 
-    /// `, phase: live since generation 1` for a fact its join journalled
-    /// after entering a phase.
     pub(super) fn heading_suffix(&self, record: &RunRecord) -> Option<String> {
         self.by_fact.get(&event_id(record)).map(|phase| {
             format!(

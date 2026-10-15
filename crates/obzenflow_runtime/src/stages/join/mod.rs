@@ -10,8 +10,8 @@
 //! By default (`JoinReferenceMode::FiniteEof`), joins follow a hydrate-then-enrich model:
 //! reference loads to EOF before stream processing begins. In `JoinReferenceMode::Live`,
 //! the join processes stream events continuously while the reference side can keep
-//! receiving updates. `JoinReferenceMode::FiniteThenLive` runs the two in sequence:
-//! batch catalog, then batch stream, then live over every input (FLOWIP-084q).
+//! receiving updates. `JoinReferenceMode::FiniteThenLive` hydrates the batch catalog,
+//! enriches the batch stream, then runs live over every input.
 //!
 //! # Key Features
 //! - Reference-first convention (no left/right confusion)
@@ -92,9 +92,8 @@ where
         .build(join_fn)
 }
 
-/// Construct an inner join that completes its batch inputs before going live
-/// (FLOWIP-084q): it hydrates the batch catalog, enriches the batch stream, and
-/// then runs live over every input.
+/// Construct an inner join that hydrates the batch catalog, enriches the batch
+/// stream, then runs live over every input.
 pub fn inner_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
@@ -159,9 +158,8 @@ where
         .build(join_fn)
 }
 
-/// Construct a left join that completes its batch inputs before going live
-/// (FLOWIP-084q): it hydrates the batch catalog, enriches the batch stream, and
-/// then runs live over every input.
+/// Construct a left join that hydrates the batch catalog, enriches the batch
+/// stream, then runs live over every input.
 pub fn left_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
@@ -226,9 +224,8 @@ where
         .build(join_fn)
 }
 
-/// Construct a strict join that completes its batch inputs before going live
-/// (FLOWIP-084q): it hydrates the batch catalog, enriches the batch stream, and
-/// then runs live over every input.
+/// Construct a strict join that hydrates the batch catalog, enriches the batch
+/// stream, then runs live over every input.
 pub fn strict_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,

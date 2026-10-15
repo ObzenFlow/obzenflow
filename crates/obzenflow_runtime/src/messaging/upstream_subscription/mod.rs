@@ -356,10 +356,6 @@ where
     /// Never advanced while a watermark head is merely held.
     generation_by_reader: Vec<ReaderGeneration>,
 
-    /// Generation a stage that held this subscription promoted it to when it
-    /// crossed its catch-up boundary without reading it (FLOWIP-084q B1). Its
-    /// remaining recorded rows were held in the killed run too, so they are
-    /// new work in that generation. Never applied to watermark accounting.
     promoted_generation: ReaderGeneration,
 
     /// Generation of the last delivered event: the delivering reader's
@@ -724,14 +720,10 @@ where
             .unwrap_or_default()
     }
 
-    /// A reader's generation for scoping and ordering: its own, or the
-    /// generation this subscription was promoted to (FLOWIP-084q B1).
     pub(crate) fn effective_generation(&self, index: usize) -> ReaderGeneration {
         self.generation_by_reader[index].max(self.promoted_generation)
     }
 
-    /// Promote every reader of a subscription its stage held through a
-    /// catch-up crossing to `generation` (FLOWIP-084q B1). Monotonic.
     pub(crate) fn promote_held_readers(&mut self, generation: ReaderGeneration) {
         self.promoted_generation = self.promoted_generation.max(generation);
     }

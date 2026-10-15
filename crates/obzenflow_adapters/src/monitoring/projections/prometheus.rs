@@ -1491,7 +1491,6 @@ impl PrometheusProjection {
             writeln!(output)?;
         }
 
-        // Edge-scoped hold renewals (FLOWIP-084q B3)
         if !snapshot.backpressure_hold_renewals_total.is_empty() {
             writeln!(
                 output,

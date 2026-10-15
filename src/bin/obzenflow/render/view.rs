@@ -46,7 +46,6 @@ pub(super) struct HeaderView<'a> {
     pub reporter: Cow<'a, str>,
     pub journal: JournalNumber,
     pub read_model: bool,
-    /// `, phase: live since generation 1` on a join fact (FLOWIP-084q B11).
     pub phase: Option<String>,
 }
 

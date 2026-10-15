@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A join's states that hold inputs (FLOWIP-084q): which natural EOFs end them
-//! (B2, B5, B8), which subscriptions each reads for its catch-up crossing (B1),
-//! and the phases a resumed join's archive already reached (B1, B11).
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -21,20 +17,13 @@ use crate::stages::common::handlers::UnifiedJoinHandler;
 use super::config::{JoinReferenceMode, PhaseWitnesses};
 use super::fsm::{HoldCompletion, JoinResources, JoinSubscriptionSide};
 
-/// What one EOF delivered to a state that holds inputs decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoldOutcome {
-    /// The state keeps holding.
     Holding,
-    /// Every input that ends the state ended naturally (B2).
     Completed(HoldCompletion),
-    /// Every input the state reads ended, not all naturally (B2).
     LeftOpen,
 }
 
-/// The subscriptions a join state reads, which scope its catch-up crossing
-/// (B1): `Hydrating` reads the catalog, `Enriching` the stream, every other
-/// state both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PhaseReads {
     Reference,
@@ -51,7 +40,6 @@ impl PhaseReads {
         matches!(self, Self::Stream | Self::Both)
     }
 
-    /// The side this state holds, promoted when it crosses (B1).
     pub(crate) fn held(self) -> Option<JoinSubscriptionSide> {
         match self {
             Self::Reference => Some(JoinSubscriptionSide::Stream),
@@ -60,7 +48,6 @@ impl PhaseReads {
         }
     }
 
-    /// Phase order: hydrating, then the batch, then live.
     fn rank(self) -> u8 {
         match self {
             Self::Reference => 0,
@@ -93,8 +80,6 @@ fn rank_name(rank: u8) -> &'static str {
     }
 }
 
-/// B1 fail-closed: a resumed join may cross its catch-up boundary only in the
-/// phase its archive had reached before that boundary. `Err` names both.
 pub(crate) fn check_crossing_phase(
     stage_name: &str,
     archived: &[JoinPhaseFact],
@@ -120,7 +105,6 @@ pub(crate) fn check_crossing_phase(
     Ok(())
 }
 
-/// The stage that authored a delivered EOF, from its payload or its envelope.
 fn eof_author(envelope: &DeliveredRecord<ChainPayload>) -> Option<(StageId, EofKind)> {
     let event = envelope.authored();
     let ChainPayload::FlowControl(FlowControlPayload::Eof {
@@ -135,12 +119,6 @@ fn eof_author(envelope: &DeliveredRecord<ChainPayload>) -> Option<(StageId, EofK
     }
 }
 
-/// Fold one EOF delivered to a state that holds inputs (B2, B5, B8).
-///
-/// A then-live join's state ends when every witness's natural EOF has arrived
-/// on the side it reads, authored or forwarded. A `FiniteEof` join's hydration
-/// ends on its catalog's own final EOF. Once the side ends otherwise, the
-/// state is left open.
 pub(crate) fn observe_hold_eof<H: UnifiedJoinHandler>(
     ctx: &mut JoinResources<H>,
     side: JoinSubscriptionSide,
@@ -192,8 +170,6 @@ pub(crate) fn observe_hold_eof<H: UnifiedJoinHandler>(
     }
 }
 
-/// Every stage ID a witness's EOF may carry in this run: its own, and the one
-/// the archive recorded for its key when this run replays or resumes one.
 pub(crate) fn witness_keys(
     witnesses: Option<&PhaseWitnesses>,
     archive: Option<&Arc<dyn ReplayArchive>>,
@@ -213,8 +189,6 @@ pub(crate) fn witness_keys(
     keys
 }
 
-/// The phase facts this join's own archived journal records, across the
-/// archive and the ancestors it merges with (B1, B11).
 pub(crate) async fn load_archived_phases(
     archive: &Arc<dyn ReplayArchive>,
     stage_key: &str,
@@ -256,7 +230,6 @@ async fn read_archived_phases(
     Ok(phases)
 }
 
-/// Whether this mode's `Enriching` state holds the catalog (B3).
 pub(crate) fn enriching_holds_catalog(mode: JoinReferenceMode) -> bool {
     mode == JoinReferenceMode::FiniteThenLive
 }
@@ -299,8 +272,6 @@ mod tests {
 
     #[test]
     fn phases_entered_after_the_boundary_do_not_count() {
-        // A replay of a resumed archive crosses into generation 1 in the batch,
-        // although the archive later went live in generation 1.
         let archived = [fact(1, 0), fact(2, 1)];
         assert!(
             check_crossing_phase("posted", &archived, ReaderGeneration(1), PhaseReads::Stream)

@@ -41,7 +41,6 @@ pub(super) async fn dispatch_enriching<
     ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
-    // FLOWIP-084q B3: a then-live join's batch holds the catalog.
     let holds_catalog = enriching_holds_catalog(ctx.reference_mode);
     if holds_catalog {
         common::renew_held_inputs(ctx, JoinSubscriptionSide::Reference);
@@ -170,9 +169,6 @@ pub(super) async fn dispatch_enriching<
                     )
                     .await;
 
-                    // FLOWIP-084q B2, B8: a then-live join's batch ends only once
-                    // the natural EOFs that end it have arrived; once the stream
-                    // ends otherwise, it is left open.
                     if holds_catalog
                         && envelope.is_eof()
                         && matches!(

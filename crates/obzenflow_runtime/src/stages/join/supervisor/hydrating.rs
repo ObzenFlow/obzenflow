@@ -32,7 +32,6 @@ pub(super) async fn dispatch_hydrating<
     ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
-    // FLOWIP-084q B3: hydration holds the stream side.
     common::renew_held_inputs(ctx, JoinSubscriptionSide::Stream);
 
     let loop_count = ctx
@@ -154,9 +153,6 @@ pub(super) async fn dispatch_hydrating<
 
                             if envelope.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
-                                // FLOWIP-084q B2, B5: hydration ends only once the
-                                // natural EOFs that end it have arrived; once the
-                                // catalog ends otherwise, it is left open.
                                 let catalog_final = last_eof_outcome
                                     .as_ref()
                                     .filter(|outcome| outcome.is_final)

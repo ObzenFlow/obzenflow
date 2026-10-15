@@ -98,7 +98,7 @@ pub enum ExecutionPayload {
     JoinReferenceProgress {
         reference_inputs_since_last_report: u64,
     },
-    /// A join left a state that holds inputs (FLOWIP-084q B11).
+    /// A join left a state that holds inputs.
     JoinPhase(JoinPhaseFact),
     SinkAudit(super::delivery_payload::SinkAuditPayload),
     StageFatalRecorded(super::stage_fatal_payload::StageFatalRecorded),
@@ -294,8 +294,8 @@ impl CircuitBreakerFact {
     }
 }
 
-/// The phase a join entered when a state that holds inputs completed
-/// (FLOWIP-084q B11). The variant selects the occurrence.
+/// The phase a join entered when a state that holds inputs completed. The
+/// variant selects the occurrence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum JoinPhaseFact {

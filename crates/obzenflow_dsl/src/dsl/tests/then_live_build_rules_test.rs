@@ -2,9 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-084q: root classification, phase witnesses, merge producers and every
-//! then-live build refusal, over flows authored with the real stage macros.
-
 use crate::dsl::composites::lower_composites;
 use crate::dsl::composition::{FlowMember, IntoFlowMember};
 use crate::dsl::stage_descriptor::{StageDescriptor, BINDING_DERIVED_NAME_SENTINEL};
@@ -43,7 +40,6 @@ impl TypedPayload for Posted {
     const EVENT_TYPE: &'static str = "test.then_live.posted";
 }
 
-/// A join of `$c` and `$s` into `Posted`, built by the named constructor.
 macro_rules! join_with {
     ($ctor:ident, $catalog:ident: $c:ident, $s:ident) => {{
         let handler = obzenflow_runtime::stages::join::$ctor(
@@ -73,8 +69,6 @@ fn topology_type(stage_type: StageType) -> obzenflow_topology::StageType {
     }
 }
 
-/// Bind, lower and wire a flow as the flow builder does, short of resources
-/// and of the semantic checks, such as a required sink, that run elsewhere.
 fn flow(members: Vec<(&str, Box<dyn StageDescriptor>)>, authored: Vec<AuthoredConnection>) -> Flow {
     let members: HashMap<String, FlowMember> = members
         .into_iter()
@@ -192,7 +186,6 @@ fn live_tx() -> Box<dyn StageDescriptor> {
     crate::infinite_source!(Entry => placeholder!())
 }
 
-/// The piggy bank's scene after 084q: two merges and one join.
 fn piggy_bank() -> Flow {
     flow(
         vec![
@@ -686,7 +679,6 @@ fn batch_and_live_sources_meeting_inside_a_cycle_are_refused() {
     );
 }
 
-/// `export` feeds both the catalog and the held stream input `ledger_rows`.
 fn export_feeds_both_sides() -> Flow {
     let handler = obzenflow_runtime::stages::join::inner(
         |account: &Account| account.key.clone(),

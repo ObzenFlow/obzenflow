@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Merge stage configuration (FLOWIP-084q B7, B8).
+//! Merge stage configuration.
 
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::merges::MergeStrategyKind;

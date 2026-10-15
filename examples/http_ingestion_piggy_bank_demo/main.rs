@@ -8,15 +8,6 @@
 //! - Batch: accounts read once from `accounts.yaml`, and ledger entries read
 //!   from `transactions.csv`, paced at about two rows a second
 //! - Live: accounts and ledger entries posted over HTTP ingress
-//! - `accounts` and `transactions`: `then_live` merges that pass on every batch
-//!   row before any live one
-//! - `posted`: one then-live join that loads every YAML account, then posts
-//!   every CSV entry, then posts live entries against every account
-//! - `checkbook`: one stateful fold over the postings, printed by a console
-//!   sink
-//!
-//! Once `posted` goes live, it records its delivery order in its own journal
-//! and never waits on a quiet input.
 //!
 //! Run with localhost-only defaults:
 //! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host`
@@ -29,17 +20,12 @@
 //!
 //! Accounts `acct-1` (Alice, $10.00) and `acct-2` (Bob, $0.00) open from
 //! `accounts.yaml`, and the entries in `transactions.csv` post against them.
-//! Live data sent during the batch is committed and answered at once, then
-//! posts after the last CSV entry. Open an account, wait for its `202`, then
-//! post to it:
+//! Open an account, wait for its `202`, then post to it:
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -H 'Idempotency-Key: "acct-0003"' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-3","owner":"Carol","initial_balance_cents":0}}'`
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "live-0001"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-3","kind":"Credit","amount_cents":700,"note":"first deposit"}}'`
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -H 'Idempotency-Key: "live-0002"' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'`
 //!
 //! Notes:
-//! - Once live, `posted` drops an entry whose account it has not yet read.
-//!   Wait for the account's `202` before posting to it.
-//! - Entries for unknown accounts are dropped by the join.
 //! - The CSV source rejects a zero-amount or malformed row. Ingress answers `400`
 //!   to a zero-amount or malformed entry and a negative opening balance, and the
 //!   system journal records the refusal with the field it names.

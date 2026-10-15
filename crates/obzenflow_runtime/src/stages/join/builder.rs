@@ -137,8 +137,6 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 crate::messaging::upstream_subscription::ReaderSelectionPolicy::CanonicalMerge;
         }
         let recorded = match self.config.reference_mode {
-            // FLOWIP-084q B6: a then-live join records its order from phase 3,
-            // exactly as a live join does.
             super::config::JoinReferenceMode::Live
             | super::config::JoinReferenceMode::FiniteThenLive => {
                 stream_subscription_factory.recorded = None;

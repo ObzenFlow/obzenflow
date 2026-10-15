@@ -1,4 +1,4 @@
-# FLOWIP-114d Studio walkthrough config: select with
+# Studio walkthrough config, selected with
 #   --config examples/http_ingestion_piggy_bank_demo/obzenflow.studio.toml
 # The runtime registers with the phonebook and the browser attaches directly
 # to this process's port; the phonebook never proxies the data path.
@@ -9,9 +9,8 @@ host = "127.0.0.1"
 port = 9090
 startup_mode = "manual"
 
-# The Studio bundle is served from the phonebook origin, so every browser
-# request to this runtime is cross-origin; both spellings are listed because
-# 127.0.0.1 and localhost are different origins.
+# Every browser request to this runtime is cross-origin, from the Studio
+# bundle on the phonebook origin.
 [server.cors]
 mode = "allow-list"
 # 7010 = the studiod-served bundle origin; 8080 = the `trunk serve` UI-dev
@@ -32,7 +31,7 @@ advertise_url = "http://127.0.0.1:9090"
 [metrics]
 enabled = true
 
-# --config replaces the demo's obzenflow.toml, so its settings are repeated here.
+# The demo's own settings, as in obzenflow.toml, which --config replaces.
 # Relative paths resolve against the working directory.
 [app]
 accounts_file = "examples/http_ingestion_piggy_bank_demo/accounts.yaml"

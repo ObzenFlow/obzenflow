@@ -46,9 +46,6 @@ pub(crate) enum DrainOutcome {
     BackedOff,
 }
 
-/// Runtime-owned bound on one blocked suspend: the loop re-enters
-/// `dispatch_state` at least this often so queued control is observed, while
-/// the per-edge stall clocks alone decide the stall (FLOWIP-115e, 084q B10).
 pub(crate) const CONTROL_RESPONSIVENESS_CAP: std::time::Duration =
     std::time::Duration::from_millis(250);
 
@@ -124,10 +121,6 @@ pub(crate) async fn drain_one_pending(
     {
         DrainAttempt::Committed { was_data } => Ok(DrainOutcome::Committed { was_data }),
         DrainAttempt::BackedOff { bound, waker } => {
-            // One chunk of the credit wait: wake on the downstream ack or at
-            // the chunk boundary, then return to dispatch_state either way.
-            // Only the edge clocks in `backpressure_stall` can author the
-            // stall fact, so intermediate wakes never extend the episode.
             let wait_started = tokio::time::Instant::now();
             let _ = suspend_until(&WakeOn::Notify(waker), Some(bound)).await;
             let measured = wait_started.elapsed();
@@ -337,9 +330,6 @@ pub(crate) async fn drain_one_pending_resolve(
             let Some(reservation) = backpressure_writer.reserve(1) else {
                 pending_outputs.push_front(pending);
 
-                // Each edge without credit runs its own clock from the writer's
-                // first credit miss there, and only a hold renewal restarts it
-                // (FLOWIP-084q B10); wakes and chunk boundaries never do.
                 let verdict = backpressure_writer
                     .look(backpressure_stall, 1, tokio::time::Instant::now())
                     .expect("a blocked writer has enforced downstream edges");
@@ -448,9 +438,6 @@ async fn emit_bypass_pulse_if_needed(
     }
 }
 
-/// Author the `backpressure.stalled` fact (FLOWIP-115e): one edge stayed
-/// without credit or renewal for its full ceiling (FLOWIP-084q B10). Live-scoped only; the caller
-/// then emits poison EOF and fails the stage through the dispatch error path.
 async fn emit_stalled_fact(
     stage_id: StageId,
     flow_context: &FlowContext,

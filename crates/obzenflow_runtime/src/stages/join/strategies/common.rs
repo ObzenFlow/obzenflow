@@ -44,7 +44,6 @@ pub trait JoinStrategy {
     type StreamType: TypedPayload + Clone + Send + Sync;
     type EnrichedType: TypedPayload + Clone + Send + Sync;
     type Key: Eq + Hash + Clone + Send + Sync + std::fmt::Debug;
-    /// The variant name build diagnostics use, such as `inner` (FLOWIP-084q).
     const LABEL: &'static str;
 
     fn match_reference(

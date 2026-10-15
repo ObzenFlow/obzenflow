@@ -431,8 +431,7 @@ pub enum PolicyGuardSurface {
     Sink,
 }
 
-/// A join's mode and the built-in variant its handler names, which the
-/// then-live build diagnostics quote (FLOWIP-084q).
+/// A join's mode and the built-in variant its handler names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JoinShape {
     pub mode: JoinReferenceMode,
@@ -539,28 +538,22 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         // Default: no-op for non-join stages
     }
 
-    /// A join's mode and built-in variant name, `None` for every other stage
-    /// (FLOWIP-084q).
+    /// A join's mode and built-in variant name, `None` for every other stage.
     fn join_shape(&self) -> Option<JoinShape> {
         None
     }
 
     /// Install the natural EOFs that end a then-live join's holding states,
-    /// computed by the flow build (FLOWIP-084q B5, B8).
-    fn set_phase_witnesses(&mut self, _witnesses: PhaseWitnesses) {
-        // Default: no-op for every stage but a join
-    }
+    /// computed by the flow build.
+    fn set_phase_witnesses(&mut self, _witnesses: PhaseWitnesses) {}
 
-    /// A merge's strategy, `None` for every other stage (FLOWIP-084q B7).
+    /// A merge's strategy, `None` for every other stage.
     fn merge_strategy(&self) -> Option<MergeStrategyKind> {
         None
     }
 
-    /// Install a merge's batch and live producers, classified by the flow
-    /// build (FLOWIP-084q B8).
-    fn set_merge_producers(&mut self, _batch: Vec<StageId>, _live: Vec<StageId>) {
-        // Default: no-op for every stage but a merge
-    }
+    /// Install a merge's batch and live producers, classified by the flow build.
+    fn set_merge_producers(&mut self, _batch: Vec<StageId>, _live: Vec<StageId>) {}
 
     /// Create the handle for this stage with the flow's shared control-plane
     /// aggregation carrier.
@@ -3162,12 +3155,6 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
     }
 }
 
-// ============================================================================
-// Merge Descriptor
-// ============================================================================
-
-/// Descriptor for merge stages (FLOWIP-084q B7 to B9). A merge runs no author
-/// code, so it carries no handler and no middleware.
 pub(crate) struct MergeDescriptor {
     pub(crate) name: String,
     pub(crate) strategy: MergeStrategyKind,
@@ -3211,8 +3198,6 @@ impl StageDescriptor for MergeDescriptor {
         self.live_producers = live;
     }
 
-    /// The strategy fixes the merged order: canonical over the batch
-    /// producers, then live producers in recorded order (FLOWIP-084q B6, B8).
     fn is_deterministic_input_orderer(&self) -> bool {
         true
     }

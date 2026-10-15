@@ -32,7 +32,6 @@ pub enum StageType {
     Join,
 
     /// Stage that combines producers of one type under a framework strategy
-    /// (FLOWIP-084q)
     Merge,
 }
 

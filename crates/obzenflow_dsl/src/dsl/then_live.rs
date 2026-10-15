@@ -2,13 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Build rules for then-live joins and `then_live` merges (FLOWIP-084q).
-//!
-//! Classifies each input by its roots, refuses the shapes 084q refuses, and
-//! computes what ends each state that holds inputs: a then-live join's phase
-//! witnesses (B5, B8), each merge's batch and live producers (B8), and the
-//! stages that must keep flowing, which B4 checks once edge modes resolve.
-
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use obzenflow_core::event::context::StageType;
@@ -21,22 +14,16 @@ use crate::dsl::stage_descriptor::{JoinShape, StageDescriptor};
 use crate::dsl::typing::TypeHint;
 use crate::dsl::FlowBuildError;
 
-/// What the flow build hands the then-live stages, and what B4 checks.
 #[derive(Default)]
 pub(crate) struct ThenLivePlan {
-    /// Phase witnesses per then-live join, by DSL binding.
     pub(crate) witnesses: Vec<(String, PhaseWitnesses)>,
-    /// Batch and live producers per merge, by DSL binding.
     pub(crate) merge_producers: Vec<(String, Vec<StageId>, Vec<StageId>)>,
     holds: Vec<Hold>,
 }
 
-/// A state that holds inputs (B4).
 struct Hold {
     holder: StageId,
     state: HoldState,
-    /// The holder, and every stage on a path from a root that ends the state
-    /// to an input the state reads.
     must_flow: Vec<StageId>,
     held: Vec<StageId>,
 }
@@ -48,7 +35,6 @@ enum HoldState {
     MergeBatch,
 }
 
-/// A stage's roots, the sources upstream of it or the stage itself.
 #[derive(Default)]
 struct Roots {
     finite: BTreeSet<StageId>,
@@ -69,7 +55,6 @@ impl Roots {
     }
 }
 
-/// How a then-live join's stream input feeds its batch phase.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StreamInput {
     Finite,
@@ -77,8 +62,6 @@ enum StreamInput {
     ThenLiveMerge,
 }
 
-/// The flow's stages and data-flow edges by core stage ID. For `a <| b` the
-/// edge runs from `b` to `a`.
 struct Graph<'a> {
     descriptors: HashMap<StageId, &'a dyn StageDescriptor>,
     inbound: HashMap<StageId, Vec<(StageId, EdgeKind)>>,
@@ -151,7 +134,6 @@ impl<'a> Graph<'a> {
             .map(|(to, _)| *to)
     }
 
-    /// `id` and every stage upstream of it, feedback edges included.
     fn upstream_closure(&self, ids: impl IntoIterator<Item = StageId>) -> HashSet<StageId> {
         let mut seen = HashSet::new();
         let mut queue: VecDeque<StageId> = ids.into_iter().collect();
@@ -169,7 +151,6 @@ impl<'a> Graph<'a> {
         seen
     }
 
-    /// `ids` and every stage downstream of them, feedback edges included.
     fn downstream_closure(&self, ids: impl IntoIterator<Item = StageId>) -> HashSet<StageId> {
         let mut seen = HashSet::new();
         let mut queue: VecDeque<StageId> = ids.into_iter().collect();
@@ -229,8 +210,6 @@ impl<'a> Graph<'a> {
         }
     }
 
-    /// Stages downstream of `ending_roots` and upstream of `read`, plus the
-    /// holder: the stages that must keep flowing for the state to end (B4).
     fn must_flow(
         &self,
         holder: StageId,
@@ -247,8 +226,6 @@ impl<'a> Graph<'a> {
     }
 }
 
-/// A then-live build refusal, kept small so every check can return it; the
-/// flow build reports it as [`FlowBuildError::ThenLiveTopology`].
 #[derive(Debug)]
 pub(crate) struct Refusal(String);
 
@@ -264,7 +241,6 @@ impl From<Refusal> for FlowBuildError {
     }
 }
 
-/// The variant names a join's diagnostics quote.
 struct Variants {
     then_live: String,
     live: String,
@@ -288,7 +264,6 @@ impl Variants {
     }
 }
 
-/// `my_crate::events::AccountOpened` as `AccountOpened`, for a diagnostic.
 fn short_type_name(hint: &TypeHint) -> String {
     let TypeHint::Exact { display_name, .. } = hint else {
         return "T".to_string();
@@ -322,8 +297,6 @@ fn stage_kind(stage_type: Option<StageType>) -> &'static str {
     }
 }
 
-/// Classify every then-live join and merge, refuse the shapes 084q refuses,
-/// and compute what ends each state that holds inputs.
 pub(crate) fn plan(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
@@ -389,8 +362,6 @@ pub(crate) fn plan(
                 plan.witnesses.push((binding.clone(), witnesses));
             }
             JoinReferenceMode::FiniteEof => {
-                // Hydration ends on the catalog's own final EOF, which needs
-                // every root above it.
                 let ending: Vec<StageId> = graph.roots(catalog).all().collect();
                 plan.holds.push(Hold {
                     holder: id,
@@ -405,7 +376,6 @@ pub(crate) fn plan(
     Ok(plan)
 }
 
-/// B8: a `then_live` merge's producers, split into batch and live.
 fn merge_producers(
     graph: &Graph<'_>,
     merge: StageId,
@@ -445,7 +415,6 @@ fn merge_producers(
     Ok((batch, live))
 }
 
-/// B5, B8, B12: a then-live join's classification and phase witnesses.
 fn then_live_join(
     graph: &Graph<'_>,
     join: StageId,
@@ -580,9 +549,6 @@ fn then_live_join(
     })
 }
 
-/// B5: a mixed catalog's frontier, the stages whose roots are all finite and
-/// that feed a stage with a live root on a path to the catalog, once the path
-/// rule admits it.
 fn catalog_frontier(
     graph: &Graph<'_>,
     name: &str,
@@ -602,7 +568,6 @@ fn catalog_frontier(
     let reached = graph.downstream_closure(frontier.iter().copied());
     let span: HashSet<StageId> = up.intersection(&reached).copied().collect();
 
-    // No feedback edge between the frontier and the catalog.
     for from in graph.sorted(span.iter().copied()) {
         for (to, kind) in graph.outbound.get(&from).into_iter().flatten() {
             if *kind == EdgeKind::Backward && span.contains(to) {
@@ -616,7 +581,6 @@ fn catalog_frontier(
         }
     }
 
-    // Every stage between the frontier and the catalog is a transform or a merge.
     for stage in graph.sorted(span.iter().copied()) {
         if frontier.contains(&stage) {
             continue;
@@ -635,7 +599,6 @@ fn catalog_frontier(
         }
     }
 
-    // Each frontier stage reaches the catalog by exactly one path.
     let mut memo = HashMap::new();
     for stage in &frontier {
         if paths_to(graph, *stage, catalog, &span, &mut memo) > 1 {
@@ -652,7 +615,6 @@ fn catalog_frontier(
     Ok(frontier)
 }
 
-/// Paths from `stage` to `target` inside `span`, saturating at two.
 fn paths_to(
     graph: &Graph<'_>,
     stage: StageId,
@@ -678,7 +640,6 @@ fn paths_to(
     count
 }
 
-/// The first two branches where `stage`'s paths to `target` part.
 fn first_fork(
     graph: &Graph<'_>,
     stage: StageId,
@@ -702,8 +663,6 @@ fn first_fork(
 }
 
 impl ThenLivePlan {
-    /// B4: refuse a state that holds inputs when a stage that must keep
-    /// flowing for it to end reaches a held input through enforced edges.
     pub(crate) fn refuse_deadlocked_holds(
         &self,
         topology: &Topology,
@@ -732,7 +691,6 @@ impl ThenLivePlan {
     }
 }
 
-/// The shortest path from `from` to `to` whose every edge is enforced.
 fn enforced_path(
     graph: &Graph<'_>,
     enforced: &HashSet<(StageId, StageId)>,

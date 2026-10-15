@@ -597,7 +597,6 @@ struct Scenario {
     inputs: PathBuf,
     /// The port of an HTTP history's server; every run of it serves there.
     http: Option<u16>,
-    /// Runs the FLOWIP-084q then-live flow in place of the payment flow.
     #[serde(default)]
     then_live: bool,
 }
@@ -2194,12 +2193,6 @@ async fn durable_execution_contract_over_http() {
     history.report();
 }
 
-// ---------------------------------------------------------------------------
-// FLOWIP-084q: a then-live join behind two `then_live` merges, killed in each
-// phase that holds inputs and resumed. Each merge's batch phase is cut by the
-// hydrating and enriching rows. The batch order is canonical, so each row
-// checks the resumed lineage against the inputs' own order.
-
 mod then_live {
     use super::*;
     use obzenflow::flow::{join, merge};
@@ -2309,7 +2302,6 @@ mod then_live {
         let batch_tx_input = yaml(EntryYaml, entries_input(scenario), "/entries");
         let (account_sender, live_accounts_input) = tokio::sync::mpsc::channel::<Account>(1);
         let (entry_sender, live_tx_input) = tokio::sync::mpsc::channel::<Entry>(1);
-        // The senders outlive the run, so the live inputs stay open until a stop.
         Box::leak(Box::new((account_sender, entry_sender)));
         let live_accounts_input = ChannelSource::new(live_accounts_input);
         let live_tx_input = ChannelSource::new(live_tx_input);
@@ -2394,8 +2386,6 @@ mod then_live {
         }
     }
 
-    /// Kill the run at `cut`, resume it to the end of the batch, check the
-    /// resumed lineage and strict-replay it.
     async fn row(name: &str, cut: Cut, generations: (u64, u64)) {
         let scenario = fresh(name);
         let child = Child::spawn(&scenario, Vec::new(), None);
