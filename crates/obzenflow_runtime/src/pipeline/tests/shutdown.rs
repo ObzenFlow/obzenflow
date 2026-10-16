@@ -155,6 +155,8 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
             liveness_snapshots: None,
             run_substrate: obzenflow_core::journal::factory::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
+            archive_flow_evidence: Default::default(),
+            resume_notices: Vec::new(),
         };
         let initial = if publish_after_abort {
             S::ReadyForRun

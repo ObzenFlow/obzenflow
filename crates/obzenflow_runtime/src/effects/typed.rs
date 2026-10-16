@@ -202,10 +202,8 @@ where
         T: TypedPayload + OutputAllowsFact<Output, At>,
     {
         self.core.preflight_next_effect_cursor_is_empty().await?;
-        if !self.core.is_replaying() {
-            self.core.request_generated_live_admission().await?;
-        }
-        self.emit(fact).await?;
+        // Live admission follows the fact's own origin (FLOWIP-134k B1).
+        self.core.emit_pre_effect(fact).await?;
         self.complete()
     }
 

@@ -29,7 +29,7 @@ use std::task::{Context, Poll};
 use crate::backpressure::{
     BackpressureReader, BackpressureRegistry, BackpressureWriter, DirectFactAdmission,
 };
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{ArchivedActs, EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
@@ -946,7 +946,16 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                 // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
                 let recorded_history = ctx.runtime_execution.archive_for_io();
                 if let Some(archive) = recorded_history {
-                    let history = EffectHistory::load(archive, &ctx.stage_name)
+                    let archived_acts = if ctx
+                        .handler
+                        .as_ref()
+                        .is_some_and(|handler| handler.has_effect_runtime())
+                    {
+                        ArchivedActs::Load
+                    } else {
+                        ArchivedActs::Skip
+                    };
+                    let history = EffectHistory::load(archive, &ctx.stage_name, archived_acts)
                         .await
                         .map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
@@ -954,16 +963,6 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                                 ctx.stage_name
                             ))
                         })?;
-                    // FLOWIP-120n F7: register the recorded effect mark so a
-                    // prefix cursor miss fails loud and a live-tail miss runs.
-                    if let Some(control) = ctx.runtime_execution.resume_control() {
-                        if let Some(max) = history.max_recorded_input_seq() {
-                            control.record_effect_high_water(
-                                ctx.stage_id,
-                                crate::messaging::upstream_subscription::StageInputPosition(max),
-                            );
-                        }
-                    }
                     ctx.effect_history = Some(Arc::new(history));
                 }
 

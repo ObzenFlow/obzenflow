@@ -48,6 +48,9 @@ pub enum ApplicationError {
     /// (FLOWIP-134i B6, B7, B8, B12, B13).
     ResumeRefused(String),
 
+    /// A replay refused before any work, printed verbatim (FLOWIP-134k §1).
+    ReplayRefused(String),
+
     /// Other error
     Other(Box<dyn Error + Send + Sync>),
 }
@@ -85,7 +88,7 @@ impl fmt::Display for ApplicationError {
                     resume.display()
                 )
             }
-            Self::ResumeRefused(refusal) => f.write_str(refusal),
+            Self::ResumeRefused(refusal) | Self::ReplayRefused(refusal) => f.write_str(refusal),
             Self::Other(err) => write!(f, "Application error: {err}"),
         }
     }

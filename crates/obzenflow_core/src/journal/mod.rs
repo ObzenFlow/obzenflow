@@ -9,6 +9,7 @@
 
 pub mod append;
 pub mod archive;
+pub mod archive_actions;
 pub mod config;
 pub mod factory;
 pub mod journal_error;

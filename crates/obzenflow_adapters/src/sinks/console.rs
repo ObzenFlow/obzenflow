@@ -983,12 +983,16 @@ mod tests {
         }
         JournalRecord::new(JournalWriterId::new(), event).into()
     }
-    fn delivery_cases() -> [(MiddlewareExecutionScope, bool, bool); 4] {
+    /// A delivery's label follows its own scope, never the row's inherited
+    /// lineage (FLOWIP-134k §4): a live delivery of a row that carries replay
+    /// provenance is live.
+    fn delivery_cases() -> [(MiddlewareExecutionScope, bool, bool); 5] {
         [
             (Default::default(), false, false),
             (MiddlewareExecutionScope::StrictReplayHandler, false, true),
             (MiddlewareExecutionScope::ResumeHandler, false, true),
-            (Default::default(), true, true),
+            (Default::default(), true, false),
+            (MiddlewareExecutionScope::ResumeHandler, true, true),
         ]
     }
     fn text(output: ConsoleOutput) -> String {

@@ -124,6 +124,12 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
         "1"
     }
 
+    /// Whether the stage runs an effect runtime, whose archived acts a resume
+    /// reproduces in order (FLOWIP-134k B7).
+    fn has_effect_runtime(&self) -> bool {
+        false
+    }
+
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 
@@ -319,6 +325,10 @@ impl<H> UnifiedTransformHandler for EffectfulTransformHandlerAdapter<H>
 where
     H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
+    fn has_effect_runtime(&self) -> bool {
+        true
+    }
+
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
         self.effect_boundary.install_observation_recorder(recorder);
     }

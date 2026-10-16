@@ -13,6 +13,7 @@
 //! ```
 
 mod allocation;
+mod desk;
 mod domain;
 mod flow;
 mod warehouse;
@@ -374,7 +375,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[app.warehouse]\nid = \"{id}\"\nreserve_latency_ms = 0\nreserve_unavailable = false\n"
+                "[app.warehouse]\nid = \"{id}\"\nreserve_latency_ms = 0\nreserve_unavailable = false\nreservation_pace_ms = 0\n"
             ),
         )
         .expect("settings are written");

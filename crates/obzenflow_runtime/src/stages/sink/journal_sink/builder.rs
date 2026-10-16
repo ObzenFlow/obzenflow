@@ -158,6 +158,11 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             backpressure_readers: self.resources.backpressure_readers.clone(),
             heartbeat,
             catch_up_flip: None,
+            receipt_classification: self
+                .resources
+                .sink_resume_edges
+                .clone()
+                .map(super::receipts::SinkReceiptClassification::new),
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
         };

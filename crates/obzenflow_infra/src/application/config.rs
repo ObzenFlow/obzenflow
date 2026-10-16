@@ -157,6 +157,12 @@ pub struct FlowConfig {
     /// Resume a recorded run: catch up on the archive with effects suppressed,
     /// then continue live from the recorded high-water mark (FLOWIP-120n).
     ///
+    /// Resume with a build and configuration that act the same on the inputs
+    /// the run settled; a stage that departs from its archive refuses the
+    /// resume (FLOWIP-134k B7). Check a changed build first with
+    /// `--replay-from <run> --verify` against a recording that ended with a
+    /// terminal record.
+    ///
     /// The path must be the exact run directory containing `run_manifest.json`.
     /// Mutually exclusive with `--replay-from`.
     #[arg(long, conflicts_with = "replay_from")]
@@ -315,6 +321,7 @@ impl ResolvedStartupConfig {
             // The host opens the archive at launch and fills this in before the
             // install (FLOWIP-120u); config resolution carries settings only.
             replay_archive: None,
+            archive_evidence: None,
         }
     }
 }

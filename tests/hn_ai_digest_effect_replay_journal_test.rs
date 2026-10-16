@@ -2292,9 +2292,12 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
         .expect("strict replay rematerialises abandonment without a dependency");
     let strict_archive = latest_run_dir(&journal_base);
 
+    // FLOWIP-134k §1: the resumed run completed naturally over finite
+    // sources, so a further resume has no work left and refuses before any
+    // run starts or any dependency resolves.
     let replay_resolutions = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    let refusal = FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -2307,30 +2310,34 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
             ai_recovery_rejecting_resilience_for_test(),
         ))
         .await
-        .expect("resume-of-resume treats abandonment as the settled cursor terminal");
+        .expect_err("a completed finite run has no work left to resume");
+    assert!(
+        refusal
+            .to_string()
+            .contains("there is no work left to continue"),
+        "{refusal}"
+    );
     assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
-    let resumed_again_archive = latest_run_dir(&journal_base);
+    assert_eq!(latest_run_dir(&journal_base), strict_archive);
 
-    for replay_archive in [&strict_archive, &resumed_again_archive] {
-        let replay_map = stage_envelopes(replay_archive, "recovery_digest__map").await;
-        assert_eq!(effect_evidence_ids(&replay_map), effect_evidence_ids(&map));
-        let verification = verify_run_dirs(
-            &abandonment_archive,
-            replay_archive,
-            &VerifyOptions {
-                write_report: false,
-                ..VerifyOptions::default()
-            },
-        )
-        .expect("recovery-composition run verification executes");
-        assert_eq!(
-            verification.exit_code(),
-            0,
-            "{}",
-            obzenflow_infra::verify::render_verdict(&verification)
-        );
-    }
+    let replay_map = stage_envelopes(&strict_archive, "recovery_digest__map").await;
+    assert_eq!(effect_evidence_ids(&replay_map), effect_evidence_ids(&map));
+    let verification = verify_run_dirs(
+        &abandonment_archive,
+        &strict_archive,
+        &VerifyOptions {
+            write_report: false,
+            ..VerifyOptions::default()
+        },
+    )
+    .expect("recovery-composition run verification executes");
+    assert_eq!(
+        verification.exit_code(),
+        0,
+        "{}",
+        obzenflow_infra::verify::render_verdict(&verification)
+    );
 }
 
 #[tokio::test]

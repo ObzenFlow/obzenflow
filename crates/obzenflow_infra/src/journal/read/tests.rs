@@ -51,6 +51,7 @@ impl Run {
             journal_schema_version: JOURNAL_SCHEMA_VERSION.into(),
             obzenflow_version: env!("CARGO_PKG_VERSION").into(),
             flow_id: run_id.to_string(),
+            recorded_flow_id: None,
             pipeline_writer_id: pipeline.into(),
             flow_name: "reader_test".into(),
             created_at: chrono::Utc::now(),

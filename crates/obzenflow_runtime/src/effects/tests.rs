@@ -1978,7 +1978,7 @@ async fn generated_pre_effect_terminal_keeps_reconstruction_track_only() {
 #[test]
 fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
     // FLOWIP-134i B6: a torn resume's history joins its ancestor's per cursor;
-    // F7's recorded mark derives from the join.
+    // the stage's archived acts join by identity prefix (FLOWIP-134k B7).
     let record = |input_seq: u64, value: u64| EffectRecord {
         observation:
             obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
@@ -2002,14 +2002,14 @@ fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
         .expect("torn history indexes");
     let joined = ancestor
         .clone()
-        .joined_with(&torn)
+        .joined_with(&torn, "effect_stage")
         .expect("agreeing histories join");
-    assert_eq!(joined.max_recorded_input_seq(), Some(2));
+    assert_eq!(joined.acts().remaining().len(), 2);
 
     let conflicting = EffectHistory::from_records("archived_flow", vec![record(1, 11)])
         .expect("conflicting history indexes");
     let refusal = ancestor
-        .joined_with(&conflicting)
+        .joined_with(&conflicting, "effect_stage")
         .expect_err("incomparable terminals refuse");
     assert!(matches!(
         refusal,
@@ -2041,13 +2041,17 @@ fn a_torn_run_without_effects_keeps_its_ancestors_root() {
         .expect("ancestor history indexes");
     let torn = EffectHistory::from_records("torn_flow", Vec::new()).expect("empty torn history");
 
-    let joined = ancestor.joined_with(&torn).expect("histories join");
+    let joined = ancestor
+        .joined_with(&torn, "effect_stage")
+        .expect("histories join");
 
     assert_eq!(joined.recorded_flow_id().as_str(), "root_flow");
     assert!(joined.find_group(&record.cursor).is_some());
 
     let empty = EffectHistory::from_records("older_flow", Vec::new()).expect("empty ancestor");
-    let unjoined = empty.joined_with(&torn).expect("empty histories join");
+    let unjoined = empty
+        .joined_with(&torn, "effect_stage")
+        .expect("empty histories join");
     assert_eq!(
         unjoined.recorded_flow_id().as_str(),
         "torn_flow",
@@ -2277,6 +2281,15 @@ async fn affine_scope_matrix_histories(
     (completed_history, in_doubt_history)
 }
 
+/// Rows other than stage control, such as a resume's crossing marker.
+fn effect_rows(journal: &MemoryJournal<ChainEvent>) -> usize {
+    journal
+        .events()
+        .iter()
+        .filter(|envelope| !matches!(envelope.payload, ChainPayload::FlowControl(_)))
+        .count()
+}
+
 fn direct_fact_scope(
     runtime_execution: &crate::execution::RuntimeExecution,
     stage_id: StageId,
@@ -2361,6 +2374,7 @@ async fn assert_scope_matrix_executable(
         direct_fact_scope(&runtime_execution, ctx.stage_id),
         obzenflow_core::MiddlewareExecutionScope::ResumeHandler
     );
+    let effect_stage = ctx.stage_id;
 
     let effect_calls = calls.clone();
     let mut effects = EffectsCore::new(ctx);
@@ -2384,7 +2398,7 @@ async fn assert_scope_matrix_executable(
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        journal.events().len(),
+        effect_rows(&journal),
         expected_prefix_rows,
         "only the reconstruction prefix may exist before live admission"
     );
@@ -2402,9 +2416,10 @@ async fn assert_scope_matrix_executable(
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        direct_fact_scope(&runtime_execution, stage_id),
-        obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
-        "live admission must not mutate the frozen handler observer scope"
+        direct_fact_scope(&runtime_execution, effect_stage),
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        "the stage crossed before its first live act, so its later work is live \
+         (FLOWIP-134k §3)"
     );
     assert_eq!(
         admission.close().expect("admitted lease closes"),
@@ -2637,7 +2652,7 @@ async fn generated_resume_withheld_credit_precedes_named_port_resolution() {
             "withheld credit must prevent credential and client resolution"
         );
         assert_eq!(port_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(journal.events().len(), expected_prefix_rows);
+        assert_eq!(effect_rows(&journal), expected_prefix_rows);
 
         let lease = crate::backpressure::DirectFactLease::try_acquire(
             &BackpressureWriter::disabled(),
@@ -6897,9 +6912,12 @@ type ComparableEffectJournalEntry = (
 fn comparable_effect_journal(
     journal: &MemoryJournal<ChainEvent>,
 ) -> Vec<ComparableEffectJournalEntry> {
+    // A resume's crossing marker is stage control, not effect evidence
+    // (FLOWIP-134k §3).
     journal
         .events()
         .into_iter()
+        .filter(|envelope| !matches!(envelope.payload, ChainPayload::FlowControl(_)))
         .map(|envelope| {
             (
                 envelope.envelope.provenance.event.id,
@@ -8641,4 +8659,377 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         fact_id(&journal_b),
         "an aborted transactional effect must not shift the output ordinals of later facts"
     );
+}
+
+// FLOWIP-134k B1, B2, B7, §4: a resumed stage takes its archived acts in
+// order, crosses before its first live act, and marks every copied row.
+
+fn archived_counting_record(input_seq: u64) -> EffectRecord {
+    EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
+        cursor: EffectCursor::new("archived_flow", "effect_stage", input_seq, 0_u32),
+        descriptor_hash: EffectDescriptorHash::new("archived-descriptor"),
+        descriptor: EffectDescriptor::new(
+            CountingEffect::EFFECT_TYPE,
+            "archived",
+            CountingEffect::SCHEMA_VERSION,
+            "test-v1",
+            "archived-input",
+        ),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": input_seq }),
+        },
+        origin: None,
+    }
+}
+
+fn resumed_context(
+    journal: Arc<MemoryJournal<ChainEvent>>,
+    history: EffectHistory,
+    input_seq: u64,
+) -> EffectInvocationContext {
+    let mut ctx = invocation_context_with_mode(
+        journal,
+        recorded_parent(),
+        Some(Arc::new(history)),
+        EffectRuntimeMode::Resume,
+        EffectPortRegistry::new(),
+    );
+    ctx.input_seq = StageInputPosition(input_seq);
+    ctx.emit_enabled = true;
+    ctx
+}
+
+/// A recorded input, which carries the replay provenance a resume stamps on
+/// re-admitted source rows.
+fn recorded_parent() -> JournalRecord<ChainPayload> {
+    let mut event = ChainEventFactory::data_event(
+        WriterId::from(StageId::new()),
+        "test.input",
+        std::num::NonZeroU32::MIN,
+        json!({"id": 1}),
+    );
+    event.replay_context = Some(obzenflow_core::event::provenance::ReplayContext {
+        original_event_id: EventId::new(),
+        original_flow_id: "archived_flow".to_string(),
+        original_stage_id: StageId::new(),
+    });
+    crate::testing::causal_fixture::committed_input(JournalWriterId::new(), event)
+}
+
+fn counting(calls: &Arc<AtomicUsize>) -> CountingEffect {
+    CountingEffect {
+        value: 1,
+        label: "same",
+        calls: calls.clone(),
+    }
+}
+
+fn recorded_fact_id(ordinal: u32) -> EventId {
+    deterministic_payload_event_id(
+        "archived_flow",
+        "effect_stage",
+        StageInputPosition(1),
+        ordinal,
+        &CountingOutput::descriptor(),
+    )
+}
+
+fn markers(journal: &MemoryJournal<ChainEvent>) -> Vec<obzenflow_core::ReaderGeneration> {
+    journal
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(
+                obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete {
+                    generation, ..
+                },
+            ) => Some(*generation),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_resume_refuses_an_effect_its_archive_lacks_before_the_archive_ends() {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let history = EffectHistory::from_records("archived_flow", vec![archived_counting_record(1)])
+        .expect("history indexes");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = EffectsCore::new(resumed_context(journal.clone(), history, 2));
+    effects
+        .perform(counting(&calls))
+        .await
+        .expect_err("an act the archive lacks refuses while archived acts remain");
+    let fatal = effects.authoring_halt_fatal().expect("the refusal latches");
+    assert_eq!(
+        fatal.reason,
+        obzenflow_core::event::StageFatalReason::MissingRecordedEffect
+    );
+    assert_eq!(
+        fatal.detail,
+        "stage 'effect_stage' would perform Counting at input 2, but its recording's next act \
+         is a Counting effect"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no call before the refusal"
+    );
+    assert!(journal.events().is_empty(), "no row before the refusal");
+}
+
+#[tokio::test]
+async fn a_resume_refuses_an_act_that_skips_an_archived_one() {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let history = EffectHistory::from_records(
+        "archived_flow",
+        vec![archived_counting_record(1), archived_counting_record(2)],
+    )
+    .expect("history indexes");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = EffectsCore::new(resumed_context(journal.clone(), history, 2));
+    effects
+        .perform(counting(&calls))
+        .await
+        .expect_err("skipping an archived act refuses");
+    let fatal = effects.authoring_halt_fatal().expect("the refusal latches");
+    assert_eq!(
+        fatal.reason,
+        obzenflow_core::event::StageFatalReason::UnusedEffectHistory
+    );
+    assert_eq!(
+        fatal.detail,
+        "stage 'effect_stage' skipped a Counting effect its recording holds"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(journal.events().is_empty());
+}
+
+#[tokio::test]
+async fn once_every_archived_act_is_reproduced_a_miss_crosses_and_runs_live() {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let history = EffectHistory::from_records("archived_flow", Vec::new()).expect("empty history");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let ctx = resumed_context(journal.clone(), history, 1);
+    let stage_id = ctx.stage_id;
+    let execution = ctx.runtime_execution.clone();
+    let mut effects = EffectsCore::new(ctx);
+    assert!(
+        !effects.is_replaying(),
+        "no archived act is left to reproduce"
+    );
+    effects
+        .perform(counting(&calls))
+        .await
+        .expect("a miss after the archived acts runs live");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let events = journal.events();
+    assert!(
+        matches!(
+            events[0].payload,
+            ChainPayload::FlowControl(
+                obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete { .. }
+            )
+        ),
+        "the crossing precedes the first live act's first row"
+    );
+    assert_eq!(markers(&journal), vec![obzenflow_core::ReaderGeneration(1)]);
+    assert!(execution
+        .resume_control()
+        .expect("resume")
+        .stage_is_live(stage_id));
+    assert!(
+        events[1..]
+            .iter()
+            .all(|envelope| envelope.authored().replay_context.is_none()),
+        "live rows carry no replay provenance whatever their input's lineage"
+    );
+}
+
+#[tokio::test]
+async fn is_replaying_follows_the_archived_acts_and_an_in_doubt_attempt_is_live() {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let settled = EffectHistory::from_records("archived_flow", vec![archived_counting_record(1)])
+        .expect("history indexes");
+    let effects = EffectsCore::new(resumed_context(journal.clone(), settled, 1));
+    assert!(effects.is_replaying(), "an archived act remains");
+
+    let cursor = EffectCursor::new("archived_flow", "effect_stage", 1_u64, 0_u32);
+    let in_doubt = EffectHistory::with_acts_for_test(
+        "archived_flow",
+        vec![ArchivedAct::Effect {
+            cursor: cursor.clone(),
+            effect_type: CountingEffect::EFFECT_TYPE.to_string(),
+            in_doubt: true,
+        }],
+        HashMap::new(),
+    );
+    let effects = EffectsCore::new(resumed_context(journal.clone(), in_doubt, 1));
+    assert!(
+        !effects.is_replaying(),
+        "the only act left is the next effect's in-doubt attempt"
+    );
+    let elsewhere = EffectHistory::with_acts_for_test(
+        "archived_flow",
+        vec![ArchivedAct::Effect {
+            cursor,
+            effect_type: CountingEffect::EFFECT_TYPE.to_string(),
+            in_doubt: true,
+        }],
+        HashMap::new(),
+    );
+    let effects = EffectsCore::new(resumed_context(journal, elsewhere, 2));
+    assert!(effects.is_replaying(), "another input's attempt remains");
+}
+
+#[tokio::test]
+async fn an_emitted_fact_reproduces_by_identity_and_a_departing_fact_refuses() {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let history = EffectHistory::with_acts_for_test(
+        "archived_flow",
+        vec![ArchivedAct::Fact {
+            id: recorded_fact_id(0),
+            event_type: CountingOutput::EVENT_TYPE.to_string(),
+        }],
+        HashMap::new(),
+    );
+    let mut effects = EffectsCore::new(resumed_context(journal.clone(), history, 1));
+    effects
+        .emit(CountingOutput { value: 1 })
+        .await
+        .expect("the archived fact reproduces");
+    let reproduced = journal.events()[0].authored();
+    assert_eq!(reproduced.id, recorded_fact_id(0));
+    assert_eq!(
+        reproduced
+            .replay_context
+            .as_ref()
+            .map(|context| context.original_event_id),
+        Some(recorded_fact_id(0)),
+        "a rematerialized fact names the archived row"
+    );
+    assert!(
+        markers(&journal).is_empty(),
+        "no crossing before a reproduced act"
+    );
+
+    effects
+        .emit(CountingOutput { value: 2 })
+        .await
+        .expect("a fact after every archived act runs live");
+    assert_eq!(markers(&journal), vec![obzenflow_core::ReaderGeneration(1)]);
+    let live = journal.events().last().expect("live fact").authored();
+    assert!(live.replay_context.is_none());
+
+    let departing = EffectHistory::with_acts_for_test(
+        "archived_flow",
+        vec![ArchivedAct::Fact {
+            id: EventId::new(),
+            event_type: "allocation.sold_out".to_string(),
+        }],
+        HashMap::new(),
+    );
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut effects = EffectsCore::new(resumed_context(journal.clone(), departing, 5));
+    effects
+        .emit(CountingOutput { value: 1 })
+        .await
+        .expect_err("a fact the archive lacks refuses");
+    let fatal = effects.authoring_halt_fatal().expect("the refusal latches");
+    assert_eq!(
+        fatal.reason,
+        obzenflow_core::event::StageFatalReason::MissingRecordedFact
+    );
+    assert_eq!(
+        fatal.detail,
+        "stage 'effect_stage' emitted CountingOutput at input 5, but its recording's next act \
+         is a SoldOut fact"
+    );
+    assert!(journal.events().is_empty());
+}
+
+#[tokio::test]
+async fn reconstruction_reauthors_a_recorded_crossing_before_the_act_it_anchors() {
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let id = recorded_fact_id(0);
+    let history = EffectHistory::with_acts_for_test(
+        "archived_flow",
+        vec![ArchivedAct::Fact {
+            id,
+            event_type: CountingOutput::EVENT_TYPE.to_string(),
+        }],
+        HashMap::from([(ActRow::Fact(id), vec![obzenflow_core::ReaderGeneration(1)])]),
+    );
+    let mut ctx = invocation_context_with_mode(
+        journal.clone(),
+        recorded_parent(),
+        Some(Arc::new(history)),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    );
+    ctx.emit_enabled = true;
+    let stage_id = ctx.stage_id;
+    let execution = ctx.runtime_execution.clone();
+    let mut effects = EffectsCore::new(ctx);
+    effects
+        .emit(CountingOutput { value: 1 })
+        .await
+        .expect("strict replay recomputes the fact");
+    let events = journal.events();
+    assert_eq!(markers(&journal), vec![obzenflow_core::ReaderGeneration(1)]);
+    assert!(matches!(events[0].payload, ChainPayload::FlowControl(_)));
+    assert_eq!(
+        events[1].authored().id,
+        id,
+        "the marker sits directly before its act"
+    );
+    assert!(events[1].authored().replay_context.is_some());
+    assert_eq!(
+        execution.stage_crossings().crossed(stage_id),
+        obzenflow_core::ReaderGeneration(1),
+        "the supervisor's flip sees the re-authored crossing"
+    );
+}
+
+#[tokio::test]
+async fn strict_replay_marks_every_rebuilt_effect_row() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live = EffectsCore::new(invocation_context(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+    live.perform(counting(&Arc::new(AtomicUsize::new(0))))
+        .await
+        .expect("live effect");
+    let history = EffectHistory::from_records("archived_flow", effect_records(&live_journal))
+        .expect("history indexes");
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = EffectsCore::new(invocation_context(
+        replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(Arc::new(history)),
+    ));
+    replay
+        .perform(counting(&calls))
+        .await
+        .expect("strict replay reconstructs");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let events = replay_journal.events();
+    assert!(!events.is_empty());
+    for envelope in events {
+        let event = envelope.authored();
+        assert_eq!(
+            event
+                .replay_context
+                .as_ref()
+                .map(|context| context.original_event_id),
+            Some(event.id),
+            "every rebuilt row names the archived row it reproduces"
+        );
+    }
 }

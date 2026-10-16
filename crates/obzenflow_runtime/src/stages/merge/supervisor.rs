@@ -519,6 +519,7 @@ async fn flip(
             writer_id: ctx.writer_id,
             data_journal: &ctx.data_journal,
             instrumentation: &ctx.instrumentation,
+            effect_history: None,
         },
         true,
         &ctx.runtime_execution,
@@ -563,6 +564,10 @@ async fn handle_control(
             CatchUpDisposition::Consumed => EventLoopDirective::Continue,
             CatchUpDisposition::Failed(message) => {
                 EventLoopDirective::Transition(MergeEvent::Error(message))
+            }
+            // A merge has no effect runtime, so it never refuses for acts.
+            CatchUpDisposition::Refused(fatal) => {
+                EventLoopDirective::Transition(MergeEvent::Error(fatal.detail))
             }
         }));
     }

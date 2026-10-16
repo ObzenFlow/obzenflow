@@ -15,6 +15,7 @@ use obzenflow::error::HandlerError;
 use obzenflow::schema::StageOutputFacts;
 use obzenflow::stages::stateful::EffectfulStatefulHandler;
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HeldStock {
@@ -60,12 +61,23 @@ type AllocationEffects = obzenflow::effects::effect_set![ReserveStock, ReleaseSt
 #[derive(Clone, Debug)]
 pub struct Allocator {
     capacity_per_sku: u32,
+    reservation_pace: Duration,
 }
 
 impl Allocator {
     pub fn new(capacity_per_sku: u32) -> Self {
         assert!(capacity_per_sku > 0, "allocation capacity must be non-zero");
-        Self { capacity_per_sku }
+        Self {
+            capacity_per_sku,
+            reservation_pace: Duration::ZERO,
+        }
+    }
+
+    /// How long the allocator takes over each live order. A reproduced
+    /// order decides at once.
+    pub fn with_reservation_pace(mut self, reservation_pace: Duration) -> Self {
+        self.reservation_pace = reservation_pace;
+        self
     }
 }
 
@@ -97,6 +109,9 @@ impl EffectfulStatefulHandler for Allocator {
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         match input {
             AllocationInput::OrderPlaced(placed) => {
+                if !fx.is_replaying() {
+                    tokio::time::sleep(self.reservation_pace).await;
+                }
                 if state.allocated(&placed.sku) >= self.capacity_per_sku {
                     fx.emit(SoldOut {
                         order_id: placed.order_id.clone(),

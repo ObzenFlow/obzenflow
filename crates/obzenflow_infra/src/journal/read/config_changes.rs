@@ -110,6 +110,8 @@ fn configuration_refusal<'a>(
                 StageFatalReason::DescriptorMismatch
                     | StageFatalReason::MissingRecordedEffect
                     | StageFatalReason::UnusedEffectHistory
+                    | StageFatalReason::MissingRecordedFact
+                    | StageFatalReason::UnusedFactHistory
             ) =>
         {
             Some(&fatal.stage_key)
@@ -235,6 +237,8 @@ mod tests {
             StageFatalReason::DescriptorMismatch,
             StageFatalReason::MissingRecordedEffect,
             StageFatalReason::UnusedEffectHistory,
+            StageFatalReason::MissingRecordedFact,
+            StageFatalReason::UnusedFactHistory,
         ] {
             assert_eq!(
                 configuration_refusal(None, &fatal("score", reason)),

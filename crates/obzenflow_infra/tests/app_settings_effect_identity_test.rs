@@ -15,6 +15,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, SourceContinuationRefusal,
 };
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, StageFatalReason};
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::TypedPayload;
@@ -83,12 +84,36 @@ impl TypedPayload for Unscored {
     const EVENT_TYPE: &'static str = "app_identity.unscored";
 }
 
+/// Emitted after `Scored` while `annotate` is set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Noted {
+    value: u64,
+}
+
+impl TypedPayload for Noted {
+    const EVENT_TYPE: &'static str = "app_identity.noted";
+}
+
+/// A reading above `limit`, which the stage settles without a call.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Capped {
+    value: u64,
+}
+
+impl TypedPayload for Capped {
+    const EVENT_TYPE: &'static str = "app_identity.capped";
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
     affinity: Affinity,
     #[serde(default)]
     rescore: bool,
+    #[serde(default)]
+    annotate: bool,
+    #[serde(default)]
+    limit: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -101,11 +126,15 @@ struct Affinity {
 struct App {
     threshold: u64,
     rescore: bool,
+    annotate: bool,
+    limit: Option<u64>,
 }
 
 const RECORDED: App = App {
     threshold: 10,
     rescore: false,
+    annotate: false,
+    limit: None,
 };
 
 #[derive(Clone, Debug)]
@@ -167,7 +196,7 @@ impl Effect for ScoreEffect {
     }
 }
 
-type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored];
+type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored, Noted, Capped];
 type ScoreEffects = obzenflow_runtime::effect_set![ScoreEffect];
 
 const RESCORE_OFFSET: u64 = 1_000;
@@ -211,13 +240,20 @@ impl EffectfulTransformHandler for ScoreTransform {
         input: Reading,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        if self.app.limit.is_some_and(|limit| input.value > limit) {
+            fx.emit(Capped { value: input.value }).await?;
+            return Ok(fx.complete()?);
+        }
         match self.score(input.value, fx).await {
             Ok(score) => {
                 fx.emit(Scored {
                     value: input.value,
                     score: score.score,
                 })
-                .await?
+                .await?;
+                if self.app.annotate {
+                    fx.emit(Noted { value: input.value }).await?;
+                }
             }
             Err(_) => fx.emit(Unscored { value: input.value }).await?,
         }
@@ -287,6 +323,8 @@ async fn build(
             app: App {
                 threshold: settings.affinity.threshold,
                 rescore: settings.rescore,
+                annotate: settings.annotate,
+                limit: settings.limit,
             },
             executed,
         };
@@ -298,7 +336,8 @@ async fn build(
             stages: {
                 src = infinite_source!(Reading => reader);
                 score = effectful_transform!(
-                    Reading -> { Scored, Score, Unscored } uses ScoreEffect => score_transform);
+                    Reading -> { Scored, Score, Unscored, Noted, Capped }
+                        uses ScoreEffect => score_transform);
                 snk = sink!(Scored => counting_sink);
             },
 
@@ -311,6 +350,8 @@ async fn build(
     .build(context(json!({
         "affinity": { "threshold": app.threshold },
         "rescore": app.rescore,
+        "annotate": app.annotate,
+        "limit": app.limit,
     })))
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
@@ -559,6 +600,224 @@ async fn an_app_value_that_adds_an_effect_refuses_replay_and_resume_catch_up() -
     assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
     assert_eq!(read_configuration_refusals(&r1).await?, stages(&["score"]));
     assert_eq!(changed_keys(&r1)?, [(r0, vec![KEY.to_string()])]);
+    Ok(())
+}
+
+/// A resume whose stage departs from its archive fails at the departing act,
+/// before any live call (FLOWIP-134k B7). Rows it reproduced before that act
+/// may already have reached the sink.
+async fn run_departed(journal_base: &Path, app: App) -> Result<()> {
+    let (handle, run) = build(journal_base, 4, 0, app).await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the departed resume to end"))?;
+    assert!(outcome.is_err(), "a departing act fails the resume");
+    assert_eq!(run.executed(), Vec::<u64>::new(), "zero live calls");
+    Ok(())
+}
+
+/// The score stage's catch-up marker sits after every reproduced data row
+/// and before every live one, and live rows follow it.
+async fn assert_crossing_after_archived_acts(run_dir: &Path) {
+    let rows = replay_testkit::read_stage_envelopes_appended(run_dir, "score").await;
+    let marker = rows
+        .iter()
+        .position(|row| {
+            matches!(
+                &row.payload,
+                ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+            )
+        })
+        .expect("the resumed stage crosses");
+    let (rebuilt, live) = rows.split_at(marker);
+    assert!(rebuilt
+        .iter()
+        .filter(|row| row.consumes_data_credit())
+        .all(|row| row.authored().replay_context.is_some()));
+    let live: Vec<_> = live
+        .iter()
+        .filter(|row| row.consumes_data_credit())
+        .collect();
+    assert!(!live.is_empty(), "live work follows the crossing");
+    assert!(live
+        .iter()
+        .all(|row| row.authored().replay_context.is_none()));
+}
+
+async fn record_readings(journal_base: &Path, app: App) -> Result<PathBuf> {
+    run_until(journal_base, 1, 3, app, 3, 3).await?;
+    Ok(std::fs::canonicalize(replay_testkit::latest_run_dir(
+        journal_base,
+    ))?)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_value_that_adds_a_fact_refuses_resume_until_the_recorded_value_returns(
+) -> Result<()> {
+    const KEY: &str = "app.annotate";
+    let annotate = App {
+        annotate: true,
+        ..RECORDED
+    };
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let r0 = record_readings(&journal_base, RECORDED).await?;
+
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
+        );
+        run_departed(&journal_base, annotate).await?;
+    }
+    let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+    let detail = assert_refused(&r1, StageFatalReason::MissingRecordedFact).await?;
+    assert_eq!(
+        detail,
+        "stage 'score' emitted Noted at input 1, but its recording's next act is a \
+         Score effect"
+    );
+    assert_eq!(changed_keys(&r1)?, [(r0.clone(), vec![KEY.to_string()])]);
+
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r1.clone(), ReplayVerb::Resume)).await,
+        );
+        assert_eq!(
+            run_until(&journal_base, 4, 2, RECORDED, 2, 2).await?,
+            [4, 5]
+        );
+    }
+    let r2 = replay_testkit::latest_run_dir(&journal_base);
+    assert_eq!(stage_fatals(&r2).await?, Vec::new());
+    assert_crossing_after_archived_acts(&r2).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_value_that_skips_a_recorded_fact_refuses_resume() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let annotate = App {
+        annotate: true,
+        ..RECORDED
+    };
+    let r0 = record_readings(&journal_base, annotate).await?;
+
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
+        );
+        run_departed(&journal_base, RECORDED).await?;
+    }
+    let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+    let detail = assert_refused(&r1, StageFatalReason::UnusedFactHistory).await?;
+    assert_eq!(
+        detail,
+        "stage 'score' skipped a Noted fact its recording holds"
+    );
+    assert_eq!(changed_keys(&r1)?, [(r0, vec!["app.annotate".to_string()])]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_value_that_turns_a_settled_input_into_a_call_refuses_resume() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let capped = App {
+        limit: Some(2),
+        ..RECORDED
+    };
+    let r0 = {
+        let (handle, run) = build(&journal_base, 1, 3, capped).await?;
+        wait_for_running(&handle).await?;
+        let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let capped_rows = replay_testkit::read_stage_envelopes_appended(&r0, "score")
+                    .await
+                    .iter()
+                    .filter(|row| Capped::from_event(&row.authored()).is_some())
+                    .count();
+                if capped_rows == 1 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("timeout waiting for reading 3 to be capped"))?;
+        handle.stop().await?;
+        tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the run to stop"))??;
+        assert_eq!(
+            run.executed(),
+            [1, 2],
+            "the recording settles reading 3 without a call"
+        );
+        r0
+    };
+
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume)).await,
+        );
+        run_departed(&journal_base, RECORDED).await?;
+    }
+    let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+    let detail = assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
+    assert_eq!(
+        detail,
+        "stage 'score' would perform Score at input 3, but its recording's next act is a \
+         Capped fact"
+    );
+    assert_eq!(changed_keys(&r1)?, [(r0, vec!["app.limit".to_string()])]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_replay_with_a_changed_value_proceeds_and_verify_reports_the_difference(
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let r0 = record_readings(&journal_base, RECORDED).await?;
+    let annotate = App {
+        annotate: true,
+        ..RECORDED
+    };
+
+    {
+        // A stopped recording replays without the override, so `--verify`
+        // can certify against it.
+        let plain = ReplayBootstrap {
+            allow_incomplete_archive: false,
+            ..archive(r0.clone(), ReplayVerb::Replay)
+        };
+        let _bootstrap =
+            install_bootstrap_config(replay_testkit::bootstrap_with_archive(plain).await);
+        let (handle, run) = build(&journal_base, 1, 0, annotate).await?;
+        tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the replay"))??;
+        assert_eq!(run.executed(), Vec::<u64>::new(), "replay makes no call");
+    }
+    let replay = replay_testkit::latest_run_dir(&journal_base);
+    assert_eq!(stage_fatals(&replay).await?, Vec::new());
+    let verification = obzenflow_infra::verify::verify_run_dirs(
+        &r0,
+        &replay,
+        &obzenflow_infra::verify::VerifyOptions {
+            write_report: false,
+            ..obzenflow_infra::verify::VerifyOptions::default()
+        },
+    )?;
+    assert_eq!(
+        verification.exit_code(),
+        1,
+        "{}",
+        obzenflow_infra::verify::render_verdict(&verification)
+    );
     Ok(())
 }
 

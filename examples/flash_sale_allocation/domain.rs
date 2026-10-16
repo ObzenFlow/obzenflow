@@ -110,6 +110,19 @@ impl TypedPayload for SoldOut {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+/// The reservation desk numbered a reservation, taken by phone or online.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationConfirmed {
+    pub order_id: OrderId,
+    pub sku: Sku,
+    pub confirmation: u64,
+}
+
+impl TypedPayload for ReservationConfirmed {
+    const EVENT_TYPE: &'static str = "allocation.reservation_confirmed";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 /// A cancellation had no currently folded warehouse hold to release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelIgnored {

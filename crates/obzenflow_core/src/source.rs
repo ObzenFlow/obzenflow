@@ -221,6 +221,83 @@ impl RecordedSourceFrontier {
     }
 }
 
+/// The continuation a source stage was admitted with. A positioned source
+/// carries the position version its connector reads (FLOWIP-134i B22); a
+/// reattaching one, the guarantee it records (FLOWIP-122i).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceContinuation {
+    Refuse {
+        by: RefusedBy,
+    },
+    Seek {
+        position_version: NonZeroU32,
+    },
+    Reattach {
+        guarantee: crate::event::payloads::execution_payload::ReattachGuarantee,
+    },
+}
+
+/// What refuses a source's interrupted input: its connector's declaration, or
+/// a direct handler, which declares none (FLOWIP-122i).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedBy {
+    Connector,
+    Handler,
+}
+
+/// Why a resume refuses a source at archive admission, before any claim.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeRefusal {
+    /// The source stopped with its input unfinished, and its connector or
+    /// handler cannot continue interrupted input (B8).
+    UnfinishedInput { by: RefusedBy },
+    /// The source recorded its input without positions (B22).
+    RecordedWithoutPositions,
+    /// The source recorded positions in another version of its connector's
+    /// format (B22).
+    PositionVersion {
+        recorded: NonZeroU32,
+        expected: NonZeroU32,
+    },
+}
+
+impl SourceContinuation {
+    /// Why a resume must refuse this source, from the EOF and frontier its
+    /// archive recorded. A naturally completed source replays its completion
+    /// whatever its connector; `Poison` and `Truncated` are not natural
+    /// completion.
+    pub fn resume_refusal(
+        self,
+        recorded_eof: Option<crate::event::payloads::flow_control_payload::EofKind>,
+        frontier: &RecordedSourceFrontier,
+    ) -> Option<ResumeRefusal> {
+        use crate::event::payloads::flow_control_payload::EofKind;
+        if recorded_eof == Some(EofKind::Natural) {
+            return None;
+        }
+        match self {
+            Self::Refuse { by } => Some(ResumeRefusal::UnfinishedInput { by }),
+            Self::Seek { position_version } => {
+                frontier
+                    .handoff(position_version)
+                    .err()
+                    .map(|refusal| match refusal {
+                        SourceFrontierRefusal::MissingEvidence => {
+                            ResumeRefusal::RecordedWithoutPositions
+                        }
+                        SourceFrontierRefusal::PositionVersion { recorded, expected } => {
+                            ResumeRefusal::PositionVersion { recorded, expected }
+                        }
+                    })
+            }
+            Self::Reattach { .. } => None,
+        }
+    }
+}
+
 /// Why an input identity could not be computed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SourceIdentityError {
@@ -333,6 +410,70 @@ pub(crate) fn lower_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::payloads::execution_payload::ReattachGuarantee;
+    use crate::event::payloads::flow_control_payload::EofKind;
+
+    fn refusal(
+        continuation: SourceContinuation,
+        recorded_eof: Option<EofKind>,
+    ) -> Option<ResumeRefusal> {
+        continuation.resume_refusal(recorded_eof, &RecordedSourceFrontier::default())
+    }
+
+    #[test]
+    fn refuse_admits_resume_only_after_natural_completion() {
+        for by in [RefusedBy::Connector, RefusedBy::Handler] {
+            let refuse = SourceContinuation::Refuse { by };
+            let unfinished = Some(ResumeRefusal::UnfinishedInput { by });
+            assert_eq!(refusal(refuse, Some(EofKind::Natural)), None);
+            assert_eq!(
+                refusal(refuse, Some(EofKind::Poison)),
+                unfinished,
+                "a Jonestown poison is not natural completion"
+            );
+            assert_eq!(
+                refusal(refuse, Some(EofKind::Truncated)),
+                unfinished,
+                "an operator stop leaves the input unfinished"
+            );
+            assert_eq!(
+                refusal(refuse, None),
+                unfinished,
+                "a torn source committed no completion"
+            );
+        }
+    }
+
+    #[test]
+    fn reattach_admits_resume_whatever_its_recorded_completion() {
+        for guarantee in [
+            ReattachGuarantee::SenderRedelivers,
+            ReattachGuarantee::LatestState,
+            ReattachGuarantee::AtMostOnce,
+        ] {
+            for recorded_eof in [
+                None,
+                Some(EofKind::Natural),
+                Some(EofKind::Poison),
+                Some(EofKind::Truncated),
+            ] {
+                let reattach = SourceContinuation::Reattach { guarantee };
+                assert_eq!(refusal(reattach, recorded_eof), None);
+            }
+        }
+    }
+
+    /// B15, B22: a positioned source that completed naturally replays its
+    /// completion, and one that never pinned or admitted anything starts.
+    #[test]
+    fn seek_admits_completion_and_a_never_pinned_start() {
+        let seek = SourceContinuation::Seek {
+            position_version: NonZeroU32::MIN,
+        };
+        assert_eq!(refusal(seek, Some(EofKind::Natural)), None);
+        assert_eq!(refusal(seek, Some(EofKind::Truncated)), None);
+        assert_eq!(refusal(seek, None), None);
+    }
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct Offset {

@@ -74,15 +74,28 @@ fn banner_for(mode: &RunMode) -> Banner {
 /// Completion copy branches the same way: live runs are pointed at replay and
 /// live metrics; replays are pointed at verification (FLOWIP-095j) and
 /// replay-of-replay, never at metrics the replay did not touch.
+/// Next steps name a verb only when the footer offers it (FLOWIP-134k B4).
 fn footer_for(outcome: RunPresentationOutcome) -> Footer {
+    let replayable = outcome.offers().replay;
     let next_step = match outcome.run_mode() {
-        RunMode::Replay(ctx) if ctx.verify => "Next: replay the replay.",
-        RunMode::Replay(_) => {
-            "Next: add --verify to make the runtime prove the reconstruction (\"output matched the original run, 0 differences\"), or replay the replay."
-        }
-        _ => "Next: replay this run with --replay-from, or scrape /metrics for obzenflow_circuit_breaker_*.",
+        RunMode::Replay(ctx) if ctx.verify && replayable => Some("Next: replay the replay."),
+        RunMode::Replay(ctx) if ctx.verify => None,
+        RunMode::Replay(_) if replayable => Some(
+            "Next: add --verify to make the runtime prove the reconstruction (\"output matched the original run, 0 differences\"), or replay the replay.",
+        ),
+        RunMode::Replay(_) => Some(
+            "Next: add --verify to make the runtime prove the reconstruction (\"output matched the original run, 0 differences\").",
+        ),
+        _ if replayable => Some(
+            "Next: replay this run with --replay-from, or scrape /metrics for obzenflow_circuit_breaker_*.",
+        ),
+        _ => Some("Next: scrape /metrics for obzenflow_circuit_breaker_*."),
     };
-    outcome.into_footer().paragraph(next_step)
+    let footer = outcome.into_footer();
+    match next_step {
+        Some(next_step) => footer.paragraph(next_step),
+        None => footer,
+    }
 }
 
 /// Exit codes follow the FLOWIP-095j verification contract when `--verify`
@@ -116,7 +129,7 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow::application::ReplayRunContext;
+    use obzenflow::application::{ArchiveOffers, ReplayRunContext};
     use std::path::PathBuf;
 
     fn replay_mode() -> RunMode {
@@ -151,12 +164,14 @@ mod tests {
             flow_name: "payment_gateway_resilience_demo".to_string(),
             location: Some(location.clone()),
             run_mode: RunMode::Live,
+            offers: REPLAY_ONLY,
         })
         .finish();
         let replay = footer_for(RunPresentationOutcome::Completed {
             flow_name: "payment_gateway_resilience_demo".to_string(),
             location: Some(location),
             run_mode: replay_mode(),
+            offers: REPLAY_ONLY,
         })
         .finish();
 
@@ -185,10 +200,32 @@ mod tests {
                 PathBuf::from("target/payment-gateway-logs/flows/flow_01REPLAY"),
             )),
             run_mode,
+            offers: REPLAY_ONLY,
         })
         .finish();
 
         assert!(!replay.contains("--verify"), "{replay}");
         assert!(replay.contains("replay the replay"), "{replay}");
     }
+
+    /// FLOWIP-134k B4: a live run whose replay is refused is never pointed
+    /// at it.
+    #[test]
+    fn a_refused_replay_is_never_suggested() {
+        let footer = footer_for(RunPresentationOutcome::Stopped {
+            flow_name: "payment_gateway_resilience_demo".to_string(),
+            location: Some(obzenflow::application::CurrentRunLocator::new(
+                PathBuf::from("target/payment-gateway-logs/flows/flow_01RUN"),
+            )),
+            run_mode: RunMode::Live,
+            offers: ArchiveOffers::default(),
+        })
+        .finish();
+        assert!(!footer.contains("--replay-from"), "{footer}");
+    }
+
+    const REPLAY_ONLY: ArchiveOffers = ArchiveOffers {
+        replay: true,
+        resume: false,
+    };
 }

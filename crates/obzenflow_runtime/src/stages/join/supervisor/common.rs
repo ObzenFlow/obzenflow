@@ -107,6 +107,7 @@ async fn join_flip<H: UnifiedJoinHandler>(
             writer_id: ctx.writer_id,
             data_journal: &ctx.data_journal,
             instrumentation: &ctx.instrumentation,
+            effect_history: None,
         },
         /* author_marker */ true,
         &ctx.runtime_execution,
@@ -132,6 +133,10 @@ pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
         CatchUpDisposition::Consumed => crate::supervised_base::EventLoopDirective::Continue,
         CatchUpDisposition::Failed(message) => {
             crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message))
+        }
+        // A join has no effect runtime, so it never refuses for acts.
+        CatchUpDisposition::Refused(fatal) => {
+            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail))
         }
     }
 }
@@ -159,6 +164,9 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
         CatchUpDisposition::Consumed => None,
         CatchUpDisposition::Failed(message) => Some(
             crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message)),
+        ),
+        CatchUpDisposition::Refused(fatal) => Some(
+            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail)),
         ),
     }
 }

@@ -15,8 +15,8 @@ use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
 use super::observability::PreparedObservability;
 use super::web_surface::label_endpoint;
 use super::{
-    ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
-    WebSurfaceWiringContext,
+    ApplicationError, ArchiveOffers, FlowConfig, Presentation, RunPresentationOutcome,
+    WebSurfaceAttachment, WebSurfaceWiringContext,
 };
 #[cfg(feature = "warp-server")]
 use crate::application::config::CorsModeArg;
@@ -677,16 +677,24 @@ impl FlowApplication {
             .as_ref()
             .map(|model| model.clone() as Arc<dyn MetricsSnapshotExporter>);
 
-        if let Some(presentation) = &presentation {
-            let rendered = presentation.render_banner(&run_mode);
-            for warning in rendered.warnings {
-                tracing::warn!("{warning}");
+        // FLOWIP-134k §1: the banner prints after the build, so a refused verb
+        // never announces that it is resuming or replaying.
+        let mut resumed_replayed_run = None;
+        let print_banner = |resumed_replayed_run: &Option<String>| {
+            if let Some(presentation) = &presentation {
+                let rendered = presentation.render_banner(&run_mode);
+                for warning in rendered.warnings {
+                    tracing::warn!("{warning}");
+                }
+                print!("{}", rendered.text);
             }
-            print!("{}", rendered.text);
-        }
+            if let Some(line) = resumed_replayed_run {
+                println!("{line}");
+            }
+        };
 
         let mut config_changes = Vec::new();
-        let (result, flow_name, run_state, stopped) = 'run: {
+        let (result, flow_name, run_state, built_flow) = 'run: {
             if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server.enabled {
                 break 'run (
                     Err(ApplicationError::InvalidConfiguration(
@@ -695,7 +703,7 @@ impl FlowApplication {
                     )),
                     None,
                     None,
-                    false,
+                    None,
                 );
             }
 
@@ -735,10 +743,10 @@ impl FlowApplication {
                         ReplayError::AncestorMissing { .. }
                         | ReplayError::AncestorUnreadable { .. }
                         | ReplayError::AncestorDisagrees { .. }
+                        | ReplayError::NamespaceDisagrees { .. }
                         | ReplayError::AlreadyContinued { .. }
                         | ReplayError::StoppedBeforeTakeover { .. }
                         | ReplayError::ContinuedByAnother { .. }
-                        | ReplayError::StillRunning { .. }
                         | ReplayError::LocationNotWritable { .. }
                         | ReplayError::ReplayedRunMissing { .. } => {
                             ApplicationError::ResumeRefused(e.to_string())
@@ -750,12 +758,15 @@ impl FlowApplication {
                     if std::fs::canonicalize(&replay.archive_path)
                         .is_ok_and(|requested| requested != archive.archive_path())
                     {
-                        println!(
+                        resumed_replayed_run = Some(format!(
                             "Resuming {}, the run that {} replays.",
                             archive.archive_path().display(),
                             replay.archive_path.display()
-                        );
+                        ));
                     }
+                    // FLOWIP-134k §1: the host hands Core the archive's
+                    // evidence through the build, which decides the verb.
+                    bootstrap_config.archive_evidence = Some(archive.evidence());
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
                 bootstrap_config
@@ -782,7 +793,7 @@ impl FlowApplication {
                     Err(ApplicationError::FeatureNotEnabled("web-host".into())),
                     None,
                     None,
-                    false,
+                    None,
                 );
             }
 
@@ -803,8 +814,19 @@ impl FlowApplication {
                     // means the build failed before substrate selection, so no run
                     // directory exists to point at.
                     let error = match &failure.error {
-                        obzenflow_dsl::FlowBuildError::ResumeRefusedSources { .. }
-                        | obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
+                        // FLOWIP-134k §1, B4: every archive-verb refusal
+                        // prints verbatim as the requested verb's refusal.
+                        obzenflow_dsl::FlowBuildError::ArchiveVerbRefused(refusal) => {
+                            match refusal.verb() {
+                                obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
+                                    ApplicationError::ResumeRefused(refusal.to_string())
+                                }
+                                obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
+                                    ApplicationError::ReplayRefused(refusal.to_string())
+                                }
+                            }
+                        }
+                        obzenflow_dsl::FlowBuildError::ResumeRefusedClaim(_) => {
                             ApplicationError::ResumeRefused(failure.error.to_string())
                         }
                         obzenflow_dsl::FlowBuildError::ApplicationSettings(error) => {
@@ -815,10 +837,16 @@ impl FlowApplication {
                         }
                         other => ApplicationError::FlowBuildFailed(other.to_string()),
                     };
-                    break 'run (Err(error), None, failure.run, false);
+                    break 'run (Err(error), None, failure.run, None);
                 }
             };
 
+            print_banner(&resumed_replayed_run);
+            // FLOWIP-134k B3: a resumed sink edge that follows generation is
+            // named after the banner.
+            for notice in flow_handle.resume_notices() {
+                println!("{notice}");
+            }
             application.protect_flow(&flow_handle);
 
             for line in super::config_report::settings_lines(
@@ -852,7 +880,7 @@ impl FlowApplication {
                     Ok(task) => application.tasks.push(ApplicationTask(task)),
                     Err(err) => {
                         let result = application.fail_before_run(flow_handle.clone(), err).await;
-                        break 'run (result, Some(flow_name.clone()), run_state, false);
+                        break 'run (result, Some(flow_name.clone()), run_state, None);
                     }
                 }
             }
@@ -912,7 +940,7 @@ impl FlowApplication {
                         let result = application
                             .fail_before_run(flow_handle.clone(), error)
                             .await;
-                        break 'run (result, Some(flow_name.clone()), run_state, false);
+                        break 'run (result, Some(flow_name.clone()), run_state, None);
                     }
                 }
                 for endpoint in endpoints {
@@ -932,7 +960,7 @@ impl FlowApplication {
                         Err(err) => {
                             let result =
                                 application.fail_before_run(flow_handle.clone(), err).await;
-                            break 'run (result, Some(flow_name.clone()), run_state, false);
+                            break 'run (result, Some(flow_name.clone()), run_state, None);
                         }
                     }
                 }
@@ -984,7 +1012,7 @@ impl FlowApplication {
                         let result = application
                             .fail_before_run(flow_handle.clone(), error)
                             .await;
-                        break 'run (result, Some(flow_name), run_state, false);
+                        break 'run (result, Some(flow_name), run_state, None);
                     }
                 };
 
@@ -1036,6 +1064,7 @@ impl FlowApplication {
                     }
                 }
 
+                let footer_flow = flow_handle.clone();
                 let result = application
                     .run_hosted(
                         host,
@@ -1046,24 +1075,31 @@ impl FlowApplication {
                         test_shutdown_signal,
                     )
                     .await;
-                break 'run (result, Some(flow_name), run_state, true);
+                break 'run (result, Some(flow_name), run_state, Some(footer_flow));
             }
 
             // Non-server mode: preserve existing behaviour (run to completion, no HTTP server)
             tracing::info!("▶️  Starting flow execution (no server)");
+            let footer_flow = flow_handle.clone();
             let result = application.run_standalone(flow_handle).await;
             if result.is_ok() && !presentation_enabled {
                 if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
-                    print_replay_hint(locator);
+                    if Self::written_run_footer(&footer_flow, locator)
+                        .await
+                        .1
+                        .replay
+                    {
+                        print_replay_hint(locator);
+                    }
                 }
             }
-            break 'run (result, Some(flow_name), run_state, false);
+            break 'run (result, Some(flow_name), run_state, Some(footer_flow));
         };
 
         let result = application.finish(result).await;
 
-        match (result, flow_name, run_state, stopped) {
-            (Ok(()), flow_name, run_state, stopped) => {
+        match (result, flow_name, run_state, built_flow) {
+            (Ok(()), flow_name, run_state, built_flow) => {
                 let location = run_state.as_ref().and_then(|s| s.locator()).cloned();
                 // FLOWIP-095j: keep the candidate run directory before the
                 // outcome takes ownership of the location below.
@@ -1072,19 +1108,32 @@ impl FlowApplication {
                     .map(|locator| locator.path().to_path_buf());
                 if let Some(presentation) = &presentation {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
-                    let outcome = if stopped {
-                        RunPresentationOutcome::Stopped {
-                            flow_name,
-                            location,
-                            run_mode: run_mode.clone(),
+                    // FLOWIP-134k §2: the verb is the written run's archive
+                    // status, and each offer Core's decision for that run and
+                    // the flow just built.
+                    let (status, offers) = match (&built_flow, &location) {
+                        (Some(flow), Some(locator)) => {
+                            Self::written_run_footer(flow, locator).await
                         }
-                    } else {
-                        RunPresentationOutcome::Completed {
-                            flow_name,
-                            location,
-                            run_mode: run_mode.clone(),
-                        }
+                        (Some(flow), None) => (flow.terminal_status(), ArchiveOffers::default()),
+                        (None, _) => (None, ArchiveOffers::default()),
                     };
+                    let outcome =
+                        if status == Some(obzenflow_core::journal::ArchiveStatus::Cancelled) {
+                            RunPresentationOutcome::Stopped {
+                                flow_name,
+                                location,
+                                run_mode: run_mode.clone(),
+                                offers,
+                            }
+                        } else {
+                            RunPresentationOutcome::Completed {
+                                flow_name,
+                                location,
+                                run_mode: run_mode.clone(),
+                                offers,
+                            }
+                        };
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(outcome);
                     if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
@@ -1132,7 +1181,13 @@ impl FlowApplication {
                     }
                     _ => Vec::new(),
                 };
-                if let Some(presentation) = &presentation {
+                // FLOWIP-134k §1: an archive verb's refusal prints alone,
+                // with no banner before it and no failure footer after it.
+                let refused = matches!(
+                    err,
+                    ApplicationError::ResumeRefused(_) | ApplicationError::ReplayRefused(_)
+                );
+                if let Some(presentation) = presentation.as_ref().filter(|_| !refused) {
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(RunPresentationOutcome::Failed {
                         flow_name,
@@ -1159,6 +1214,46 @@ impl FlowApplication {
                 Err(err)
             }
         }
+    }
+
+    /// The footer's verb and offers for the run just written (FLOWIP-134k §2,
+    /// B4): its derived archive status, and the plain commands Core admits
+    /// for it and the flow just built. An archive that cannot be read offers
+    /// nothing, and its status falls back to the pipeline's outcome.
+    async fn written_run_footer(
+        flow: &FlowHandle,
+        locator: &CurrentRunLocator,
+    ) -> (
+        Option<obzenflow_core::journal::ArchiveStatus>,
+        ArchiveOffers,
+    ) {
+        use crate::journal::disk::replay_archive::DiskReplayArchive;
+        use obzenflow_core::journal::archive_actions::{decide, ArchiveOverrides, ReplayVerb};
+        let run = locator.path().to_path_buf();
+        let mut status = flow.terminal_status();
+        let mut offers = ArchiveOffers::default();
+        for verb in [ReplayVerb::Replay, ReplayVerb::Resume] {
+            let Ok(evidence) = DiskReplayArchive::written_run_evidence(run.clone(), verb).await
+            else {
+                continue;
+            };
+            if verb == ReplayVerb::Replay {
+                status = Some(evidence.status);
+            }
+            let admitted = decide(
+                verb,
+                &run,
+                &evidence,
+                flow.archive_flow_evidence(),
+                ArchiveOverrides::default(),
+            )
+            .is_ok();
+            match verb {
+                ReplayVerb::Replay => offers.replay = admitted,
+                ReplayVerb::Resume => offers.resume = admitted,
+            }
+        }
+        (status, offers)
     }
 
     /// FLOWIP-095j: the `--verify` convenience form. Compares the just-written

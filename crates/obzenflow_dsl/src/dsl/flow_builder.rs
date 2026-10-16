@@ -500,50 +500,31 @@ where
             &lowering_artifacts.internal_feeds,
         );
 
+        // FLOWIP-134k B4: the flow's own archive facts, kept for the footer and
+        // handed with the archive's evidence to Core's admission before
+        // substrate selection, so a refused verb leaves no run directory.
+        let __archive_flow_evidence = crate::dsl::typing::archive_flow_evidence(&topology, &descriptors);
         if let Some(replay) = obzenflow_runtime::bootstrap::replay_bootstrap() {
-            // FLOWIP-120n F13: cyclic resume is a v1 non-goal; the
-            // condensation-frontier follow-on lifts it. Resume-only.
-            if replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume {
-                let cycle_members: Vec<String> = topology
-                    .stages()
-                    .filter(|stage| topology.is_in_cycle(stage.id))
-                    .map(|stage| stage.name.as_str().to_string())
-                    .collect();
-                if !cycle_members.is_empty() {
-                    return Err(FlowBuildError::UnsupportedCycleTopology(format!(
-                        "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle members: {}",
-                        cycle_members.join(", ")
-                    )));
-                }
-
-                // FLOWIP-134i B8, B22: a source whose recorded input cannot be
-                // continued refuses the resume before any run or claim exists.
-                if let Some(archive) = obzenflow_runtime::bootstrap::replay_archive() {
-                    let refusals = obzenflow_runtime::stages::source::sources_refusing_resume(
-                        archive.as_ref(),
-                        descriptors.iter().filter_map(|(name, descriptor)| {
-                            descriptor
-                                .source_continuation()
-                                .map(|continuation| (name.as_str(), continuation))
-                        }),
-                    );
-                    if !refusals.is_empty() {
-                        return Err(FlowBuildError::ResumeRefusedSources {
-                            archive: replay.archive_path.clone(),
-                            refusals,
-                        });
-                    }
-                }
-            }
-
-            // FLOWIP-120n F16, FLOWIP-120v: both archive verbs re-execute
-            // recorded work at sinks, so every sink must declare its delivery
-            // safety.
-            crate::dsl::typing::validate_archive_sink_delivery_safety(
-                &descriptors,
+            let evidence = obzenflow_runtime::bootstrap::archive_evidence().ok_or_else(|| {
+                FlowBuildError::StageResourcesFailed(format!(
+                    "replay/resume bootstrap is installed (verb {:?}) but no opened archive \
+                     was provided, so admission has no archive evidence (FLOWIP-134k B4); \
+                     refusing to run live",
+                    replay.verb
+                ))
+            })?;
+            let admission = obzenflow_core::journal::archive_actions::decide(
                 replay.verb,
-                replay.allow_duplicate_sink_delivery,
-            )?;
+                &replay.archive_path,
+                &evidence,
+                &__archive_flow_evidence,
+                obzenflow_core::journal::archive_actions::ArchiveOverrides {
+                    allow_incomplete_archive: replay.allow_incomplete_archive,
+                    allow_duplicate_sink_delivery: replay.allow_duplicate_sink_delivery,
+                },
+            )
+            .map_err(FlowBuildError::ArchiveVerbRefused)?;
+            crate::dsl::typing::warn_duplicate_sink_delivery(replay.verb, &admission);
         }
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
@@ -1287,6 +1268,15 @@ where
 
             obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.to_string(),
             flow_id: flow_id.to_string(),
+            // FLOWIP-134k B8: a fresh run starts its own namespace; a resume or
+            // replay copies the one its archive records.
+            recorded_flow_id: Some(match replay_archive.as_ref() {
+                Some(archive) => archive
+                    .recorded_flow_id()
+                    .unwrap_or(archive.archive_flow_id())
+                    .to_string(),
+                None => flow_id.to_string(),
+            }),
             pipeline_writer_id: pipeline_system_id.into(),
             flow_name: flow_name.to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
@@ -1420,6 +1410,40 @@ where
             }
         }
 
+        // FLOWIP-134k B3: the sink edges a resume reproduces, by Core's order
+        // certification against every archive the resume reads, and a notice
+        // for each stage that keeps an edge on generation.
+        let __sink_resume_plan = match (
+            obzenflow_runtime::bootstrap::replay_bootstrap(),
+            replay_archive.as_ref(),
+        ) {
+            (Some(replay), Some(archive))
+                if replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume =>
+            {
+                let current =
+                    obzenflow_core::journal::archive::certification::StageOrders::from(&run_manifest);
+                let stage_ids: HashMap<String, StageId> = name_to_id
+                    .iter()
+                    .map(|(var, id)| (descriptors[var].name().to_string(), *id))
+                    .collect();
+                let sinks: Vec<(String, StageId)> = descriptors
+                    .iter()
+                    .filter(|(_, descriptor)| {
+                        descriptor.stage_type() == obzenflow_core::event::context::StageType::Sink
+                    })
+                    .map(|(var, descriptor)| (descriptor.name().to_string(), name_to_id[var]))
+                    .collect();
+                crate::dsl::resume_edges::sink_resume_plan(
+                    &current,
+                    &sinks,
+                    &stage_ids,
+                    archive.as_ref(),
+                    &replay.archive_path,
+                )
+            }
+            _ => Default::default(),
+        };
+
         // Use StageResourcesBuilder to handle all the complex wiring
         use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
 
@@ -1463,6 +1487,7 @@ where
         .with_lineage_policies(lineage_policies)
         .with_heartbeat_intervals(heartbeat_intervals)
         .with_effect_ports(effect_ports)
+        .with_sink_resume_edges(__sink_resume_plan.edges)
         .with_replay_archive(replay_archive);
 
         let stage_resources_set = resources_builder
@@ -1715,7 +1740,9 @@ where
             .with_observations(stage_resources_set.observations.clone(), stage_resources_set.host_observations.clone())
             .with_runtime_execution(stage_resources_set.runtime_execution.clone())
             .with_run_substrate(__substrate.clone())
-            .with_flow_effective_config(__flow_effective.clone());
+            .with_flow_effective_config(__flow_effective.clone())
+            .with_archive_flow_evidence(__archive_flow_evidence.clone())
+            .with_resume_notices(__sink_resume_plan.notices);
 
         let builder = if let Some(journals) = metrics_journals {
             builder.with_metrics_journals(journals)

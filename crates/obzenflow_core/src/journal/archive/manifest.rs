@@ -30,6 +30,12 @@ pub struct RunManifest {
     pub journal_schema_version: String,
     pub obzenflow_version: String,
     pub flow_id: String,
+    /// The lineage namespace every deterministic identity in this run mints
+    /// in (FLOWIP-134k B8): a fresh run's own flow id, or the value the
+    /// archive a resume or replay opened records. Absent in archives written
+    /// before B8, which read as their own flow id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_flow_id: Option<String>,
     /// Authoritative pipeline lifecycle writer allocated for this output run.
     pub pipeline_writer_id: crate::event::WriterId,
     pub flow_name: String,
@@ -55,6 +61,14 @@ pub struct RunManifest {
     /// exact versioned physical input event type.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bounded_direct_fact_admission: Vec<RunManifestDirectFactAdmission>,
+}
+
+impl RunManifest {
+    /// The run's lineage namespace; an archive written before FLOWIP-134k B8
+    /// records none and reads as its own flow id.
+    pub fn lineage_namespace(&self) -> &str {
+        self.recorded_flow_id.as_deref().unwrap_or(&self.flow_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,5 +154,48 @@ impl DeliveryOrder {
     /// Whether independent runs over the same inputs deliver in the same order.
     pub const fn agrees_across_runs(self) -> bool {
         matches!(self, Self::SingleInput | Self::Structural | Self::Canonical)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(recorded_flow_id: Option<&str>) -> RunManifest {
+        RunManifest {
+            journal_schema_version: JOURNAL_SCHEMA_VERSION.to_string(),
+            obzenflow_version: "0.2.6".to_string(),
+            flow_id: "flow_resume".to_string(),
+            recorded_flow_id: recorded_flow_id.map(str::to_string),
+            pipeline_writer_id: crate::SystemId::new().into(),
+            flow_name: "test".to_string(),
+            created_at: Utc::now(),
+            replay: None,
+            resume: None,
+            stages: HashMap::new(),
+            system_journal_file: "system.log".to_string(),
+            metrics_journals: None,
+            effective_config: None,
+            capabilities: BTreeMap::new(),
+            bounded_direct_fact_admission: Vec::new(),
+        }
+    }
+
+    /// FLOWIP-134k B8: the namespace round-trips, and an archive written
+    /// before B8 reads as its own flow id.
+    #[test]
+    fn the_recorded_namespace_round_trips_and_an_absent_one_reads_as_the_flow_id() {
+        let recorded = manifest(Some("flow_killed"));
+        let json = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(json["recorded_flow_id"], "flow_killed");
+        let read: RunManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(read.lineage_namespace(), "flow_killed");
+
+        let mut older = serde_json::to_value(manifest(None)).unwrap();
+        assert!(older.get("recorded_flow_id").is_none());
+        older.as_object_mut().unwrap().remove("recorded_flow_id");
+        let read: RunManifest = serde_json::from_value(older).unwrap();
+        assert_eq!(read.recorded_flow_id, None);
+        assert_eq!(read.lineage_namespace(), "flow_resume");
     }
 }

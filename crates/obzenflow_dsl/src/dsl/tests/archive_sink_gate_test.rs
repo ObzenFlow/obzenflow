@@ -2,13 +2,18 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Tests for the archive sink delivery-safety gate: FLOWIP-120n F16, extended
-//! to both archive verbs by FLOWIP-120v.
+//! Tests for the archive sink delivery-safety row: FLOWIP-120n F16, extended
+//! to both archive verbs by FLOWIP-120v, decided by Core's archive admission
+//! from the facts the flow builder derives (FLOWIP-134k B4).
 
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+    use obzenflow_core::journal::archive_actions::{
+        decide, Admission, ArchiveEvidence, ArchiveOverrides, ArchiveRefusal,
+    };
+    use obzenflow_core::journal::ArchiveStatus;
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::bootstrap::ReplayVerb;
     use obzenflow_runtime::effects::SinkRedeliverySafety;
@@ -18,14 +23,37 @@ mod tests {
     };
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use crate::dsl::error::FlowBuildError;
     use crate::dsl::stage_descriptor::{SinkDescriptor, StageDescriptor};
-    use crate::dsl::typing::validate_archive_sink_delivery_safety;
+    use crate::dsl::typing::flow_evidence_with_cycle;
 
     const BOTH_VERBS: [ReplayVerb; 2] = [ReplayVerb::Resume, ReplayVerb::Replay];
+
+    /// Core's decision for a cancelled archive with no sources, so only the
+    /// sink row can refuse.
+    fn validate_archive_sink_delivery_safety(
+        descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+        verb: ReplayVerb,
+        allow_duplicate_sink_delivery: bool,
+    ) -> Result<Admission, ArchiveRefusal> {
+        decide(
+            verb,
+            Path::new("/runs/r1"),
+            &ArchiveEvidence {
+                status: ArchiveStatus::Cancelled,
+                live_writer: false,
+                sources: Vec::new(),
+            },
+            &flow_evidence_with_cycle(Vec::new(), descriptors),
+            ArchiveOverrides {
+                allow_incomplete_archive: false,
+                allow_duplicate_sink_delivery,
+            },
+        )
+    }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct SinkInput {
@@ -152,11 +180,15 @@ mod tests {
             .expect_err("non-idempotent sinks refuse resume without the opt-in");
         let message = err.to_string();
         match err {
-            FlowBuildError::ArchiveRefusedNonIdempotentSink { stage, verb } => {
+            ArchiveRefusal::Sink {
+                stage,
+                verb,
+                undeclared: false,
+            } => {
                 assert_eq!(stage, "external_writer");
                 assert_eq!(verb, ReplayVerb::Resume);
             }
-            other => panic!("unexpected error variant: {other:?}"),
+            other => panic!("unexpected refusal: {other:?}"),
         }
         assert!(message.starts_with("--resume-from refused"), "{message}");
         assert!(
@@ -179,11 +211,15 @@ mod tests {
             .expect_err("non-idempotent sinks refuse replay without the opt-in");
         let message = err.to_string();
         match err {
-            FlowBuildError::ArchiveRefusedNonIdempotentSink { stage, verb } => {
+            ArchiveRefusal::Sink {
+                stage,
+                verb,
+                undeclared: false,
+            } => {
                 assert_eq!(stage, "external_writer");
                 assert_eq!(verb, ReplayVerb::Replay);
             }
-            other => panic!("unexpected error variant: {other:?}"),
+            other => panic!("unexpected refusal: {other:?}"),
         }
         assert!(message.starts_with("--replay-from refused"), "{message}");
         assert!(
@@ -204,11 +240,15 @@ mod tests {
         let err = validate_archive_sink_delivery_safety(&descriptors, ReplayVerb::Resume, false)
             .expect_err("undeclared sinks fail closed under resume");
         match err {
-            FlowBuildError::ArchiveRefusedUndeclaredSink { stage, verb } => {
+            ArchiveRefusal::Sink {
+                stage,
+                verb,
+                undeclared: true,
+            } => {
                 assert_eq!(stage, "mystery");
                 assert_eq!(verb, ReplayVerb::Resume);
             }
-            other => panic!("unexpected error variant: {other:?}"),
+            other => panic!("unexpected refusal: {other:?}"),
         }
     }
 
@@ -220,11 +260,15 @@ mod tests {
             .expect_err("undeclared sinks fail closed under replay");
         let message = err.to_string();
         match err {
-            FlowBuildError::ArchiveRefusedUndeclaredSink { stage, verb } => {
+            ArchiveRefusal::Sink {
+                stage,
+                verb,
+                undeclared: true,
+            } => {
                 assert_eq!(stage, "mystery");
                 assert_eq!(verb, ReplayVerb::Replay);
             }
-            other => panic!("unexpected error variant: {other:?}"),
+            other => panic!("unexpected refusal: {other:?}"),
         }
         // The refusal names both supported classification homes.
         assert!(

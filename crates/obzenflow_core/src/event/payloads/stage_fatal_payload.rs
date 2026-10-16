@@ -40,6 +40,11 @@ pub enum StageFatalReason {
     MissingRecordedEffect,
     /// The rebuild skipped an effect its recording holds.
     UnusedEffectHistory,
+    /// A resume emitted a fact its recording lacks before the recording ends
+    /// (FLOWIP-134k B7).
+    MissingRecordedFact,
+    /// A resume skipped a fact its recording holds (FLOWIP-134k B7).
+    UnusedFactHistory,
     ConfigurationInvariant,
     EffectTargetAssertionMismatch,
     EffectPortRegistrationMissing,

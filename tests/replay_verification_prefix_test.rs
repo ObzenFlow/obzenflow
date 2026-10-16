@@ -129,6 +129,9 @@ async fn cancelled_baseline_verifies_under_prefix_semantics() {
         .await
         .expect("cancelled run should terminate")
         .expect("cancelled run should resolve");
+    // The handle holds the run's journal writers; a replay of a run whose
+    // writers are open refuses as still running (FLOWIP-134k §1).
+    drop(handle);
     let baseline = latest_run_dir(&journal_base);
 
     // Strict replay of the cancelled archive: re-admits the recorded ticks

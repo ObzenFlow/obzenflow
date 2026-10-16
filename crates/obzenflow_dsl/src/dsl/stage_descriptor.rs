@@ -4465,6 +4465,7 @@ mod tests {
             flow_id: FlowId::new(),
             lineage_policy: obzenflow_core::config::LineagePolicy::default(),
             heartbeat_interval: 1000,
+            sink_resume_edges: None,
             data_journal,
             error_journal,
             flow_context: obzenflow_core::event::provenance::FlowContext::new(

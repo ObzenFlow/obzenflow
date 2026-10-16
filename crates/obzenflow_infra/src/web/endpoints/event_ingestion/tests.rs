@@ -1222,12 +1222,12 @@ async fn a_strict_replay_refuses_ingress_throughout() {
         .find(|run| run.join("run_manifest.json").exists())
         .expect("a recorded archive");
 
+    let opened = DiskReplayArchive::open(archive.clone(), true)
+        .await
+        .expect("open the archive");
     let _bootstrap = install_bootstrap_config(BootstrapConfig {
-        replay_archive: Some(Arc::new(
-            DiskReplayArchive::open(archive.clone(), true)
-                .await
-                .expect("open the archive"),
-        )),
+        archive_evidence: Some(opened.evidence()),
+        replay_archive: Some(Arc::new(opened)),
         replay: Some(ReplayBootstrap {
             archive_path: archive,
             allow_incomplete_archive: true,

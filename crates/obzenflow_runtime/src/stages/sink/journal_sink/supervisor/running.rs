@@ -334,6 +334,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                 writer_id: ctx.writer_id,
                 data_journal: &ctx.data_journal,
                 instrumentation: &ctx.instrumentation,
+                effect_history: None,
             },
             /* author_marker */ false,
             &ctx.runtime_execution,
@@ -345,6 +346,9 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
             CatchUpDisposition::Failed(message) => {
                 EventLoopDirective::Transition(JournalSinkEvent::Error(message))
             }
+            CatchUpDisposition::Refused(fatal) => {
+                EventLoopDirective::Transition(JournalSinkEvent::Error(fatal.detail))
+            }
         });
     }
 
@@ -352,7 +356,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
     // caught-up frontier; no watermark follows, so re-run the flip before
     // normal EOF handling.
     if envelope.is_eof() {
-        if let Some(message) = flip_on_authored_eof(
+        match flip_on_authored_eof(
             subscription,
             CatchUpStage {
                 stage_id: ctx.stage_id,
@@ -363,6 +367,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                 writer_id: ctx.writer_id,
                 data_journal: &ctx.data_journal,
                 instrumentation: &ctx.instrumentation,
+                effect_history: None,
             },
             /* author_marker */ false,
             &ctx.runtime_execution,
@@ -370,9 +375,17 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
         )
         .await
         {
-            return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
-                message,
-            )));
+            CatchUpDisposition::Consumed => {}
+            CatchUpDisposition::Failed(message) => {
+                return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
+                    message,
+                )));
+            }
+            CatchUpDisposition::Refused(fatal) => {
+                return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
+                    fatal.detail,
+                )));
+            }
         }
     }
 
@@ -911,11 +924,35 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             effect_boundary: None,
         })
     });
-    let scope = ctx.runtime_execution.dispatch_scope(
-        ctx.stage_id,
-        stage_input_position,
-        subscription.last_delivered_generation(),
-    );
+    // FLOWIP-134k B3: a resumed sink classifies the delivery against its own
+    // receipts, and records its boundary at its first unsettled delivery once
+    // every certified edge re-delivered its settled prefix.
+    let scope = match (ctx.receipt_classification.as_mut(), upstream_stage) {
+        (Some(classification), Some(upstream)) => {
+            let settlement = classification.classify(upstream);
+            if settlement == crate::execution::DeliverySettlement::FirstDelivery
+                && classification.take_boundary()
+            {
+                if let Some(control) = ctx.runtime_execution.resume_control() {
+                    let generation = control.resume_generation();
+                    ctx.runtime_execution
+                        .stage_crossings()
+                        .advance(ctx.stage_id, generation);
+                    control.record_generation_boundary(ctx.stage_id, generation);
+                }
+            }
+            ctx.runtime_execution.sink_delivery_scope(
+                ctx.stage_id,
+                subscription.last_delivered_generation(),
+                settlement,
+            )
+        }
+        _ => ctx.runtime_execution.dispatch_scope(
+            ctx.stage_id,
+            stage_input_position,
+            subscription.last_delivered_generation(),
+        ),
+    };
     if ctx.observers.has_sink_delivery() {
         ctx.pending_delivery_observations.insert(
             envelope.commitment(),

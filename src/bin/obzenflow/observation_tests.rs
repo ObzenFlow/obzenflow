@@ -26,6 +26,7 @@ async fn pending_tail_reaches_wait_decision_and_detaches_without_inventing_settl
         journal_schema_version: JOURNAL_SCHEMA_VERSION.into(),
         obzenflow_version: env!("CARGO_PKG_VERSION").into(),
         flow_id: flow_id.to_string(),
+        recorded_flow_id: None,
         pipeline_writer_id: pipeline.into(),
         flow_name: "pending_viewer".into(),
         created_at: "2026-09-30T00:00:00Z".parse().unwrap(),

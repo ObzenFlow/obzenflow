@@ -20,16 +20,8 @@ pub enum EffectSafety {
     Transactional,
 }
 
-/// Replay/resume safety of a configured sink (FLOWIP-120n F16).
-/// Read only by the archive sink gate; live behaviour never consults it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SinkRedeliverySafety {
-    /// Repeating a recorded write is acceptable for this configured sink.
-    SafeToRepeat,
-    /// Repeating a recorded write can create externally visible duplicates.
-    /// Archive execution refuses without `allow_duplicate_sink_delivery`.
-    DuplicateSensitive,
-}
+// Core owns the declaration archive admission reads (FLOWIP-134k B4).
+pub use obzenflow_core::journal::archive_actions::SinkRedeliverySafety;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdempotencyKeyPolicy {

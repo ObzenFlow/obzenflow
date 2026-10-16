@@ -17,6 +17,7 @@
 use crate::execution::RuntimeExecution;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::ChainEventFactory;
@@ -31,6 +32,9 @@ pub(crate) enum CatchUpDisposition {
     /// Fail-closed validation or authoring failed; the supervisor takes its
     /// error transition with this message.
     Failed(String),
+    /// The stage's recorded input ended with archived acts left; the
+    /// supervisor records this stage-fatal refusal (FLOWIP-134k B7).
+    Refused(StageFatal),
 }
 
 /// The consuming stage's identity and write path for the authored marker.
@@ -43,6 +47,9 @@ pub(crate) struct CatchUpStage<'a> {
     pub writer_id: Option<WriterId>,
     pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
     pub instrumentation: &'a Arc<StageInstrumentation>,
+    /// A stage with an effect runtime's archived history, whose acts must all
+    /// have been reproduced when its frontier completes (FLOWIP-134k B7).
+    pub effect_history: Option<&'a Arc<crate::effects::EffectHistory>>,
 }
 
 /// Run the catch-up flip for `target` (FLOWIP-120n): frontier check, F15
@@ -68,8 +75,12 @@ pub(crate) async fn maybe_flip_caught_up(
     runtime_execution: &RuntimeExecution,
     flip_latch: &mut Option<ReaderGeneration>,
 ) -> CatchUpDisposition {
-    // Already flipped at (or past) this generation.
-    if flip_latch.is_some_and(|flipped| flipped >= target) {
+    // Already flipped at (or past) this generation, here or by the stage's
+    // effect runtime crossing before a live act (FLOWIP-134k §3, B2).
+    let crossings = runtime_execution.stage_crossings();
+    if flip_latch.is_some_and(|flipped| flipped >= target)
+        || crossings.crossed(stage.stage_id) >= target
+    {
         return CatchUpDisposition::Consumed;
     }
 
@@ -77,6 +88,24 @@ pub(crate) async fn maybe_flip_caught_up(
     // generation already advanced inside the subscription.
     if !all_inputs_caught_up {
         return CatchUpDisposition::Consumed;
+    }
+
+    // The resume generation's frontier ends the stage's recorded input, so
+    // every archived act must have been reproduced (FLOWIP-134k B7). An
+    // earlier generation's watermark in a resume of a resume ends only that
+    // generation's prefix.
+    let ends_recorded_input = runtime_execution
+        .resume_control()
+        .is_some_and(|control| target >= control.resume_generation());
+    if ends_recorded_input {
+        if let Some(fatal) = crate::effects::unreproduced_acts_fatal(
+            stage.effect_history,
+            runtime_execution,
+            stage.stage_id,
+            stage.stage_name,
+        ) {
+            return CatchUpDisposition::Refused(fatal);
+        }
     }
 
     // F15 fail-closed validation: at the flip the full recorded prefix must
@@ -137,6 +166,7 @@ pub(crate) async fn maybe_flip_caught_up(
         );
     }
 
+    crossings.advance(stage.stage_id, target);
     if let Some(control) = runtime_execution.resume_control() {
         control.record_generation_boundary(stage.stage_id, target);
     }
@@ -147,22 +177,22 @@ pub(crate) async fn maybe_flip_caught_up(
 
 /// Re-run the flip when an authored EOF is the delivery that completes the
 /// caught-up frontier (F17): no watermark follows an EOF-exhausted reader, so
-/// the EOF arm re-evaluates against the max delivered generation. `None` when
-/// nothing failed (flipped or not); the caller continues normal EOF
-/// processing. `Some(message)` is the fail-closed error transition.
+/// the EOF arm re-evaluates against the max delivered generation. `Consumed`
+/// when nothing failed (flipped or not); the caller continues normal EOF
+/// processing.
 pub(crate) async fn flip_on_authored_eof(
     subscription: &UpstreamSubscription<ChainEvent>,
     stage: CatchUpStage<'_>,
     author_marker: bool,
     runtime_execution: &RuntimeExecution,
     flip_latch: &mut Option<ReaderGeneration>,
-) -> Option<String> {
+) -> CatchUpDisposition {
     let target = subscription.max_reader_generation();
     // No watermark delivered yet on any input: nothing to cross.
     if target == ReaderGeneration(0) {
-        return None;
+        return CatchUpDisposition::Consumed;
     }
-    match maybe_flip_caught_up(
+    maybe_flip_caught_up(
         target,
         subscription.all_readers_caught_up(target),
         subscription.delivered_data_count(),
@@ -172,8 +202,4 @@ pub(crate) async fn flip_on_authored_eof(
         flip_latch,
     )
     .await
-    {
-        CatchUpDisposition::Consumed => None,
-        CatchUpDisposition::Failed(message) => Some(message),
-    }
 }

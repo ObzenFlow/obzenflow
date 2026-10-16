@@ -414,6 +414,19 @@ pub struct StageResources {
     /// FLOWIP-010: build-resolved `runtime.heartbeat_interval` for this
     /// stage (events between heartbeats; 0 disables).
     pub heartbeat_interval: u64,
+
+    /// A resumed sink's inbound edges whose order the resume reproduces
+    /// (FLOWIP-134k B3); `None` outside a resume and for other stages.
+    pub sink_resume_edges: Option<SinkResumeEdges>,
+}
+
+/// A resumed sink's inbound edges that order certification passed against
+/// every archive the resume reads, by current upstream stage id, each with
+/// its upstream stage key (FLOWIP-134k B3). Its receipts classify deliveries
+/// on these edges; every other edge follows generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SinkResumeEdges {
+    pub certified: HashMap<StageId, String>,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -437,6 +450,7 @@ pub struct StageResourcesBuilder {
     heartbeat_intervals: HashMap<StageId, u64>,
     source_contract_strict_mode:
         crate::messaging::upstream_subscription_policy::SourceContractStrictMode,
+    sink_resume_edges: HashMap<StageId, SinkResumeEdges>,
 }
 
 impl StageResourcesBuilder {
@@ -465,7 +479,15 @@ impl StageResourcesBuilder {
             lineage_policies: HashMap::new(),
             heartbeat_intervals: HashMap::new(),
             source_contract_strict_mode: Default::default(),
+            sink_resume_edges: HashMap::new(),
         }
+    }
+
+    /// Each resumed sink's certified inbound edges, by sink stage id
+    /// (FLOWIP-134k B3).
+    pub fn with_sink_resume_edges(mut self, edges: HashMap<StageId, SinkResumeEdges>) -> Self {
+        self.sink_resume_edges = edges;
+        self
     }
 
     /// Resolve source-edge contract policy at the child subscription boundary.
@@ -942,6 +964,7 @@ impl StageResourcesBuilder {
                     .get(&stage_id)
                     .copied()
                     .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL),
+                sink_resume_edges: self.sink_resume_edges.get(&stage_id).cloned(),
             };
 
             tracing::debug!(

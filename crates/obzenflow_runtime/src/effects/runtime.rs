@@ -113,8 +113,31 @@ enum ReconstructionRefusal {
     Unrecorded {
         cursor: EffectCursor,
     },
+    /// A resumed act departs from the archive before it ends (FLOWIP-134k B7).
+    Departed {
+        reason: obzenflow_core::event::StageFatalReason,
+        detail: String,
+    },
     HistoryShape(EffectError),
     UndecodableOutcome(EffectError),
+}
+
+/// Whether a resume reproduces an act or runs it live (FLOWIP-134k B7). Only
+/// a resume takes acts in order; a live run and a strict replay do not check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActPlan {
+    Unchecked,
+    Reproduce,
+    Live,
+}
+
+/// Where a committed effect row came from (FLOWIP-134k §4): copied or
+/// rematerialized from the archive, which `replay_context` names, or written
+/// by live work, which carries none whatever its input's lineage.
+#[derive(Clone, Copy)]
+enum RowLineage<'a> {
+    Live,
+    Reproduced(Option<&'a EffectCursorHistory>),
 }
 
 impl ReconstructionRefusal {
@@ -132,6 +155,9 @@ impl ReconstructionRefusal {
             Self::Unrecorded { cursor } => EffectError::MissingRecordedEffect {
                 cursor: cursor.clone(),
             },
+            Self::Departed { detail, .. } => EffectError::RecordingDeparture {
+                detail: detail.clone(),
+            },
             Self::HistoryShape(error) | Self::UndecodableOutcome(error) => error.clone(),
         }
     }
@@ -141,11 +167,64 @@ impl ReconstructionRefusal {
         match self {
             Self::DescriptorMismatch { .. } => StageFatalReason::DescriptorMismatch,
             Self::Unrecorded { .. } => StageFatalReason::MissingRecordedEffect,
+            Self::Departed { reason, .. } => *reason,
             Self::HistoryShape(_) | Self::UndecodableOutcome(_) => {
                 StageFatalReason::ReplayDivergence
             }
         }
     }
+}
+
+/// The refusal for a resumed stage whose recorded input ended, at natural EOF
+/// or a watermark that completes its frontier, with archived acts left
+/// (FLOWIP-134k B7). A drain or stop never checks.
+pub(crate) fn unreproduced_acts_fatal(
+    history: Option<&Arc<EffectHistory>>,
+    execution: &crate::execution::RuntimeExecution,
+    stage_id: StageId,
+    stage_key: &str,
+) -> Option<crate::stages::common::handler_error::StageFatal> {
+    use obzenflow_core::event::StageFatalReason;
+    let control = execution.resume_control()?;
+    if control.stage_is_live(stage_id) {
+        return None;
+    }
+    let skipped = history?.acts().remaining().into_iter().next()?;
+    Some(crate::stages::common::handler_error::StageFatal::new(
+        obzenflow_core::event::StageFatalCode::Replay,
+        if skipped.is_fact() {
+            StageFatalReason::UnusedFactHistory
+        } else {
+            StageFatalReason::UnusedEffectHistory
+        },
+        format!(
+            "stage '{stage_key}' skipped {} its recording holds",
+            skipped.describe()
+        ),
+    ))
+}
+
+/// A resume's act check and the cursor's history must agree: an archived act
+/// has history, and a live act has none (FLOWIP-134k B7).
+fn act_plan_mismatch(
+    plan: ActPlan,
+    selection: &EffectHistorySelection,
+    cursor: &EffectCursor,
+) -> Option<ReconstructionRefusal> {
+    let agrees = matches!(
+        (plan, selection),
+        (ActPlan::Unchecked, _)
+            | (
+                ActPlan::Reproduce,
+                EffectHistorySelection::Hit(_) | EffectHistorySelection::InDoubt(_)
+            )
+            | (ActPlan::Live, EffectHistorySelection::Miss)
+    );
+    (!agrees).then(|| {
+        ReconstructionRefusal::HistoryShape(EffectError::EffectProvenanceMismatch(format!(
+            "effect cursor {cursor:?} disagrees with the stage's archived acts"
+        )))
+    })
 }
 
 /// The first condition that closes authoring for an invocation. The stage
@@ -356,16 +435,237 @@ impl EffectsCore {
         &self.ctx.stage_key
     }
 
+    /// True while the invocation reproduces archived acts: always in a strict
+    /// replay, never live, and in a resume while the stage has archived acts
+    /// left, unless the only one left is its next effect's in-doubt attempt
+    /// (FLOWIP-134k B1, B7).
     pub(crate) fn is_replaying(&self) -> bool {
+        let reconstructing =
+            self.ctx
+                .runtime_execution
+                .is_reconstructing(crate::execution::ExecutionPosition {
+                    stage_id: self.ctx.stage_id,
+                    position: self.ctx.input_seq,
+                    generation: None,
+                });
+        if !reconstructing {
+            return false;
+        }
+        match (
+            self.ctx.runtime_execution.resume_control(),
+            self.ctx.effect_history.as_ref(),
+        ) {
+            (Some(_), Some(history)) => history.acts().reproducing(&self.next_cursor()),
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+    }
+
+    /// The namespace this stage's identities mint in (FLOWIP-134k B8): the
+    /// one its history records, or this run's own in a live run.
+    fn namespace(&self) -> String {
+        self.ctx
+            .effect_history
+            .as_ref()
+            .map(|history| history.recorded_flow_id().to_string())
+            .unwrap_or_else(|| self.ctx.flow_id.to_string())
+    }
+
+    fn next_cursor(&self) -> EffectCursor {
+        EffectCursor::new(
+            self.namespace(),
+            self.ctx.stage_key.clone(),
+            self.ctx.input_seq.0,
+            self.next_effect_ordinal,
+        )
+    }
+
+    /// Take `offered` against the stage's archived acts. Only a resume takes
+    /// them in order (FLOWIP-134k B7): an act that departs from the archive
+    /// before it ends refuses here, before any of its rows or calls.
+    fn take_act(
+        &mut self,
+        offered: super::ActKey,
+        offered_act: impl FnOnce() -> String,
+    ) -> Result<ActPlan, EffectError> {
+        use obzenflow_core::event::StageFatalReason;
+        let acts = match (
+            self.ctx.runtime_execution.resume_control(),
+            self.ctx.effect_history.as_ref(),
+        ) {
+            (None, _) => return Ok(ActPlan::Unchecked),
+            (Some(control), Some(history)) if !control.stage_is_live(self.ctx.stage_id) => {
+                history.acts().clone()
+            }
+            (Some(_), _) => return Ok(ActPlan::Live),
+        };
+        let fact = matches!(offered, super::ActKey::Fact(_));
+        let refusal = match acts.take(&offered) {
+            super::ActCheck::Reproduce => return Ok(ActPlan::Reproduce),
+            super::ActCheck::Live => return Ok(ActPlan::Live),
+            super::ActCheck::Missing { next } => ReconstructionRefusal::Departed {
+                reason: if fact {
+                    StageFatalReason::MissingRecordedFact
+                } else {
+                    StageFatalReason::MissingRecordedEffect
+                },
+                detail: format!(
+                    "stage '{}' {}, but its recording's next act is {}",
+                    self.ctx.stage_key,
+                    offered_act(),
+                    next.describe()
+                ),
+            },
+            super::ActCheck::Skipped { skipped } => ReconstructionRefusal::Departed {
+                reason: if skipped.is_fact() {
+                    StageFatalReason::UnusedFactHistory
+                } else {
+                    StageFatalReason::UnusedEffectHistory
+                },
+                detail: format!(
+                    "stage '{}' skipped {} its recording holds",
+                    self.ctx.stage_key,
+                    skipped.describe()
+                ),
+            },
+        };
+        Err(self.refuse(refusal))
+    }
+
+    /// Cross before the first row of the stage's first live act
+    /// (FLOWIP-134k §3): one marker for each generation the stage has not
+    /// crossed, so its readers advance one generation at a time (F11).
+    async fn cross_before_live_act(&mut self) -> Result<(), EffectError> {
+        let Some(control) = self.ctx.runtime_execution.resume_control().cloned() else {
+            return Ok(());
+        };
+        if control.stage_is_live(self.ctx.stage_id) {
+            return Ok(());
+        }
+        let target = control.resume_generation();
+        let crossed = self
+            .ctx
+            .runtime_execution
+            .stage_crossings()
+            .crossed(self.ctx.stage_id);
+        for generation in crossed.0.saturating_add(1)..=target.0 {
+            self.author_crossing(obzenflow_core::ReaderGeneration(generation))
+                .await?;
+        }
+        control.record_generation_boundary(self.ctx.stage_id, target);
+        tracing::info!(
+            stage_name = %self.ctx.stage_key,
+            generation = target.0,
+            "stage crossed its catch-up boundary before its first live act"
+        );
+        Ok(())
+    }
+
+    /// Re-author each crossing the archive recorded before `row`, at its
+    /// recorded generation, unless the stage already crossed it here
+    /// (FLOWIP-134k B2).
+    async fn reauthor_recorded_crossings(&mut self, row: super::ActRow) -> Result<(), EffectError> {
+        let Some(history) = self.ctx.effect_history.clone() else {
+            return Ok(());
+        };
+        for generation in history.acts().crossings_before(&row) {
+            let crossed = self
+                .ctx
+                .runtime_execution
+                .stage_crossings()
+                .crossed(self.ctx.stage_id);
+            if generation <= crossed {
+                continue;
+            }
+            self.author_crossing(generation).await?;
+            if let Some(control) = self.ctx.runtime_execution.resume_control() {
+                control.record_generation_boundary(self.ctx.stage_id, generation);
+            }
+        }
+        Ok(())
+    }
+
+    async fn author_crossing(
+        &self,
+        generation: obzenflow_core::ReaderGeneration,
+    ) -> Result<(), EffectError> {
+        let mut marker = ChainEventFactory::catch_up_complete_event(
+            self.ctx.writer_id,
+            generation,
+            obzenflow_core::StageKey::from(self.ctx.stage_key.clone()),
+        );
+        if let Some(flow_context) = &self.ctx.flow_context {
+            marker.flow_context = flow_context.clone();
+        }
+        let committed = match self.ctx.instrumentation.as_ref() {
+            Some(instrumentation) => crate::supervised_base::publication::with_snapshot(
+                self.causal.clone(),
+                crate::stages::common::supervision::output_committer::commit_control_output(
+                    &self.ctx.data_journal,
+                    instrumentation,
+                    marker,
+                ),
+            )
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string()),
+            None => crate::supervised_base::publication::with_snapshot(
+                self.causal.clone(),
+                crate::supervised_base::publication::append(
+                    &self.ctx.data_journal,
+                    marker,
+                    obzenflow_core::journal::AppendOptions::default(),
+                ),
+            )
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string()),
+        };
+        committed.map_err(EffectError::Journal)?;
         self.ctx
             .runtime_execution
-            .is_reconstructing(crate::execution::ExecutionPosition {
-                stage_id: self.ctx.stage_id,
-                position: self.ctx.input_seq,
-                // The effect context carries no generation; the effect-miss
-                // decision is positional (FLOWIP-120n F7).
-                generation: None,
-            })
+            .stage_crossings()
+            .advance(self.ctx.stage_id, generation);
+        Ok(())
+    }
+
+    /// Apply `lineage` to a row about to be committed (FLOWIP-134k §4). A
+    /// reproduced row names the archived row it copies, by the identity it
+    /// keeps, and the run and stage that recorded it.
+    fn mark_lineage(&self, event: &mut ChainEvent, lineage: RowLineage<'_>) {
+        match lineage {
+            RowLineage::Live => event.replay_context = None,
+            RowLineage::Reproduced(history) => {
+                let archived = history.and_then(|history| {
+                    history
+                        .terminal_group_events
+                        .iter()
+                        .chain(history.attempt_events.values())
+                        .chain(history.escape_control_batches.values().flatten())
+                        .find(|archived| archived.id == event.id)
+                });
+                let (original_flow_id, original_stage_id) = match archived {
+                    Some(archived) => (
+                        archived.flow_context.flow_id.clone(),
+                        archived.flow_context.stage_id,
+                    ),
+                    None => match self.ctx.runtime_execution.archive_for_io() {
+                        Some(archive) => (
+                            archive.archive_flow_id().to_string(),
+                            archive
+                                .archived_stage_id(&self.ctx.stage_key)
+                                .unwrap_or(self.ctx.stage_id),
+                        ),
+                        None => (self.ctx.flow_id.to_string(), self.ctx.stage_id),
+                    },
+                };
+                event.replay_context = Some(obzenflow_core::event::provenance::ReplayContext {
+                    original_event_id: event.id,
+                    original_flow_id,
+                    original_stage_id,
+                });
+            }
+        }
     }
 
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
@@ -399,8 +699,31 @@ impl EffectsCore {
         &self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {
         use obzenflow_core::event::StageFatalReason;
+        let resumed_next = match (
+            self.ctx.runtime_execution.resume_control(),
+            self.ctx.effect_history.as_ref(),
+        ) {
+            (Some(_), Some(history)) => history.acts().remaining().into_iter().next(),
+            _ => None,
+        };
         let (reason, detail) = match self.next_cursor_selection().await {
             Ok((_, EffectHistorySelection::Miss)) => return None,
+            // A resume names the archived act it skipped (FLOWIP-134k B7).
+            Ok((_, _)) if resumed_next.is_some() => {
+                let skipped = resumed_next.expect("checked above");
+                (
+                    if skipped.is_fact() {
+                        StageFatalReason::UnusedFactHistory
+                    } else {
+                        StageFatalReason::UnusedEffectHistory
+                    },
+                    format!(
+                        "stage '{}' skipped {} its recording holds",
+                        self.ctx.stage_key,
+                        skipped.describe()
+                    ),
+                )
+            }
             Ok((cursor, _)) => (
                 StageFatalReason::UnusedEffectHistory,
                 format!("the rebuild skipped the recorded effect at cursor {cursor:?}"),
@@ -418,18 +741,7 @@ impl EffectsCore {
         &self,
     ) -> Result<(EffectCursor, EffectHistorySelection), EffectError> {
         self.gate_authoring()?;
-        let recorded_flow_id = self
-            .ctx
-            .effect_history
-            .as_ref()
-            .map(|history| history.recorded_flow_id().to_string())
-            .unwrap_or_else(|| self.ctx.flow_id.to_string());
-        let cursor = EffectCursor::new(
-            recorded_flow_id,
-            self.ctx.stage_key.clone(),
-            self.ctx.input_seq.0,
-            self.next_effect_ordinal,
-        );
+        let cursor = self.next_cursor();
         let archived = self
             .ctx
             .effect_history
@@ -578,6 +890,22 @@ impl EffectsCore {
     where
         T: TypedPayload,
     {
+        self.emit_fact(fact, false).await
+    }
+
+    /// Emit one fact before the invocation's first effect, requesting live
+    /// admission only when the fact itself is live (FLOWIP-134k B1).
+    pub(crate) async fn emit_pre_effect<T>(&mut self, fact: T) -> Result<(), EffectError>
+    where
+        T: TypedPayload,
+    {
+        self.emit_fact(fact, true).await
+    }
+
+    async fn emit_fact<T>(&mut self, fact: T, pre_effect: bool) -> Result<(), EffectError>
+    where
+        T: TypedPayload,
+    {
         self.gate_authoring()?;
         if !self.ctx.emit_enabled {
             return Err(EffectError::EmitUnsupported {
@@ -601,14 +929,9 @@ impl EffectsCore {
             is_routable_output_fact(Some(&self.ctx.output_contract), &T::descriptor()) as usize;
         self.ensure_routed_fanout_capacity(routed_fact)?;
 
-        let recorded_flow_id = self
-            .ctx
-            .effect_history
-            .as_ref()
-            .map(|history| history.recorded_flow_id().to_string())
-            .unwrap_or_else(|| self.ctx.flow_id.to_string());
+        let recorded_flow_id = self.namespace();
         let output_ordinal = self.reserve_output_ordinal()?;
-        let event = deterministic_typed_output_event(
+        let mut event = deterministic_typed_output_event(
             self.ctx.writer_id,
             &self.ctx.parent.authored(),
             fact,
@@ -618,6 +941,42 @@ impl EffectsCore {
             output_ordinal,
             self.ctx.lineage,
         )?;
+        let input = self.ctx.input_seq.0;
+        let plan = self.take_act(super::ActKey::Fact(event.id), || {
+            format!(
+                "emitted {} at input {input}",
+                super::acts::display_name(&event_type)
+            )
+        })?;
+        // A fact the archive holds is rematerialized and says so; a live
+        // fact carries no replay provenance; any other computed from
+        // recorded input keeps its input's (FLOWIP-134k §4).
+        let held = self
+            .ctx
+            .effect_history
+            .as_ref()
+            .is_some_and(|history| history.acts().holds_fact(&event.id));
+        let replaying = self.is_replaying();
+        let lineage = match plan {
+            ActPlan::Reproduce => Some(RowLineage::Reproduced(None)),
+            ActPlan::Live => {
+                self.cross_before_live_act().await?;
+                Some(RowLineage::Live)
+            }
+            ActPlan::Unchecked if replaying && held => Some(RowLineage::Reproduced(None)),
+            ActPlan::Unchecked if !replaying => Some(RowLineage::Live),
+            ActPlan::Unchecked => None,
+        };
+        if matches!(lineage, Some(RowLineage::Reproduced(_))) {
+            self.reauthor_recorded_crossings(super::ActRow::Fact(event.id))
+                .await?;
+        }
+        if pre_effect && matches!(lineage, Some(RowLineage::Live)) {
+            self.request_generated_live_admission().await?;
+        }
+        if let Some(lineage) = lineage {
+            self.mark_lineage(&mut event, lineage);
+        }
         let committed_event = event.clone();
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
@@ -713,18 +1072,19 @@ impl EffectsCore {
             declaration.binding_identity(),
         )?;
         let descriptor_hash = descriptor_hash(&descriptor)?;
-        let recorded_flow_id = self
-            .ctx
-            .effect_history
-            .as_ref()
-            .map(|history| history.recorded_flow_id().to_string())
-            .unwrap_or_else(|| self.ctx.flow_id.to_string());
         let cursor = EffectCursor::new(
-            recorded_flow_id,
+            self.namespace(),
             self.ctx.stage_key.clone(),
             self.ctx.input_seq.0,
             effect_ordinal,
         );
+        let input = self.ctx.input_seq.0;
+        let plan = self.take_act(super::ActKey::Effect(cursor.clone()), || {
+            format!(
+                "would perform {} at input {input}",
+                super::acts::display_name(E::EFFECT_TYPE)
+            )
+        })?;
         let cursor_coordinator = self
             .ctx
             .runtime_execution
@@ -746,7 +1106,11 @@ impl EffectsCore {
             self.history_shape(validate_affine_terminal_group(&cursor, &selected))?;
         }
 
-        match selected.select() {
+        let selection = selected.select();
+        if let Some(refusal) = act_plan_mismatch(plan, &selection, &cursor) {
+            return Err(self.refuse(refusal));
+        }
+        match selection {
             EffectHistorySelection::Hit(records) => {
                 for started in &selected.attempts {
                     if started.descriptor_hash != descriptor_hash
@@ -853,13 +1217,18 @@ impl EffectsCore {
                 }
                 self.append_replayed_prefix(&cursor, &selected, descriptor.clone())
                     .await?;
+                // The re-attempt is the stage's first live act (B1).
+                self.cross_before_live_act().await?;
                 prior_attempts = attempts;
             }
-            EffectHistorySelection::Miss => {
-                if let Some(error) = self.unrecorded_effect_error(cursor.clone()) {
-                    return Err(error);
+            EffectHistorySelection::Miss => match plan {
+                ActPlan::Live => self.cross_before_live_act().await?,
+                ActPlan::Unchecked | ActPlan::Reproduce => {
+                    if let Some(error) = self.unrecorded_effect_error(cursor.clone()) {
+                        return Err(error);
+                    }
                 }
-            }
+            },
         }
 
         // A replay hit above never requests generated live credit or touches
@@ -1156,13 +1525,14 @@ impl EffectsCore {
             outcome_group_id: outcome_group_id.clone(),
             causal_input_id: self.ctx.parent.envelope.provenance.event.id,
         };
-        let start_event = build_effect_attempt_started_event(
+        let mut start_event = build_effect_attempt_started_event(
             self.ctx.writer_id,
             &self.ctx.parent,
             started,
             descriptor.clone(),
             self.ctx.lineage,
         )?;
+        self.mark_lineage(&mut start_event, RowLineage::Live);
 
         let outcome_slot: ExecutedOutcomeSlot<E::Outcome> = Arc::new(Mutex::new(None));
         let failure_slot = Arc::new(Mutex::new(None::<(EffectError, EffectObservation)>));
@@ -1442,6 +1812,7 @@ impl EffectsCore {
                             intent: StageAppendIntent::NonDataStageFact,
                         }],
                         control_events,
+                        RowLineage::Live,
                     )
                     .await;
             }
@@ -1480,7 +1851,7 @@ impl EffectsCore {
                 intent: StageAppendIntent::NormalStageData,
             })
             .collect();
-        self.commit_terminal_group(&cursor, entries, control_events)
+        self.commit_terminal_group(&cursor, entries, control_events, RowLineage::Live)
             .await?;
         self.routed_output_fact_count = self
             .routed_output_fact_count
@@ -1508,6 +1879,7 @@ impl EffectsCore {
                 attempt,
                 preterminal,
                 obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                RowLineage::Live,
             )
             .await?;
             control_events = terminal;
@@ -1549,6 +1921,7 @@ impl EffectsCore {
                 intent: StageAppendIntent::NonDataStageFact,
             }],
             control_events,
+            RowLineage::Live,
         )
         .await
     }
@@ -1636,6 +2009,7 @@ impl EffectsCore {
                 },
             ],
             control_events,
+            RowLineage::Live,
         )
         .await?;
         Err(error)
@@ -1649,20 +2023,23 @@ impl EffectsCore {
         observation: EffectObservation,
         err: &EffectError,
     ) -> Result<(), EffectError> {
-        self.append_record(EffectRecord {
-            observation,
-            cursor,
-            descriptor_hash,
-            descriptor,
-            outcome: EffectOutcomePayload::Failed {
-                error_type: err.error_type(),
-                error_message: err.error_message(),
-                retry: err.retry_disposition(),
-                cause: err.failure_cause(),
-                detail: err.failure_detail(),
+        self.append_record(
+            EffectRecord {
+                observation,
+                cursor,
+                descriptor_hash,
+                descriptor,
+                outcome: EffectOutcomePayload::Failed {
+                    error_type: err.error_type(),
+                    error_message: err.error_message(),
+                    retry: err.retry_disposition(),
+                    cause: err.failure_cause(),
+                    detail: err.failure_detail(),
+                },
+                origin: None,
             },
-            origin: None,
-        })
+            RowLineage::Live,
+        )
         .await
     }
 
@@ -1703,6 +2080,7 @@ impl EffectsCore {
                 intent: StageAppendIntent::NonDataStageFact,
             }],
             control_events,
+            RowLineage::Live,
         )
         .await?;
         Ok(())
@@ -1750,6 +2128,7 @@ impl EffectsCore {
                 intent: StageAppendIntent::NonDataStageFact,
             }],
             control_events,
+            RowLineage::Live,
         )
         .await?;
         Err(err)
@@ -1773,21 +2152,31 @@ impl EffectsCore {
             hash_json_value(&Value::String(label.to_string()))?,
         );
         let descriptor_hash = descriptor_hash(&descriptor)?;
-        let recorded_flow_id = self
-            .ctx
-            .effect_history
-            .as_ref()
-            .map(|history| history.recorded_flow_id().to_string())
-            .unwrap_or_else(|| self.ctx.flow_id.to_string());
         let cursor = EffectCursor::new(
-            recorded_flow_id,
+            self.namespace(),
             self.ctx.stage_key.clone(),
             self.ctx.input_seq.0,
             effect_ordinal,
         );
+        let input = self.ctx.input_seq.0;
+        let plan = self.take_act(super::ActKey::Effect(cursor.clone()), || {
+            format!(
+                "would perform {} at input {input}",
+                super::acts::display_name("obzenflow.capture")
+            )
+        })?;
 
         if let Some(history) = self.ctx.effect_history.clone() {
-            if let Some(records) = history.find_group(&cursor) {
+            let held = history.find_group(&cursor);
+            let selection = if held.is_some() {
+                EffectHistorySelection::Hit(Vec::new())
+            } else {
+                EffectHistorySelection::Miss
+            };
+            if let Some(refusal) = act_plan_mismatch(plan, &selection, &cursor) {
+                return Err(self.refuse(refusal));
+            }
+            if let Some(records) = held {
                 let frontier = history.cursor_history(&cursor).causal;
                 let incorporated = self.incorporate_history(&frontier);
                 self.history_shape(incorporated)?;
@@ -1830,21 +2219,29 @@ impl EffectsCore {
                 return Ok(output);
             }
 
-            if let Some(error) = self.unrecorded_effect_error(cursor.clone()) {
-                return Err(error);
+            if plan != ActPlan::Live {
+                if let Some(error) = self.unrecorded_effect_error(cursor.clone()) {
+                    return Err(error);
+                }
             }
+        }
+        if plan == ActPlan::Live {
+            self.cross_before_live_act().await?;
         }
 
         let output =
             serde_json::to_value(&value).map_err(|e| EffectError::Serialization(e.to_string()))?;
-        self.append_record(EffectRecord {
-            observation: EffectObservation::ValueCaptured {},
-            cursor,
-            descriptor_hash,
-            descriptor,
-            outcome: EffectOutcomePayload::Succeeded { output },
-            origin: None,
-        })
+        self.append_record(
+            EffectRecord {
+                observation: EffectObservation::ValueCaptured {},
+                cursor,
+                descriptor_hash,
+                descriptor,
+                outcome: EffectOutcomePayload::Succeeded { output },
+                origin: None,
+            },
+            RowLineage::Live,
+        )
         .await?;
         self.observe_effect_outcome(
             "obzenflow.capture",
@@ -2157,7 +2554,7 @@ impl EffectsCore {
                 }]
             }
         };
-        self.commit_terminal_group(cursor, entries, control_events)
+        self.commit_terminal_group(cursor, entries, control_events, RowLineage::Live)
             .await
     }
 
@@ -2323,15 +2720,24 @@ impl EffectsCore {
         Ok((metadata_context, binding_context))
     }
 
-    async fn append_record(&self, record: EffectRecord) -> Result<(), EffectError> {
+    async fn append_record(
+        &self,
+        record: EffectRecord,
+        lineage: RowLineage<'_>,
+    ) -> Result<(), EffectError> {
+        let mut event = build_effect_record_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.lineage,
+        )?;
+        self.mark_lineage(&mut event, lineage);
         crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             append_effect_record(
                 &self.ctx.data_journal,
-                self.ctx.writer_id,
+                event,
                 &self.ctx.parent,
-                record,
-                self.ctx.lineage,
                 &self.ctx.backpressure_writer,
             ),
         )
@@ -2348,18 +2754,28 @@ impl EffectsCore {
     ) -> Result<(), EffectError> {
         match success {
             PreparedEffectSuccess::DomainFacts(facts) => {
-                self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
-                    .await
-            }
-            PreparedEffectSuccess::RecordedReply(output) => {
-                self.append_record(EffectRecord {
-                    observation: EffectObservation::returned_success(),
+                self.append_success_facts(
                     cursor,
                     descriptor_hash,
                     descriptor,
-                    outcome: EffectOutcomePayload::Succeeded { output },
-                    origin: None,
-                })
+                    facts,
+                    origin,
+                    RowLineage::Live,
+                )
+                .await
+            }
+            PreparedEffectSuccess::RecordedReply(output) => {
+                self.append_record(
+                    EffectRecord {
+                        observation: EffectObservation::returned_success(),
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        outcome: EffectOutcomePayload::Succeeded { output },
+                        origin: None,
+                    },
+                    RowLineage::Live,
+                )
                 .await
             }
         }
@@ -2409,6 +2825,7 @@ impl EffectsCore {
                         intent: StageAppendIntent::NonDataStageFact,
                     }],
                     control_events,
+                    RowLineage::Live,
                 )
                 .await
             }
@@ -2422,6 +2839,7 @@ impl EffectsCore {
         descriptor: EffectDescriptor,
         facts: Vec<TypedFact>,
         origin: Option<EffectFactOrigin>,
+        lineage: RowLineage<'_>,
     ) -> Result<(), EffectError> {
         if facts.is_empty() {
             return Err(EffectError::Execution(
@@ -2431,6 +2849,20 @@ impl EffectsCore {
         let routed_fact_count = self.count_routed_facts(&facts);
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
+        let mut events = build_domain_effect_success_facts(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            cursor,
+            descriptor_hash,
+            descriptor,
+            facts,
+            output_ordinal,
+            origin,
+            self.ctx.lineage,
+        )?;
+        for event in &mut events {
+            self.mark_lineage(event, lineage);
+        }
         let committed_events = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             append_domain_effect_success_facts(
@@ -2440,15 +2872,8 @@ impl EffectsCore {
                 self.ctx.heartbeat_state.as_ref(),
                 Some(&self.ctx.output_contract),
                 &self.ctx.backpressure_writer,
-                self.ctx.writer_id,
                 &self.ctx.parent,
-                cursor,
-                descriptor_hash,
-                descriptor,
-                facts,
-                output_ordinal,
-                origin,
-                self.ctx.lineage,
+                events,
             ),
         )
         .await?;
@@ -2500,7 +2925,7 @@ impl EffectsCore {
                 intent: StageAppendIntent::NormalStageData,
             })
             .collect();
-        self.commit_terminal_group(&cursor, outcome_entries, control_events)
+        self.commit_terminal_group(&cursor, outcome_entries, control_events, RowLineage::Live)
             .await?;
         self.routed_output_fact_count = self
             .routed_output_fact_count
@@ -2515,12 +2940,16 @@ impl EffectsCore {
         cursor: &EffectCursor,
         mut outcome_entries: Vec<AtomicCommitEntry>,
         control_events: Vec<ChainEvent>,
+        lineage: RowLineage<'_>,
     ) -> Result<(), EffectError> {
         outcome_entries.extend(control_events.into_iter().map(|event| AtomicCommitEntry {
             event,
             options: CommitOptions::default(),
             intent: StageAppendIntent::FrameworkObservability,
         }));
+        for entry in &mut outcome_entries {
+            self.mark_lineage(&mut entry.event, lineage);
+        }
         let group_id = effect_outcome_group_id(cursor);
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
@@ -2557,6 +2986,7 @@ impl EffectsCore {
         attempt: EffectAttemptOrdinal,
         control_events: Vec<ChainEvent>,
         observer_scope: obzenflow_core::MiddlewareExecutionScope,
+        lineage: RowLineage<'_>,
     ) -> Result<(), EffectError> {
         if control_events.is_empty() {
             return Ok(());
@@ -2568,10 +2998,13 @@ impl EffectsCore {
         }
         let entries = control_events
             .into_iter()
-            .map(|event| AtomicCommitEntry {
-                event,
-                options: CommitOptions::default(),
-                intent: StageAppendIntent::FrameworkObservability,
+            .map(|mut event| {
+                self.mark_lineage(&mut event, lineage);
+                AtomicCommitEntry {
+                    event,
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::FrameworkObservability,
+                }
             })
             .collect();
         let group_id = effect_escape_controls_group_id(cursor, attempt);
@@ -2623,6 +3056,12 @@ impl EffectsCore {
                 }),
             )?;
             self.history_shape(restore_archived_effect_identity(&mut event, archived))?;
+            self.reauthor_recorded_crossings(super::ActRow::Effect {
+                cursor: cursor.clone(),
+                attempt: Some(started.attempt),
+            })
+            .await?;
+            self.mark_lineage(&mut event, RowLineage::Reproduced(Some(history)));
             self.commit_framework_effect_event(event).await?;
             if let Some(control_events) = history.escape_control_batches.get(&started.attempt) {
                 self.commit_escape_control_group(
@@ -2630,6 +3069,7 @@ impl EffectsCore {
                     started.attempt,
                     control_events.to_vec(),
                     obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+                    RowLineage::Reproduced(Some(history)),
                 )
                 .await?;
             }
@@ -2758,8 +3198,18 @@ impl EffectsCore {
             });
         }
 
-        self.commit_terminal_group(&cursor, entries, terminal_control_events)
-            .await?;
+        self.reauthor_recorded_crossings(super::ActRow::Effect {
+            cursor: cursor.clone(),
+            attempt: terminal_attempt,
+        })
+        .await?;
+        self.commit_terminal_group(
+            &cursor,
+            entries,
+            terminal_control_events,
+            RowLineage::Reproduced(Some(history)),
+        )
+        .await?;
         self.routed_output_fact_count = self
             .routed_output_fact_count
             .checked_add(routed_fact_count)
@@ -2775,6 +3225,11 @@ impl EffectsCore {
         descriptor: EffectDescriptor,
         materialization: EffectRecordMaterialization,
     ) -> Result<(), EffectError> {
+        self.reauthor_recorded_crossings(super::ActRow::Effect {
+            cursor: cursor.clone(),
+            attempt: None,
+        })
+        .await?;
         match materialization {
             EffectRecordMaterialization::DomainFacts {
                 facts,
@@ -2783,12 +3238,20 @@ impl EffectsCore {
                 // The recorded provenance wins. Older records without an
                 // explicit origin came from the effect itself.
                 let origin = recorded_origin.or(Some(EffectFactOrigin::Effect));
-                self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
-                    .await
+                self.append_success_facts(
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    facts,
+                    origin,
+                    RowLineage::Reproduced(None),
+                )
+                .await
             }
             EffectRecordMaterialization::FrameworkRecords(records) => {
                 for record in records {
-                    self.append_record(record).await?;
+                    self.append_record(record, RowLineage::Reproduced(None))
+                        .await?;
                 }
                 Ok(())
             }

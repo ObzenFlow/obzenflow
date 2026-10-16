@@ -28,6 +28,7 @@ use crate::stages::observer::dispatch::{
 };
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainPayload;
@@ -296,18 +297,14 @@ async fn dispatch_running_inner<
                                 writer_id: ctx.writer_id,
                                 data_journal: &ctx.data_journal,
                                 instrumentation: &ctx.instrumentation,
+                                effect_history: ctx.effect_history.as_ref(),
                             },
                             /* author_marker */ true,
                             &ctx.runtime_execution,
                             &mut ctx.catch_up_flip,
                         )
                         .await;
-                        return Ok(match disposition {
-                            CatchUpDisposition::Consumed => EventLoopDirective::Continue,
-                            CatchUpDisposition::Failed(message) => {
-                                EventLoopDirective::Transition(TransformEvent::Error(message))
-                            }
-                        });
+                        return catch_up_directive(ctx, disposition, Some(&envelope)).await;
                     }
 
                     // FLOWIP-120n F17: an authored EOF can be the delivery
@@ -318,7 +315,7 @@ async fn dispatch_running_inner<
                             .subscription
                             .as_ref()
                             .expect("subscription presence checked above");
-                        if let Some(message) = flip_on_authored_eof(
+                        let disposition = flip_on_authored_eof(
                             subscription,
                             CatchUpStage {
                                 stage_id: ctx.stage_id,
@@ -329,16 +326,15 @@ async fn dispatch_running_inner<
                                 writer_id: ctx.writer_id,
                                 data_journal: &ctx.data_journal,
                                 instrumentation: &ctx.instrumentation,
+                                effect_history: ctx.effect_history.as_ref(),
                             },
                             /* author_marker */ true,
                             &ctx.runtime_execution,
                             &mut ctx.catch_up_flip,
                         )
-                        .await
-                        {
-                            return Ok(EventLoopDirective::Transition(TransformEvent::Error(
-                                message,
-                            )));
+                        .await;
+                        if !matches!(disposition, CatchUpDisposition::Consumed) {
+                            return catch_up_directive(ctx, disposition, Some(&envelope)).await;
                         }
                     }
 
@@ -387,6 +383,27 @@ async fn dispatch_running_inner<
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
+                            // FLOWIP-134k B7: a recorded input that ends
+                            // naturally must have reproduced every archived
+                            // act; a drain or stop never checks.
+                            if envelope.is_eof()
+                                && ctx.terminal_eof_kind.unwrap_or(EofKind::Natural)
+                                    == EofKind::Natural
+                            {
+                                if let Some(fatal) = crate::effects::unreproduced_acts_fatal(
+                                    ctx.effect_history.as_ref(),
+                                    &ctx.runtime_execution,
+                                    ctx.stage_id,
+                                    &ctx.stage_name,
+                                ) {
+                                    return catch_up_directive(
+                                        ctx,
+                                        CatchUpDisposition::Refused(fatal),
+                                        Some(&envelope),
+                                    )
+                                    .await;
+                                }
+                            }
                             ctx.buffered_eof = Some(envelope.authored());
 
                             if envelope.is_eof() {
@@ -591,6 +608,14 @@ async fn dispatch_running_inner<
                         })
                         .await;
 
+                    // A stage with an effect runtime can cross inside the
+                    // invocation, before its first live act (FLOWIP-134k §3);
+                    // what follows the handler sees the scope it left.
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        stage_input_position,
+                        delivered_generation,
+                    );
                     match result {
                         Ok(transformed_events) => {
                             if handler_invoked {
@@ -891,6 +916,44 @@ async fn dispatch_running_inner<
             );
             Ok(EventLoopDirective::Transition(TransformEvent::Error(
                 format!("Subscription error: {e}"),
+            )))
+        }
+    }
+}
+
+/// The directive for a catch-up disposition. A refusal is recorded as the
+/// stage's fatal before the error transition (FLOWIP-134k B7).
+async fn catch_up_directive<
+    H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &mut TransformResources<H>,
+    disposition: CatchUpDisposition,
+    parent: Option<&obzenflow_core::event::JournalRecord<ChainPayload>>,
+) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    match disposition {
+        CatchUpDisposition::Consumed => Ok(EventLoopDirective::Continue),
+        CatchUpDisposition::Failed(message) => Ok(EventLoopDirective::Transition(
+            TransformEvent::Error(message),
+        )),
+        CatchUpDisposition::Refused(fatal) => {
+            let writer_id = ctx
+                .writer_id
+                .ok_or_else(|| "refused transform input has no stage writer id".to_string())?;
+            record_stage_fatal(
+                &fatal,
+                StageFatalCommit {
+                    error_journal: &ctx.error_journal,
+                    writer_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: &ctx.stage_name,
+                    input_position: None,
+                    parent,
+                    lineage: ctx.lineage_policy,
+                },
+            )
+            .await?;
+            Ok(EventLoopDirective::Transition(TransformEvent::Error(
+                fatal.detail,
             )))
         }
     }

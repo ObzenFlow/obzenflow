@@ -19,6 +19,11 @@ pub enum EffectError {
     #[error("missing recorded effect for cursor {cursor:?}")]
     MissingRecordedEffect { cursor: EffectCursor },
 
+    /// A resumed act departs from the stage's archive before it ends
+    /// (FLOWIP-134k B7); the detail names the act and the archived one.
+    #[error("{detail}")]
+    RecordingDeparture { detail: String },
+
     /// A replay reached a cursor its recording holds no outcome for, or an
     /// attempt it left in doubt; a replay never executes an effect, so only a
     /// resume finishes this work (FLOWIP-134i B13).
@@ -183,6 +188,7 @@ impl EffectError {
             EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::IncompleteOutcomeGroup { .. } => false,
             EffectError::MissingRecordedEffect { .. }
+            | EffectError::RecordingDeparture { .. }
             | EffectError::RecordingEnded { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
@@ -216,6 +222,7 @@ impl EffectError {
             EffectError::Serialization(_) => "serialization",
             EffectError::Journal(_) => "journal",
             EffectError::MissingRecordedEffect { .. } => "missing_recorded_effect",
+            EffectError::RecordingDeparture { .. } => "recording_departure",
             EffectError::RecordingEnded { .. } => "recording_ended",
             EffectError::DuplicateRecordedEffect { .. } => "duplicate_recorded_effect",
             EffectError::DescriptorMismatch { .. } => "descriptor_mismatch",
@@ -275,6 +282,7 @@ impl EffectError {
             | EffectError::RecoveryAbandoned { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::BindingAuthority { .. }
             | EffectError::MissingRecordedEffect { .. }
+            | EffectError::RecordingDeparture { .. }
             | EffectError::RecordingEnded { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }

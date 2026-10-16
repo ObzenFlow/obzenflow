@@ -26,6 +26,7 @@ pub struct StatusDerivation {
     pub warning: Option<String>,
 }
 
+pub mod certification;
 pub mod manifest;
 pub mod replay;
 pub use manifest::{

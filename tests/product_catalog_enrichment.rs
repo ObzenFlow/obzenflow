@@ -219,6 +219,7 @@ mod presentation_tests {
             flow_name: "product_catalog_enrichment".to_string(),
             location: None,
             run_mode: replay_mode(),
+            offers: Default::default(),
         })
         .finish();
 
@@ -232,6 +233,7 @@ mod presentation_tests {
             flow_name: "product_catalog_enrichment".to_string(),
             location: None,
             run_mode: RunMode::Live,
+            offers: Default::default(),
         })
         .finish();
 

@@ -209,6 +209,7 @@ pub mod flow_builder;
 mod flow_definition;
 #[doc(hidden)]
 pub mod inference;
+mod resume_edges;
 pub mod stage_descriptor;
 mod stage_macros;
 mod then_live;

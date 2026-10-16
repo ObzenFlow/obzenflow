@@ -39,4 +39,6 @@ pub use common::handlers::{JoinReferenceView, TypedJoinHandler, TypedTransformHa
 
 // Re-export resources builder
 pub use crate::typing::{SourceTyping, TransformTyping};
-pub use resources_builder::{StageResources, StageResourcesBuilder, StageResourcesSet};
+pub use resources_builder::{
+    SinkResumeEdges, StageResources, StageResourcesBuilder, StageResourcesSet,
+};

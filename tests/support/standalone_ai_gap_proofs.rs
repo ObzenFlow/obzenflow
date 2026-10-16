@@ -10,7 +10,6 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::EffectAttemptStarted;
-use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_dsl::infinite_source;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_runtime::bootstrap::{
@@ -549,6 +548,7 @@ async fn bootstrap_for_resume(archive_path: PathBuf) -> BootstrapConfig {
         .expect("the T2 resume archive opens");
     BootstrapConfig {
         replay: Some(replay),
+        archive_evidence: Some(archive.evidence()),
         replay_archive: Some(Arc::new(archive)),
         ..Default::default()
     }
@@ -632,8 +632,9 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
 /// journals as they unwind, where a killed process would release them at once.
 async fn wait_for_writers_released(archive: &Path) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Err(ReplayError::StillRunning { .. }) =
-            DiskReplayArchive::open_for_resume(archive.to_path_buf(), true).await
+        while DiskReplayArchive::open_for_resume(archive.to_path_buf(), true)
+            .await
+            .is_ok_and(|opened| opened.evidence().live_writer)
         {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

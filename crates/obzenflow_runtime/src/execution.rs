@@ -123,6 +123,19 @@ pub enum UnrecordedEffect {
     RecordingEnded,
 }
 
+/// How a resumed sink's receipts classify one delivery (FLOWIP-134k B3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverySettlement {
+    /// Past the settled prefix of an edge whose order the resume reproduces:
+    /// the sink never delivered this row, so the delivery is live.
+    FirstDelivery,
+    /// Inside the settled prefix: a re-delivery, which follows generation.
+    Settled,
+    /// On an edge certification did not pass, or outside a resume: the
+    /// delivery follows generation.
+    Unclassified,
+}
+
 /// Whether descriptor materialisation requires every declared effect port to
 /// be registered. A replay never executes an effect, so it deliberately
 /// permits an empty registry.
@@ -155,6 +168,20 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
         _generation: ReaderGeneration,
     ) -> MiddlewareExecutionScope {
         self.stage_scope(stage)
+    }
+    /// Middleware execution scope for one sink delivery, classified by the
+    /// sink's receipts (FLOWIP-134k B3). Strategies that do not resume ignore
+    /// the classification.
+    fn sink_delivery_scope(
+        &self,
+        stage: StageId,
+        generation: Option<ReaderGeneration>,
+        _settlement: DeliverySettlement,
+    ) -> MiddlewareExecutionScope {
+        match generation {
+            Some(generation) => self.scope_for_generation(stage, generation),
+            None => self.stage_scope(stage),
+        }
     }
     /// What a cursor without any recorded attempt means at this position.
     fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect;
@@ -258,10 +285,6 @@ pub struct ResumeState {
     /// Each replaying source's answer at the end of its recorded input, from
     /// its admitted continuation and recorded completion (FLOWIP-134i B8).
     source_exhaustion: Mutex<HashMap<StageId, SourceReplayExhaustion>>,
-    /// Per-stage maximum recorded effect `input_seq`, registered at
-    /// `EffectHistory` load (FLOWIP-120n F7). A cursor miss at or below the
-    /// mark is a torn prefix; beyond it, a live call.
-    recorded_effect_seq_max: Mutex<HashMap<StageId, StageInputPosition>>,
     /// Per-stage recorded delivered-data maxima, the F15 fail-closed
     /// validation input. Sources register theirs at driver exhaustion.
     recorded_delivered_high_water: Mutex<HashMap<StageId, u64>>,
@@ -276,18 +299,9 @@ impl ResumeState {
             resume_generation,
             frontier_by_stage: Mutex::new(HashMap::new()),
             source_exhaustion: Mutex::new(HashMap::new()),
-            recorded_effect_seq_max: Mutex::new(HashMap::new()),
             recorded_delivered_high_water: Mutex::new(HashMap::new()),
             crossings: Mutex::new(None),
         }
-    }
-
-    fn recorded_effect_seq_max(&self, stage: StageId) -> Option<StageInputPosition> {
-        self.recorded_effect_seq_max
-            .lock()
-            .expect("resume effect high-water lock poisoned")
-            .get(&stage)
-            .copied()
     }
 
     fn frontier(&self, stage: StageId) -> ReaderGeneration {
@@ -397,16 +411,6 @@ impl ResumeControl {
             .insert(stage, exhaustion);
     }
 
-    /// Register a stage's maximum recorded effect `input_seq`, from the
-    /// surviving `EffectHistory` index at load (F7).
-    pub fn record_effect_high_water(&self, stage: StageId, max: StageInputPosition) {
-        self.0
-            .recorded_effect_seq_max
-            .lock()
-            .expect("resume effect high-water lock poisoned")
-            .insert(stage, max);
-    }
-
     /// Register a stage's recorded delivered-data maximum, the F15 validation
     /// input. Sources register theirs at replay-driver exhaustion.
     pub fn record_delivered_high_water(&self, stage: StageId, count: u64) {
@@ -443,10 +447,14 @@ struct Resume {
 
 impl ExecutionStrategy for Resume {
     fn scope_at(&self, at: ExecutionPosition) -> MiddlewareExecutionScope {
-        // The phase is the event's generation, carried in band (F1): a late
-        // prefix event still in flight after its stage hands off stays
-        // reconstruction-scoped because the generation rides the dispatch.
-        // A generation-less dispatch falls back to the stage frontier.
+        // Once a stage has crossed, every dispatch at it is live: a stage with
+        // an effect runtime crosses before its first live act even while its
+        // inputs still carry the recorded generation (FLOWIP-134k §3).
+        // Otherwise the phase is the event's generation, carried in band
+        // (F1), and a generation-less dispatch falls back to the frontier.
+        if self.state.stage_is_live(at.stage_id) {
+            return MiddlewareExecutionScope::LiveHandler;
+        }
         match at.generation {
             Some(generation) if generation >= self.state.resume_generation => {
                 MiddlewareExecutionScope::LiveHandler
@@ -474,15 +482,26 @@ impl ExecutionStrategy for Resume {
             MiddlewareExecutionScope::ResumeHandler
         }
     }
-    fn missing_outcome(&self, at: ExecutionPosition) -> UnrecordedEffect {
-        // The effect-miss decision is positional, never generational (F7): a
-        // miss at or below the stage's recorded mark is a torn prefix, beyond
-        // it a live call. No registered mark means no recorded effects, so
-        // every miss is live.
-        match self.state.recorded_effect_seq_max(at.stage_id) {
-            Some(max) if at.position <= max => UnrecordedEffect::Corrupt,
-            _ => UnrecordedEffect::Execute,
+    fn sink_delivery_scope(
+        &self,
+        stage: StageId,
+        generation: Option<ReaderGeneration>,
+        settlement: DeliverySettlement,
+    ) -> MiddlewareExecutionScope {
+        // A first delivery is live; a re-delivery, or one on an uncertified
+        // edge, follows its generation alone, so receipts only ever move a
+        // delivery from replayed to live (FLOWIP-134k B3).
+        match (settlement, generation) {
+            (DeliverySettlement::FirstDelivery, _) => MiddlewareExecutionScope::LiveHandler,
+            (_, Some(generation)) => self.scope_for_generation(stage, generation),
+            (_, None) => self.stage_scope(stage),
         }
+    }
+    fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
+        // The stage's archived acts, taken in order, decide whether a miss
+        // may run live (FLOWIP-134k B7); the effect runtime refuses one that
+        // departs from the archive before reaching here.
+        UnrecordedEffect::Execute
     }
     fn in_doubt_authorizes_attempt(&self) -> bool {
         true
@@ -526,6 +545,33 @@ fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
     !archive_is_sealed(status) && allow_incomplete
 }
 
+/// The last catch-up generation each stage authored in this run, shared by
+/// the stage's supervisor and its effect runtime so a crossing is authored
+/// once, whichever reaches it first (FLOWIP-134k §3, B2).
+#[derive(Debug, Default)]
+pub struct StageCrossings(Mutex<HashMap<StageId, ReaderGeneration>>);
+
+impl StageCrossings {
+    /// The last generation `stage` authored; zero before any.
+    pub fn crossed(&self, stage: StageId) -> ReaderGeneration {
+        self.0
+            .lock()
+            .expect("stage crossings lock poisoned")
+            .get(&stage)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Record that `stage` authored `generation`. Monotonic.
+    pub fn advance(&self, stage: StageId, generation: ReaderGeneration) {
+        let mut crossed = self.0.lock().expect("stage crossings lock poisoned");
+        let entry = crossed.entry(stage).or_default();
+        if generation > *entry {
+            *entry = generation;
+        }
+    }
+}
+
 /// The runtime-owned execution authority. Holds the chosen strategy and the
 /// archive as an I/O resource, and forwards every replay-versus-live query to
 /// the strategy. This is the callers' surface; the strategy itself never sees
@@ -538,6 +584,7 @@ pub struct RuntimeExecution {
     observations: Arc<ObservationRegistry>,
     /// Present only under `RuntimeMode::Resume` (FLOWIP-120n).
     resume: Option<ResumeControl>,
+    crossings: Arc<StageCrossings>,
 }
 
 impl std::fmt::Debug for RuntimeExecution {
@@ -588,7 +635,13 @@ impl RuntimeExecution {
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
             resume,
+            crossings: Arc::default(),
         }
+    }
+
+    /// The catch-up generations each stage authored in this run.
+    pub fn stage_crossings(&self) -> &Arc<StageCrossings> {
+        &self.crossings
     }
 
     /// The resume write handle; `None` outside `RuntimeMode::Resume`.
@@ -643,6 +696,7 @@ impl RuntimeExecution {
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
             resume,
+            crossings: Arc::default(),
         }
     }
 
@@ -696,6 +750,18 @@ impl RuntimeExecution {
             (None, Some(generation)) => self.strategy.scope_for_generation(stage_id, generation),
             (None, None) => self.stage_scope(stage_id),
         }
+    }
+
+    /// Scope for one sink delivery, classified by the sink's receipts
+    /// (FLOWIP-134k B3).
+    pub fn sink_delivery_scope(
+        &self,
+        stage_id: StageId,
+        generation: Option<ReaderGeneration>,
+        settlement: DeliverySettlement,
+    ) -> MiddlewareExecutionScope {
+        self.strategy
+            .sink_delivery_scope(stage_id, generation, settlement)
     }
 
     /// Whether positioned work at `at` is reconstructing recorded history.
@@ -951,14 +1017,14 @@ mod tests {
             Scope::LiveHandler
         );
 
-        // After the boundary the frontier fallback flips, while a late prefix
-        // event still in flight stays reconstruction-scoped: the generation
-        // rides the dispatch, so there is no race (F1).
+        // After the stage crosses, every dispatch at it is live, including an
+        // input that still carries the recorded generation (FLOWIP-134k §3).
+        // A position-less signal keeps its own generation.
         control.record_generation_boundary(stage, ReaderGeneration(1));
         assert_eq!(s.scope_at(at(None)), Scope::LiveHandler);
         assert_eq!(
             s.scope_at(at(Some(ReaderGeneration(0)))),
-            Scope::ResumeHandler
+            Scope::LiveHandler
         );
         assert_eq!(
             s.scope_for_generation(stage, ReaderGeneration(0)),
@@ -966,32 +1032,31 @@ mod tests {
         );
     }
 
+    /// FLOWIP-134k B7: the positional F7 mark is retired; the effect
+    /// runtime's archived acts decide whether a miss may run live.
     #[test]
-    fn resume_effect_miss_is_positional_not_generational() {
+    fn resume_leaves_an_effect_miss_to_the_archived_acts() {
         let state = Arc::new(ResumeState::new(ReaderGeneration(1)));
-        let control = ResumeControl(Arc::clone(&state));
         let s = Resume {
             state: Arc::clone(&state),
         };
-        let stage = StageId::new();
-        let at = |p: u64| ExecutionPosition {
-            stage_id: stage,
-            position: StageInputPosition(p),
+        let at = ExecutionPosition {
+            stage_id: StageId::new(),
+            position: StageInputPosition(1),
             generation: None,
         };
+        assert_eq!(s.missing_outcome(at), UnrecordedEffect::Execute);
+    }
 
-        // No registered mark: every miss is a live call.
-        assert_eq!(s.missing_outcome(at(1)), UnrecordedEffect::Execute);
-
-        // With the mark, a miss within the recorded range is a torn prefix
-        // and one beyond it is live, regardless of the stage frontier.
-        control.record_effect_high_water(stage, StageInputPosition(5));
-        assert_eq!(s.missing_outcome(at(1)), UnrecordedEffect::Corrupt);
-        assert_eq!(s.missing_outcome(at(5)), UnrecordedEffect::Corrupt);
-        assert_eq!(s.missing_outcome(at(6)), UnrecordedEffect::Execute);
-        control.record_generation_boundary(stage, ReaderGeneration(1));
-        assert_eq!(s.missing_outcome(at(5)), UnrecordedEffect::Corrupt);
-        assert_eq!(s.missing_outcome(at(6)), UnrecordedEffect::Execute);
+    #[test]
+    fn stage_crossings_are_monotonic_per_stage() {
+        let crossings = StageCrossings::default();
+        let stage = StageId::new();
+        assert_eq!(crossings.crossed(stage), ReaderGeneration(0));
+        crossings.advance(stage, ReaderGeneration(2));
+        crossings.advance(stage, ReaderGeneration(1));
+        assert_eq!(crossings.crossed(stage), ReaderGeneration(2));
+        assert_eq!(crossings.crossed(StageId::new()), ReaderGeneration(0));
     }
 
     #[test]

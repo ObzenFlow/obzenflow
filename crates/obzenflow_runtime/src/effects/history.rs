@@ -89,6 +89,9 @@ pub struct EffectHistory {
     grouped_events: Arc<GroupedJournalEvents>,
     attempt_positions: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), usize>>,
     attempt_events: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), ChainEvent>>,
+    /// The stage's archived acts in journal order and the crossings they
+    /// anchor (FLOWIP-134k B2, B7), shared by every invocation of the stage.
+    acts: Arc<super::StageActs>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,13 +129,22 @@ impl EffectCursorHistory {
     }
 }
 
+/// Whether a loaded history carries the stage's archived acts. Only a stage
+/// with an effect runtime authors acts (FLOWIP-134k B7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchivedActs {
+    Load,
+    Skip,
+}
+
 impl EffectHistory {
-    /// A resume joins each cursor's history across the archive and the
-    /// ancestors it merges with (FLOWIP-134i B6), oldest first, failing closed
-    /// where they conflict. F7's recorded mark then derives from the join.
+    /// A resume joins each cursor's history, and the stage's archived acts,
+    /// across the archive and the ancestors it merges with (FLOWIP-134i B6),
+    /// oldest first, failing closed where they conflict.
     pub async fn load(
         archive: &Arc<dyn ReplayArchive>,
         stage_key: &str,
+        archived_acts: ArchivedActs,
     ) -> Result<Self, EffectError> {
         let mut joined: Option<Self> = None;
         for ancestor in archive.ancestors().iter().rev() {
@@ -142,21 +154,23 @@ impl EffectHistory {
             ) {
                 continue;
             }
-            let older = Self::load_archive(ancestor, stage_key).await?;
+            let older = Self::load_archive(ancestor, stage_key, archived_acts).await?;
             joined = Some(match joined {
-                Some(oldest) => oldest.joined_with(&older)?,
+                Some(oldest) => oldest.joined_with(&older, stage_key)?,
                 None => older,
             });
         }
-        let head = Self::load_archive(archive, stage_key).await?;
+        let head = Self::load_archive(archive, stage_key, archived_acts).await?;
         match joined {
-            Some(ancestors) => ancestors.joined_with(&head),
+            Some(ancestors) => ancestors.joined_with(&head, stage_key),
             None => Ok(head),
         }
     }
 
-    /// Join a newer run's history over this one, per cursor.
-    pub(super) fn joined_with(self, newer: &Self) -> Result<Self, EffectError> {
+    /// Join a newer run's history over this one, per cursor, and its archived
+    /// acts by identity prefix.
+    pub(super) fn joined_with(self, newer: &Self, stage_key: &str) -> Result<Self, EffectError> {
+        let acts = self.acts.joined_with(&newer.acts, stage_key)?;
         let cursors: std::collections::HashSet<EffectCursor> = [&self, newer]
             .into_iter()
             .flat_map(|history| {
@@ -181,12 +195,22 @@ impl EffectHistory {
                 Ok((cursor, joined))
             })
             .collect::<Result<Vec<_>, EffectError>>()?;
+        // Every member records the same namespace once B8 holds; an older
+        // member that records cursors keeps it otherwise.
         let recorded_flow_id = if newer.holds_evidence() || !self.holds_evidence() {
             newer.recorded_flow_id.clone()
         } else {
             self.recorded_flow_id.clone()
         };
-        Ok(Self::from_cursor_histories(recorded_flow_id, histories))
+        let mut history = Self::from_cursor_histories(recorded_flow_id, histories);
+        let acts = acts.with_in_doubt(|cursor| !history.index.contains_key(cursor));
+        history.acts = Arc::new(acts);
+        Ok(history)
+    }
+
+    /// The stage's archived acts (FLOWIP-134k B7).
+    pub(crate) fn acts(&self) -> &Arc<super::StageActs> {
+        &self.acts
     }
 
     fn holds_evidence(&self) -> bool {
@@ -260,12 +284,14 @@ impl EffectHistory {
             grouped_events: Arc::new(grouped_events),
             attempt_positions: Arc::new(attempt_positions),
             attempt_events: Arc::new(attempt_events),
+            acts: Arc::new(super::StageActs::default()),
         }
     }
 
     async fn load_archive(
         archive: &Arc<dyn ReplayArchive>,
         stage_key: &str,
+        archived_acts: ArchivedActs,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
@@ -278,12 +304,16 @@ impl EffectHistory {
         let mut attempt_positions = HashMap::new();
         let mut attempt_events = HashMap::new();
         let mut position = 0_usize;
+        let mut acts = super::acts::ActScan::default();
 
         while let Some(envelope) = reader
             .next()
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
+            if archived_acts == ArchivedActs::Load {
+                acts.observe(&envelope.authored())?;
+            }
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
                 causal
                     .entry(effect.cursor.clone())
@@ -382,13 +412,35 @@ impl EffectHistory {
             }
         }
 
+        // FLOWIP-134k B8: identities mint in the namespace the run's manifest
+        // records, and every recorded cursor must name it. An archive written
+        // before B8 records none, and its cursors, or its own flow id, name it.
+        if let Some(namespace) = archive.recorded_flow_id() {
+            if let Some(record) = records
+                .iter()
+                .find(|record| record.cursor.recorded_flow_id.as_str() != namespace)
+            {
+                return Err(EffectError::ReplayArchive(format!(
+                    "stage '{stage_key}' recorded an effect in namespace `{}`, but its run \
+                     records namespace `{namespace}`",
+                    record.cursor.recorded_flow_id
+                )));
+            }
+        }
+        let fallback_namespace = archive
+            .recorded_flow_id()
+            .unwrap_or(archive.archive_flow_id())
+            .to_string();
         // Only a non-`Completed` archive may carry a torn tail, so only then is
         // an incomplete outcome group tolerated as absent.
         let mut history = Self::from_records_with_policy(
-            archive.archive_flow_id().to_string(),
+            fallback_namespace,
             records,
             archive.archive_status() != ArchiveStatus::Completed,
         )?;
+        if let Some(namespace) = archive.recorded_flow_id() {
+            history.recorded_flow_id = RecordedFlowId::from(namespace.to_string());
+        }
         validate_attempt_grammar(
             &attempts,
             &history.index,
@@ -420,6 +472,17 @@ impl EffectHistory {
         history.attempt_events = Arc::new(attempt_events);
         validate_group_grammar(&history, &grouped_events)?;
         history.grouped_events = Arc::new(grouped_events);
+        // A torn final group stays absent: only acts whose evidence survived
+        // are archived acts (FLOWIP-134k B7).
+        let acts = acts.finish(
+            |cursor| {
+                history.index.contains_key(cursor)
+                    || history.attempts.contains_key(cursor)
+                    || history.abandonments.contains_key(cursor)
+            },
+            |cursor| !history.index.contains_key(cursor),
+        );
+        history.acts = Arc::new(acts);
         Ok(history)
     }
 
@@ -434,6 +497,18 @@ impl EffectHistory {
         Self::from_records_with_policy(recorded_flow_id, records, true)
     }
 
+    /// A history holding only archived acts and the crossings they anchor.
+    #[cfg(test)]
+    pub(crate) fn with_acts_for_test(
+        recorded_flow_id: impl Into<RecordedFlowId>,
+        acts: Vec<super::ArchivedAct>,
+        anchors: HashMap<super::ActRow, Vec<obzenflow_core::ReaderGeneration>>,
+    ) -> Self {
+        let mut built = Self::from_cursor_histories(recorded_flow_id.into(), Vec::new());
+        built.acts = Arc::new(super::StageActs::new(acts, anchors));
+        built
+    }
+
     #[cfg(test)]
     pub(crate) fn from_cursor_history_for_test(
         recorded_flow_id: impl Into<RecordedFlowId>,
@@ -441,10 +516,25 @@ impl EffectHistory {
         history: EffectCursorHistory,
     ) -> Result<Self, EffectError> {
         validate_cursor_history(&cursor, &history)?;
-        Ok(Self::from_cursor_histories(
-            recorded_flow_id.into(),
-            vec![(cursor, history)],
-        ))
+        let act = super::ArchivedAct::Effect {
+            cursor: cursor.clone(),
+            effect_type: history
+                .attempts
+                .first()
+                .map(|started| started.effect_type.as_str().to_string())
+                .or_else(|| {
+                    history
+                        .records
+                        .first()
+                        .map(|record| record.descriptor.effect_type.as_str().to_string())
+                })
+                .unwrap_or_default(),
+            in_doubt: history.records.is_empty(),
+        };
+        let mut built =
+            Self::from_cursor_histories(recorded_flow_id.into(), vec![(cursor, history)]);
+        built.acts = Arc::new(super::StageActs::new(vec![act], HashMap::new()));
+        Ok(built)
     }
 
     /// Build under an explicit torn-tail policy. With `tolerate_torn_tail` false
@@ -507,6 +597,21 @@ impl EffectHistory {
         }
 
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
+        // Decoded records keep their order, which is the order of their acts.
+        let mut ordered = Vec::<super::ArchivedAct>::new();
+        for record in &records {
+            if index.contains_key(&record.cursor)
+                && !ordered.iter().any(|act| {
+                    matches!(act, super::ArchivedAct::Effect { cursor, .. } if cursor == &record.cursor)
+                })
+            {
+                ordered.push(super::ArchivedAct::Effect {
+                    cursor: record.cursor.clone(),
+                    effect_type: record.descriptor.effect_type.as_str().to_string(),
+                    in_doubt: false,
+                });
+            }
+        }
 
         Ok(Self {
             causal: Arc::new(HashMap::new()),
@@ -524,6 +629,7 @@ impl EffectHistory {
             grouped_events: Arc::new(HashMap::new()),
             attempt_positions: Arc::new(HashMap::new()),
             attempt_events: Arc::new(HashMap::new()),
+            acts: Arc::new(super::StageActs::new(ordered, HashMap::new())),
         })
     }
 
@@ -616,18 +722,6 @@ impl EffectHistory {
 
     pub fn recorded_flow_id(&self) -> &RecordedFlowId {
         &self.recorded_flow_id
-    }
-
-    /// Maximum recorded `input_seq` in the surviving index (FLOWIP-120n F7):
-    /// a position at or below it is recorded prefix, beyond it live tail.
-    /// Computed after torn-tail groups are dropped, so a torn boundary group
-    /// lowers the mark and resume re-executes it rather than failing loud.
-    pub fn max_recorded_input_seq(&self) -> Option<u64> {
-        self.index
-            .keys()
-            .chain(self.attempts.keys())
-            .map(|cursor| cursor.input_seq.get())
-            .max()
     }
 }
 

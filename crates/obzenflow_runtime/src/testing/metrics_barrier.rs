@@ -442,6 +442,8 @@ mod tests {
             liveness_snapshots: None,
             run_substrate: obzenflow_core::journal::factory::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
+            archive_flow_evidence: Default::default(),
+            resume_notices: Vec::new(),
         };
 
         let handle = FlowHandle::new(standard_handle, extras);
@@ -486,6 +488,8 @@ mod tests {
             liveness_snapshots: None,
             run_substrate: obzenflow_core::journal::factory::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
+            archive_flow_evidence: Default::default(),
+            resume_notices: Vec::new(),
         };
 
         let handle = FlowHandle::new(standard_handle, extras);

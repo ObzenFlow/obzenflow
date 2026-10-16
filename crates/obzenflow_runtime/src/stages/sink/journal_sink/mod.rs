@@ -17,6 +17,7 @@ pub mod builder;
 pub mod config;
 pub mod fsm;
 pub mod handle;
+pub(crate) mod receipts;
 pub mod supervisor;
 
 use crate::messaging::upstream_subscription::StageInputPosition;

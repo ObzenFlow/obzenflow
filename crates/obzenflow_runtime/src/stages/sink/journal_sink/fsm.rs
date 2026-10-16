@@ -10,12 +10,10 @@
 
 use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{ArchivedActs, EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::execution::RuntimeExecution;
 use crate::message_bus::FsmMessageBus;
-use crate::messaging::upstream_subscription::{
-    ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
-};
+use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalGate};
@@ -535,6 +533,10 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     /// triggers (watermark and authored EOF).
     pub(crate) catch_up_flip: Option<ReaderGeneration>,
 
+    /// A resumed sink's receipt classification of its deliveries
+    /// (FLOWIP-134k B3); `None` outside a resume.
+    pub(crate) receipt_classification: Option<super::receipts::SinkReceiptClassification>,
+
     /// Set once a failed transition has durable lifecycle evidence. Failure
     /// cleanup must never invoke another connector lifecycle method.
     pub(crate) failure_lifecycle_recorded: bool,
@@ -632,7 +634,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                 // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
                 let recorded_history = ctx.runtime_execution.archive_for_io();
                 if let Some(archive) = recorded_history {
-                    let history = EffectHistory::load(archive, &ctx.stage_name)
+                    let history = EffectHistory::load(archive, &ctx.stage_name, ArchivedActs::Skip)
                         .await
                         .map_err(|e| {
                             FsmError::HandlerError(format!(
@@ -640,14 +642,28 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 ctx.stage_name
                             ))
                         })?;
-                    // FLOWIP-120n F7: register the recorded effect mark so a
-                    // prefix cursor miss fails loud and a live-tail miss runs.
-                    if let Some(control) = ctx.runtime_execution.resume_control() {
-                        if let Some(max) = history.max_recorded_input_seq() {
-                            control.record_effect_high_water(ctx.stage_id, StageInputPosition(max));
-                        }
-                    }
                     ctx.effect_history = Some(Arc::new(history));
+
+                    // FLOWIP-134k B3: a resumed sink reads its own receipts
+                    // once, to classify each delivery on a certified edge.
+                    if let (Some(_), Some(classification)) = (
+                        ctx.runtime_execution.resume_control(),
+                        ctx.receipt_classification.take(),
+                    ) {
+                        let settled = if classification.certified_edges().certified.is_empty() {
+                            Default::default()
+                        } else {
+                            super::receipts::load_settled_prefixes(archive, &ctx.stage_name)
+                                .await
+                                .map_err(|e| {
+                                    FsmError::HandlerError(format!(
+                                        "Failed to read the receipts of '{}': {e}",
+                                        ctx.stage_name
+                                    ))
+                                })?
+                        };
+                        ctx.receipt_classification = Some(classification.with_settled(settled));
+                    }
                 }
 
                 tracing::info!(
@@ -1380,6 +1396,7 @@ mod tests {
             backpressure_readers: HashMap::new(),
             heartbeat: None,
             catch_up_flip: None,
+            receipt_classification: None,
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
         };

@@ -47,6 +47,7 @@ pub async fn bootstrap_with_archive(
     .expect("test replay archive must open");
     obzenflow_runtime::bootstrap::BootstrapConfig {
         replay: Some(replay),
+        archive_evidence: Some(archive.evidence()),
         replay_archive: Some(std::sync::Arc::new(archive)),
         ..Default::default()
     }
