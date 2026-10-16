@@ -933,10 +933,23 @@ impl Child {
     /// Run to the end and return the run it wrote.
     async fn completed(self) -> PathBuf {
         let run = self.run().await;
+        let log = self.log.clone();
         let status = self.exit().await;
-        assert!(status.success(), "{} failed: {status}", run.display());
+        assert!(
+            status.success(),
+            "{} failed: {status}\n{}",
+            run.display(),
+            log_tail(&log)
+        );
         run
     }
+}
+
+/// The end of a child's log, which CI's uploaded artifacts do not hold.
+fn log_tail(log: &Path) -> String {
+    let text = read_log(log);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(40)..].join("\n")
 }
 
 /// Wait until `holds` is true of the running archive, with `store_orders`
