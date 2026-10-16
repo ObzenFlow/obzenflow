@@ -2,10 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Archive verb admission (FLOWIP-134k §1, B4). One evaluator decides whether
-//! a replay or resume of a run is admitted, from the run's archive evidence
-//! and the flow's own facts, for the build and the footer alike. Archive rows
-//! are checked first, then the flow's.
+//! Admission of a replay or resume of a run, decided from the run's archive
+//! evidence and the flow's own facts. Archive checks run before flow checks.
 
 use super::ArchiveStatus;
 use crate::event::payloads::execution_payload::{
@@ -16,8 +14,8 @@ use crate::source::{RecordedSourceFrontier, RefusedBy, ResumeRefusal, SourceCont
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The operator's archive verb (FLOWIP-120n): bounded reconstruction that
-/// drains, or catch-up that continues live.
+/// The operator's archive verb, a bounded replay that drains or a resume that
+/// catches up and continues live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayVerb {
     /// `--replay-from`.
@@ -35,8 +33,8 @@ impl ReplayVerb {
     }
 }
 
-/// Replay/resume safety of a configured sink (FLOWIP-120n F16).
-/// Read only by archive admission; live behaviour never consults it.
+/// Replay and resume safety of a configured sink. Only archive admission reads
+/// it; live delivery never does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkRedeliverySafety {
     /// Repeating a recorded write is acceptable for this configured sink.
@@ -55,7 +53,7 @@ pub struct SourceEvidence {
     pub frontier: RecordedSourceFrontier,
 }
 
-/// How a failed run's recorded failures bear on resuming it (FLOWIP-134k B10).
+/// How a failed run's recorded failures bear on resuming it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FailureEvidence {
     /// Not a failed resume, or one that failed for another reason.
@@ -65,9 +63,8 @@ pub enum FailureEvidence {
     DepartedFromArchive,
 }
 
-/// Whether an error-journal row is a refusal a resume makes for departing from
-/// its archive (FLOWIP-134k B10): a stage-fatal departure, or a source whose
-/// input changed (FLOWIP-134i B10).
+/// Whether an error-journal entry is a resume refusal for departing from the
+/// archive, either a stage-fatal departure or a source whose input changed.
 pub fn departs_from_archive(execution: &ExecutionPayload) -> bool {
     match execution {
         ExecutionPayload::StageFatalRecorded(fatal) => fatal.reason.departs_from_archive(),
@@ -78,8 +75,8 @@ pub fn departs_from_archive(execution: &ExecutionPayload) -> bool {
     }
 }
 
-/// Folds a failed resume's error-journal rows and terminal record into its
-/// [`FailureEvidence`] (FLOWIP-134k B10).
+/// Folds a failed resume's error-journal entries and terminal record into its
+/// [`FailureEvidence`].
 #[derive(Debug, Default)]
 pub struct FailureFold {
     departed: bool,
@@ -99,8 +96,8 @@ impl FailureFold {
         }
     }
 
-    /// At least one departure and no other failure, under a terminal record
-    /// that names no contract violation.
+    /// `DepartedFromArchive` after at least one departure and no other failure,
+    /// when the terminal record names no contract violation.
     pub fn finish(self, contract_violation: bool) -> FailureEvidence {
         if self.departed && !self.other && !contract_violation {
             FailureEvidence::DepartedFromArchive
@@ -110,15 +107,14 @@ impl FailureFold {
     }
 }
 
-/// What Infra decoded from an archive: its derived status, whether any of its
-/// journals still has a live writer, what each source journal recorded, and
-/// how a failed resume failed.
+/// What an archive records about its status, live writers, sources and how a
+/// failed resume failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveEvidence {
     pub status: ArchiveStatus,
     pub live_writer: bool,
     pub sources: Vec<SourceEvidence>,
-    /// Read only by the `Failed` resume row (B10).
+    /// Consulted only when resuming a `Failed` archive.
     pub failure: FailureEvidence,
 }
 
@@ -129,8 +125,6 @@ impl ArchiveEvidence {
             .find(|source| source.stage_key == stage_key)
     }
 
-    /// A completed run left no work when every source is finite and ended
-    /// naturally.
     fn completed_naturally(&self) -> bool {
         self.status == ArchiveStatus::Completed
             && self
@@ -158,8 +152,8 @@ pub struct ArchiveOverrides {
     pub allow_duplicate_sink_delivery: bool,
 }
 
-/// An admitted verb, with the sinks admitted only under
-/// `allow_duplicate_sink_delivery`, for the caller to warn about.
+/// An admitted verb, listing the sinks admitted only under
+/// `allow_duplicate_sink_delivery`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Admission {
     pub duplicate_sinks: Vec<(String, Option<SinkRedeliverySafety>)>,
@@ -182,16 +176,16 @@ pub enum ArchiveRefusal {
     Interrupted {
         run: PathBuf,
     },
-    /// FLOWIP-120n F13: cyclic resume is a v1 non-goal.
+    /// A resume of a flow with a cycle; `members` names the stages on it.
     Cycle {
         members: Vec<String>,
     },
-    /// FLOWIP-134i B8, B22: sources whose recorded input cannot be continued.
+    /// Sources whose recorded input a resume cannot continue.
     Sources {
         run: PathBuf,
         refusals: Vec<(String, ResumeRefusal)>,
     },
-    /// FLOWIP-120n F16, FLOWIP-120v: a sink without safe redelivery.
+    /// A sink without safe redelivery; `undeclared` when it declares no safety.
     Sink {
         verb: ReplayVerb,
         stage: String,
@@ -260,7 +254,7 @@ impl fmt::Display for ArchiveRefusal {
 
 impl std::error::Error for ArchiveRefusal {}
 
-/// Decide whether `verb` over `run` is admitted (FLOWIP-134k §1, B4).
+/// Decide whether `verb` over `run` is admitted.
 pub fn decide(
     verb: ReplayVerb,
     run: &Path,
@@ -334,8 +328,6 @@ pub fn decide(
     Ok(admission)
 }
 
-// One diagnostic names every source whose connector, or direct handler, cannot
-// continue its interrupted input (FLOWIP-134i B8, FLOWIP-122i).
 fn unfinished_sources_refusal(archive: &Path, sources: &[String], by: RefusedBy) -> String {
     let quoted: Vec<String> = sources.iter().map(|source| format!("'{source}'")).collect();
     let named = match quoted.as_slice() {
@@ -360,8 +352,6 @@ fn unfinished_sources_refusal(archive: &Path, sources: &[String], by: RefusedBy)
     )
 }
 
-// Every source a resume refuses at archive admission, before any claim
-// (FLOWIP-134i B8, B22).
 fn sources_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> String {
     let mut paragraphs = Vec::new();
     for refuser in [RefusedBy::Connector, RefusedBy::Handler] {
@@ -393,8 +383,6 @@ fn sources_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> Stri
     paragraphs.join("\n")
 }
 
-// Verb-aware refusal copy for the archive sink delivery-safety row
-// (FLOWIP-120n F16, extended to both archive verbs by FLOWIP-120v).
 fn sink_refusal(verb: ReplayVerb, stage: &str, undeclared: bool) -> String {
     let (flag, re_execution) = match verb {
         ReplayVerb::Replay => (
@@ -753,7 +741,6 @@ mod tests {
             )],
             ..safe_flow()
         };
-        // A never-pinned, never-admitted Seek source starts afresh.
         let empty = archive(
             ArchiveStatus::Cancelled,
             vec![source("orders", true, Some(EofKind::Truncated))],
@@ -778,7 +765,6 @@ mod tests {
                 )],
             }
         );
-        // Natural EOF or a reattaching source pass whatever the frontier.
         let natural = archive(
             ArchiveStatus::Cancelled,
             vec![source("orders", true, Some(EofKind::Natural))],
@@ -844,8 +830,6 @@ mod tests {
         ));
     }
 
-    /// FLOWIP-122i: a direct handler declares no continuation, and the
-    /// refusal says so.
     #[test]
     fn an_unfinished_direct_handler_is_named_as_a_handler() {
         let archive = Path::new("/runs/interrupted");
@@ -883,8 +867,6 @@ mod tests {
         );
     }
 
-    /// FLOWIP-134i B22: one refusal names every source, the unfinished ones
-    /// together and each positioned one with its own reason and remedy.
     #[test]
     fn sources_refusal_names_each_source_with_its_remedy() {
         let archive = Path::new("/runs/interrupted");

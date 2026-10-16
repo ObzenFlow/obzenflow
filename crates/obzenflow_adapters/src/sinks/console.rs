@@ -983,9 +983,6 @@ mod tests {
         }
         JournalRecord::new(JournalWriterId::new(), event).into()
     }
-    /// A delivery's label follows its own scope, never the row's inherited
-    /// lineage (FLOWIP-134k §4): a live delivery of a row that carries replay
-    /// provenance is live.
     fn delivery_cases() -> [(MiddlewareExecutionScope, bool, bool); 5] {
         [
             (Default::default(), false, false),

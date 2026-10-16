@@ -76,8 +76,8 @@ pub struct BootstrapConfig {
     /// The host opens it at config resolution (the concrete opener lives in
     /// infra, below the DSL in the dependency graph) and the build consumes it.
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
-    /// What the host decoded from `replay_archive`, which the build hands to
-    /// Core's archive admission (FLOWIP-134k §1).
+    /// What the host decoded from `replay_archive`; the flow build checks the
+    /// replay or resume request against it.
     pub archive_evidence: Option<ArchiveEvidence>,
 }
 
@@ -220,7 +220,7 @@ pub fn replay_archive() -> Option<Arc<dyn ReplayArchive>> {
     bootstrap_config().replay_archive
 }
 
-/// The evidence the host decoded from the installed archive (FLOWIP-134k §1).
+/// The evidence the host decoded from the installed archive.
 pub fn archive_evidence() -> Option<ArchiveEvidence> {
     bootstrap_config().archive_evidence
 }

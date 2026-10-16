@@ -677,8 +677,6 @@ impl FlowApplication {
             .as_ref()
             .map(|model| model.clone() as Arc<dyn MetricsSnapshotExporter>);
 
-        // FLOWIP-134k §1: the banner prints after the build, so a refused verb
-        // never announces that it is resuming or replaying.
         let mut resumed_replayed_run = None;
         let print_banner = |resumed_replayed_run: &Option<String>| {
             if let Some(presentation) = &presentation {
@@ -764,8 +762,6 @@ impl FlowApplication {
                             replay.archive_path.display()
                         ));
                     }
-                    // FLOWIP-134k §1: the host hands Core the archive's
-                    // evidence through the build, which decides the verb.
                     bootstrap_config.archive_evidence = Some(archive.evidence());
                     bootstrap_config.replay_archive = Some(Arc::new(archive));
                 }
@@ -814,8 +810,6 @@ impl FlowApplication {
                     // means the build failed before substrate selection, so no run
                     // directory exists to point at.
                     let error = match &failure.error {
-                        // FLOWIP-134k §1, B4: every archive-verb refusal
-                        // prints verbatim as the requested verb's refusal.
                         obzenflow_dsl::FlowBuildError::ArchiveVerbRefused(refusal) => {
                             match refusal.verb() {
                                 obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
@@ -842,8 +836,6 @@ impl FlowApplication {
             };
 
             print_banner(&resumed_replayed_run);
-            // FLOWIP-134k B3: a resumed sink edge that follows generation is
-            // named after the banner.
             for notice in flow_handle.resume_notices() {
                 println!("{notice}");
             }
@@ -1108,9 +1100,6 @@ impl FlowApplication {
                     .map(|locator| locator.path().to_path_buf());
                 if let Some(presentation) = &presentation {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
-                    // FLOWIP-134k §2: the verb is the written run's archive
-                    // status, and each offer Core's decision for that run and
-                    // the flow just built.
                     let (status, offers) = match (&built_flow, &location) {
                         (Some(flow), Some(locator)) => {
                             Self::written_run_footer(flow, locator).await
@@ -1181,8 +1170,6 @@ impl FlowApplication {
                     }
                     _ => Vec::new(),
                 };
-                // FLOWIP-134k §1: an archive verb's refusal prints alone,
-                // with no banner before it and no failure footer after it.
                 let refused = matches!(
                     err,
                     ApplicationError::ResumeRefused(_) | ApplicationError::ReplayRefused(_)
@@ -1211,8 +1198,6 @@ impl FlowApplication {
                 for line in refusal_footer {
                     println!("{line}");
                 }
-                // FLOWIP-134k B10: every flow names the plain command that
-                // continues a resume which departed from its archive.
                 if let (Some(flow), Some(locator)) =
                     (&built_flow, run_state.as_ref().and_then(|s| s.locator()))
                 {
@@ -1225,10 +1210,6 @@ impl FlowApplication {
         }
     }
 
-    /// The footer's verb and offers for the run just written (FLOWIP-134k §2,
-    /// B4): its derived archive status, and the plain commands Core admits
-    /// for it and the flow just built. An archive that cannot be read offers
-    /// nothing, and its status falls back to the pipeline's outcome.
     async fn written_run_footer(
         flow: &FlowHandle,
         locator: &CurrentRunLocator,

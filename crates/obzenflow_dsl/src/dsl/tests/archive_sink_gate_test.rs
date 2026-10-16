@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Tests for the archive sink delivery-safety row: FLOWIP-120n F16, extended
-//! to both archive verbs by FLOWIP-120v, decided by Core's archive admission
-//! from the facts the flow builder derives (FLOWIP-134k B4).
-
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
@@ -32,8 +28,6 @@ mod tests {
 
     const BOTH_VERBS: [ReplayVerb; 2] = [ReplayVerb::Resume, ReplayVerb::Replay];
 
-    /// Core's decision for a cancelled archive with no sources, so only the
-    /// sink row can refuse.
     fn validate_archive_sink_delivery_safety(
         descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
         verb: ReplayVerb,

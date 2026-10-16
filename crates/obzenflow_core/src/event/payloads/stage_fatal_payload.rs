@@ -40,10 +40,9 @@ pub enum StageFatalReason {
     MissingRecordedEffect,
     /// The rebuild skipped an effect its recording holds.
     UnusedEffectHistory,
-    /// A resume emitted a fact its recording lacks before the recording ends
-    /// (FLOWIP-134k B7).
+    /// A resume emitted a fact its recording lacks before the recording ends.
     MissingRecordedFact,
-    /// A resume skipped a fact its recording holds (FLOWIP-134k B7).
+    /// A resume skipped a fact its recording holds.
     UnusedFactHistory,
     ConfigurationInvariant,
     EffectTargetAssertionMismatch,
@@ -58,8 +57,8 @@ pub enum StageFatalReason {
 }
 
 impl StageFatalReason {
-    /// A refusal a resume makes when its build or configuration departs from
-    /// its archive (FLOWIP-010t B11, FLOWIP-134k B7, B10).
+    /// Whether a resume refuses with this reason because its build or
+    /// configuration departs from its archive.
     pub fn departs_from_archive(self) -> bool {
         matches!(
             self,

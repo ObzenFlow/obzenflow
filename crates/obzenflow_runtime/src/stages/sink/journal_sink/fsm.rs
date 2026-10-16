@@ -533,8 +533,6 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     /// triggers (watermark and authored EOF).
     pub(crate) catch_up_flip: Option<ReaderGeneration>,
 
-    /// A resumed sink's receipt classification of its deliveries
-    /// (FLOWIP-134k B3); `None` outside a resume.
     pub(crate) receipt_classification: Option<super::receipts::SinkReceiptClassification>,
 
     /// Set once a failed transition has durable lifecycle evidence. Failure
@@ -644,8 +642,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         })?;
                     ctx.effect_history = Some(Arc::new(history));
 
-                    // FLOWIP-134k B3: a resumed sink reads its own receipts
-                    // once, to classify each delivery on a certified edge.
                     if let (Some(_), Some(classification)) = (
                         ctx.runtime_execution.resume_control(),
                         ctx.receipt_classification.take(),

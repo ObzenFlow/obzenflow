@@ -385,9 +385,6 @@ async fn dispatch_running_inner<
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
-                            // FLOWIP-134k B7: a recorded input that ends
-                            // naturally must have reproduced every archived
-                            // act; a drain or stop never checks.
                             if envelope.is_eof()
                                 && ctx.terminal_eof_kind.unwrap_or(EofKind::Natural)
                                     == EofKind::Natural
@@ -610,9 +607,6 @@ async fn dispatch_running_inner<
                         })
                         .await;
 
-                    // A stage with an effect runtime can cross inside the
-                    // invocation, before its first live act (FLOWIP-134k §3);
-                    // what follows the handler sees the scope it left.
                     let scope = ctx.runtime_execution.dispatch_scope(
                         ctx.stage_id,
                         stage_input_position,
@@ -924,8 +918,6 @@ async fn dispatch_running_inner<
     }
 }
 
-/// The directive for a catch-up disposition. A refusal is recorded as the
-/// stage's fatal before the error transition (FLOWIP-134k B7).
 async fn catch_up_directive<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(

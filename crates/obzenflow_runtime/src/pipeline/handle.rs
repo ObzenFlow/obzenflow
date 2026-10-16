@@ -43,9 +43,7 @@ pub(crate) struct FlowHandleExtras {
     /// FLOWIP-010: the build-resolved effective config, carried out of the
     /// build so the host can serve the per-flow/per-stage read surface.
     pub flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
-    /// The flow's own archive facts (FLOWIP-134k B4).
     pub archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
-    /// Notices for resumed sink edges that follow generation (FLOWIP-134k B3).
     pub resume_notices: Vec<String>,
 }
 
@@ -101,11 +99,8 @@ pub struct FlowHandle {
     /// FLOWIP-010: the build-resolved effective config with provenance.
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 
-    /// The flow's own archive facts, which the footer's offers read
-    /// (FLOWIP-134k B4).
     archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
 
-    /// Notices for resumed sink edges that follow generation (FLOWIP-134k B3).
     resume_notices: Vec<String>,
 }
 
@@ -238,7 +233,7 @@ impl FlowHandle {
     }
 
     /// How the run ended, as its terminal pipeline event records it; `None`
-    /// before it ends or when it never started (FLOWIP-134k §2).
+    /// before it ends or when it never started.
     pub fn terminal_status(&self) -> Option<obzenflow_core::journal::ArchiveStatus> {
         use super::termination::ExecutionOutcome;
         use obzenflow_core::journal::ArchiveStatus;
@@ -250,13 +245,13 @@ impl FlowHandle {
         }
     }
 
-    /// One notice for each stage that keeps a resumed sink's edge on
-    /// generation (FLOWIP-134k B3).
+    /// Notices naming each resumed sink edge whose deliveries are scoped by
+    /// generation.
     pub fn resume_notices(&self) -> &[String] {
         &self.resume_notices
     }
 
-    /// The flow's own archive facts, for the footer's offers (FLOWIP-134k B4).
+    /// The facts the flow builder derived from this flow.
     pub fn archive_flow_evidence(&self) -> &obzenflow_core::journal::archive_actions::FlowEvidence {
         &self.archive_flow_evidence
     }

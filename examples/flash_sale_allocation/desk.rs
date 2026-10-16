@@ -2,9 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The reservation desk: one confirmation number per reservation, in the
-//! order reservations reach it.
-
 use super::domain::{ReservationConfirmed, StockReserved};
 use obzenflow::error::HandlerError;
 use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
@@ -15,10 +12,6 @@ pub struct DeskState {
     pending: Option<ReservationConfirmed>,
 }
 
-/// Issues the next confirmation number to each reservation, whether staff
-/// took it by phone or the allocator reserved it online. The number depends
-/// on delivered order, so a resume and its replay must deliver the same
-/// order to keep every number (FLOWIP-134k B2).
 #[derive(Clone, Debug)]
 pub struct ReservationDesk;
 
@@ -44,8 +37,6 @@ impl TypedStatefulHandler for ReservationDesk {
         state.pending.is_some()
     }
 
-    /// Each confirmation derives from the one reservation it numbers, so the
-    /// epoch resets while the count carries on.
     fn emit(
         &self,
         state: &Self::State,

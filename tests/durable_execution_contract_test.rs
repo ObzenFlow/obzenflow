@@ -83,8 +83,6 @@ const FIRST_AFTER_INVALID: &str = "S-03";
 const FIRST_CUT: &str = "S-12";
 /// Held inside S4's resumed run once its reconstruction completes (S5).
 const SECOND_CUT: &str = "S-18";
-/// Its receipt is re-written, then held, inside S4's resumed run before that
-/// run's reconstruction completes (S5b).
 const HELD_RECEIPT: &str = "W-01";
 const DECLINES: [(&str, &str); 3] = [
     ("S-05", "InsufficientFunds"),
@@ -247,15 +245,10 @@ fn idempotency_key(order_id: &str) -> String {
     format!("payment-authorize:{order_id}")
 }
 
-/// Where a child pauses on one order until the scenario's `release` exists.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Hold {
-    /// The gateway, after recording the order's call.
     Gateway(String),
-    /// The receipts sink, after writing the order's receipt.
     Receipt(String),
-    /// A two-effect handler, after the order's first effect returns and
-    /// before its second starts.
     BetweenEffects(String),
 }
 
@@ -465,8 +458,6 @@ struct Receipt {
     authorization_id: String,
 }
 
-/// Appends one receipt per delivery; repeating a recorded write is safe.
-/// Holds `hold` after writing its receipt until `release` exists.
 #[derive(Clone, Debug)]
 struct ReceiptFile {
     path: PathBuf,
@@ -594,7 +585,6 @@ struct Plan {
     scenario: Scenario,
     args: Vec<String>,
     hold: Option<Hold>,
-    /// The run carries a fix that changes only the interrupted input.
     #[serde(default)]
     fix: bool,
 }
@@ -657,27 +647,17 @@ struct Scenario {
     graph: Graph,
 }
 
-/// The flow a scenario's children run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum Graph {
-    /// Two order channels into `AuthorizePayment` (134i's rows).
     #[default]
     Payment,
-    /// 084q's then-live merge and join.
     ThenLive,
-    /// The then-live graph with an effect stage on the batch entries.
     ThenLiveEffect,
-    /// The payment example's own flow and presentation.
     PaymentDemo,
-    /// One handler that performs two effects per order.
     TwoEffects,
-    /// An effect stage that only emits facts.
     EmitOnly,
-    /// The flash-sale example's allocator and reservation desk.
     FlashSale,
-    /// A rate-limited sink behind a finite source.
     RateLimitedSink,
-    /// A console sink below an unordered fan-in of two finite sources.
     UnorderedFanIn,
 }
 
@@ -706,7 +686,6 @@ impl Scenario {
         Self::create(name, Some(port))
     }
 
-    /// An empty scenario for `graph`, whose module writes its inputs.
     fn for_graph(name: &str, graph: Graph) -> Self {
         let root = Self::directory(name);
         let inputs = root.join("inputs");
@@ -828,13 +807,10 @@ fn remove_input(input: &Path) {
     }
 }
 
-/// Plain resume: a stopped or killed run is admitted on its own evidence
-/// (FLOWIP-134k §1).
 fn resume(archive: &Path) -> Vec<String> {
     vec!["--resume-from".into(), archive.display().to_string()]
 }
 
-/// A failed run resumes only past the override.
 fn resume_failed(archive: &Path) -> Vec<String> {
     let mut args = resume(archive);
     args.push("--allow-incomplete-archive".into());
@@ -945,7 +921,6 @@ impl Child {
     }
 }
 
-/// The end of a child's log, which CI's uploaded artifacts do not hold.
 fn log_tail(log: &Path) -> String {
     let text = read_log(log);
     let lines: Vec<&str> = text.lines().collect();
@@ -1941,12 +1916,10 @@ async fn strict_replay(history: &mut History, archive: &Path) -> PathBuf {
     replayed
 }
 
-/// A fact or an effect's evidence: a row an act wrote.
 fn is_act_row(row: &JournalRecord<ChainPayload>) -> bool {
     row.consumes_data_credit() || row.authored().effect_provenance.is_some()
 }
 
-/// A stage's act rows before and after its first catch-up marker.
 fn around_crossing<'a>(
     archive: &'a Archive,
     stage: &'a str,
@@ -1970,9 +1943,6 @@ fn around_crossing<'a>(
     (acts(&rows[..marker]), acts(&rows[marker + 1..]))
 }
 
-/// FLOWIP-134k criterion 7 at a stage with an effect runtime: every act row
-/// before its crossing reproduces an archived one and says so, and no row
-/// live work wrote after it does.
 fn assert_lineage_at_crossing(archive: &Archive, stage: &str, name: &str) {
     let (rebuilt, live) = around_crossing(archive, stage);
     assert!(
@@ -2078,10 +2048,6 @@ async fn durable_execution_contract() {
     let rebuilt_head = Child::spawn(&s5, resume(&torn), None).completed().await;
     after_rebuild.record(&rebuilt_head, Ended::Natural).await;
 
-    // S5b: SIGKILL inside S4's resumed run before its reconstruction
-    // completes, while the receipts sink holds a re-delivered receipt and
-    // after the effect stage re-attempted the in-doubt order live (FLOWIP-134k
-    // B1); resume of the resume with S4's archive present.
     let mut before_rebuild = History::new("S5b", &s4);
     before_rebuild.in_flight.insert(FIRST_CUT.into());
     before_rebuild
@@ -2377,7 +2343,6 @@ async fn durable_execution_contract_over_http() {
     history.report();
 }
 
-/// Child logs carry the tracing formatter's colour codes.
 fn strip_ansi(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -2399,7 +2364,6 @@ fn read_log(log: &Path) -> String {
     strip_ansi(&std::fs::read_to_string(log).expect("the child log is readable"))
 }
 
-/// Copy a run into another scenario, which then holds its own history of it.
 fn copy_run(run: &Path, into: &Scenario) -> PathBuf {
     let copy = into
         .journals()
@@ -2413,7 +2377,6 @@ fn copy_run(run: &Path, into: &Scenario) -> PathBuf {
     std::fs::canonicalize(copy).expect("resolve the copy")
 }
 
-/// The keys of `upstream`'s `T` facts that `sink` delivered successfully.
 fn delivered_keys<T: TypedPayload + DeserializeOwned, K: Clone>(
     archive: &Archive,
     upstream: &str,
@@ -2451,7 +2414,6 @@ fn verify_exit(baseline: &Path, candidate: &Path) -> (Option<i32>, String) {
     )
 }
 
-/// The file names in a run directory.
 fn run_files(run: &Path) -> BTreeSet<std::ffi::OsString> {
     std::fs::read_dir(run)
         .expect("read the run directory")
@@ -2459,9 +2421,6 @@ fn run_files(run: &Path) -> BTreeSet<std::ffi::OsString> {
         .collect()
 }
 
-/// FLOWIP-134k §1, B9: a resume or replay of a running run is refused by
-/// Core before any run directory exists, and writes nothing into the
-/// running run's location.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_run_refuses_resume_and_replay() {
     let scenario = Scenario::fresh("still_running");
@@ -2588,8 +2547,6 @@ mod then_live {
             .expect("the batch channel is configured")
     }
 
-    /// The batch entries the effect stage audits; it settles the rest with a
-    /// fact and no call, so its last recorded inputs made none.
     const AUDITED: [&str; 2] = ["e-1", "e-2"];
 
     fn audit_ledger(scenario: &Scenario) -> PathBuf {
@@ -2764,7 +2721,6 @@ mod then_live {
         Hydrating,
         Enriching,
         Live,
-        /// Enriching, with the effect stage past every audited entry.
         PastAudits,
     }
 
@@ -2911,9 +2867,6 @@ mod then_live {
         row("then_live_live", Graph::ThenLive, Cut::Live, (0, 0)).await;
     }
 
-    /// FLOWIP-134k criterion 10: an effect stage whose last recorded inputs
-    /// made no call crosses after them, so the then-live merge and join
-    /// downstream see no crossing ahead of a reproduced row.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_effect_stage_past_its_last_call_resumes_without_a_phase_refusal() {
         row(
@@ -2926,8 +2879,6 @@ mod then_live {
     }
 }
 
-/// FLOWIP-134k's payment loop: the payment example's own flow, killed after
-/// its feeds finish and stopped before they do.
 mod payment_demo {
     use super::*;
     use gateway_demo::domain::PaymentAuthorizationUnavailable;
@@ -2936,13 +2887,10 @@ mod payment_demo {
     use obzenflow::application::{Banner, Presentation};
 
     const BANNER: &str = "Durable execution contract: payment demo";
-    /// Longer than the breaker's five-second open window, as in the demo.
     const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
     const GATEWAY_CALLS_PER_SECOND: f64 = 20.0;
     const UNAVAILABLE: &str = "unavailable";
     const WARMUP_ORDERS: usize = 8;
-    /// The recovery orders that reach the gateway, routed as the
-    /// uninterrupted demo routes them.
     const RECOVERY_ROUTES: [(&str, &str); 5] = [
         ("web-recovery-0", AUTHORIZED),
         ("store-recovery-3", DECLINED),
@@ -2965,7 +2913,6 @@ mod payment_demo {
         )
     }
 
-    /// Each order's committed route at the gateway stage.
     fn routes(archive: &Archive) -> BTreeMap<String, &'static str> {
         let stage = "authorize_payment";
         archive
@@ -3007,12 +2954,6 @@ mod payment_demo {
         .any(|prefix| event_type.as_str().starts_with(prefix))
     }
 
-    /// Killed after its feeds finish, as the outage begins, the payment loop
-    /// resumes with plain `--resume-from` and meets the outage live. The
-    /// recovery pause runs, the recovery orders route as in the
-    /// uninterrupted demo, each first manual-review delivery is live and
-    /// observed, and the resumed and replayed journals say which rows were
-    /// rebuilt (criteria 1, 5, 6, 7). Its time is the demo's own sleeps.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_payment_loop_killed_during_the_outage_routes_as_the_demo_does() {
         let name = "payment_loop";
@@ -3100,10 +3041,6 @@ mod payment_demo {
         );
     }
 
-    /// Killed before its `ValuesSource` feeds finish, a run refuses to resume
-    /// with 134i B8's diagnostic, before any banner or run directory. A
-    /// Ctrl-C at the same point gets a footer that offers only replay
-    /// (criteria 3 and 4).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_stopped_before_its_feeds_finish_offers_only_replay() {
         let name = "payment_early_stop";
@@ -3169,16 +3106,12 @@ mod payment_demo {
     }
 }
 
-/// FLOWIP-134k criteria 9 and 14: a handler that performs two effects for
-/// one order, killed between them.
 mod two_effects {
     use super::*;
 
     const ORDERS: [&str; 3] = ["T-01", "T-02", "T-03"];
-    /// Killed after its authorization and before its capture.
     const INTERRUPTED: &str = "T-02";
     const AMOUNT_CENTS: u64 = 2_000;
-    /// A fix that changes only the interrupted order's capture.
     const FIXED_AMOUNT_CENTS: u64 = 2_500;
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -3206,7 +3139,6 @@ mod two_effects {
         const EVENT_TYPE: &'static str = "durable_contract.two_effects.captured";
     }
 
-    /// One physical call, in the external ledger.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     struct LedgerCall {
         order_id: String,
@@ -3504,8 +3436,6 @@ mod two_effects {
     }
 }
 
-/// FLOWIP-134k B2 and B8: an effect stage that only emits facts, whose
-/// identities mint in its lineage's namespace.
 mod emit_only {
     use super::*;
     use obzenflow::middleware::rate_limit;
@@ -3608,7 +3538,6 @@ mod emit_only {
             .collect()
     }
 
-    /// Each crossing's position among the stage's act rows.
     fn crossings(archive: &Archive) -> Vec<usize> {
         let mut acts = 0;
         let mut positions = Vec::new();
@@ -3625,7 +3554,6 @@ mod emit_only {
         positions
     }
 
-    /// Stamped facts the run wrote live, after its first crossing.
     fn live_after_crossing(archive: &Archive) -> usize {
         crossings(archive).first().map_or(0, |crossing| {
             stamped(archive).len().saturating_sub(*crossing)
@@ -3650,9 +3578,6 @@ mod emit_only {
         (3..TICKS as usize).contains(&stamped(archive).len())
     }
 
-    /// Killed, resumed, and the resume killed after its crossing: the resume
-    /// of the resume completes without a refusal, and its strict replay
-    /// re-authors each recorded crossing where it was recorded.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_emit_only_stage_resumes_a_resume_killed_after_its_crossing() {
         let name = "emit_only";
@@ -3690,9 +3615,6 @@ mod emit_only {
         );
     }
 
-    /// The first resume killed after it finished reconstruction needs no
-    /// original archive: its own manifest records the namespace the stage's
-    /// identities mint in (B8).
     #[tokio::test(flavor = "multi_thread")]
     async fn an_emit_only_resume_of_a_resume_needs_no_original_archive() {
         let name = "emit_only_namespace";
@@ -3723,14 +3645,11 @@ mod emit_only {
     }
 }
 
-/// FLOWIP-134k B2: the flash-sale allocator feeding its reservation desk, an
-/// order-sensitive fold whose other input is a finite source.
 mod flash_sale {
     use super::*;
     use flash_sale_demo::domain::{ReservationConfirmed, SoldOut};
     use flash_sale_demo::warehouse::WarehouseStats;
 
-    /// Every allocation input settles with exactly one fact.
     const INPUTS: usize = 6;
 
     pub(super) fn config(scenario: &Scenario) -> PathBuf {
@@ -3796,11 +3715,6 @@ mod flash_sale {
         run
     }
 
-    /// Killed mid-allocation after its sources end, the flow resumes with
-    /// plain `--resume-from` and strict-replays with `--verify` reporting 0
-    /// differences and every confirmation kept. A kill and resume of a
-    /// resume after its crossing keeps every confirmation the desk issued
-    /// before the kill (criteria 11 and 12, journal proof steps 5 to 7).
     #[tokio::test(flavor = "multi_thread")]
     async fn the_reservation_desk_keeps_its_confirmations_across_resumes() {
         let name = "flash_sale";
@@ -3867,10 +3781,6 @@ mod flash_sale {
         );
     }
 
-    /// A resume with a changed warehouse id refuses before any warehouse
-    /// call and names the plain command that continues it. That command,
-    /// with the recorded id restored, completes without the override, and
-    /// every input settles once (FLOWIP-134k B10, criterion 16).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_refused_resume_continues_with_plain_resume_from() {
         let name = "flash_sale_refused";
@@ -3932,7 +3842,6 @@ mod flash_sale {
     }
 }
 
-/// FLOWIP-134k B3: sinks that lag their finished sources at a kill.
 mod lagging {
     use super::*;
     use obzenflow::flow::transform;
@@ -3967,7 +3876,6 @@ mod lagging {
         const EVENT_TYPE: &'static str = "durable_contract.lagging.combined";
     }
 
-    /// One write, with the delivery's own label.
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct Written {
         n: u64,
@@ -4071,7 +3979,6 @@ mod lagging {
         }
     }
 
-    /// Records each item whose delivery the runtime observed.
     struct Observed {
         path: PathBuf,
     }
@@ -4164,10 +4071,6 @@ mod lagging {
             .count()
     }
 
-    /// A rate-limited sink killed while it lags its finished source resumes:
-    /// its re-deliveries write no limiter evidence, and each first delivery
-    /// passes the limiter, runs its observers and is labelled live
-    /// (criterion 6).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lagging_rate_limited_sink_delivers_its_first_rows_live() {
         let name = "rate_limited_sink";
@@ -4260,9 +4163,6 @@ mod lagging {
         );
     }
 
-    /// A console sink below an unordered fan-in of two finite sources,
-    /// killed while it lags, follows generation, and the resume names the
-    /// fan-in in the approved notice (criterion 6).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lagging_sink_below_an_unordered_fan_in_follows_generation() {
         let name = "unordered_fan_in";

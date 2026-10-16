@@ -155,8 +155,6 @@ pub trait StatefulHandler: Send + Sync {
 pub trait UnifiedStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
 
-    /// Whether the stage runs an effect runtime, whose archived acts a resume
-    /// reproduces in order (FLOWIP-134k B7).
     fn has_effect_runtime(&self) -> bool {
         false
     }

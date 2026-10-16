@@ -88,8 +88,6 @@ pub fn scripted_inputs() -> Vec<AllocationInput> {
     ]
 }
 
-/// Reservations staff took by phone for the store's own allotment. The desk
-/// numbers them alongside the allocator's online reservations.
 pub fn phone_reservations() -> Vec<StockReserved> {
     let sku = Sku::from("store-allotment");
     (1..=3)

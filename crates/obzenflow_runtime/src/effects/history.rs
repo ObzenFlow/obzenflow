@@ -89,8 +89,6 @@ pub struct EffectHistory {
     grouped_events: Arc<GroupedJournalEvents>,
     attempt_positions: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), usize>>,
     attempt_events: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), ChainEvent>>,
-    /// The stage's archived acts in journal order and the crossings they
-    /// anchor (FLOWIP-134k B2, B7), shared by every invocation of the stage.
     acts: Arc<super::StageActs>,
 }
 
@@ -129,8 +127,8 @@ impl EffectCursorHistory {
     }
 }
 
-/// Whether a loaded history carries the stage's archived acts. Only a stage
-/// with an effect runtime authors acts (FLOWIP-134k B7).
+/// Whether [`EffectHistory::load`] reads the stage's archived acts; only a
+/// stage with an effect runtime authors them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchivedActs {
     Load,
@@ -138,9 +136,8 @@ pub enum ArchivedActs {
 }
 
 impl EffectHistory {
-    /// A resume joins each cursor's history, and the stage's archived acts,
-    /// across the archive and the ancestors it merges with (FLOWIP-134i B6),
-    /// oldest first, failing closed where they conflict.
+    /// Load the stage's history from `archive` and the ancestors it merges with,
+    /// joining cursor histories and archived acts oldest first; a conflict is an error.
     pub async fn load(
         archive: &Arc<dyn ReplayArchive>,
         stage_key: &str,
@@ -167,8 +164,6 @@ impl EffectHistory {
         }
     }
 
-    /// Join a newer run's history over this one, per cursor, and its archived
-    /// acts by identity prefix.
     pub(super) fn joined_with(self, newer: &Self, stage_key: &str) -> Result<Self, EffectError> {
         let acts = self.acts.joined_with(&newer.acts, stage_key)?;
         let cursors: std::collections::HashSet<EffectCursor> = [&self, newer]
@@ -195,8 +190,6 @@ impl EffectHistory {
                 Ok((cursor, joined))
             })
             .collect::<Result<Vec<_>, EffectError>>()?;
-        // Every member records the same namespace once B8 holds; an older
-        // member that records cursors keeps it otherwise.
         let recorded_flow_id = if newer.holds_evidence() || !self.holds_evidence() {
             newer.recorded_flow_id.clone()
         } else {
@@ -208,7 +201,6 @@ impl EffectHistory {
         Ok(history)
     }
 
-    /// The stage's archived acts (FLOWIP-134k B7).
     pub(crate) fn acts(&self) -> &Arc<super::StageActs> {
         &self.acts
     }
@@ -412,9 +404,6 @@ impl EffectHistory {
             }
         }
 
-        // FLOWIP-134k B8: identities mint in the namespace the run's manifest
-        // records, and every recorded cursor must name it. An archive written
-        // before B8 records none, and its cursors, or its own flow id, name it.
         if let Some(namespace) = archive.recorded_flow_id() {
             if let Some(record) = records
                 .iter()
@@ -472,8 +461,6 @@ impl EffectHistory {
         history.attempt_events = Arc::new(attempt_events);
         validate_group_grammar(&history, &grouped_events)?;
         history.grouped_events = Arc::new(grouped_events);
-        // A torn final group stays absent: only acts whose evidence survived
-        // are archived acts (FLOWIP-134k B7).
         let acts = acts.finish(
             |cursor| {
                 history.index.contains_key(cursor)
@@ -497,7 +484,6 @@ impl EffectHistory {
         Self::from_records_with_policy(recorded_flow_id, records, true)
     }
 
-    /// A history holding only archived acts and the crossings they anchor.
     #[cfg(test)]
     pub(crate) fn with_acts_for_test(
         recorded_flow_id: impl Into<RecordedFlowId>,
@@ -597,7 +583,6 @@ impl EffectHistory {
         }
 
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
-        // Decoded records keep their order, which is the order of their acts.
         let mut ordered = Vec::<super::ArchivedAct>::new();
         for record in &records {
             if index.contains_key(&record.cursor)

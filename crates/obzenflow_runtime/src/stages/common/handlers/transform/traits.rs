@@ -124,8 +124,6 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
         "1"
     }
 
-    /// Whether the stage runs an effect runtime, whose archived acts a resume
-    /// reproduces in order (FLOWIP-134k B7).
     fn has_effect_runtime(&self) -> bool {
         false
     }

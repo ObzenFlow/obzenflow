@@ -565,7 +565,6 @@ async fn handle_control(
             CatchUpDisposition::Failed(message) => {
                 EventLoopDirective::Transition(MergeEvent::Error(message))
             }
-            // A merge has no effect runtime, so it never refuses for acts.
             CatchUpDisposition::Refused(fatal) => {
                 EventLoopDirective::Transition(MergeEvent::Error(fatal.detail))
             }

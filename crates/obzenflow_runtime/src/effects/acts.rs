@@ -2,35 +2,29 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A stage's archived acts in journal order (FLOWIP-134k B1, B7) and the
-//! crossings each one anchors (B2). During a resume a stage with an effect
-//! runtime must reproduce its archive's acts in order before any new act.
-
 use super::*;
 use obzenflow_core::ReaderGeneration;
 use std::collections::HashSet;
 
 pub(crate) use obzenflow_core::event::payloads::effect_payload::SETTLEMENT_EFFECT_TYPE;
 
-/// One act a stage's archive holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArchivedAct {
-    /// An effect or capture, identified by its cursor. `in_doubt` when the
-    /// archive holds only attempt starts for it.
     Effect {
         cursor: EffectCursor,
         effect_type: String,
         in_doubt: bool,
     },
-    /// A fact the handler emitted, identified by its deterministic id.
-    Fact { id: EventId, event_type: String },
-    /// An input the stage settled with no effect, capture or fact, recorded
-    /// at its invocation's next cursor (FLOWIP-134k B11).
-    Settled { cursor: EffectCursor },
+    Fact {
+        id: EventId,
+        event_type: String,
+    },
+    Settled {
+        cursor: EffectCursor,
+    },
 }
 
 impl ArchivedAct {
-    /// The act an archived effect record names.
     pub(crate) fn recorded(cursor: EffectCursor, effect_type: &str) -> Self {
         if effect_type == SETTLEMENT_EFFECT_TYPE {
             Self::Settled { cursor }
@@ -51,7 +45,6 @@ impl ArchivedAct {
         }
     }
 
-    /// The cursor of an effect or settlement act.
     pub(crate) fn cursor(&self) -> Option<&EffectCursor> {
         match self {
             Self::Effect { cursor, .. } | Self::Settled { cursor } => Some(cursor),
@@ -63,7 +56,6 @@ impl ArchivedAct {
         matches!(self, Self::Fact { .. })
     }
 
-    /// "a SoldOut fact", "a ReserveStock effect".
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Effect { effect_type, .. } => {
@@ -76,7 +68,6 @@ impl ArchivedAct {
         }
     }
 
-    /// The detail for this act when a resume skips it (FLOWIP-134k B7, B11).
     pub(crate) fn skipped_detail(&self, stage_key: &str) -> String {
         match self {
             Self::Settled { cursor } => format!(
@@ -91,8 +82,6 @@ impl ArchivedAct {
     }
 }
 
-/// An act's identity: an effect's cursor, an emitted fact's id, or the cursor
-/// of a settlement, which never matches an effect at the same cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ActKey {
     Effect(EffectCursor),
@@ -100,8 +89,6 @@ pub(crate) enum ActKey {
     Settled(EffectCursor),
 }
 
-/// A row that names an act: an effect row with its attempt, or an emitted
-/// fact. A crossing anchors to the first such row after its marker (B2).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ActRow {
     Effect {
@@ -111,8 +98,6 @@ pub(crate) enum ActRow {
     Fact(EventId),
 }
 
-/// The type a refusal names: the last segment of an event or effect type,
-/// in upper camel case (`allocation.sold_out` reads `SoldOut`).
 pub(crate) fn display_name(type_name: &str) -> String {
     type_name
         .rsplit('.')
@@ -130,22 +115,14 @@ pub(crate) fn display_name(type_name: &str) -> String {
         .collect()
 }
 
-/// How an offered act relates to the stage's archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ActCheck {
-    /// It is the archive's next act; reproduce it.
     Reproduce,
-    /// Every archived act has been reproduced, so it runs live.
     Live,
-    /// The archive lacks it while archived acts remain.
     Missing { next: ArchivedAct },
-    /// The archive holds it later, so the archived acts before it were
-    /// skipped; the first of them is named.
     Skipped { skipped: ArchivedAct },
 }
 
-/// The archived acts of one stage, joined across a merged lineage, with the
-/// position of the next one to reproduce.
 #[derive(Debug, Default)]
 pub(crate) struct StageActs {
     acts: Vec<ArchivedAct>,
@@ -179,13 +156,10 @@ impl StageActs {
         &self.acts
     }
 
-    /// Whether the archive holds an emitted fact with this identity.
     pub(crate) fn holds_fact(&self, id: &EventId) -> bool {
         self.facts.contains(id)
     }
 
-    /// The recorded crossings to re-author before `row`, at their recorded
-    /// generations, lowest first.
     pub(crate) fn crossings_before(&self, row: &ActRow) -> Vec<ReaderGeneration> {
         let mut generations = self.anchors.get(row).cloned().unwrap_or_default();
         generations.sort();
@@ -199,14 +173,10 @@ impl StageActs {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The archived acts not yet reproduced.
     pub(crate) fn remaining(&self) -> Vec<ArchivedAct> {
         self.acts[self.position().min(self.acts.len())..].to_vec()
     }
 
-    /// Whether an invocation whose next effect has cursor `next_effect` is
-    /// still reproducing: archived acts remain, unless the only one left is
-    /// that effect's in-doubt attempt (B1, B7).
     pub(crate) fn reproducing(&self, next_effect: &EffectCursor) -> bool {
         match self.remaining().as_slice() {
             [] => false,
@@ -219,8 +189,6 @@ impl StageActs {
         }
     }
 
-    /// Check `offered` against the next archived act, taking it when it is
-    /// that act.
     pub(crate) fn take(&self, offered: &ActKey) -> ActCheck {
         let mut next = self
             .next
@@ -244,8 +212,6 @@ impl StageActs {
         }
     }
 
-    /// Join a newer member of a merged lineage over this one: the shorter
-    /// list must open the longer by identity (FLOWIP-134i B6).
     pub(crate) fn joined_with(&self, newer: &Self, stage_key: &str) -> Result<Self, EffectError> {
         let (shorter, longer) = if self.acts.len() <= newer.acts.len() {
             (&self.acts, &newer.acts)
@@ -273,7 +239,6 @@ impl StageActs {
         Ok(Self::new(longer.clone(), anchors))
     }
 
-    /// Mark each effect act in doubt when `in_doubt` says so, after a join.
     pub(crate) fn with_in_doubt(self, in_doubt: impl Fn(&EffectCursor) -> bool) -> Self {
         let acts = self
             .acts
@@ -295,8 +260,6 @@ impl StageActs {
     }
 }
 
-/// Folds a stage journal, in order, into its archived acts and the rows its
-/// crossings anchor to (B2).
 #[derive(Debug, Default)]
 pub(crate) struct ActScan {
     acts: Vec<ArchivedAct>,
@@ -358,8 +321,6 @@ impl ActScan {
         }
     }
 
-    /// The scanned acts, keeping only effects whose evidence survived torn
-    /// tails (`holds`), each marked in doubt when `in_doubt` says so.
     pub(crate) fn finish(
         self,
         holds: impl Fn(&EffectCursor) -> bool,
@@ -442,7 +403,6 @@ mod tests {
             }
         );
         assert_eq!(fact(sold_out).describe(), "a SoldOut fact");
-        // Departures take nothing.
         assert_eq!(acts.take(&ActKey::Fact(sold_out)), ActCheck::Reproduce);
     }
 
@@ -467,8 +427,6 @@ mod tests {
         assert!(older.joined_with(&other, "allocate_stock").is_err());
     }
 
-    /// FLOWIP-134k B11: a settlement takes its turn in order, and never
-    /// matches an effect at its cursor.
     #[test]
     fn a_settlement_is_an_act_apart_from_any_effect_at_its_cursor() {
         let settled = ArchivedAct::recorded(cursor(5, 0), SETTLEMENT_EFFECT_TYPE);

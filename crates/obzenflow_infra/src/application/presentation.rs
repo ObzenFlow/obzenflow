@@ -360,9 +360,8 @@ impl Presentation {
     }
 }
 
-/// The archive verbs Core admits as plain commands for the run just written
-/// and the flow just built (FLOWIP-134k §2, B4). The footer prints a verb's
-/// line only when it is offered.
+/// The archive verbs admitted as plain commands for the run just written and
+/// the flow just built. The footer prints a verb's line only when it is offered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ArchiveOffers {
     pub replay: bool,
@@ -406,7 +405,7 @@ impl RunPresentationOutcome {
     }
 
     /// The archive verbs offered for the run just written; a failed run
-    /// offers none (FLOWIP-134k B4).
+    /// offers none.
     pub fn offers(&self) -> ArchiveOffers {
         match self {
             Self::Completed { offers, .. } | Self::Stopped { offers, .. } => *offers,
@@ -414,11 +413,6 @@ impl RunPresentationOutcome {
         }
     }
 
-    /// Default terminal copy for a finished run. Lives once: live runs are
-    /// invited to replay their journal; strict replays state what was
-    /// reconstructed and offer replay-of-replay, which a replay journal
-    /// supports by closure (FLOWIP-120b). Each verb's line prints only when
-    /// Core admits that command (FLOWIP-134k B4).
     fn terminal_paragraph(
         verb: &str,
         flow_name: &str,
@@ -869,7 +863,6 @@ mod tests {
         };
         assert_eq!(completed.default_footer(), "flow completed.");
 
-        // FLOWIP-134k §2: a natural all-finite completion offers only replay.
         let location = CurrentRunLocator::new(PathBuf::from("tmp/run"));
         let completed_with_journal = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
@@ -882,8 +875,6 @@ mod tests {
             "flow completed. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\n(Source settings are ignored during replay and catch-up)"
         );
 
-        // FLOWIP-120n: a stopped run with work left offers both verbs with the
-        // journal path, the operator's path back to replay or resume.
         let stopped_with_journal = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
             location: Some(CurrentRunLocator::new(PathBuf::from("tmp/run"))),
@@ -896,8 +887,6 @@ mod tests {
         );
         assert_eq!(stopped_with_journal.offers(), BOTH);
 
-        // A run whose sources cannot continue their input offers only replay
-        // (FLOWIP-134k B4), and one that offers nothing prints its journal.
         let early_stop = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
             location: Some(location.clone()),
@@ -1049,8 +1038,6 @@ mod tests {
             "a resume cannot be verified as a bounded replay: {footer}"
         );
 
-        // FLOWIP-134k §2: a resumed run that completed naturally with every
-        // source finite no longer offers to resume it again.
         let completed = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
             location: Some(CurrentRunLocator::new(PathBuf::from("tmp/resume-run"))),

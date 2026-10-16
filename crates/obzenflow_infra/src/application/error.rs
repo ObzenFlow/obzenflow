@@ -48,7 +48,7 @@ pub enum ApplicationError {
     /// (FLOWIP-134i B6, B7, B8, B12, B13).
     ResumeRefused(String),
 
-    /// A replay refused before any work, printed verbatim (FLOWIP-134k §1).
+    /// A replay refused before any work, printed verbatim.
     ReplayRefused(String),
 
     /// Other error

@@ -74,7 +74,6 @@ fn banner_for(mode: &RunMode) -> Banner {
 /// Completion copy branches the same way: live runs are pointed at replay and
 /// live metrics; replays are pointed at verification (FLOWIP-095j) and
 /// replay-of-replay, never at metrics the replay did not touch.
-/// Next steps name a verb only when the footer offers it (FLOWIP-134k B4).
 fn footer_for(outcome: RunPresentationOutcome) -> Footer {
     let replayable = outcome.offers().replay;
     let next_step = match outcome.run_mode() {
@@ -208,8 +207,6 @@ mod tests {
         assert!(replay.contains("replay the replay"), "{replay}");
     }
 
-    /// FLOWIP-134k B4: a live run whose replay is refused is never pointed
-    /// at it.
     #[test]
     fn a_refused_replay_is_never_suggested() {
         let footer = footer_for(RunPresentationOutcome::Stopped {

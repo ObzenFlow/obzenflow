@@ -1621,8 +1621,6 @@ async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_sa
         live_word.last().copied(),
         "the live destination row is the final delivered value"
     );
-    // The handle holds the run's journal writers; a replay of a run whose
-    // writers are open refuses as still running (FLOWIP-134k §1).
     drop(handle);
 
     let replay_probe = PostgresTestProbe::default();

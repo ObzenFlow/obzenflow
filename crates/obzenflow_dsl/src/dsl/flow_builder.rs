@@ -500,9 +500,6 @@ where
             &lowering_artifacts.internal_feeds,
         );
 
-        // FLOWIP-134k B4: the flow's own archive facts, kept for the footer and
-        // handed with the archive's evidence to Core's admission before
-        // substrate selection, so a refused verb leaves no run directory.
         let __archive_flow_evidence = crate::dsl::typing::archive_flow_evidence(&topology, &descriptors);
         if let Some(replay) = obzenflow_runtime::bootstrap::replay_bootstrap() {
             let evidence = obzenflow_runtime::bootstrap::archive_evidence().ok_or_else(|| {
@@ -1268,8 +1265,6 @@ where
 
             obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.to_string(),
             flow_id: flow_id.to_string(),
-            // FLOWIP-134k B8: a fresh run starts its own namespace; a resume or
-            // replay copies the one its archive records.
             recorded_flow_id: Some(match replay_archive.as_ref() {
                 Some(archive) => archive
                     .recorded_flow_id()
@@ -1410,9 +1405,6 @@ where
             }
         }
 
-        // FLOWIP-134k B3: the sink edges a resume reproduces, by Core's order
-        // certification against every archive the resume reads, and a notice
-        // for each stage that keeps an edge on generation.
         let __sink_resume_plan = match (
             obzenflow_runtime::bootstrap::replay_bootstrap(),
             replay_archive.as_ref(),

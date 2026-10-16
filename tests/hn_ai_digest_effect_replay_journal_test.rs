@@ -2292,9 +2292,6 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
         .expect("strict replay rematerialises abandonment without a dependency");
     let strict_archive = latest_run_dir(&journal_base);
 
-    // FLOWIP-134k §1: the resumed run completed naturally over finite
-    // sources, so a further resume has no work left and refuses before any
-    // run starts or any dependency resolves.
     let replay_resolutions = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let refusal = FlowApplication::builder()

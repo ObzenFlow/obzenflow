@@ -2,13 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Which sink edges a resume reproduces position by position (FLOWIP-134k
-//! B3). Core's order certification runs over the current flow and every
-//! archive the resume reads; a sink classifies deliveries by its receipts
-//! only on edges it passes against all of them. Each other edge follows
-//! generation, and the resume prints a notice naming the stage that keeps it
-//! there.
-
 use obzenflow_core::journal::archive::certification::{
     certify_orders, Comparison, StageCertification, StageOrders,
 };
@@ -19,17 +12,12 @@ use obzenflow_runtime::stages::SinkResumeEdges;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-/// One resumed flow's sink plan: each sink's certified edges, by sink stage
-/// id, and the notices for edges that follow generation.
 #[derive(Debug, Default)]
 pub(crate) struct SinkResumePlan {
     pub edges: HashMap<StageId, SinkResumeEdges>,
     pub notices: Vec<String>,
 }
 
-/// `current` holds the resumed flow's inbound edges and delivery orders by
-/// stage key; `sinks` names each sink's key and stage id; `stage_ids` maps
-/// every stage key to its current id.
 pub(crate) fn sink_resume_plan(
     current: &StageOrders,
     sinks: &[(String, StageId)],
@@ -131,7 +119,6 @@ mod tests {
         )
     }
 
-    /// An archive that records only stage orders.
     struct Recorded(StageOrders, Vec<Arc<dyn ReplayArchive>>);
 
     #[async_trait::async_trait]
@@ -269,8 +256,6 @@ mod tests {
             ]
         );
 
-        // An ancestor in the merged lineage that recorded another order
-        // blocks the edge too.
         let ordered = orders(&[
             ("web_orders", &[], SingleInput),
             ("normalize", &["web_orders"], SingleInput),

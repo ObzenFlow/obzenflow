@@ -11,8 +11,6 @@
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 
-/// A handler-error row written by live work carries no replay provenance,
-/// whatever its input's lineage (FLOWIP-134k §4, B11).
 pub(crate) fn error_row_in_scope(
     mut event: ChainEvent,
     scope: MiddlewareExecutionScope,

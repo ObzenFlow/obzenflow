@@ -110,7 +110,6 @@ impl TypedPayload for SoldOut {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// The reservation desk numbered a reservation, taken by phone or online.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReservationConfirmed {
     pub order_id: OrderId,

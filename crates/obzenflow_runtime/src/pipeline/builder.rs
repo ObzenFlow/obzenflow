@@ -152,15 +152,14 @@ impl PipelineBuilder {
         }
     }
 
-    /// One notice for each stage that keeps a resumed sink's edge on
-    /// generation, printed after the banner (FLOWIP-134k B3).
+    /// Notices naming each resumed sink edge whose deliveries are scoped by
+    /// generation, printed after the run banner.
     pub fn with_resume_notices(mut self, notices: Vec<String>) -> Self {
         self.resume_notices = notices;
         self
     }
 
-    /// The flow's own archive facts, kept for the footer's offers
-    /// (FLOWIP-134k B4).
+    /// Attach the facts the flow builder derived from this flow.
     pub fn with_archive_flow_evidence(
         mut self,
         evidence: obzenflow_core::journal::archive_actions::FlowEvidence,

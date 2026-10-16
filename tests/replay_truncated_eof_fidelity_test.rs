@@ -551,8 +551,6 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
         .await
         .expect("cancelled run should terminate")
         .expect("cancelled run should resolve");
-    // The handle holds the run's journal writers; a replay of a run whose
-    // writers are open refuses as still running (FLOWIP-134k §1).
     drop(handle);
 
     // Replay: A reproduces Natural, B synthesizes Truncated, and the fan-in's
@@ -848,7 +846,6 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
         .await
         .expect("cancelled cycle run should terminate")
         .expect("cancelled cycle run should resolve");
-    // Releases the run's journal writers (FLOWIP-134k §1).
     drop(handle);
 
     // Replay the cancelled cycle archive: it must terminate cleanly, with the

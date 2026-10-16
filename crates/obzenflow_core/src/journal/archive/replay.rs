@@ -112,8 +112,7 @@ pub enum ReplayError {
         stage_key: String,
     },
 
-    /// Archives of one merged lineage record different identity namespaces
-    /// (FLOWIP-134k B8).
+    /// Archives of one merged lineage record different identity namespaces.
     #[error(
         "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
          from, {}, records a different identity namespace.\nRestore {} as it was recorded, \
@@ -196,21 +195,18 @@ pub trait ReplayArchive: Send + Sync {
 
     fn archive_flow_id(&self) -> &str;
 
-    /// The lineage namespace the archive's manifest records (FLOWIP-134k
-    /// B8); `None` for an archive written before B8.
+    /// The identity namespace the archive's manifest records, if any.
     fn recorded_flow_id(&self) -> Option<&str> {
         None
     }
 
-    /// Each stage's recorded inbound edges and delivery order, which order
-    /// certification compares with the resumed flow (FLOWIP-134k B3).
+    /// Each stage's recorded inbound edges and delivery order.
     fn stage_orders(&self) -> super::certification::StageOrders {
         super::certification::StageOrders::default()
     }
 
-    /// The stage that wrote each archived data journal, by the journal writer
-    /// its records name, so a sink can key its receipts by upstream edge
-    /// (FLOWIP-134k B3).
+    /// The stage that wrote each archived data journal, keyed by the journal
+    /// writer its records name.
     fn journal_stages(&self) -> std::collections::HashMap<crate::JournalWriterId, String> {
         std::collections::HashMap::new()
     }

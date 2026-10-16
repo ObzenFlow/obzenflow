@@ -134,7 +134,6 @@ pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
         CatchUpDisposition::Failed(message) => {
             crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message))
         }
-        // A join has no effect runtime, so it never refuses for acts.
         CatchUpDisposition::Refused(fatal) => {
             crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail))
         }

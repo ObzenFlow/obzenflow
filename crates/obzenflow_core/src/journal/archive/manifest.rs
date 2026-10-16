@@ -30,10 +30,8 @@ pub struct RunManifest {
     pub journal_schema_version: String,
     pub obzenflow_version: String,
     pub flow_id: String,
-    /// The lineage namespace every deterministic identity in this run mints
-    /// in (FLOWIP-134k B8): a fresh run's own flow id, or the value the
-    /// archive a resume or replay opened records. Absent in archives written
-    /// before B8, which read as their own flow id.
+    /// Namespace for this run's deterministic identities, taken from the opened
+    /// archive on a resume or replay. `None` reads as `flow_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded_flow_id: Option<String>,
     /// Authoritative pipeline lifecycle writer allocated for this output run.
@@ -64,8 +62,8 @@ pub struct RunManifest {
 }
 
 impl RunManifest {
-    /// The run's lineage namespace; an archive written before FLOWIP-134k B8
-    /// records none and reads as its own flow id.
+    /// Namespace for this run's deterministic identities, falling back to
+    /// `flow_id`.
     pub fn lineage_namespace(&self) -> &str {
         self.recorded_flow_id.as_deref().unwrap_or(&self.flow_id)
     }
@@ -181,8 +179,6 @@ mod tests {
         }
     }
 
-    /// FLOWIP-134k B8: the namespace round-trips, and an archive written
-    /// before B8 reads as its own flow id.
     #[test]
     fn the_recorded_namespace_round_trips_and_an_absent_one_reads_as_the_flow_id() {
         let recorded = manifest(Some("flow_killed"));

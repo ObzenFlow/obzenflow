@@ -250,12 +250,6 @@ where
     /// Readers for each upstream journal
     readers: Vec<ReaderSlot<T>>,
 
-    /// Replay identity alias for each current upstream stage. Re-admitted
-    /// source facts preserve their first-generation writer, so contract
-    /// authorship couples this topology-keyed immediate-archive map with the
-    /// runtime-stamped replay context instead of comparing unrelated per-run
-    /// StageIds. That remains valid across replay-of-replay generations, and a
-    /// merged lineage aliases the stage's id in every member (FLOWIP-134i B6).
     archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
 
     /// Selected Data event types by upstream reader stage.

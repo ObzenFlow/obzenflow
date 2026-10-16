@@ -924,9 +924,6 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             effect_boundary: None,
         })
     });
-    // FLOWIP-134k B3: a resumed sink classifies the delivery against its own
-    // receipts, and records its boundary at its first unsettled delivery once
-    // every certified edge re-delivered its settled prefix.
     let scope = match (ctx.receipt_classification.as_mut(), upstream_stage) {
         (Some(classification), Some(upstream)) => {
             let settlement = classification.classify(upstream);

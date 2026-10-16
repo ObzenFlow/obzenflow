@@ -343,8 +343,7 @@ pub enum FlowBuildError {
     )]
     OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
 
-    /// Core's archive admission refused the verb (FLOWIP-134k §1, B4); it
-    /// prints verbatim as the verb's refusal.
+    /// Archive admission refused the verb; displays the refusal verbatim.
     #[error("{0}")]
     ArchiveVerbRefused(obzenflow_core::journal::archive_actions::ArchiveRefusal),
 

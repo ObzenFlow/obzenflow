@@ -15,8 +15,8 @@ use serde_json::Value;
 
 pub const EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE: &str = "effect.execution_succeeded";
 pub const CAPTURE_EVENT_TYPE: &str = "effect.value_captured";
-/// The descriptor type of a settlement: a captured record of an input a stage
-/// with an effect runtime settled without an act (FLOWIP-134k B11).
+/// Descriptor type of the record a stage with an effect runtime writes for an
+/// input it settles with no effect, capture or fact.
 pub const SETTLEMENT_EFFECT_TYPE: &str = "obzenflow.settlement";
 pub const EFFECT_ATTEMPT_STARTED_EVENT_TYPE: &str = "obzenflow.effect_attempt_started";
 pub const EFFECT_RECOVERY_ABANDONED_EVENT_TYPE: &str = "obzenflow.effect_recovery_abandoned";

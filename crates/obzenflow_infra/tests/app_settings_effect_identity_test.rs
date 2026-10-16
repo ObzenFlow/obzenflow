@@ -87,7 +87,6 @@ impl TypedPayload for Unscored {
     const EVENT_TYPE: &'static str = "app_identity.unscored";
 }
 
-/// Emitted after `Scored` while `annotate` is set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Noted {
     value: u64,
@@ -97,7 +96,6 @@ impl TypedPayload for Noted {
     const EVENT_TYPE: &'static str = "app_identity.noted";
 }
 
-/// A reading above `limit`, which the stage settles without a call.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Capped {
     value: u64,
@@ -135,9 +133,7 @@ struct App {
     rescore: bool,
     annotate: bool,
     limit: Option<u64>,
-    /// The reading that settles with no act.
     quiet: Option<u64>,
-    /// The reading that fails the handler, to the error journal.
     failing: Option<u64>,
 }
 
@@ -441,8 +437,6 @@ async fn run_refused(journal_base: &Path, first_value: u64, count: u64, app: App
     Ok(())
 }
 
-/// The plain command: a refused resume continues without the override
-/// (FLOWIP-134k B10).
 fn archive(path: PathBuf, verb: ReplayVerb) -> ReplayBootstrap {
     ReplayBootstrap {
         archive_path: path,
@@ -452,7 +446,6 @@ fn archive(path: PathBuf, verb: ReplayVerb) -> ReplayBootstrap {
     }
 }
 
-/// How `run` failed, as `verb` would open it.
 async fn failure(run: &Path, verb: ReplayVerb) -> Result<FailureEvidence> {
     let opened = match verb {
         ReplayVerb::Resume => DiskReplayArchive::open_for_resume(run.to_path_buf(), false).await?,
@@ -461,7 +454,6 @@ async fn failure(run: &Path, verb: ReplayVerb) -> Result<FailureEvidence> {
     Ok(opened.evidence().failure)
 }
 
-/// Whether `run`'s manifest records that it went ahead under the override.
 fn recorded_override(run: &Path) -> Result<bool> {
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(run.join("run_manifest.json"))?)?;
@@ -660,9 +652,6 @@ async fn an_app_value_that_adds_an_effect_refuses_replay_and_resume_catch_up() -
     Ok(())
 }
 
-/// A resume whose stage departs from its archive fails at the departing act,
-/// before any live call (FLOWIP-134k B7). Rows it reproduced before that act
-/// may already have reached the sink.
 async fn run_departed(journal_base: &Path, app: App) -> Result<()> {
     let (handle, run) = build(journal_base, 4, 0, app).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
@@ -673,8 +662,6 @@ async fn run_departed(journal_base: &Path, app: App) -> Result<()> {
     Ok(())
 }
 
-/// The score stage's catch-up marker sits after every reproduced data row
-/// and before every live one, and live rows follow it.
 async fn assert_crossing_after_archived_acts(run_dir: &Path) {
     let rows = replay_testkit::read_stage_envelopes_appended(run_dir, "score").await;
     let marker = rows
@@ -833,7 +820,6 @@ async fn a_changed_value_that_turns_a_settled_input_into_a_call_refuses_resume()
     Ok(())
 }
 
-/// The inputs of `run`'s score stage that settled with no act (FLOWIP-134k B11).
 async fn settlements(run_dir: &Path) -> Vec<(u64, bool)> {
     replay_testkit::read_stage_envelopes_appended(run_dir, "score")
         .await
@@ -851,8 +837,6 @@ async fn settlements(run_dir: &Path) -> Vec<(u64, bool)> {
         .collect()
 }
 
-/// Readings 1 and 2 are scored, reading 3 settles with no act, and the run
-/// stops.
 async fn record_a_settlement_without_an_act(journal_base: &Path, app: App) -> Result<PathBuf> {
     let (handle, run) = build(journal_base, 1, 3, app).await?;
     wait_for_running(&handle).await?;
@@ -873,10 +857,6 @@ async fn record_a_settlement_without_an_act(journal_base: &Path, app: App) -> Re
     Ok(r0)
 }
 
-/// FLOWIP-134k B11: an input settled without an act, by an empty completion
-/// or a handler error after the stage's last other act, leaves an act a
-/// changed build must reproduce, and the plain command continues the refused
-/// run with the recorded value (B10).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_changed_value_that_acts_on_an_input_settled_without_an_act_refuses_resume() -> Result<()>
 {
@@ -970,8 +950,6 @@ async fn strict_replay_with_a_changed_value_proceeds_and_verify_reports_the_diff
     };
 
     {
-        // A stopped recording replays without the override, so `--verify`
-        // can certify against it.
         let plain = ReplayBootstrap {
             allow_incomplete_archive: false,
             ..archive(r0.clone(), ReplayVerb::Replay)
@@ -1141,8 +1119,6 @@ async fn a_changed_app_path_refuses_an_interrupted_source_and_reaches_the_footer
         FailureEvidence::DepartedFromArchive
     );
 
-    // FLOWIP-134k B10: with the recorded input restored, the plain command
-    // continues the refused run.
     let r1 = std::fs::canonicalize(r1)?;
     {
         let _bootstrap = install_bootstrap_config(

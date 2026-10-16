@@ -178,11 +178,6 @@ pub(crate) fn publish_claim(
     }
 }
 
-/// Refuse to resume `run` unless it is the head of its history: no claim, a
-/// parent claim naming it unless it recorded reconstruction completion, and a
-/// location that can hold its claim. Liveness is probed first and decided by
-/// Core's still-running row, so a live run skips every check here
-/// (FLOWIP-134k B9). Returns whether a journal writer is live.
 pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayError> {
     if has_live_writer(run, manifest)? {
         return Ok(true);

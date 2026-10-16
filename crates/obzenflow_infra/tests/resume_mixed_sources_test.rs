@@ -1053,8 +1053,6 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
     assert_eq!(resumed_polls.load(Ordering::SeqCst), 0);
     assert!(!recorded_run.join("run_continuation.json").exists());
 
-    // FLOWIP-134k B4: with the source rebuilt, the sink row refuses an
-    // undeclared sink, also from Core before substrate selection.
     let failure = {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
@@ -1104,7 +1102,6 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("the rebuilt flow must resume the refused archive: {e:?}"))?;
-        // The handle keeps the facts admission read, for the footer's offers.
         let facts = handle.archive_flow_evidence();
         assert!(facts.cycle_members.is_empty());
         assert_eq!(

@@ -2241,8 +2241,6 @@ async fn run_cli_flow(journal_base: &Path, args: &[&std::ffi::OsStr]) -> PathBuf
     std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves")
 }
 
-/// Stop the CLI test flow once its source has ended, while a slow sink still
-/// lags it, so the run has work left to resume (FLOWIP-134k §1, B3).
 async fn stop_cli_flow_with_a_lagging_sink(journal_base: &Path) -> PathBuf {
     #[derive(Clone, Debug)]
     struct SlowDiscard;

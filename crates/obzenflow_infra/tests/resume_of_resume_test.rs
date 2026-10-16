@@ -723,10 +723,6 @@ async fn racing_resumes_of_one_archive_cannot_both_proceed() -> Result<()> {
     Ok(())
 }
 
-/// FLOWIP-134i B7: a run still being written refuses to resume until its
-/// process stops; its journal writers' OS locks are the evidence. Infra only
-/// probes liveness, and Core's still-running row refuses it, for both verbs,
-/// before any claim read or writability probe (FLOWIP-134k B9).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_still_being_written_refuses_until_its_process_stops() -> Result<()> {
     use obzenflow_core::journal::archive_actions::{

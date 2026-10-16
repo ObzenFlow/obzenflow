@@ -1977,8 +1977,6 @@ async fn generated_pre_effect_terminal_keeps_reconstruction_track_only() {
 
 #[test]
 fn lineage_histories_join_per_cursor_and_refuse_conflicting_terminals() {
-    // FLOWIP-134i B6: a torn resume's history joins its ancestor's per cursor;
-    // the stage's archived acts join by identity prefix (FLOWIP-134k B7).
     let record = |input_seq: u64, value: u64| EffectRecord {
         observation:
             obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
@@ -2281,7 +2279,6 @@ async fn affine_scope_matrix_histories(
     (completed_history, in_doubt_history)
 }
 
-/// Rows other than stage control, such as a resume's crossing marker.
 fn effect_rows(journal: &MemoryJournal<ChainEvent>) -> usize {
     journal
         .events()
@@ -3024,7 +3021,6 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
     );
 }
 
-/// The input a settlement row settled, or `None` for any other row.
 fn settlement_input(event: &ChainEvent) -> Option<u64> {
     let provenance = event.effect_provenance.as_ref()?;
     (provenance.descriptor.effect_type.as_str() == super::acts::SETTLEMENT_EFFECT_TYPE
@@ -6931,8 +6927,6 @@ type ComparableEffectJournalEntry = (
 fn comparable_effect_journal(
     journal: &MemoryJournal<ChainEvent>,
 ) -> Vec<ComparableEffectJournalEntry> {
-    // A resume's crossing marker is stage control, not effect evidence
-    // (FLOWIP-134k §3).
     journal
         .events()
         .into_iter()
@@ -8680,9 +8674,6 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
     );
 }
 
-// FLOWIP-134k B1, B2, B7, §4: a resumed stage takes its archived acts in
-// order, crosses before its first live act, and marks every copied row.
-
 fn archived_counting_record(input_seq: u64) -> EffectRecord {
     EffectRecord {
         observation:
@@ -8720,8 +8711,6 @@ fn resumed_context(
     ctx
 }
 
-/// A recorded input, which carries the replay provenance a resume stamps on
-/// re-admitted source rows.
 fn recorded_parent() -> JournalRecord<ChainPayload> {
     let mut event = ChainEventFactory::data_event(
         WriterId::from(StageId::new()),

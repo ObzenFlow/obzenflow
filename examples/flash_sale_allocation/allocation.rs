@@ -73,8 +73,6 @@ impl Allocator {
         }
     }
 
-    /// How long the allocator takes over each live order. A reproduced
-    /// order decides at once.
     pub fn with_reservation_pace(mut self, reservation_pace: Duration) -> Self {
         self.reservation_pace = reservation_pace;
         self

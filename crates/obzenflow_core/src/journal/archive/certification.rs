@@ -2,15 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Order certification decides which stages reproduce their delivery order
-//! position by position (FLOWIP-095j).
-//!
-//! A pure walk over each run's inbound edges and delivery orders, which must
-//! match in both. A replay reproduces every order except `unordered`.
-//! Independent runs agree only where the order is a function of the inputs,
-//! so a recorded stage or ancestor is reported instead of compared. The
-//! verifier compares runs with it, and the flow builder decides with it which
-//! sink edges a resume reproduces (FLOWIP-134k B3).
+//! Order certification decides which stages of two runs reproduce their
+//! delivery order position by position. A replay reproduces every order except
+//! `unordered`; independent runs agree only where the order follows from the inputs.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -28,9 +22,8 @@ pub enum Comparison {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageCertification {
     Certified,
-    /// Not positionally comparable. `blocking` names every ancestor, possibly
-    /// the stage itself, whose delivery order prevents certification; at
-    /// least one is unordered or differs between the runs.
+    /// Not positionally comparable. `blocking` names the stage or ancestors whose
+    /// delivery order is unordered or differs between the runs.
     NotOrderCertified {
         blocking: Vec<String>,
     },
@@ -86,7 +79,7 @@ enum Blocker {
 }
 
 /// Compute certification for every stage of `candidate` against two run
-/// manifests. The verifier validates stage-set and inbound equality first.
+/// manifests.
 pub fn certify(
     baseline: &RunManifest,
     candidate: &RunManifest,
@@ -95,9 +88,8 @@ pub fn certify(
     certify_orders(&baseline.into(), &candidate.into(), comparison)
 }
 
-/// Compute certification for every stage of `candidate`. A stage blocks when
-/// the baseline lacks it, records other inbound edges or another delivery
-/// order, or its order is unordered.
+/// Compute certification for every stage of `candidate`. A stage blocks when the
+/// baseline lacks it, its inbound edges or delivery order differ, or it is unordered.
 pub fn certify_orders(
     baseline: &StageOrders,
     candidate: &StageOrders,
@@ -325,8 +317,6 @@ mod tests {
         }
     }
 
-    /// FLOWIP-134k B3: changed inbound edges, or a stage the baseline lacks,
-    /// block the stage and everything below it.
     #[test]
     fn changed_inbound_edges_and_a_missing_stage_block() {
         let baseline = orders(&[

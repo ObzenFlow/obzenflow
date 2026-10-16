@@ -113,7 +113,6 @@ enum ReconstructionRefusal {
     Unrecorded {
         cursor: EffectCursor,
     },
-    /// A resumed act departs from the archive before it ends (FLOWIP-134k B7).
     Departed {
         reason: obzenflow_core::event::StageFatalReason,
         detail: String,
@@ -122,9 +121,6 @@ enum ReconstructionRefusal {
     UndecodableOutcome(EffectError),
 }
 
-/// A value the runtime records under an invocation's next cursor: a handler's
-/// capture, or the settlement of an input it settled without an act
-/// (FLOWIP-134k B11).
 #[derive(Debug, Clone, Copy)]
 enum RecordedValue {
     Capture(&'static str),
@@ -140,8 +136,6 @@ impl RecordedValue {
     }
 }
 
-/// Whether a resume reproduces an act or runs it live (FLOWIP-134k B7). Only
-/// a resume takes acts in order; a live run and a strict replay do not check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActPlan {
     Unchecked,
@@ -149,9 +143,6 @@ enum ActPlan {
     Live,
 }
 
-/// Where a committed effect row came from (FLOWIP-134k §4): copied or
-/// rematerialized from the archive, which `replay_context` names, or written
-/// by live work, which carries none whatever its input's lineage.
 #[derive(Clone, Copy)]
 enum RowLineage<'a> {
     Live,
@@ -193,9 +184,6 @@ impl ReconstructionRefusal {
     }
 }
 
-/// The refusal for a resumed stage whose recorded input ended, at natural EOF
-/// or a watermark that completes its frontier, with archived acts left
-/// (FLOWIP-134k B7). A drain or stop never checks.
 pub(crate) fn unreproduced_acts_fatal(
     history: Option<&Arc<EffectHistory>>,
     execution: &crate::execution::RuntimeExecution,
@@ -219,8 +207,6 @@ pub(crate) fn unreproduced_acts_fatal(
     ))
 }
 
-/// A resume's act check and the cursor's history must agree: an archived act
-/// has history, and a live act has none (FLOWIP-134k B7).
 fn act_plan_mismatch(
     plan: ActPlan,
     selection: &EffectHistorySelection,
@@ -295,7 +281,6 @@ pub(crate) struct EffectsCore {
     next_output_ordinal: EffectOutputOrdinal,
     routed_output_fact_count: usize,
     committed_facts: Vec<ChainEvent>,
-    /// Facts already drained for a stateful fold, which still count as acts.
     drained_facts: usize,
     halt: Option<AuthoringHalt>,
 }
@@ -453,10 +438,6 @@ impl EffectsCore {
         &self.ctx.stage_key
     }
 
-    /// True while the invocation reproduces archived acts: always in a strict
-    /// replay, never live, and in a resume while the stage has archived acts
-    /// left, unless the only one left is its next effect's in-doubt attempt
-    /// (FLOWIP-134k B1, B7).
     pub(crate) fn is_replaying(&self) -> bool {
         let reconstructing =
             self.ctx
@@ -479,8 +460,6 @@ impl EffectsCore {
         }
     }
 
-    /// The namespace this stage's identities mint in (FLOWIP-134k B8): the
-    /// one its history records, or this run's own in a live run.
     fn namespace(&self) -> String {
         self.ctx
             .effect_history
@@ -498,9 +477,6 @@ impl EffectsCore {
         )
     }
 
-    /// Take `offered` against the stage's archived acts. Only a resume takes
-    /// them in order (FLOWIP-134k B7): an act that departs from the archive
-    /// before it ends refuses here, before any of its rows or calls.
     fn take_act(
         &mut self,
         offered: super::ActKey,
@@ -529,8 +505,6 @@ impl EffectsCore {
         let refusal = match acts.take(&offered) {
             super::ActCheck::Reproduce => return Ok(ActPlan::Reproduce),
             super::ActCheck::Live => return Ok(ActPlan::Live),
-            // Settling without the act the archive holds next drops that
-            // act (FLOWIP-134k B11).
             super::ActCheck::Missing { next } if settling => ReconstructionRefusal::Departed {
                 reason: unused(&next),
                 detail: next.skipped_detail(&self.ctx.stage_key),
@@ -567,9 +541,6 @@ impl EffectsCore {
         Err(self.refuse(refusal))
     }
 
-    /// Cross before the first row of the stage's first live act
-    /// (FLOWIP-134k §3): one marker for each generation the stage has not
-    /// crossed, so its readers advance one generation at a time (F11).
     async fn cross_before_live_act(&mut self) -> Result<(), EffectError> {
         let Some(control) = self.ctx.runtime_execution.resume_control().cloned() else {
             return Ok(());
@@ -596,9 +567,6 @@ impl EffectsCore {
         Ok(())
     }
 
-    /// Re-author each crossing the archive recorded before `row`, at its
-    /// recorded generation, unless the stage already crossed it here
-    /// (FLOWIP-134k B2).
     async fn reauthor_recorded_crossings(&mut self, row: super::ActRow) -> Result<(), EffectError> {
         let Some(history) = self.ctx.effect_history.clone() else {
             return Ok(());
@@ -664,9 +632,6 @@ impl EffectsCore {
         Ok(())
     }
 
-    /// Apply `lineage` to a row about to be committed (FLOWIP-134k §4). A
-    /// reproduced row names the archived row it copies, by the identity it
-    /// keeps, and the run and stage that recorded it.
     fn mark_lineage(&self, event: &mut ChainEvent, lineage: RowLineage<'_>) {
         match lineage {
             RowLineage::Live => event.replay_context = None,
@@ -745,7 +710,6 @@ impl EffectsCore {
         };
         let (reason, detail) = match self.next_cursor_selection().await {
             Ok((_, EffectHistorySelection::Miss)) => return None,
-            // A resume names the archived act it skipped (FLOWIP-134k B7).
             Ok((_, _)) if resumed_next.is_some() => {
                 let skipped = resumed_next.expect("checked above");
                 (
@@ -926,8 +890,6 @@ impl EffectsCore {
         self.emit_fact(fact, false).await
     }
 
-    /// Emit one fact before the invocation's first effect, requesting live
-    /// admission only when the fact itself is live (FLOWIP-134k B1).
     pub(crate) async fn emit_pre_effect<T>(&mut self, fact: T) -> Result<(), EffectError>
     where
         T: TypedPayload,
@@ -981,9 +943,6 @@ impl EffectsCore {
                 super::acts::display_name(&event_type)
             )
         })?;
-        // A fact the archive holds is rematerialized and says so; a live
-        // fact carries no replay provenance; any other computed from
-        // recorded input keeps its input's (FLOWIP-134k §4).
         let held = self
             .ctx
             .effect_history
@@ -1250,7 +1209,6 @@ impl EffectsCore {
                 }
                 self.append_replayed_prefix(&cursor, &selected, descriptor.clone())
                     .await?;
-                // The re-attempt is the stage's first live act (B1).
                 self.cross_before_live_act().await?;
                 prior_attempts = attempts;
             }
@@ -2179,9 +2137,6 @@ impl EffectsCore {
             .await
     }
 
-    /// Record that an invocation which authored no act settled its input
-    /// (FLOWIP-134k B11), so a resume tells a settled input from an unread
-    /// one and takes it in order like any act.
     pub(crate) async fn settle_without_act(&mut self) -> Result<(), EffectError> {
         if self.authored_act() {
             return Ok(());
@@ -2209,8 +2164,6 @@ impl EffectsCore {
                 self.ctx.stage_logic_version.clone(),
                 hash_json_value(&Value::String(label.to_string()))?,
             ),
-            // A settlement's identity never depends on the handler's logic
-            // version.
             RecordedValue::Settlement => EffectDescriptor::new(
                 super::acts::SETTLEMENT_EFFECT_TYPE,
                 "settlement",

@@ -39,9 +39,6 @@ pub struct DiskReplayArchive {
     status_derivation: StatusDerivation,
     allow_incomplete_archive: bool,
     read_write_lock: Arc<RwLock<()>>,
-    /// Max generation with a recorded catch-up boundary in any source or
-    /// effect-stage journal (FLOWIP-120n, FLOWIP-134k B2), scanned once at
-    /// open. See [`scan_source_journals`].
     max_recorded_generation: obzenflow_core::ReaderGeneration,
     /// Each source journal's committed EOF kind (FLOWIP-134i B8), from the
     /// same scan; under a merged lineage, the kind ending its merged records.
@@ -57,16 +54,10 @@ pub struct DiskReplayArchive {
     reconstruction_completed: Option<u64>,
     /// The runs a resume of this one merges with, nearest first (B6).
     ancestors: Vec<Arc<DiskReplayArchive>>,
-    /// Whether a journal of the run still had a live writer at open; Core's
-    /// still-running row decides it (FLOWIP-134k §1, B9).
     live_writer: bool,
-    /// How a failed resume failed, from its error journals (FLOWIP-134k B10).
     failure: obzenflow_core::journal::archive_actions::FailureEvidence,
 }
 
-/// Whether opening an archive probes its journal writers' locks. The footer
-/// opens the run its own process just finished writing, whose locks that
-/// process may still hold, so it knows the run stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Liveness {
     Probe,
@@ -74,8 +65,8 @@ enum Liveness {
 }
 
 impl DiskReplayArchive {
-    /// Open an archive to replay it. Status never refuses here; Core's
-    /// admission decides from [`Self::evidence`] (FLOWIP-134k §1).
+    /// Open an archive to replay it. The archive's status never refuses here;
+    /// admission decides from [`Self::evidence`].
     pub async fn open(
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
@@ -100,7 +91,7 @@ impl DiskReplayArchive {
         .await
     }
 
-    /// The evidence Core's archive admission reads (FLOWIP-134k §1).
+    /// The evidence archive admission reads.
     pub fn evidence(&self) -> obzenflow_core::journal::archive_actions::ArchiveEvidence {
         use obzenflow_core::journal::archive_actions::{ArchiveEvidence, SourceEvidence};
         ArchiveEvidence {
@@ -121,8 +112,7 @@ impl DiskReplayArchive {
     }
 
     /// The evidence of a run this process just finished writing, as `verb`
-    /// would open it, for the footer's offers (FLOWIP-134k §2, B4). The run
-    /// is known to have stopped, and it is the head of its history.
+    /// would open it. The run must have stopped and be the head of its history.
     pub async fn written_run_evidence(
         run: PathBuf,
         verb: obzenflow_core::journal::archive_actions::ReplayVerb,
@@ -237,8 +227,6 @@ impl DiskReplayArchive {
         super::identity::validate_archive_identities(&archive_path, &manifest)
             .map_err(causal_admission_error)?;
 
-        // A live run's journals are still being written, and Core refuses it
-        // before reading anything else they record (FLOWIP-134k §1).
         if live_writer {
             return Ok(Self {
                 archive_path,
@@ -341,13 +329,9 @@ impl DiskReplayArchive {
         })
     }
 
-    /// Open an archive to resume it. Resuming a replay resumes the run it
-    /// reproduces (FLOWIP-134i B13), and only the head of a history resumes
-    /// (B7, B12). A resumed run that never recorded reconstruction completion
-    /// merges with the runs it resumed from, back to the first that did. Every
-    /// source's records must agree across them; a missing, unreadable or
-    /// disagreeing ancestor refuses before any run starts (B6). A live run is
-    /// opened without any of these checks, for Core to refuse (FLOWIP-134k B9).
+    /// Open the head of a history to resume it. A replay resolves to the run it
+    /// reproduces, and a resume whose reconstruction never completed merges
+    /// with its ancestors, which must agree. A live run opens without these checks.
     pub async fn open_for_resume(
         archive_path: PathBuf,
         allow_incomplete_archive: bool,
@@ -394,7 +378,6 @@ impl DiskReplayArchive {
                     ancestor,
                 });
             }
-            // A claimed ancestor never runs again, so only the head is probed.
             let opened = Self::open_replay(ancestor.clone(), true, Liveness::Stopped)
                 .await
                 .map_err(|error| ReplayError::AncestorUnreadable {
@@ -455,8 +438,6 @@ impl DiskReplayArchive {
         if ancestors.is_empty() {
             return Ok(());
         }
-        // FLOWIP-134k B8: members that record a namespace must agree; one
-        // written before B8 records none and is not compared.
         let mut recorded = self
             .manifest
             .recorded_flow_id
@@ -576,7 +557,6 @@ impl ReplayArchive for DiskReplayArchive {
             });
         }
 
-        // Readers trust Core's admitted decision (FLOWIP-134k §1).
         let data_path = self.archive_path.join(&stage_info.data_journal_file);
         if !data_path.exists() {
             return Err(ReplayError::MissingJournal { path: data_path });
@@ -764,11 +744,8 @@ impl ReplayArchive for DiskReplayArchive {
         &self.manifest.bounded_direct_fact_admission
     }
 
-    /// Journal-scan authority (FLOWIP-120n): the max generation with a
-    /// recorded catch-up boundary in any source or effect-stage journal
-    /// (FLOWIP-134k B2), computed at open.
-    /// The manifest's resume field records the generation the archived run
-    /// ENTERED at bootstrap, an upper bound a torn catch-up never records.
+    /// The highest generation with a recorded catch-up boundary in any source
+    /// or effect-stage journal, scanned at open.
     fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {
         self.max_recorded_generation
     }
@@ -919,9 +896,6 @@ fn scan_source_journals(
     let mut replayable_by_source = HashMap::new();
     let mut frontier_by_source = HashMap::new();
     for (stage_key, stage_info) in &manifest.stages {
-        // FLOWIP-134k B2: a stage with an effect runtime crosses before its
-        // first live act, so its markers count toward the recorded
-        // generation too.
         if stage_info.is_effectful && !stage_info.stage_type.is_source() {
             let path = archive_path.join(&stage_info.data_journal_file);
             max_generation = max_generation.max(scan_marker_generation(&path, policy)?);
@@ -1021,9 +995,6 @@ fn scan_source_journals(
     })
 }
 
-/// The highest catch-up generation a stage journal's own markers recorded;
-/// zero for a missing journal or one that recorded none. Like the source
-/// scan, it stops at a corrupt record, which the resume read path refuses.
 fn scan_marker_generation(path: &Path, policy: ReadPolicy) -> Result<u64, ReplayError> {
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
     use obzenflow_core::event::ChainPayload;
@@ -1078,9 +1049,6 @@ fn scan_marker_generation(path: &Path, policy: ReadPolicy) -> Result<u64, Replay
     Ok(max_generation)
 }
 
-/// How a failed resume failed, folded by Core from every stage's error journal
-/// (FLOWIP-134k B10). A record the scan cannot read leaves the run's failure
-/// unclassified, so admission keeps the override.
 fn scan_failure_evidence(
     archive_path: &Path,
     manifest: &RunManifest,
@@ -1139,8 +1107,6 @@ pub(crate) struct SystemLogScan {
     /// The generation whose reconstruction the run recorded as complete
     /// (FLOWIP-134i B6).
     pub(crate) reconstruction_completed: Option<u64>,
-    /// Whether the terminal record that derived the status is a failure that
-    /// names a contract violation (FLOWIP-134k B10).
     pub(crate) contract_violation: bool,
 }
 

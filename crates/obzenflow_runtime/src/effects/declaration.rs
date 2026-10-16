@@ -20,7 +20,6 @@ pub enum EffectSafety {
     Transactional,
 }
 
-// Core owns the declaration archive admission reads (FLOWIP-134k B4).
 pub use obzenflow_core::journal::archive_actions::SinkRedeliverySafety;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

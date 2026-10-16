@@ -25,9 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 static NEXT_PENDING_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
-/// FLOWIP-120i per-delivery provenance projection, derived from the
-/// delivery's own execution scope rather than the row's inherited lineage
-/// (FLOWIP-134k §4).
+/// A delivery's provenance, derived from its own execution scope alone.
 #[derive(Debug, Clone)]
 pub struct DeliveryContext {
     provenance: DeliveryProvenance,

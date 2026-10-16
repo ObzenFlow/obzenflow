@@ -221,9 +221,6 @@ impl RecordedSourceFrontier {
     }
 }
 
-/// The continuation a source stage was admitted with. A positioned source
-/// carries the position version its connector reads (FLOWIP-134i B22); a
-/// reattaching one, the guarantee it records (FLOWIP-122i).
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceContinuation {
@@ -238,8 +235,6 @@ pub enum SourceContinuation {
     },
 }
 
-/// What refuses a source's interrupted input: its connector's declaration, or
-/// a direct handler, which declares none (FLOWIP-122i).
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusedBy {
@@ -247,17 +242,13 @@ pub enum RefusedBy {
     Handler,
 }
 
-/// Why a resume refuses a source at archive admission, before any claim.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeRefusal {
-    /// The source stopped with its input unfinished, and its connector or
-    /// handler cannot continue interrupted input (B8).
-    UnfinishedInput { by: RefusedBy },
-    /// The source recorded its input without positions (B22).
+    UnfinishedInput {
+        by: RefusedBy,
+    },
     RecordedWithoutPositions,
-    /// The source recorded positions in another version of its connector's
-    /// format (B22).
     PositionVersion {
         recorded: NonZeroU32,
         expected: NonZeroU32,
@@ -265,10 +256,6 @@ pub enum ResumeRefusal {
 }
 
 impl SourceContinuation {
-    /// Why a resume must refuse this source, from the EOF and frontier its
-    /// archive recorded. A naturally completed source replays its completion
-    /// whatever its connector; `Poison` and `Truncated` are not natural
-    /// completion.
     pub fn resume_refusal(
         self,
         recorded_eof: Option<crate::event::payloads::flow_control_payload::EofKind>,
@@ -463,8 +450,6 @@ mod tests {
         }
     }
 
-    /// B15, B22: a positioned source that completed naturally replays its
-    /// completion, and one that never pinned or admitted anything starts.
     #[test]
     fn seek_admits_completion_and_a_never_pinned_start() {
         let seek = SourceContinuation::Seek {

@@ -2,13 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A resumed sink classifies each delivery against its own receipts
-//! (FLOWIP-134k B3). On each upstream edge whose order the resume reproduces,
-//! the archive's receipts form a prefix of settled inputs, keyed by 095g's
-//! position: the selected-type delivered ordinal on that edge. A delivery
-//! past the prefix is a first delivery and runs live; one inside it follows
-//! generation.
-
 use crate::execution::DeliverySettlement;
 use crate::stages::SinkResumeEdges;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
@@ -18,8 +11,6 @@ use obzenflow_core::{ChainEvent, JournalWriterId, StageId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// One edge's inputs in delivery order, each settled once a terminal receipt
-/// names it. A buffered input without one is unsettled (095g §5).
 #[derive(Debug, Default)]
 struct EdgeReceipts {
     inputs: Vec<(JournalCommitRef, bool)>,
@@ -41,8 +32,6 @@ impl EdgeReceipts {
     }
 }
 
-/// Fold one archived sink journal into each upstream edge's settled prefix,
-/// by upstream stage key.
 pub(crate) fn settled_prefixes<'a>(
     records: impl IntoIterator<Item = &'a ChainEvent>,
     journal_stages: &HashMap<JournalWriterId, String>,
@@ -67,8 +56,6 @@ pub(crate) fn settled_prefixes<'a>(
         .collect()
 }
 
-/// Each edge's longest settled prefix across a resume's merged lineage
-/// (FLOWIP-134i B6).
 pub(crate) async fn load_settled_prefixes(
     archive: &Arc<dyn ReplayArchive>,
     stage_key: &str,
@@ -98,8 +85,6 @@ pub(crate) async fn load_settled_prefixes(
     Ok(settled)
 }
 
-/// A resumed sink's receipt classification and its progress through each
-/// certified edge's settled prefix.
 #[derive(Debug, Default)]
 pub(crate) struct SinkReceiptClassification {
     edges: SinkResumeEdges,
@@ -132,8 +117,6 @@ impl SinkReceiptClassification {
             .map(|key| self.settled.get(key).copied().unwrap_or(0))
     }
 
-    /// Classify the next data delivery from `upstream` by its ordinal on that
-    /// edge.
     pub(crate) fn classify(&mut self, upstream: StageId) -> DeliverySettlement {
         let ordinal = self.delivered.entry(upstream).or_default();
         let position = *ordinal;
@@ -145,10 +128,6 @@ impl SinkReceiptClassification {
         }
     }
 
-    /// Whether the sink records its boundary at this first delivery: once,
-    /// after every certified edge re-delivered its settled prefix, so its
-    /// heartbeats start with live work and the completion record never
-    /// precedes a re-delivery a later resume needs.
     pub(crate) fn take_boundary(&mut self) -> bool {
         if self.boundary_recorded {
             return false;

@@ -452,7 +452,6 @@ impl LiveGuarantee for AtMostOnce {
     const GUARANTEE: ReattachGuarantee = ReattachGuarantee::AtMostOnce;
 }
 
-// Core owns the declarations archive admission reads (FLOWIP-134k B4).
 pub use obzenflow_core::source::{RefusedBy, ResumeRefusal, SourceContinuation};
 
 mod sealed {

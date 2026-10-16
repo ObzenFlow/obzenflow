@@ -81,8 +81,6 @@ pub struct SubscriptionFactory {
     /// Pre-computed stage names for all potential upstreams
     stage_names: HashMap<StageId, String>,
     advisory_contract_upstreams: HashSet<StageId>,
-    /// Stable current-to-archive stage identities used by contract authorship
-    /// during replay and resume, one per member of a merged lineage.
     archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
     /// The generation this run entered at, 0 live and the archive's maximum
     /// recorded generation plus one on replay or resume. Copied into every
@@ -415,15 +413,13 @@ pub struct StageResources {
     /// stage (events between heartbeats; 0 disables).
     pub heartbeat_interval: u64,
 
-    /// A resumed sink's inbound edges whose order the resume reproduces
-    /// (FLOWIP-134k B3); `None` outside a resume and for other stages.
+    /// A resumed sink's certified inbound edges; `None` outside a resume and
+    /// for other stages.
     pub sink_resume_edges: Option<SinkResumeEdges>,
 }
 
-/// A resumed sink's inbound edges that order certification passed against
-/// every archive the resume reads, by current upstream stage id, each with
-/// its upstream stage key (FLOWIP-134k B3). Its receipts classify deliveries
-/// on these edges; every other edge follows generation.
+/// A resumed sink's inbound edges whose order certification passed against every
+/// archive the resume reads, by current upstream stage id, each with its stage key.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SinkResumeEdges {
     pub certified: HashMap<StageId, String>,
@@ -483,8 +479,7 @@ impl StageResourcesBuilder {
         }
     }
 
-    /// Each resumed sink's certified inbound edges, by sink stage id
-    /// (FLOWIP-134k B3).
+    /// Each resumed sink's certified inbound edges, by sink stage id.
     pub fn with_sink_resume_edges(mut self, edges: HashMap<StageId, SinkResumeEdges>) -> Self {
         self.sink_resume_edges = edges;
         self
@@ -610,9 +605,6 @@ impl StageResourcesBuilder {
             }
         };
 
-        // A merged lineage re-admits each source's rows from the member that
-        // holds them, so a stage's archived authors are its id in every
-        // member (FLOWIP-134i B6).
         let mut archived_stage_ids_by_current = HashMap::new();
         if let Some(archive) = &self.replay_archive {
             let ancestors = archive.ancestors();

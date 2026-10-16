@@ -2257,10 +2257,8 @@ pub fn validate_stage_typing_metadata(
     Ok(())
 }
 
-/// The flow's own facts Core's archive admission reads (FLOWIP-134k B4): its
-/// cycle members (FLOWIP-120n F13), each source's declared continuation
-/// (FLOWIP-134i B8, B22) and each sink's redelivery safety (FLOWIP-120n F16,
-/// FLOWIP-120v). Derived on every build, so the footer judges the flow it ran.
+/// The facts archive admission reads from the flow itself, namely its cycle
+/// members, each source's declared continuation and each sink's redelivery safety.
 pub fn archive_flow_evidence(
     topology: &obzenflow_topology::Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
@@ -2273,7 +2271,6 @@ pub fn archive_flow_evidence(
     flow_evidence_with_cycle(cycle_members, descriptors)
 }
 
-/// [`archive_flow_evidence`] over cycle members already found.
 pub(crate) fn flow_evidence_with_cycle(
     mut cycle_members: Vec<String>,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
@@ -2281,12 +2278,10 @@ pub(crate) fn flow_evidence_with_cycle(
     cycle_members.sort();
     let mut sources = Vec::new();
     let mut sinks = Vec::new();
-    // Keyed by stage key, as the archive's manifest records them.
     for descriptor in descriptors.values() {
         if let Some(continuation) = descriptor.source_continuation() {
             sources.push((descriptor.name().to_string(), continuation));
         }
-        // Only plain sinks exist (FLOWIP-120v removed the effectful surface).
         if descriptor.stage_type() == StageType::Sink {
             sinks.push((
                 descriptor.name().to_string(),
@@ -2305,7 +2300,8 @@ pub(crate) fn flow_evidence_with_cycle(
     }
 }
 
-/// Name each sink admitted only under `allow_duplicate_sink_delivery`.
+/// Logs a warning naming each sink admitted only under
+/// `allow_duplicate_sink_delivery`.
 pub fn warn_duplicate_sink_delivery(
     verb: obzenflow_runtime::bootstrap::ReplayVerb,
     admission: &obzenflow_core::journal::archive_actions::Admission,

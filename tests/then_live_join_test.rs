@@ -202,8 +202,6 @@ async fn wait_for_postings(sink: &Collect, count: usize) -> Result<()> {
     .map_err(|_| anyhow!("timeout waiting for {count} postings"))
 }
 
-/// Consumes the handle, which holds the run's journal writers: a replay of a
-/// run whose writers are open refuses as still running (FLOWIP-134k §1).
 async fn stop(handle: FlowHandle) -> Result<()> {
     handle.stop_graceful(Duration::from_secs(10)).await?;
     tokio::time::timeout(Duration::from_secs(15), handle.wait_for_completion())

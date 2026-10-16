@@ -358,8 +358,6 @@ async fn open_gates_required_capabilities_before_journal_decode() {
     }
 }
 
-/// FLOWIP-134k §1: the opener reports a failed status as evidence, and
-/// Core's admission refuses it without the override.
 #[tokio::test]
 async fn open_reports_a_failed_status_for_core_to_refuse() {
     let dir = tempdir().unwrap();

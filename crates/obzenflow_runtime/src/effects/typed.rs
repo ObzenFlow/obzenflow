@@ -202,7 +202,6 @@ where
         T: TypedPayload + OutputAllowsFact<Output, At>,
     {
         self.core.preflight_next_effect_cursor_is_empty().await?;
-        // Live admission follows the fact's own origin (FLOWIP-134k B1).
         self.core.emit_pre_effect(fact).await?;
         self.complete()
     }
@@ -217,9 +216,6 @@ where
         self.core.authoring_halt_fatal()
     }
 
-    /// End a non-fatal invocation: record the settlement of an input it
-    /// settled without an act (FLOWIP-134k B11), then check that it skipped
-    /// no recorded effect. A refusal comes back as the stage's fatal.
     pub(crate) async fn end_of_invocation_fatal(
         &mut self,
     ) -> Result<Option<crate::stages::common::handler_error::StageFatal>, EffectError> {

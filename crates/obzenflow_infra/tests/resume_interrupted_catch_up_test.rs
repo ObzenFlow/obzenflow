@@ -780,8 +780,6 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
         r0.join("run_continuation.json"),
         stranger.join("run_continuation.json"),
     )?;
-    // FLOWIP-134k B8: a fresh recording mints in its own namespace, so the
-    // merge refuses before comparing any stage.
     match DiskReplayArchive::open_for_resume(r1.clone(), true).await {
         Err(ReplayError::NamespaceDisagrees { archive, ancestor }) => {
             assert_eq!((archive, ancestor), (torn.clone(), stranger.clone()));
@@ -789,8 +787,6 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
         Err(other) => panic!("expected the stranger's namespace to refuse: {other}"),
         Ok(_) => panic!("a stranger's namespace must refuse the resume"),
     }
-    // A member written before B8 records no namespace and is not compared,
-    // so the stranger still disagrees on its events.
     let stranger_manifest = stranger.join("run_manifest.json");
     let mut unrecorded: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&stranger_manifest)?)?;

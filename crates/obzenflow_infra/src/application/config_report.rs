@@ -105,8 +105,6 @@ pub(super) async fn refusal_footer(run_dir: &Path, changes: &[RunConfigChanges])
     )
 }
 
-/// The plain command that continues a resume which refused for departing from
-/// its archive, when Core admits it for the flow just built (FLOWIP-134k B10).
 pub(super) async fn resume_remedy(
     flow: &FlowHandle,
     locator: &CurrentRunLocator,

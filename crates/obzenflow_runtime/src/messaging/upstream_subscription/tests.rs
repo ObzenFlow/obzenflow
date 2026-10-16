@@ -2247,9 +2247,6 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     assert!(failure_reason.is_none());
 }
 
-/// FLOWIP-134i B6: a merged lineage re-admits a source's rows from the member
-/// that holds them, so the rows name more than one archived author. A reader
-/// whose aliases cover only the head undercounts and fails its EOF contract.
 #[tokio::test]
 async fn a_merged_lineage_aliases_the_upstream_in_every_member() {
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;

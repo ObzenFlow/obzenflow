@@ -195,7 +195,6 @@ where
                     (EffectOutcomeKind::RecordedReply, 0, vec![event], Vec::new())
                 }
             };
-        // A transactional outcome is always live work (FLOWIP-134k §4).
         for event in &mut events {
             event.replay_context = None;
         }
@@ -574,8 +573,6 @@ pub(super) fn build_domain_effect_success_facts(
     Ok(events)
 }
 
-/// Commit outcome facts built by [`build_domain_effect_success_facts`], one
-/// append each.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn append_domain_effect_success_facts(
     data_journal: &Arc<dyn Journal<ChainEvent>>,

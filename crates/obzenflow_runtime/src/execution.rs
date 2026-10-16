@@ -123,16 +123,17 @@ pub enum UnrecordedEffect {
     RecordingEnded,
 }
 
-/// How a resumed sink's receipts classify one delivery (FLOWIP-134k B3).
+/// How a resumed sink's receipts classify one delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliverySettlement {
-    /// Past the settled prefix of an edge whose order the resume reproduces:
-    /// the sink never delivered this row, so the delivery is live.
+    /// Past the settled prefix of a certified edge; the sink never delivered
+    /// this input, so the delivery runs live.
     FirstDelivery,
-    /// Inside the settled prefix: a re-delivery, which follows generation.
+    /// Inside a certified edge's settled prefix; a re-delivery, scoped by its
+    /// generation.
     Settled,
-    /// On an edge certification did not pass, or outside a resume: the
-    /// delivery follows generation.
+    /// Outside a resume, or on an edge that is not certified; the delivery is
+    /// scoped by its generation.
     Unclassified,
 }
 
@@ -170,8 +171,7 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
         self.stage_scope(stage)
     }
     /// Middleware execution scope for one sink delivery, classified by the
-    /// sink's receipts (FLOWIP-134k B3). Strategies that do not resume ignore
-    /// the classification.
+    /// sink's receipts. Strategies that do not resume ignore the classification.
     fn sink_delivery_scope(
         &self,
         stage: StageId,
@@ -447,11 +447,6 @@ struct Resume {
 
 impl ExecutionStrategy for Resume {
     fn scope_at(&self, at: ExecutionPosition) -> MiddlewareExecutionScope {
-        // Once a stage has crossed, every dispatch at it is live: a stage with
-        // an effect runtime crosses before its first live act even while its
-        // inputs still carry the recorded generation (FLOWIP-134k §3).
-        // Otherwise the phase is the event's generation, carried in band
-        // (F1), and a generation-less dispatch falls back to the frontier.
         if self.state.stage_is_live(at.stage_id) {
             return MiddlewareExecutionScope::LiveHandler;
         }
@@ -488,9 +483,6 @@ impl ExecutionStrategy for Resume {
         generation: Option<ReaderGeneration>,
         settlement: DeliverySettlement,
     ) -> MiddlewareExecutionScope {
-        // A first delivery is live; a re-delivery, or one on an uncertified
-        // edge, follows its generation alone, so receipts only ever move a
-        // delivery from replayed to live (FLOWIP-134k B3).
         match (settlement, generation) {
             (DeliverySettlement::FirstDelivery, _) => MiddlewareExecutionScope::LiveHandler,
             (_, Some(generation)) => self.scope_for_generation(stage, generation),
@@ -498,9 +490,6 @@ impl ExecutionStrategy for Resume {
         }
     }
     fn missing_outcome(&self, _at: ExecutionPosition) -> UnrecordedEffect {
-        // The stage's archived acts, taken in order, decide whether a miss
-        // may run live (FLOWIP-134k B7); the effect runtime refuses one that
-        // departs from the archive before reaching here.
         UnrecordedEffect::Execute
     }
     fn in_doubt_authorizes_attempt(&self) -> bool {
@@ -546,8 +535,7 @@ fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
 }
 
 /// The last catch-up generation each stage authored in this run, shared by
-/// the stage's supervisor and its effect runtime so a crossing is authored
-/// once, whichever reaches it first (FLOWIP-134k §3, B2).
+/// the stage's supervisor and its effect runtime so each crossing is authored once.
 #[derive(Debug, Default)]
 pub struct StageCrossings(Mutex<HashMap<StageId, ReaderGeneration>>);
 
@@ -562,7 +550,7 @@ impl StageCrossings {
             .unwrap_or_default()
     }
 
-    /// Record that `stage` authored `generation`. Monotonic.
+    /// Record that `stage` authored `generation`; a lower generation is ignored.
     pub fn advance(&self, stage: StageId, generation: ReaderGeneration) {
         let mut crossed = self.0.lock().expect("stage crossings lock poisoned");
         let entry = crossed.entry(stage).or_default();
@@ -752,8 +740,7 @@ impl RuntimeExecution {
         }
     }
 
-    /// Scope for one sink delivery, classified by the sink's receipts
-    /// (FLOWIP-134k B3).
+    /// Scope for one sink delivery, classified by the sink's receipts.
     pub fn sink_delivery_scope(
         &self,
         stage_id: StageId,
@@ -1017,9 +1004,6 @@ mod tests {
             Scope::LiveHandler
         );
 
-        // After the stage crosses, every dispatch at it is live, including an
-        // input that still carries the recorded generation (FLOWIP-134k §3).
-        // A position-less signal keeps its own generation.
         control.record_generation_boundary(stage, ReaderGeneration(1));
         assert_eq!(s.scope_at(at(None)), Scope::LiveHandler);
         assert_eq!(
@@ -1032,8 +1016,6 @@ mod tests {
         );
     }
 
-    /// FLOWIP-134k B7: the positional F7 mark is retired; the effect
-    /// runtime's archived acts decide whether a miss may run live.
     #[test]
     fn resume_leaves_an_effect_miss_to_the_archived_acts() {
         let state = Arc::new(ResumeState::new(ReaderGeneration(1)));
