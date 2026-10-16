@@ -81,9 +81,9 @@ pub struct SubscriptionFactory {
     /// Pre-computed stage names for all potential upstreams
     stage_names: HashMap<StageId, String>,
     advisory_contract_upstreams: HashSet<StageId>,
-    /// Stable current-to-archive stage identity used by contract authorship
-    /// during replay and resume.
-    archived_stage_ids_by_current: HashMap<StageId, StageId>,
+    /// Stable current-to-archive stage identities used by contract authorship
+    /// during replay and resume, one per member of a merged lineage.
+    archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
     /// The generation this run entered at, 0 live and the archive's maximum
     /// recorded generation plus one on replay or resume. Copied into every
     /// bound factory.
@@ -121,7 +121,7 @@ pub struct BoundSubscriptionFactory {
     pub owner_label: String,
     advisory_contract_upstreams: HashSet<StageId>,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
-    archived_stage_ids_by_current: HashMap<StageId, StageId>,
+    archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
     composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>>,
     /// Reader-selection policy for built subscriptions (FLOWIP-095d).
@@ -610,8 +610,12 @@ impl StageResourcesBuilder {
             }
         };
 
+        // A merged lineage re-admits each source's rows from the member that
+        // holds them, so a stage's archived authors are its id in every
+        // member (FLOWIP-134i B6).
         let mut archived_stage_ids_by_current = HashMap::new();
         if let Some(archive) = &self.replay_archive {
+            let ancestors = archive.ancestors();
             for stage_info in self.topology.stages() {
                 let current_stage = StageId::from_topology_id(stage_info.id);
                 let archived_stage =
@@ -623,7 +627,13 @@ impl StageResourcesBuilder {
                                 stage_info.name
                             )
                         })?;
-                archived_stage_ids_by_current.insert(current_stage, archived_stage);
+                let mut archived_stages = vec![archived_stage];
+                archived_stages.extend(
+                    ancestors
+                        .iter()
+                        .filter_map(|ancestor| ancestor.archived_stage_id(&stage_info.name).ok()),
+                );
+                archived_stage_ids_by_current.insert(current_stage, archived_stages);
             }
         }
 

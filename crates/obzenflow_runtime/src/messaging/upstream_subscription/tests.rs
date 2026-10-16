@@ -2162,7 +2162,10 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     let mut subscription = UpstreamSubscription::new_with_names("consumer", &upstreams)
         .await
         .unwrap()
-        .with_archived_stage_ids(HashMap::from([(upstream_stage, archived_upstream_stage)]))
+        .with_archived_stage_ids(HashMap::from([(
+            upstream_stage,
+            vec![archived_upstream_stage],
+        )]))
         .with_selected_feeds(selected_feeds)
         .with_contracts(ContractsWiring {
             writer_id: WriterId::from(reader_stage),
@@ -2242,6 +2245,131 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     assert_eq!(*reader_seq, SeqNo(2));
     assert_eq!(*advertised_writer_seq, Some(SeqNo(2)));
     assert!(failure_reason.is_none());
+}
+
+/// FLOWIP-134i B6: a merged lineage re-admits a source's rows from the member
+/// that holds them, so the rows name more than one archived author. A reader
+/// whose aliases cover only the head undercounts and fails its EOF contract.
+#[tokio::test]
+async fn a_merged_lineage_aliases_the_upstream_in_every_member() {
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+    use obzenflow_core::event::provenance::replay_context::ReplayContext;
+
+    let upstream_stage = StageId::new();
+    let head_member = StageId::new();
+    let ancestor_member = StageId::new();
+    let lineage_root_stage = StageId::new();
+    let reader_stage = StageId::new();
+
+    async fn read_all(
+        aliases: Vec<StageId>,
+        upstream_stage: StageId,
+        head_member: StageId,
+        ancestor_member: StageId,
+        lineage_root_stage: StageId,
+        reader_stage: StageId,
+    ) -> (SeqNo, ContractStatus) {
+        let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(upstream_stage)));
+        let contract_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(reader_stage)));
+        for (n, member) in [head_member, head_member, ancestor_member]
+            .into_iter()
+            .enumerate()
+        {
+            let mut replayed = ChainEventFactory::data_event(
+                WriterId::Stage(lineage_root_stage),
+                "test.reading",
+                std::num::NonZeroU32::MIN,
+                json!({ "n": n }),
+            );
+            replayed.replay_context = Some(ReplayContext {
+                original_event_id: replayed.id,
+                original_flow_id: "flow_member".to_string(),
+                original_stage_id: member,
+            });
+            upstream_journal
+                .append(replayed, Default::default())
+                .await
+                .unwrap();
+        }
+        let mut eof = ChainEventFactory::eof_event_with_kind(
+            WriterId::Stage(upstream_stage),
+            EofKind::Natural,
+        );
+        if let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+            &mut eof.payload
+        {
+            *writer_seq = Some(SeqNo(3));
+        }
+        upstream_journal
+            .append(eof, Default::default())
+            .await
+            .unwrap();
+
+        let upstreams = [(upstream_stage, "source".to_string(), upstream_journal)];
+        let mut subscription = UpstreamSubscription::new_with_names("consumer", &upstreams)
+            .await
+            .unwrap()
+            .with_archived_stage_ids(HashMap::from([(upstream_stage, aliases)]))
+            .with_contracts(ContractsWiring {
+                writer_id: WriterId::from(reader_stage),
+                contract_journal,
+                config: ContractConfig::default(),
+                reader_stage: Some(reader_stage),
+                control_plane: Arc::new(NoControlPlane),
+                include_delivery_contract: false,
+                cycle_guard_config: None,
+            })
+            .transport_only();
+        let mut progress = [ReaderProgress::new(upstream_stage)];
+        loop {
+            match subscription
+                .poll_next_with_state("test_fsm", Some(&mut progress))
+                .await
+            {
+                PollResult::Event(_) | PollResult::CursorAdvanced { .. } => {}
+                PollResult::NoEvents => break,
+                PollResult::Error(error) => panic!("unexpected subscription error: {error}"),
+            }
+        }
+        let status = subscription.check_contracts(&mut progress).await;
+        (progress[0].reader_seq, status)
+    }
+
+    let (reader_seq, status) = read_all(
+        vec![head_member, ancestor_member],
+        upstream_stage,
+        head_member,
+        ancestor_member,
+        lineage_root_stage,
+        reader_stage,
+    )
+    .await;
+    assert_eq!(reader_seq, SeqNo(3));
+    assert!(
+        !matches!(status, ContractStatus::Violated { .. }),
+        "every member's rows count: {status:?}"
+    );
+
+    let (reader_seq, status) = read_all(
+        vec![head_member],
+        upstream_stage,
+        head_member,
+        ancestor_member,
+        lineage_root_stage,
+        reader_stage,
+    )
+    .await;
+    assert_eq!(
+        reader_seq,
+        SeqNo(2),
+        "the head alone misses the ancestor's row"
+    );
+    assert!(
+        matches!(status, ContractStatus::Violated { .. }),
+        "{status:?}"
+    );
 }
 
 #[tokio::test]
