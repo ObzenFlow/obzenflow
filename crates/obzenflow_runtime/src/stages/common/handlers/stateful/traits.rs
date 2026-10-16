@@ -547,7 +547,7 @@ where
         if decide_result.as_ref().is_err_and(HandlerError::is_fatal) {
             return decide_result.map(|_| ());
         }
-        if let Some(divergence) = fx.settlement_divergence().await {
+        if let Some(divergence) = fx.end_of_invocation_fatal().await? {
             return Err(HandlerError::Fatal(divergence));
         }
         decide_result.map(|_| ())

@@ -2,10 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::journal::disk::inspect::load_manifest;
+use crate::journal::disk::replay_archive::DiskReplayArchive;
 use crate::journal::read::{
     compare_with_runs, read_configuration_refusals, read_logic_version_changes, ConfigChanges,
     LogicVersionChange, RunConfigChanges,
 };
+use obzenflow_core::journal::archive_actions::{
+    decide, ArchiveEvidence, ArchiveOverrides, FailureEvidence, FlowEvidence, ReplayVerb,
+};
+use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::runtime_config::app_leaves;
 use serde_json::Value;
@@ -97,6 +103,50 @@ pub(super) async fn refusal_footer(run_dir: &Path, changes: &[RunConfigChanges])
         changes,
         &read_logic_version_changes(run_dir, &runs, &refused),
     )
+}
+
+/// The plain command that continues a resume which refused for departing from
+/// its archive, when Core admits it for the flow just built (FLOWIP-134k B10).
+pub(super) async fn resume_remedy(
+    flow: &FlowHandle,
+    locator: &CurrentRunLocator,
+) -> Option<String> {
+    let run = locator.path();
+    let resumed_from = load_manifest(run).ok()?.resume?.resumed_from;
+    let evidence = DiskReplayArchive::written_run_evidence(run.to_path_buf(), ReplayVerb::Resume)
+        .await
+        .ok()?;
+    remedy_line(
+        &evidence,
+        flow.archive_flow_evidence(),
+        &resumed_from,
+        run,
+        &locator.to_string(),
+    )
+}
+
+fn remedy_line(
+    evidence: &ArchiveEvidence,
+    flow: &FlowEvidence,
+    resumed_from: &Path,
+    run: &Path,
+    shown: &str,
+) -> Option<String> {
+    let admitted = evidence.failure == FailureEvidence::DepartedFromArchive
+        && decide(
+            ReplayVerb::Resume,
+            run,
+            evidence,
+            flow,
+            ArchiveOverrides::default(),
+        )
+        .is_ok();
+    admitted.then(|| {
+        format!(
+            "To continue this run, restore what {} recorded, then add: --resume-from {shown}",
+            resumed_from.display()
+        )
+    })
 }
 
 fn footer_lines(changes: &[RunConfigChanges], logic: &[LogicVersionChange]) -> Vec<String> {
@@ -223,5 +273,43 @@ mod tests {
             "a code change alone names no configuration"
         );
         assert!(footer_lines(&[changed("/runs/r", &[])], &[]).is_empty());
+    }
+
+    #[test]
+    fn the_remedy_names_the_plain_resume_only_after_a_departure_core_admits() {
+        use obzenflow_core::journal::ArchiveStatus;
+        let failed = |failure| ArchiveEvidence {
+            status: ArchiveStatus::Failed,
+            live_writer: false,
+            sources: Vec::new(),
+            failure,
+        };
+        let line = |evidence: &ArchiveEvidence, flow: &FlowEvidence| {
+            remedy_line(
+                evidence,
+                flow,
+                Path::new("/runs/killed"),
+                Path::new("/runs/refused"),
+                "runs/refused",
+            )
+        };
+        let flow = FlowEvidence::default();
+        assert_eq!(
+            line(&failed(FailureEvidence::DepartedFromArchive), &flow).as_deref(),
+            Some(
+                "To continue this run, restore what /runs/killed recorded, then add: \
+                 --resume-from runs/refused"
+            )
+        );
+        assert_eq!(line(&failed(FailureEvidence::Other), &flow), None);
+        let cyclic = FlowEvidence {
+            cycle_members: vec!["triage".to_string()],
+            ..FlowEvidence::default()
+        };
+        assert_eq!(
+            line(&failed(FailureEvidence::DepartedFromArchive), &cyclic),
+            None,
+            "a command Core refuses is never offered"
+        );
     }
 }

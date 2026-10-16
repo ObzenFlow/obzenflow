@@ -3004,13 +3004,32 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
         .await
         .expect_err("the decide error must propagate");
 
-    assert!(matches!(
-        error,
-        crate::stages::common::handler_error::HandlerError::Domain(ref message)
-            if message == "decide failed"
-    ));
+    assert!(
+        matches!(
+            error,
+            crate::stages::common::handler_error::HandlerError::Domain(ref message)
+                if message == "decide failed"
+        ),
+        "{error:?}"
+    );
     assert_eq!(state, vec![7]);
-    assert!(journal.events().is_empty());
+    let events = journal.events();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| settlement_input(&event.authored()))
+            .collect::<Vec<_>>(),
+        [Some(1)],
+        "the error records only its input's settlement (FLOWIP-134k B11)"
+    );
+}
+
+/// The input a settlement row settled, or `None` for any other row.
+fn settlement_input(event: &ChainEvent) -> Option<u64> {
+    let provenance = event.effect_provenance.as_ref()?;
+    (provenance.descriptor.effect_type.as_str() == super::acts::SETTLEMENT_EFFECT_TYPE
+        && event.event_type() == CAPTURE_EVENT_TYPE)
+        .then(|| provenance.cursor.input_seq.get())
 }
 
 #[tokio::test]

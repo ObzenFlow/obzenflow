@@ -16,7 +16,9 @@ use crate::stages::common::supervision::catch_up::{
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
+use crate::stages::common::supervision::error_routing::{
+    error_row_in_scope, route_to_error_journal,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -539,7 +541,8 @@ pub(super) async fn dispatch_accumulating<
                     if let Err(err) = accumulate_result {
                         ctx.instrumentation.record_error(err.kind());
                         let reason = format!("Stateful handler error: {err:?}");
-                        let error_event = event.mark_as_error(reason, err.kind());
+                        let error_event =
+                            error_row_in_scope(event.mark_as_error(reason, err.kind()), scope);
 
                         if route_to_error_journal(&error_event) {
                             crate::supervised_base::publication::append(

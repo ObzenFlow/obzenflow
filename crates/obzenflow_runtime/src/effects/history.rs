@@ -601,15 +601,14 @@ impl EffectHistory {
         let mut ordered = Vec::<super::ArchivedAct>::new();
         for record in &records {
             if index.contains_key(&record.cursor)
-                && !ordered.iter().any(|act| {
-                    matches!(act, super::ArchivedAct::Effect { cursor, .. } if cursor == &record.cursor)
-                })
+                && !ordered
+                    .iter()
+                    .any(|act| act.cursor() == Some(&record.cursor))
             {
-                ordered.push(super::ArchivedAct::Effect {
-                    cursor: record.cursor.clone(),
-                    effect_type: record.descriptor.effect_type.as_str().to_string(),
-                    in_doubt: false,
-                });
+                ordered.push(super::ArchivedAct::recorded(
+                    record.cursor.clone(),
+                    record.descriptor.effect_type.as_str(),
+                ));
             }
         }
 

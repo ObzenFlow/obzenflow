@@ -122,6 +122,24 @@ enum ReconstructionRefusal {
     UndecodableOutcome(EffectError),
 }
 
+/// A value the runtime records under an invocation's next cursor: a handler's
+/// capture, or the settlement of an input it settled without an act
+/// (FLOWIP-134k B11).
+#[derive(Debug, Clone, Copy)]
+enum RecordedValue {
+    Capture(&'static str),
+    Settlement,
+}
+
+impl RecordedValue {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Capture(_) => "capture",
+            Self::Settlement => "settlement",
+        }
+    }
+}
+
 /// Whether a resume reproduces an act or runs it live (FLOWIP-134k B7). Only
 /// a resume takes acts in order; a live run and a strict replay do not check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,10 +215,7 @@ pub(crate) fn unreproduced_acts_fatal(
         } else {
             StageFatalReason::UnusedEffectHistory
         },
-        format!(
-            "stage '{stage_key}' skipped {} its recording holds",
-            skipped.describe()
-        ),
+        skipped.skipped_detail(stage_key),
     ))
 }
 
@@ -280,6 +295,8 @@ pub(crate) struct EffectsCore {
     next_output_ordinal: EffectOutputOrdinal,
     routed_output_fact_count: usize,
     committed_facts: Vec<ChainEvent>,
+    /// Facts already drained for a stateful fold, which still count as acts.
+    drained_facts: usize,
     halt: Option<AuthoringHalt>,
 }
 
@@ -292,6 +309,7 @@ impl EffectsCore {
             next_output_ordinal: EffectOutputOrdinal::new(0),
             routed_output_fact_count: 0,
             committed_facts: Vec::new(),
+            drained_facts: 0,
             halt: None,
         }
     }
@@ -500,33 +518,50 @@ impl EffectsCore {
             (Some(_), _) => return Ok(ActPlan::Live),
         };
         let fact = matches!(offered, super::ActKey::Fact(_));
+        let settling = matches!(offered, super::ActKey::Settled(_));
+        let unused = |skipped: &super::ArchivedAct| {
+            if skipped.is_fact() {
+                StageFatalReason::UnusedFactHistory
+            } else {
+                StageFatalReason::UnusedEffectHistory
+            }
+        };
         let refusal = match acts.take(&offered) {
             super::ActCheck::Reproduce => return Ok(ActPlan::Reproduce),
             super::ActCheck::Live => return Ok(ActPlan::Live),
+            // Settling without the act the archive holds next drops that
+            // act (FLOWIP-134k B11).
+            super::ActCheck::Missing { next } if settling => ReconstructionRefusal::Departed {
+                reason: unused(&next),
+                detail: next.skipped_detail(&self.ctx.stage_key),
+            },
             super::ActCheck::Missing { next } => ReconstructionRefusal::Departed {
                 reason: if fact {
                     StageFatalReason::MissingRecordedFact
                 } else {
                     StageFatalReason::MissingRecordedEffect
                 },
-                detail: format!(
-                    "stage '{}' {}, but its recording's next act is {}",
-                    self.ctx.stage_key,
-                    offered_act(),
-                    next.describe()
-                ),
+                detail: match &next {
+                    super::ArchivedAct::Settled { cursor }
+                        if cursor.input_seq.get() == self.ctx.input_seq.0 =>
+                    {
+                        format!(
+                            "stage '{}' {}, but its recording settled that input without an act",
+                            self.ctx.stage_key,
+                            offered_act()
+                        )
+                    }
+                    next => format!(
+                        "stage '{}' {}, but its recording's next act is {}",
+                        self.ctx.stage_key,
+                        offered_act(),
+                        next.describe()
+                    ),
+                },
             },
             super::ActCheck::Skipped { skipped } => ReconstructionRefusal::Departed {
-                reason: if skipped.is_fact() {
-                    StageFatalReason::UnusedFactHistory
-                } else {
-                    StageFatalReason::UnusedEffectHistory
-                },
-                detail: format!(
-                    "stage '{}' skipped {} its recording holds",
-                    self.ctx.stage_key,
-                    skipped.describe()
-                ),
+                reason: unused(&skipped),
+                detail: skipped.skipped_detail(&self.ctx.stage_key),
             },
         };
         Err(self.refuse(refusal))
@@ -669,7 +704,9 @@ impl EffectsCore {
     }
 
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
-        std::mem::take(&mut self.committed_facts)
+        let drained = std::mem::take(&mut self.committed_facts);
+        self.drained_facts = self.drained_facts.saturating_add(drained.len());
+        drained
     }
 
     pub(crate) async fn preflight_next_effect_cursor_is_empty(&self) -> Result<(), EffectError> {
@@ -717,11 +754,7 @@ impl EffectsCore {
                     } else {
                         StageFatalReason::UnusedEffectHistory
                     },
-                    format!(
-                        "stage '{}' skipped {} its recording holds",
-                        self.ctx.stage_key,
-                        skipped.describe()
-                    ),
+                    skipped.skipped_detail(&self.ctx.stage_key),
                 )
             }
             Ok((cursor, _)) => (
@@ -2142,15 +2175,50 @@ impl EffectsCore {
     where
         T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
     {
+        self.record_value(RecordedValue::Capture(label), value)
+            .await
+    }
+
+    /// Record that an invocation which authored no act settled its input
+    /// (FLOWIP-134k B11), so a resume tells a settled input from an unread
+    /// one and takes it in order like any act.
+    pub(crate) async fn settle_without_act(&mut self) -> Result<(), EffectError> {
+        if self.authored_act() {
+            return Ok(());
+        }
+        self.record_value(RecordedValue::Settlement, ()).await
+    }
+
+    fn authored_act(&self) -> bool {
+        self.next_effect_ordinal.get() > 0
+            || !self.committed_facts.is_empty()
+            || self.drained_facts > 0
+    }
+
+    async fn record_value<T>(&mut self, kind: RecordedValue, value: T) -> Result<T, EffectError>
+    where
+        T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+    {
         self.gate_authoring()?;
         let effect_ordinal = self.reserve_effect_ordinal()?;
-        let descriptor = EffectDescriptor::new(
-            "obzenflow.capture",
-            label,
-            1,
-            self.ctx.stage_logic_version.clone(),
-            hash_json_value(&Value::String(label.to_string()))?,
-        );
+        let descriptor = match kind {
+            RecordedValue::Capture(label) => EffectDescriptor::new(
+                "obzenflow.capture",
+                label,
+                1,
+                self.ctx.stage_logic_version.clone(),
+                hash_json_value(&Value::String(label.to_string()))?,
+            ),
+            // A settlement's identity never depends on the handler's logic
+            // version.
+            RecordedValue::Settlement => EffectDescriptor::new(
+                super::acts::SETTLEMENT_EFFECT_TYPE,
+                "settlement",
+                1,
+                "1",
+                hash_json_value(&Value::String("settlement".to_string()))?,
+            ),
+        };
         let descriptor_hash = descriptor_hash(&descriptor)?;
         let cursor = EffectCursor::new(
             self.namespace(),
@@ -2159,12 +2227,20 @@ impl EffectsCore {
             effect_ordinal,
         );
         let input = self.ctx.input_seq.0;
-        let plan = self.take_act(super::ActKey::Effect(cursor.clone()), || {
-            format!(
-                "would perform {} at input {input}",
-                super::acts::display_name("obzenflow.capture")
-            )
-        })?;
+        let plan = match kind {
+            RecordedValue::Capture(_) => {
+                self.take_act(super::ActKey::Effect(cursor.clone()), || {
+                    format!(
+                        "would perform {} at input {input}",
+                        super::acts::display_name("obzenflow.capture")
+                    )
+                })?
+            }
+            RecordedValue::Settlement => self
+                .take_act(super::ActKey::Settled(cursor.clone()), || {
+                    format!("settled input {input} without an act")
+                })?,
+        };
 
         if let Some(history) = self.ctx.effect_history.clone() {
             let held = history.find_group(&cursor);
@@ -2183,7 +2259,8 @@ impl EffectsCore {
                 let [record] = records.as_slice() else {
                     return Err(self.refuse(ReconstructionRefusal::HistoryShape(
                         EffectError::EffectProvenanceMismatch(format!(
-                            "capture cursor {cursor:?} recorded {} outcome records",
+                            "{} cursor {cursor:?} recorded {} outcome records",
+                            kind.name(),
                             records.len()
                         )),
                     )));
@@ -2243,10 +2320,12 @@ impl EffectsCore {
             RowLineage::Live,
         )
         .await?;
-        self.observe_effect_outcome(
-            "obzenflow.capture",
-            crate::stages::observer::EffectObserverOutcome::Succeeded,
-        );
+        if let RecordedValue::Capture(_) = kind {
+            self.observe_effect_outcome(
+                "obzenflow.capture",
+                crate::stages::observer::EffectObserverOutcome::Succeeded,
+            );
+        }
         Ok(value)
     }
 

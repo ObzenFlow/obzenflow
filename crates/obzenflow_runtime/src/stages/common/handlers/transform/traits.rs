@@ -358,12 +358,12 @@ where
             return Err(HandlerError::Fatal(fatal));
         }
         match handler_result {
-            Ok(_completion) => match fx.settlement_divergence().await {
+            Ok(_completion) => match fx.end_of_invocation_fatal().await? {
                 Some(divergence) => Err(HandlerError::Fatal(divergence)),
                 None => Ok(Vec::new()),
             },
             Err(error) if error.is_fatal() => Err(error),
-            Err(error) => match fx.settlement_divergence().await {
+            Err(error) => match fx.end_of_invocation_fatal().await? {
                 Some(divergence) => Err(HandlerError::Fatal(divergence)),
                 None => Err(error),
             },

@@ -16,7 +16,9 @@ use crate::stages::common::supervision::catch_up::{
 use crate::stages::common::supervision::control_resolution::{
     is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction,
 };
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
+use crate::stages::common::supervision::error_routing::{
+    error_row_in_scope, route_to_error_journal,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -668,6 +670,7 @@ async fn dispatch_running_inner<
                                     let k = kind.clone().unwrap_or(ErrorKind::Unknown);
                                     ctx.instrumentation.record_error(k);
                                 }
+                                let event = error_row_in_scope(event, scope);
 
                                 if route_to_error_journal(&event) {
                                     tracing::info!(

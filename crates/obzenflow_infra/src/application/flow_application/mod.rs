@@ -1163,7 +1163,7 @@ impl FlowApplication {
                 }
                 Ok(())
             }
-            (Err(err), flow_name, run_state, _) => {
+            (Err(err), flow_name, run_state, built_flow) => {
                 let err = match (&run_mode, run_state.as_ref().and_then(|s| s.locator())) {
                     (super::run_mode::RunMode::Replay(ctx), Some(locator)) => {
                         super::replay_stop::refine_replay_failure(
@@ -1210,6 +1210,15 @@ impl FlowApplication {
                 }
                 for line in refusal_footer {
                     println!("{line}");
+                }
+                // FLOWIP-134k B10: every flow names the plain command that
+                // continues a resume which departed from its archive.
+                if let (Some(flow), Some(locator)) =
+                    (&built_flow, run_state.as_ref().and_then(|s| s.locator()))
+                {
+                    if let Some(remedy) = super::config_report::resume_remedy(flow, locator).await {
+                        println!("{remedy}");
+                    }
                 }
                 Err(err)
             }

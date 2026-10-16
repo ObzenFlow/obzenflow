@@ -57,6 +57,21 @@ pub enum StageFatalReason {
     IncompleteTermination,
 }
 
+impl StageFatalReason {
+    /// A refusal a resume makes when its build or configuration departs from
+    /// its archive (FLOWIP-010t B11, FLOWIP-134k B7, B10).
+    pub fn departs_from_archive(self) -> bool {
+        matches!(
+            self,
+            Self::DescriptorMismatch
+                | Self::MissingRecordedEffect
+                | Self::UnusedEffectHistory
+                | Self::MissingRecordedFact
+                | Self::UnusedFactHistory
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageFatalRecorded {
     pub severity: StageFatalSeverity,

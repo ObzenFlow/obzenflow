@@ -12,15 +12,18 @@ use obzenflow_adapters::sources::{
     YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::effect_payload::SETTLEMENT_EFFECT_TYPE;
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, SourceContinuationRefusal,
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, StageFatalReason};
+use obzenflow_core::journal::archive_actions::FailureEvidence;
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::FlowBuildError;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, source, FlowDefinition};
+use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::read::{
     open_disk_run, read_config_changes, read_configuration_refusals, ConfigChanges,
@@ -114,6 +117,10 @@ struct Settings {
     annotate: bool,
     #[serde(default)]
     limit: Option<u64>,
+    #[serde(default)]
+    quiet: Option<u64>,
+    #[serde(default)]
+    failing: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -128,6 +135,10 @@ struct App {
     rescore: bool,
     annotate: bool,
     limit: Option<u64>,
+    /// The reading that settles with no act.
+    quiet: Option<u64>,
+    /// The reading that fails the handler, to the error journal.
+    failing: Option<u64>,
 }
 
 const RECORDED: App = App {
@@ -135,6 +146,8 @@ const RECORDED: App = App {
     rescore: false,
     annotate: false,
     limit: None,
+    quiet: None,
+    failing: None,
 };
 
 #[derive(Clone, Debug)]
@@ -244,6 +257,15 @@ impl EffectfulTransformHandler for ScoreTransform {
             fx.emit(Capped { value: input.value }).await?;
             return Ok(fx.complete()?);
         }
+        if self.app.quiet == Some(input.value) {
+            return Ok(fx.complete_empty()?);
+        }
+        if self.app.failing == Some(input.value) {
+            return Err(HandlerError::PermanentFailure(format!(
+                "reading {} is unreadable",
+                input.value
+            )));
+        }
         match self.score(input.value, fx).await {
             Ok(score) => {
                 fx.emit(Scored {
@@ -325,6 +347,8 @@ async fn build(
                 rescore: settings.rescore,
                 annotate: settings.annotate,
                 limit: settings.limit,
+                quiet: settings.quiet,
+                failing: settings.failing,
             },
             executed,
         };
@@ -352,6 +376,8 @@ async fn build(
         "rescore": app.rescore,
         "annotate": app.annotate,
         "limit": app.limit,
+        "quiet": app.quiet,
+        "failing": app.failing,
     })))
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
@@ -415,13 +441,31 @@ async fn run_refused(journal_base: &Path, first_value: u64, count: u64, app: App
     Ok(())
 }
 
+/// The plain command: a refused resume continues without the override
+/// (FLOWIP-134k B10).
 fn archive(path: PathBuf, verb: ReplayVerb) -> ReplayBootstrap {
     ReplayBootstrap {
         archive_path: path,
-        allow_incomplete_archive: true,
+        allow_incomplete_archive: false,
         allow_duplicate_sink_delivery: false,
         verb,
     }
+}
+
+/// How `run` failed, as `verb` would open it.
+async fn failure(run: &Path, verb: ReplayVerb) -> Result<FailureEvidence> {
+    let opened = match verb {
+        ReplayVerb::Resume => DiskReplayArchive::open_for_resume(run.to_path_buf(), false).await?,
+        ReplayVerb::Replay => DiskReplayArchive::open(run.to_path_buf(), false).await?,
+    };
+    Ok(opened.evidence().failure)
+}
+
+/// Whether `run`'s manifest records that it went ahead under the override.
+fn recorded_override(run: &Path) -> Result<bool> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("run_manifest.json"))?)?;
+    Ok(manifest["replay"]["allow_incomplete_archive"] == json!(true))
 }
 
 async fn stage_fatals(run_dir: &Path) -> Result<Vec<(String, StageFatalReason, String)>> {
@@ -516,6 +560,11 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
     let detail = assert_refused(&replay, StageFatalReason::DescriptorMismatch).await?;
     assert!(detail.starts_with("effect descriptor mismatch"), "{detail}");
     assert_eq!(
+        failure(&replay, ReplayVerb::Replay).await?,
+        FailureEvidence::Other,
+        "a failed replay is not a resume, so it keeps the override"
+    );
+    assert_eq!(
         read_configuration_refusals(&replay).await?,
         stages(&["score"])
     );
@@ -534,6 +583,10 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
     assert_refused(&r1, StageFatalReason::DescriptorMismatch).await?;
     assert_eq!(read_configuration_refusals(&r1).await?, stages(&["score"]));
     assert_eq!(changed_keys(&r1)?, [(r0.clone(), vec![KEY.to_string()])]);
+    assert_eq!(
+        failure(&r1, ReplayVerb::Resume).await?,
+        FailureEvidence::DepartedFromArchive
+    );
 
     let r2_executed = {
         let _bootstrap = install_bootstrap_config(
@@ -547,6 +600,10 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
         stage_fatals(&r2).await?,
         Vec::new(),
         "catch-up finds every recorded outcome under the lineage root"
+    );
+    assert!(
+        !recorded_override(&r2)?,
+        "the plain remedy records no override"
     );
     assert!(read_configuration_refusals(&r2).await?.is_empty());
     assert_eq!(
@@ -776,6 +833,131 @@ async fn a_changed_value_that_turns_a_settled_input_into_a_call_refuses_resume()
     Ok(())
 }
 
+/// The inputs of `run`'s score stage that settled with no act (FLOWIP-134k B11).
+async fn settlements(run_dir: &Path) -> Vec<(u64, bool)> {
+    replay_testkit::read_stage_envelopes_appended(run_dir, "score")
+        .await
+        .iter()
+        .filter_map(|row| {
+            let event = row.authored();
+            let provenance = event.effect_provenance.as_ref()?;
+            (provenance.descriptor.effect_type.as_str() == SETTLEMENT_EFFECT_TYPE).then(|| {
+                (
+                    provenance.cursor.input_seq.get(),
+                    event.replay_context.is_some(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Readings 1 and 2 are scored, reading 3 settles with no act, and the run
+/// stops.
+async fn record_a_settlement_without_an_act(journal_base: &Path, app: App) -> Result<PathBuf> {
+    let (handle, run) = build(journal_base, 1, 3, app).await?;
+    wait_for_running(&handle).await?;
+    let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(journal_base))?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while settlements(&r0).await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for reading 3 to settle"))?;
+    handle.stop().await?;
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the run to stop"))??;
+    assert_eq!(run.executed(), [1, 2]);
+    assert_eq!(settlements(&r0).await, [(3, false)]);
+    Ok(r0)
+}
+
+/// FLOWIP-134k B11: an input settled without an act, by an empty completion
+/// or a handler error after the stage's last other act, leaves an act a
+/// changed build must reproduce, and the plain command continues the refused
+/// run with the recorded value (B10).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_value_that_acts_on_an_input_settled_without_an_act_refuses_resume() -> Result<()>
+{
+    for (key, settled) in [
+        (
+            "app.quiet",
+            App {
+                quiet: Some(3),
+                ..RECORDED
+            },
+        ),
+        (
+            "app.failing",
+            App {
+                failing: Some(3),
+                ..RECORDED
+            },
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let journal_base = temp.path().join("journals");
+        let r0 = record_a_settlement_without_an_act(&journal_base, settled).await?;
+
+        {
+            let _bootstrap = install_bootstrap_config(
+                replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Replay))
+                    .await,
+            );
+            let (handle, run) = build(&journal_base, 1, 0, settled).await?;
+            tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+                .await
+                .map_err(|_| anyhow!("timeout waiting for the replay"))??;
+            assert_eq!(run.executed(), Vec::<u64>::new(), "replay makes no call");
+        }
+        let replay = replay_testkit::latest_run_dir(&journal_base);
+        assert_eq!(
+            settlements(&replay).await,
+            [(3, true)],
+            "{key}: strict replay copies the settlement"
+        );
+
+        {
+            let _bootstrap = install_bootstrap_config(
+                replay_testkit::bootstrap_with_archive(archive(r0.clone(), ReplayVerb::Resume))
+                    .await,
+            );
+            run_departed(&journal_base, RECORDED).await?;
+        }
+        let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
+        let detail = assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
+        assert_eq!(
+            detail,
+            "stage 'score' would perform Score at input 3, but its recording settled that \
+             input without an act",
+            "{key}"
+        );
+        assert_eq!(changed_keys(&r1)?, [(r0.clone(), vec![key.to_string()])]);
+
+        {
+            let _bootstrap = install_bootstrap_config(
+                replay_testkit::bootstrap_with_archive(archive(r1.clone(), ReplayVerb::Resume))
+                    .await,
+            );
+            assert_eq!(
+                run_until(&journal_base, 4, 2, settled, 2, 2).await?,
+                [4, 5],
+                "{key}"
+            );
+        }
+        let r2 = replay_testkit::latest_run_dir(&journal_base);
+        assert_eq!(stage_fatals(&r2).await?, Vec::new(), "{key}");
+        assert_eq!(
+            settlements(&r2).await,
+            [(3, true)],
+            "{key}: the recorded value reproduces the settlement"
+        );
+        assert_crossing_after_archived_acts(&r2).await;
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn strict_replay_with_a_changed_value_proceeds_and_verify_reports_the_difference(
 ) -> Result<()> {
@@ -954,5 +1136,32 @@ async fn a_changed_app_path_refuses_an_interrupted_source_and_reaches_the_footer
         stages(&["accounts"])
     );
     assert_eq!(changed_keys(&r1)?, [(r0, vec![KEY.to_string()])]);
+    assert_eq!(
+        failure(&r1, ReplayVerb::Resume).await?,
+        FailureEvidence::DepartedFromArchive
+    );
+
+    // FLOWIP-134k B10: with the recorded input restored, the plain command
+    // continues the refused run.
+    let r1 = std::fs::canonicalize(r1)?;
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(archive(r1.clone(), ReplayVerb::Resume)).await,
+        );
+        let handle = build_accounts(
+            &journal_base,
+            &recorded_file,
+            0.5,
+            3.0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await?;
+        tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
+            .await
+            .map_err(|_| anyhow!("timeout waiting for the remedy to complete"))??;
+    }
+    let r2 = replay_testkit::latest_run_dir(&journal_base);
+    assert_eq!(source_refusals(&r2).await?, Vec::new());
+    assert_eq!(stage_fatals(&r2).await?, Vec::new());
     Ok(())
 }

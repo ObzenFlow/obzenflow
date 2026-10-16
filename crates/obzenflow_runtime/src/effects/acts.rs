@@ -10,6 +10,8 @@ use super::*;
 use obzenflow_core::ReaderGeneration;
 use std::collections::HashSet;
 
+pub(crate) use obzenflow_core::event::payloads::effect_payload::SETTLEMENT_EFFECT_TYPE;
+
 /// One act a stage's archive holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArchivedAct {
@@ -22,13 +24,38 @@ pub(crate) enum ArchivedAct {
     },
     /// A fact the handler emitted, identified by its deterministic id.
     Fact { id: EventId, event_type: String },
+    /// An input the stage settled with no effect, capture or fact, recorded
+    /// at its invocation's next cursor (FLOWIP-134k B11).
+    Settled { cursor: EffectCursor },
 }
 
 impl ArchivedAct {
+    /// The act an archived effect record names.
+    pub(crate) fn recorded(cursor: EffectCursor, effect_type: &str) -> Self {
+        if effect_type == SETTLEMENT_EFFECT_TYPE {
+            Self::Settled { cursor }
+        } else {
+            Self::Effect {
+                cursor,
+                effect_type: effect_type.to_string(),
+                in_doubt: false,
+            }
+        }
+    }
+
     pub(crate) fn key(&self) -> ActKey {
         match self {
             Self::Effect { cursor, .. } => ActKey::Effect(cursor.clone()),
             Self::Fact { id, .. } => ActKey::Fact(*id),
+            Self::Settled { cursor } => ActKey::Settled(cursor.clone()),
+        }
+    }
+
+    /// The cursor of an effect or settlement act.
+    pub(crate) fn cursor(&self) -> Option<&EffectCursor> {
+        match self {
+            Self::Effect { cursor, .. } | Self::Settled { cursor } => Some(cursor),
+            Self::Fact { .. } => None,
         }
     }
 
@@ -43,15 +70,34 @@ impl ArchivedAct {
                 format!("a {} effect", display_name(effect_type))
             }
             Self::Fact { event_type, .. } => format!("a {} fact", display_name(event_type)),
+            Self::Settled { cursor } => {
+                format!("input {}, settled without an act", cursor.input_seq.get())
+            }
+        }
+    }
+
+    /// The detail for this act when a resume skips it (FLOWIP-134k B7, B11).
+    pub(crate) fn skipped_detail(&self, stage_key: &str) -> String {
+        match self {
+            Self::Settled { cursor } => format!(
+                "stage '{stage_key}' skipped input {}, which its recording settled without an act",
+                cursor.input_seq.get()
+            ),
+            act => format!(
+                "stage '{stage_key}' skipped {} its recording holds",
+                act.describe()
+            ),
         }
     }
 }
 
-/// An act's identity: an effect's cursor or an emitted fact's id.
+/// An act's identity: an effect's cursor, an emitted fact's id, or the cursor
+/// of a settlement, which never matches an effect at the same cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ActKey {
     Effect(EffectCursor),
     Fact(EventId),
+    Settled(EffectCursor),
 }
 
 /// A row that names an act: an effect row with its attempt, or an emitted
@@ -117,7 +163,7 @@ impl StageActs {
             .iter()
             .filter_map(|act| match act {
                 ArchivedAct::Fact { id, .. } => Some(*id),
-                ArchivedAct::Effect { .. } => None,
+                ArchivedAct::Effect { .. } | ArchivedAct::Settled { .. } => None,
             })
             .collect();
         Self {
@@ -308,11 +354,7 @@ impl ActScan {
 
     fn effect(&mut self, cursor: EffectCursor, effect_type: &str) {
         if self.seen.insert(cursor.clone()) {
-            self.acts.push(ArchivedAct::Effect {
-                cursor,
-                effect_type: effect_type.to_string(),
-                in_doubt: false,
-            });
+            self.acts.push(ArchivedAct::recorded(cursor, effect_type));
         }
     }
 
@@ -326,10 +368,7 @@ impl ActScan {
         let acts = self
             .acts
             .into_iter()
-            .filter(|act| match act {
-                ArchivedAct::Effect { cursor, .. } => holds(cursor),
-                ArchivedAct::Fact { .. } => true,
-            })
+            .filter(|act| act.cursor().is_none_or(&holds))
             .collect();
         StageActs::new(acts, self.anchors).with_in_doubt(in_doubt)
     }
@@ -426,5 +465,61 @@ mod tests {
 
         let other = StageActs::new(vec![fact(EventId::new())], HashMap::new());
         assert!(older.joined_with(&other, "allocate_stock").is_err());
+    }
+
+    /// FLOWIP-134k B11: a settlement takes its turn in order, and never
+    /// matches an effect at its cursor.
+    #[test]
+    fn a_settlement_is_an_act_apart_from_any_effect_at_its_cursor() {
+        let settled = ArchivedAct::recorded(cursor(5, 0), SETTLEMENT_EFFECT_TYPE);
+        assert_eq!(
+            settled,
+            ArchivedAct::Settled {
+                cursor: cursor(5, 0)
+            }
+        );
+        assert!(matches!(
+            ArchivedAct::recorded(cursor(5, 0), "allocation.reserve_stock"),
+            ArchivedAct::Effect { .. }
+        ));
+
+        let acts = StageActs::new(vec![effect(4, false), settled.clone()], HashMap::new());
+        assert_eq!(
+            acts.take(&ActKey::Effect(cursor(4, 0))),
+            ActCheck::Reproduce
+        );
+        assert!(
+            acts.reproducing(&cursor(5, 0)),
+            "a settled input reproduces"
+        );
+        assert_eq!(
+            acts.take(&ActKey::Effect(cursor(5, 0))),
+            ActCheck::Missing {
+                next: settled.clone()
+            },
+            "an effect where the archive settled the input departs"
+        );
+        assert_eq!(
+            acts.take(&ActKey::Settled(cursor(5, 0))),
+            ActCheck::Reproduce
+        );
+        assert_eq!(acts.take(&ActKey::Settled(cursor(6, 0))), ActCheck::Live);
+
+        assert_eq!(
+            settled.skipped_detail("allocate_stock"),
+            "stage 'allocate_stock' skipped input 5, which its recording settled without an act"
+        );
+        assert_eq!(
+            fact(EventId::new()).skipped_detail("allocate_stock"),
+            "stage 'allocate_stock' skipped a SoldOut fact its recording holds"
+        );
+    }
+
+    #[test]
+    fn a_torn_settlement_is_not_an_archived_act() {
+        let mut scan = ActScan::default();
+        scan.effect(cursor(5, 0), SETTLEMENT_EFFECT_TYPE);
+        let acts = scan.finish(|_| false, |_| false);
+        assert!(acts.acts().is_empty());
     }
 }

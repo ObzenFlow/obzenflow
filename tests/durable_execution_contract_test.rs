@@ -3853,6 +3853,70 @@ mod flash_sale {
             "{name}: the head confirms every reservation"
         );
     }
+
+    /// A resume with a changed warehouse id refuses before any warehouse
+    /// call and names the plain command that continues it. That command,
+    /// with the recorded id restored, completes without the override, and
+    /// every input settles once (FLOWIP-134k B10, criterion 16).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_resume_continues_with_plain_resume_from() {
+        let name = "flash_sale_refused";
+        let scenario = fresh(name);
+        let killed = killed_when(&scenario, Vec::new(), name, |archive| {
+            archive.eof("allocation_inputs") == Some(EofKind::Natural)
+                && archive.eof("phone_reservations") == Some(EofKind::Natural)
+                && (1..INPUTS).contains(&settled(archive))
+        })
+        .await;
+        let recorded = std::fs::read_to_string(config(&scenario)).expect("read the configuration");
+        std::fs::write(
+            config(&scenario),
+            recorded.replace("warehouse-contract", "warehouse-other"),
+        )
+        .expect("change the warehouse id");
+
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let refused = child.run().await;
+        let log = child.log.clone();
+        assert!(
+            !child.exit().await.success(),
+            "{name}: the changed id refuses the resume"
+        );
+        let output = read_log(&log);
+        let remedy = output
+            .lines()
+            .find(|line| line.starts_with("To continue this run, restore what "))
+            .unwrap_or_else(|| panic!("{name}: the failure names its remedy: {output}"));
+        let dir_name = |run: &Path| run.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            remedy.contains(&format!(
+                "{} recorded, then add: --resume-from ",
+                dir_name(&killed)
+            )) && remedy.ends_with(&dir_name(&refused)),
+            "{name}: {remedy}"
+        );
+
+        std::fs::write(config(&scenario), recorded).expect("restore the warehouse id");
+        let resumed = Child::spawn(&scenario, resume(&refused), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&resumed).await;
+        assert_eq!(
+            settled(&archive),
+            INPUTS,
+            "{name}: every input settles once"
+        );
+        assert_lineage_at_crossing(&archive, "allocate_stock", name);
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(resumed.join("run_manifest.json")).expect("read the manifest"),
+        )
+        .expect("parse the manifest");
+        assert_eq!(
+            manifest["replay"]["allow_incomplete_archive"],
+            serde_json::json!(false),
+            "{name}: the remedy run records no override"
+        );
+    }
 }
 
 /// FLOWIP-134k B3: sinks that lag their finished sources at a kill.

@@ -15,6 +15,9 @@ use serde_json::Value;
 
 pub const EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE: &str = "effect.execution_succeeded";
 pub const CAPTURE_EVENT_TYPE: &str = "effect.value_captured";
+/// The descriptor type of a settlement: a captured record of an input a stage
+/// with an effect runtime settled without an act (FLOWIP-134k B11).
+pub const SETTLEMENT_EFFECT_TYPE: &str = "obzenflow.settlement";
 pub const EFFECT_ATTEMPT_STARTED_EVENT_TYPE: &str = "obzenflow.effect_attempt_started";
 pub const EFFECT_RECOVERY_ABANDONED_EVENT_TYPE: &str = "obzenflow.effect_recovery_abandoned";
 
@@ -869,7 +872,10 @@ impl EffectRecord {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        let capture = self.descriptor.effect_type.as_str() == "obzenflow.capture";
+        let capture = matches!(
+            self.descriptor.effect_type.as_str(),
+            "obzenflow.capture" | SETTLEMENT_EFFECT_TYPE
+        );
         let valid = match (&self.observation, &self.outcome) {
             (EffectObservation::ValueCaptured {}, EffectOutcomePayload::Succeeded { .. }) => {
                 capture

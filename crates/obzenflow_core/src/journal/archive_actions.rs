@@ -8,6 +8,9 @@
 //! are checked first, then the flow's.
 
 use super::ArchiveStatus;
+use crate::event::payloads::execution_payload::{
+    ExecutionPayload, SourceContinuationRefusal, SourceContinuationRefusedFact,
+};
 use crate::event::payloads::flow_control_payload::EofKind;
 use crate::source::{RecordedSourceFrontier, RefusedBy, ResumeRefusal, SourceContinuation};
 use std::fmt;
@@ -52,13 +55,71 @@ pub struct SourceEvidence {
     pub frontier: RecordedSourceFrontier,
 }
 
+/// How a failed run's recorded failures bear on resuming it (FLOWIP-134k B10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FailureEvidence {
+    /// Not a failed resume, or one that failed for another reason.
+    #[default]
+    Other,
+    /// A failed resume whose every recorded failure departed from its archive.
+    DepartedFromArchive,
+}
+
+/// Whether an error-journal row is a refusal a resume makes for departing from
+/// its archive (FLOWIP-134k B10): a stage-fatal departure, or a source whose
+/// input changed (FLOWIP-134i B10).
+pub fn departs_from_archive(execution: &ExecutionPayload) -> bool {
+    match execution {
+        ExecutionPayload::StageFatalRecorded(fatal) => fatal.reason.departs_from_archive(),
+        ExecutionPayload::SourceContinuationRefused(SourceContinuationRefusedFact {
+            refusal: SourceContinuationRefusal::InputChanged { .. },
+        }) => true,
+        _ => false,
+    }
+}
+
+/// Folds a failed resume's error-journal rows and terminal record into its
+/// [`FailureEvidence`] (FLOWIP-134k B10).
+#[derive(Debug, Default)]
+pub struct FailureFold {
+    departed: bool,
+    other: bool,
+}
+
+impl FailureFold {
+    pub fn observe(&mut self, execution: &ExecutionPayload) {
+        if departs_from_archive(execution) {
+            self.departed = true;
+        } else if matches!(
+            execution,
+            ExecutionPayload::StageFatalRecorded(_)
+                | ExecutionPayload::SourceContinuationRefused(_)
+        ) {
+            self.other = true;
+        }
+    }
+
+    /// At least one departure and no other failure, under a terminal record
+    /// that names no contract violation.
+    pub fn finish(self, contract_violation: bool) -> FailureEvidence {
+        if self.departed && !self.other && !contract_violation {
+            FailureEvidence::DepartedFromArchive
+        } else {
+            FailureEvidence::Other
+        }
+    }
+}
+
 /// What Infra decoded from an archive: its derived status, whether any of its
-/// journals still has a live writer, and what each source journal recorded.
+/// journals still has a live writer, what each source journal recorded, and
+/// how a failed resume failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveEvidence {
     pub status: ArchiveStatus,
     pub live_writer: bool,
     pub sources: Vec<SourceEvidence>,
+    /// Read only by the `Failed` resume row (B10).
+    pub failure: FailureEvidence,
 }
 
 impl ArchiveEvidence {
@@ -220,6 +281,8 @@ pub fn decide(
         (ArchiveStatus::Unknown, ReplayVerb::Replay) if !overrides.allow_incomplete_archive => {
             return Err(ArchiveRefusal::Interrupted { run });
         }
+        (ArchiveStatus::Failed, ReplayVerb::Resume)
+            if archive.failure == FailureEvidence::DepartedFromArchive => {}
         (ArchiveStatus::Failed, _) if !overrides.allow_incomplete_archive => {
             return Err(ArchiveRefusal::Failed { verb, run });
         }
@@ -389,6 +452,7 @@ mod tests {
             status,
             live_writer: false,
             sources,
+            failure: FailureEvidence::Other,
         }
     }
 
@@ -544,6 +608,100 @@ mod tests {
                 copy
             );
             assert!(decided(verb, &failed, &safe_flow(), incomplete()).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_departed_resume_resumes_plainly_and_replays_only_with_the_override() {
+        let departed = ArchiveEvidence {
+            failure: FailureEvidence::DepartedFromArchive,
+            ..archive(ArchiveStatus::Failed, finished())
+        };
+        assert!(decided(ReplayVerb::Resume, &departed, &safe_flow(), plain()).is_ok());
+        assert!(matches!(
+            decided(ReplayVerb::Replay, &departed, &safe_flow(), plain()),
+            Err(ArchiveRefusal::Failed {
+                verb: ReplayVerb::Replay,
+                ..
+            })
+        ));
+        assert!(decided(ReplayVerb::Replay, &departed, &safe_flow(), incomplete()).is_ok());
+        let cyclic = FlowEvidence {
+            cycle_members: vec!["triage".to_string()],
+            ..safe_flow()
+        };
+        assert!(
+            matches!(
+                decided(ReplayVerb::Resume, &departed, &cyclic, plain()),
+                Err(ArchiveRefusal::Cycle { .. })
+            ),
+            "the flow's rows still apply"
+        );
+    }
+
+    fn fatal(reason: crate::event::StageFatalReason) -> ExecutionPayload {
+        use crate::event::{StageFatalCode, StageFatalRecorded, StageFatalSeverity};
+        ExecutionPayload::StageFatalRecorded(StageFatalRecorded {
+            severity: StageFatalSeverity::Primary,
+            stage_id: crate::StageId::new(),
+            stage_key: "score".to_string(),
+            causal_event_id: None,
+            input_position: None,
+            primary_cause_event_id: None,
+            code: StageFatalCode::Replay,
+            reason,
+            detail: String::new(),
+        })
+    }
+
+    fn source_refused(refusal: SourceContinuationRefusal) -> ExecutionPayload {
+        ExecutionPayload::SourceContinuationRefused(SourceContinuationRefusedFact { refusal })
+    }
+
+    fn folded(rows: &[ExecutionPayload], contract_violation: bool) -> FailureEvidence {
+        let mut fold = FailureFold::default();
+        for row in rows {
+            fold.observe(row);
+        }
+        fold.finish(contract_violation)
+    }
+
+    #[test]
+    fn only_departures_alone_fold_to_departed_from_archive() {
+        use crate::event::StageFatalReason;
+        let input_changed = source_refused(SourceContinuationRefusal::InputChanged {
+            part: "file".to_string(),
+        });
+        for departures in [
+            vec![fatal(StageFatalReason::DescriptorMismatch)],
+            vec![fatal(StageFatalReason::MissingRecordedFact)],
+            vec![
+                fatal(StageFatalReason::MissingRecordedEffect),
+                fatal(StageFatalReason::UnusedFactHistory),
+            ],
+            vec![input_changed.clone()],
+        ] {
+            assert_eq!(
+                folded(&departures, false),
+                FailureEvidence::DepartedFromArchive,
+                "{departures:?}"
+            );
+            assert_eq!(folded(&departures, true), FailureEvidence::Other);
+        }
+        for other in [
+            vec![],
+            vec![fatal(StageFatalReason::JournalFailure)],
+            vec![
+                fatal(StageFatalReason::UnusedEffectHistory),
+                fatal(StageFatalReason::JournalFailure),
+            ],
+            vec![
+                input_changed,
+                source_refused(SourceContinuationRefusal::PositionUnreadable),
+            ],
+            vec![fatal(StageFatalReason::RecordingEnded)],
+        ] {
+            assert_eq!(folded(&other, false), FailureEvidence::Other, "{other:?}");
         }
     }
 

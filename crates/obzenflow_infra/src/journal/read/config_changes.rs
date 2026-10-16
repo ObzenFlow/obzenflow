@@ -5,11 +5,10 @@
 use super::{open_disk_run, JournalReadError};
 use crate::journal::disk::inspect::load_manifest;
 use obzenflow_core::config::EffectiveConfigEvidence;
-use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourceContinuationRefusal, SourceContinuationRefusedFact,
-};
-use obzenflow_core::event::{ChainPayload, StageFatalReason};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::archive::manifest::RunManifestStage;
+use obzenflow_core::journal::archive_actions::departs_from_archive;
 use obzenflow_core::journal::read::{RunRecordData, RunStage};
 use obzenflow_core::journal::RunManifest;
 use obzenflow_runtime::runtime_config::{config_differences, ConfigDifference};
@@ -103,23 +102,12 @@ fn configuration_refusal<'a>(
     stage: Option<&'a RunStage>,
     execution: &'a ExecutionPayload,
 ) -> Option<&'a str> {
+    if !departs_from_archive(execution) {
+        return None;
+    }
     match execution {
-        ExecutionPayload::StageFatalRecorded(fatal)
-            if matches!(
-                fatal.reason,
-                StageFatalReason::DescriptorMismatch
-                    | StageFatalReason::MissingRecordedEffect
-                    | StageFatalReason::UnusedEffectHistory
-                    | StageFatalReason::MissingRecordedFact
-                    | StageFatalReason::UnusedFactHistory
-            ) =>
-        {
-            Some(&fatal.stage_key)
-        }
-        ExecutionPayload::SourceContinuationRefused(SourceContinuationRefusedFact {
-            refusal: SourceContinuationRefusal::InputChanged { .. },
-        }) => stage.map(|stage| stage.key.as_str()),
-        _ => None,
+        ExecutionPayload::StageFatalRecorded(fatal) => Some(&fatal.stage_key),
+        _ => stage.map(|stage| stage.key.as_str()),
     }
 }
 
@@ -187,7 +175,12 @@ fn rebuilt_runs(manifest: &RunManifest) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::event::{StageFatalCode, StageFatalRecorded, StageFatalSeverity};
+    use obzenflow_core::event::payloads::execution_payload::{
+        SourceContinuationRefusal, SourceContinuationRefusedFact,
+    };
+    use obzenflow_core::event::{
+        StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
+    };
     use obzenflow_core::StageId;
 
     fn fatal(stage: &str, reason: StageFatalReason) -> ExecutionPayload {

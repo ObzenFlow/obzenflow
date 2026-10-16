@@ -60,6 +60,8 @@ pub struct DiskReplayArchive {
     /// Whether a journal of the run still had a live writer at open; Core's
     /// still-running row decides it (FLOWIP-134k §1, B9).
     live_writer: bool,
+    /// How a failed resume failed, from its error journals (FLOWIP-134k B10).
+    failure: obzenflow_core::journal::archive_actions::FailureEvidence,
 }
 
 /// Whether opening an archive probes its journal writers' locks. The footer
@@ -114,6 +116,7 @@ impl DiskReplayArchive {
                     stage_key,
                 })
                 .collect(),
+            failure: self.failure,
         }
     }
 
@@ -255,37 +258,48 @@ impl DiskReplayArchive {
                 reconstruction_completed: None,
                 ancestors: Vec::new(),
                 live_writer,
+                failure: Default::default(),
             });
         }
 
         let system_log_path = archive_path.join(&manifest.system_journal_file);
-        let (status_derivation, reconstruction_completed) = match scan_system_log(&system_log_path)
-        {
-            Ok(scan) => (scan.derivation, scan.reconstruction_completed),
-            Err(err) => {
-                if allow_incomplete_archive
-                    && !matches!(err, ReplayError::UnsupportedJournalSchemaVersion { .. })
-                {
-                    tracing::warn!(
-                        archive_path = %archive_path.display(),
-                        system_log_path = %system_log_path.display(),
-                        error = %err,
-                        "Replay archive system.log could not be read; proceeding due to allow_incomplete_archive"
-                    );
-                    (
-                        StatusDerivation {
-                            terminal_events_found: 0,
-                            chosen: ArchiveStatus::Unknown,
-                            warning: Some(err.to_string()),
-                        },
-                        None,
-                    )
-                } else {
-                    return Err(err);
+        let (status_derivation, reconstruction_completed, contract_violation) =
+            match scan_system_log(&system_log_path) {
+                Ok(scan) => (
+                    scan.derivation,
+                    scan.reconstruction_completed,
+                    scan.contract_violation,
+                ),
+                Err(err) => {
+                    if allow_incomplete_archive
+                        && !matches!(err, ReplayError::UnsupportedJournalSchemaVersion { .. })
+                    {
+                        tracing::warn!(
+                            archive_path = %archive_path.display(),
+                            system_log_path = %system_log_path.display(),
+                            error = %err,
+                            "Replay archive system.log could not be read; proceeding due to allow_incomplete_archive"
+                        );
+                        (
+                            StatusDerivation {
+                                terminal_events_found: 0,
+                                chosen: ArchiveStatus::Unknown,
+                                warning: Some(err.to_string()),
+                            },
+                            None,
+                            false,
+                        )
+                    } else {
+                        return Err(err);
+                    }
                 }
-            }
-        };
+            };
         let status = status_derivation.chosen;
+        let failure = if status == ArchiveStatus::Failed && manifest.resume.is_some() {
+            scan_failure_evidence(&archive_path, &manifest, contract_violation)?
+        } else {
+            Default::default()
+        };
 
         let scan = scan_source_journals(
             &archive_path,
@@ -323,6 +337,7 @@ impl DiskReplayArchive {
             reconstruction_completed,
             ancestors: Vec::new(),
             live_writer,
+            failure,
         })
     }
 
@@ -1063,12 +1078,70 @@ fn scan_marker_generation(path: &Path, policy: ReadPolicy) -> Result<u64, Replay
     Ok(max_generation)
 }
 
+/// How a failed resume failed, folded by Core from every stage's error journal
+/// (FLOWIP-134k B10). A record the scan cannot read leaves the run's failure
+/// unclassified, so admission keeps the override.
+fn scan_failure_evidence(
+    archive_path: &Path,
+    manifest: &RunManifest,
+    contract_violation: bool,
+) -> Result<obzenflow_core::journal::archive_actions::FailureEvidence, ReplayError> {
+    use obzenflow_core::event::ChainPayload;
+    use obzenflow_core::journal::archive_actions::{FailureEvidence, FailureFold};
+    let policy = ReadPolicy::SealedScan {
+        tolerate_torn_tail: true,
+    };
+    let mut fold = FailureFold::default();
+    for stage_info in manifest.stages.values() {
+        let path = archive_path.join(&stage_info.error_journal_file);
+        if !path.exists() {
+            continue;
+        }
+        let file = File::open(&path).map_err(|e| ReplayError::Io {
+            message: format!("Failed to open error journal at {}", path.display()),
+            source: e,
+        })?;
+        let mut reader = BufReader::new(file);
+        let mut buf = Vec::new();
+        let mut offset = 0u64;
+        let mut decoder = Decoder::new(&path);
+        while let Some((consumed, termination)) =
+            read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
+                message: format!("Failed to read error journal at {}", path.display()),
+                source: e,
+            })?
+        {
+            let record_offset = offset;
+            offset += consumed as u64;
+            match dispose(
+                classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
+                termination,
+                policy,
+            ) {
+                Disposition::Yield(frame) => {
+                    for record in frame.into_records() {
+                        if let ChainPayload::Execution(execution) = &record.payload {
+                            fold.observe(execution);
+                        }
+                    }
+                }
+                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+                Disposition::Corrupt(_) => return Ok(FailureEvidence::Other),
+            }
+        }
+    }
+    Ok(fold.finish(contract_violation))
+}
+
 /// What a run's system log records about how the run ended.
 pub(crate) struct SystemLogScan {
     pub(crate) derivation: StatusDerivation,
     /// The generation whose reconstruction the run recorded as complete
     /// (FLOWIP-134i B6).
     pub(crate) reconstruction_completed: Option<u64>,
+    /// Whether the terminal record that derived the status is a failure that
+    /// names a contract violation (FLOWIP-134k B10).
+    pub(crate) contract_violation: bool,
 }
 
 pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError> {
@@ -1088,6 +1161,7 @@ pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError>
     let mut chosen = ArchiveStatus::Unknown;
     let mut terminal_events_found: u64 = 0;
     let mut reconstruction_completed = None;
+    let mut contract_violation = false;
     let mut line_no = 0u64;
     let mut offset = 0u64;
     let mut decoder = Decoder::new(path);
@@ -1122,14 +1196,20 @@ pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError>
                             obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
                                 terminal_events_found = terminal_events_found.saturating_add(1);
                                 chosen = ArchiveStatus::Completed;
+                                contract_violation = false;
                             }
-                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
+                            obzenflow_core::event::PipelineLifecycleEvent::Failed {
+                                failure_cause,
+                                ..
+                            } => {
                                 terminal_events_found = terminal_events_found.saturating_add(1);
                                 chosen = ArchiveStatus::Failed;
+                                contract_violation = failure_cause.is_some();
                             }
                             obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
                                 terminal_events_found = terminal_events_found.saturating_add(1);
                                 chosen = ArchiveStatus::Cancelled;
+                                contract_violation = false;
                             }
                             obzenflow_core::event::PipelineLifecycleEvent::ReconstructionCompleted {
                                 generation,
@@ -1171,6 +1251,7 @@ pub(crate) fn scan_system_log(path: &Path) -> Result<SystemLogScan, ReplayError>
             },
         },
         reconstruction_completed,
+        contract_violation,
     })
 }
 

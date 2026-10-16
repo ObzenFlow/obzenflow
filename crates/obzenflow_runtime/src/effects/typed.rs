@@ -217,9 +217,18 @@ where
         self.core.authoring_halt_fatal()
     }
 
-    pub(crate) async fn settlement_divergence(
-        &self,
-    ) -> Option<crate::stages::common::handler_error::StageFatal> {
-        self.core.settlement_divergence().await
+    /// End a non-fatal invocation: record the settlement of an input it
+    /// settled without an act (FLOWIP-134k B11), then check that it skipped
+    /// no recorded effect. A refusal comes back as the stage's fatal.
+    pub(crate) async fn end_of_invocation_fatal(
+        &mut self,
+    ) -> Result<Option<crate::stages::common::handler_error::StageFatal>, EffectError> {
+        if let Err(error) = self.core.settle_without_act().await {
+            return match self.core.authoring_halt_fatal() {
+                Some(fatal) => Ok(Some(fatal)),
+                None => Err(error),
+            };
+        }
+        Ok(self.core.settlement_divergence().await)
     }
 }

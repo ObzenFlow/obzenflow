@@ -46,6 +46,7 @@ mod tests {
                 status: ArchiveStatus::Cancelled,
                 live_writer: false,
                 sources: Vec::new(),
+                failure: Default::default(),
             },
             &flow_evidence_with_cycle(Vec::new(), descriptors),
             ArchiveOverrides {
