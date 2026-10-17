@@ -165,6 +165,9 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),
             effect_history: None,
+            current_run_history: crate::effects::CurrentRunHistory::new(
+                self.resources.data_journal.clone(),
+            ),
             runtime_execution: self.resources.runtime_execution.clone(),
             effect_ports: self.resources.effect_ports.clone(),
             effect_declarations: self.resources.effect_declarations.clone(),

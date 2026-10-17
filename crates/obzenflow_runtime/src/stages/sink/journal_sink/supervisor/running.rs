@@ -873,6 +873,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             heartbeat_state: None,
             parent: envelope.clone(),
             effect_history: ctx.effect_history.clone(),
+            current_run_history: ctx.current_run_history.clone(),
             runtime_execution: ctx.runtime_execution.clone(),
             effect_ports: ctx.effect_ports.clone(),
             effect_declarations: ctx.effect_declarations.clone(),

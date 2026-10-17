@@ -122,6 +122,8 @@ pub struct EffectInvocationContext {
     pub heartbeat_state: Option<Arc<HeartbeatState>>,
     pub parent: DeliveredRecord<ChainPayload>,
     pub effect_history: Option<Arc<EffectHistory>>,
+    /// The stage's own effect history in this run, folded from `data_journal`.
+    pub current_run_history: CurrentRunHistory,
     /// Runtime execution strategy (FLOWIP-120r): one authority for the
     /// replay-versus-live decision at the effect boundary.
     pub runtime_execution: crate::execution::RuntimeExecution,
