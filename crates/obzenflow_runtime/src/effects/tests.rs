@@ -4897,6 +4897,31 @@ fn a_test_history_records_one_action_per_committed_cursor_in_record_order() {
     assert_eq!(recorded, expected);
 }
 
+#[tokio::test]
+async fn a_skipped_history_scan_opens_no_journal() {
+    let archive: Arc<dyn obzenflow_core::journal::archive::ReplayArchive> =
+        Arc::new(ScopeMatrixArchive);
+
+    let history = EffectHistory::load(
+        &archive,
+        &StageKey::from("audit_sink"),
+        EffectHistoryScan::Skip,
+    )
+    .await
+    .expect("a skipped scan reads nothing that could fail");
+
+    assert_eq!(history.recorded_flow_id().as_str(), "scope-matrix-archive");
+    assert!(history
+        .find_group(&EffectCursor::new(
+            "scope-matrix-archive",
+            "audit_sink",
+            0_u64,
+            0_u32
+        ))
+        .is_none());
+    assert!(history.actions().actions().is_empty());
+}
+
 #[test]
 fn incomplete_outcome_group_on_completed_archive_fails_loud() {
     // FLOWIP-120q: the same incomplete group that a torn-tail-tolerant load drops

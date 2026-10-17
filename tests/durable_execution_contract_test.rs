@@ -79,11 +79,14 @@ const PLAN: &str = "OBZENFLOW_134I_CONTRACT_PLAN";
 /// The store channel's third record fails to decode, before the first cut.
 const INVALID_ORDER: &str = "S-BAD";
 const FIRST_AFTER_INVALID: &str = "S-03";
-/// Held after its charge at the first cut, and again when S5b re-executes it.
+/// Held after its charge at the first cut, then re-executed by each resume of
+/// S4's archive.
 const FIRST_CUT: &str = "S-12";
-/// Held inside S4's resumed runs: once reconstruction completes in S5, and
-/// before it can in S5b, so the store channel cannot reach its end.
+/// Held inside S4's resumed run once its reconstruction completes (S5).
 const SECOND_CUT: &str = "S-18";
+/// The first order S4's other resumed run calls after re-executing S-12, held
+/// before that run's reconstruction completes (S5b).
+const TORN_CUT: &str = "S-13";
 const HELD_RECEIPT: &str = "W-01";
 const DECLINES: [(&str, &str); 3] = [
     ("S-05", "InsufficientFunds"),
@@ -1466,8 +1469,22 @@ impl History {
         }
     }
 
+    /// Records `run`, which has exited and has no successor running yet. The
+    /// orders the gateway called without an outcome in an interrupted run were
+    /// in flight when it was cut.
     async fn record(&mut self, run: &Path, ended: Ended) -> &Archive {
-        self.runs.push((Archive::read(run).await, ended));
+        let archive = Archive::read(run).await;
+        if matches!(ended, Ended::Interrupted { .. }) {
+            let outcomes = archive.outcomes();
+            self.in_flight.extend(
+                self.scenario
+                    .calls()
+                    .into_iter()
+                    .map(|call| call.order_id)
+                    .filter(|order| !outcomes.contains_key(order)),
+            );
+        }
+        self.runs.push((archive, ended));
         &self.runs[self.runs.len() - 1].0
     }
 
@@ -1485,19 +1502,6 @@ impl History {
             Some(_) => http_ids().into_iter().chain(store_ids()).collect(),
             None => valid_ids(),
         }
-    }
-
-    /// Orders the gateway called without an outcome in `run` were in flight
-    /// when it was cut.
-    fn in_flight_at(&mut self, run: &Path) {
-        let outcomes = self.archive(run).outcomes();
-        let calls = self.scenario.calls();
-        self.in_flight.extend(
-            calls
-                .into_iter()
-                .map(|call| call.order_id)
-                .filter(|order| !outcomes.contains_key(order)),
-        );
     }
 
     /// I1 to I8 over every archive of this history. `control` is the natural
@@ -2002,7 +2006,6 @@ async fn durable_execution_contract() {
     // S2: SIGTERM at the cut, the hold then released; resume. S3: replay.
     let s2 = Scenario::fresh("s2");
     let mut stopped = History::new("S2", &s2);
-    stopped.in_flight.insert(FIRST_CUT.into());
     let child = Child::spawn(&s2, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
     let run = first_cut(&s2, &child, "S2").await;
     child.signal(Signal::Term);
@@ -2035,9 +2038,6 @@ async fn durable_execution_contract() {
     // completes; resume of the resume.
     let mut after_rebuild = History::new("S5", &s5);
     after_rebuild
-        .in_flight
-        .extend([FIRST_CUT.into(), SECOND_CUT.into()]);
-    after_rebuild
         .record(&killed_copy, Ended::Interrupted { killed: true })
         .await;
     let child = Child::spawn(
@@ -2062,9 +2062,6 @@ async fn durable_execution_contract() {
 
     let mut before_rebuild = History::new("S5b", &s4);
     before_rebuild
-        .in_flight
-        .extend([FIRST_CUT.into(), SECOND_CUT.into()]);
-    before_rebuild
         .record(&killed, Ended::Interrupted { killed: true })
         .await;
     let child = Child::spawn(
@@ -2072,7 +2069,7 @@ async fn durable_execution_contract() {
         resume(&killed),
         Some(Hold::ReceiptAndGateway {
             receipt: HELD_RECEIPT.into(),
-            gateway: SECOND_CUT.into(),
+            gateway: TORN_CUT.into(),
         }),
     );
     let torn = child.run().await;
@@ -2083,12 +2080,8 @@ async fn durable_execution_contract() {
                 .filter(|receipt| receipt.order_id == HELD_RECEIPT)
                 .count()
                 == 2
-            && s4
-                .calls()
-                .iter()
-                .filter(|call| call.order_id == FIRST_CUT)
-                .count()
-                == 2
+            && s4.calls().iter().any(|call| call.order_id == TORN_CUT)
+            && !archive.outcomes().contains_key(TORN_CUT)
     })
     .await;
     child.signal(Signal::Kill);
@@ -2261,7 +2254,6 @@ async fn durable_execution_contract_over_http() {
     history
         .record(&first, Ended::Interrupted { killed: true })
         .await;
-    history.in_flight_at(&first);
 
     // H2, lost response after commit: a held web order stalls the channel, a
     // sender gives up, then the hold is released and the server is killed
@@ -2294,7 +2286,6 @@ async fn durable_execution_contract_over_http() {
     history
         .record(&second, Ended::Interrupted { killed: true })
         .await;
-    history.in_flight_at(&second);
 
     // H3, after acknowledgement: the lost response resolves to its row, then
     // a new order's 202 arrives and the server is killed.
@@ -2315,7 +2306,6 @@ async fn durable_execution_contract_over_http() {
     history
         .record(&third, Ended::Interrupted { killed: true })
         .await;
-    history.in_flight_at(&third);
 
     // H4: the last resume refuses an invalid order, sends the rest and stops
     // once every outcome and receipt has committed.

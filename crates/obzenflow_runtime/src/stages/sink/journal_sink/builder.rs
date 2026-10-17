@@ -134,7 +134,6 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),
-            effect_history: None,
             current_run_history: crate::effects::CurrentRunHistory::new(
                 self.resources.data_journal.clone(),
             ),

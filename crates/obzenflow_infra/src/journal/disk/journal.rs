@@ -78,8 +78,8 @@ pub struct DiskJournal<T: JournalEvent> {
     path: PathBuf,
     /// Shared synchronous file handle for appends (opened once)
     write_file: Arc<Mutex<StdFile>>,
-    /// In-memory index: event_id -> file offset
-    index: Arc<RwLock<HashMap<Ulid, u64>>>,
+    /// Event id to frame offset, built by the first `read_event`
+    index: Arc<RwLock<Option<HashMap<Ulid, u64>>>>,
     /// Disposable known frame boundary for bounded reverse-tail discovery.
     last_frame: Arc<AtomicU64>,
     /// Shared lock to coordinate readers/writers
@@ -227,10 +227,13 @@ impl<T: JournalEvent> DiskJournal<T> {
             })?;
         }
         let (identity, writer_lease) = super::identity::open_identity(&log_path, run_id)?;
-        let (observations, (write_file, index, last_commit)) =
+        let (observations, (write_file, last_frame, last_commit)) =
             super::observations::DiskObservationReader::open_writer(log_path.clone(), |end| {
-                let (index, last_commit, committed_end) =
-                    rebuild_index_from_path::<T>(&log_path, end)?;
+                let CommittedFrames {
+                    last_commit,
+                    last_frame,
+                    committed_end,
+                } = scan_committed_frames::<T>(&log_path, end, None)?;
                 for commitment in last_commit.iter() {
                     if commitment.reference.run_id != identity.run_id
                         || commitment.reference.journal_writer_id.as_journal_id()
@@ -244,7 +247,7 @@ impl<T: JournalEvent> DiskJournal<T> {
                 // Recovery may truncate a torn suffix. Keep the locked original
                 // descriptor as the one append FD shared by every journal clone.
                 drop(open_append_file(&log_path, end, committed_end)?);
-                Ok(((writer_lease, index, last_commit), committed_end))
+                Ok(((writer_lease, last_frame, last_commit), committed_end))
             })?;
         Ok(Self {
             owner,
@@ -254,8 +257,8 @@ impl<T: JournalEvent> DiskJournal<T> {
             observations,
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
-            last_frame: Arc::new(AtomicU64::new(index.values().copied().max().unwrap_or(0))),
-            index: Arc::new(RwLock::new(index)),
+            last_frame: Arc::new(AtomicU64::new(last_frame)),
+            index: Arc::new(RwLock::new(None)),
             read_write_lock: shared_state_for_path(&log_path).0,
             observability: shared_state_for_path(&log_path).1,
             last_commit: Arc::new(RwLock::new(last_commit)),
@@ -265,9 +268,11 @@ impl<T: JournalEvent> DiskJournal<T> {
     }
 }
 
-/// In-memory index (`event_id -> byte offset`) plus the last physical journal commitment
-/// rebuilt from a journal file.
-type RebuiltIndex = (HashMap<Ulid, u64>, Option<JournalClock>, u64);
+struct CommittedFrames {
+    last_commit: Option<JournalClock>,
+    last_frame: u64,
+    committed_end: u64,
+}
 
 fn open_append_file(
     path: &Path,
@@ -318,21 +323,21 @@ fn recover_torn_tail(file: &StdFile, path: &Path, committed_end: u64) -> Result<
     Ok(())
 }
 
-/// Rebuild a disk journal's in-memory index and writer clocks from the framed
-/// log on disk (FLOWIP-120q). Shared by `DiskJournal::new` and
-/// `DiskJournal::with_owner` so the two constructors cannot diverge. Uses the
-/// sealed full-scan policy: fail loud on committed corruption, tolerate only a
-/// final torn tail (a crash mid-append leaves an unterminated last record).
-fn rebuild_index_from_path<T: JournalEvent>(
+fn scan_committed_frames<T: JournalEvent>(
     log_path: &Path,
     confirmed_end: Option<u64>,
-) -> Result<RebuiltIndex, JournalError> {
+    mut index: Option<&mut HashMap<Ulid, u64>>,
+) -> Result<CommittedFrames, JournalError> {
     let mut admission = super::identity::CommitmentAdmission::open(log_path)?;
-    let mut index = HashMap::with_capacity(10000);
     let mut last_commit: Option<JournalClock> = None;
+    let mut last_frame = 0u64;
 
     if !log_path.exists() {
-        return Ok((index, last_commit, 0));
+        return Ok(CommittedFrames {
+            last_commit,
+            last_frame,
+            committed_end: 0,
+        });
     }
 
     let file = StdFile::open(log_path).map_err(|e| JournalError::Implementation {
@@ -363,9 +368,12 @@ fn rebuild_index_from_path<T: JournalEvent>(
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
                     let commitment = admission.admit(&record)?;
-                    index.insert(record.id().as_ulid(), record_offset);
+                    if let Some(index) = index.as_deref_mut() {
+                        index.insert(record.id().as_ulid(), record_offset);
+                    }
                     last_commit = Some(commitment);
                 }
+                last_frame = record_offset;
                 committed_end = offset;
             }
             // A tolerated torn tail ends the committed records.
@@ -373,7 +381,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
             Disposition::Corrupt(problem) => {
                 return Err(JournalError::Implementation {
                     message: format!(
-                        "Corrupt record while rebuilding index at offset {record_offset} in {}: {problem}",
+                        "Corrupt record while scanning committed frames at offset {record_offset} in {}: {problem}",
                         log_path.display()
                     ),
                     source: Box::new(std::io::Error::new(
@@ -391,7 +399,11 @@ fn rebuild_index_from_path<T: JournalEvent>(
             source: "missing committed records".into(),
         });
     }
-    Ok((index, last_commit, committed_end))
+    Ok(CommittedFrames {
+        last_commit,
+        last_frame,
+        committed_end,
+    })
 }
 
 impl<T: JournalEvent> Clone for DiskJournal<T> {
@@ -586,10 +598,9 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         );
 
         // Commit in-memory state only after the durable write succeeded.
-        self.index
-            .write()
-            .await
-            .insert(envelope.id().as_ulid(), committed.offset);
+        if let Some(index) = self.index.write().await.as_mut() {
+            index.insert(envelope.id().as_ulid(), committed.offset);
+        }
         *self.last_commit.write().await = Some(commitment);
         self.observations.committed(
             std::slice::from_ref(&envelope),
@@ -747,8 +758,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             "DiskJournal appended atomic group frame"
         );
 
-        {
-            let mut index = self.index.write().await;
+        if let Some(index) = self.index.write().await.as_mut() {
             for record in &envelopes {
                 index.insert(record.id().as_ulid(), committed.offset);
             }
@@ -762,6 +772,35 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         );
 
         Ok(envelopes)
+    }
+
+    async fn event_offset(&self, ulid: &Ulid) -> Result<Option<u64>, JournalError> {
+        if let Some(index) = self.index.read().await.as_ref() {
+            return Ok(index.get(ulid).copied());
+        }
+        let append_lock = self.read_write_lock.write().await;
+        let mut index = self.index.write().await;
+        if index.is_none() {
+            let path = self.path.clone();
+            let confirmed_end = self.observations.confirmed_end();
+            let offsets = tokio::task::spawn_blocking(move || {
+                let mut offsets = HashMap::new();
+                scan_committed_frames::<T>(&path, confirmed_end, Some(&mut offsets))
+                    .map(|_| offsets)
+            })
+            .await
+            .map_err(|error| JournalError::Implementation {
+                message: "Journal index task failed".into(),
+                source: Box::new(error),
+            })??;
+            *index = Some(offsets);
+        }
+        let offset = index
+            .as_ref()
+            .and_then(|offsets| offsets.get(ulid).copied());
+        drop(index);
+        drop(append_lock);
+        Ok(offset)
     }
 }
 
@@ -896,13 +935,9 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let ulid = event_id.as_ulid();
 
-        // Check index
-        let index = self.index.read().await;
-        let offset = match index.get(&ulid) {
-            Some(o) => *o,
-            None => return Ok(None),
+        let Some(offset) = self.event_offset(&ulid).await? else {
+            return Ok(None);
         };
-        drop(index);
 
         if !self.path.exists() {
             return Ok(None);
@@ -2113,6 +2148,51 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn the_event_index_waits_for_the_first_read_event() {
+        let directory = tempfile::tempdir().expect("temporary journal directory");
+        let path = directory.path().join("lazy.log");
+        let stage = StageId::new();
+        let first = {
+            let journal =
+                DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                    .unwrap();
+            let first = journal
+                .append(
+                    crate::journal::observability::tests::event(stage, 1),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                journal.index.read().await.is_none(),
+                "appends build no index"
+            );
+            *first.id()
+        };
+
+        let journal =
+            DiskJournal::<ChainEvent>::with_owner(path, JournalOwner::stage(stage)).unwrap();
+        assert!(
+            journal.index.read().await.is_none(),
+            "reopening builds no index"
+        );
+        assert!(journal.read_event(&first).await.unwrap().is_some());
+        let second = journal
+            .append(
+                crate::journal::observability::tests::event(stage, 2),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(journal.read_event(second.id()).await.unwrap().is_some());
+        assert_eq!(
+            journal.index.read().await.as_ref().map(HashMap::len),
+            Some(2),
+            "once built, the index follows every append"
+        );
     }
 
     #[tokio::test]

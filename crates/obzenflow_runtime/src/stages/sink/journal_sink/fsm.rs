@@ -10,7 +10,7 @@
 
 use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectPortRegistry};
 use crate::execution::RuntimeExecution;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
@@ -458,9 +458,6 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     /// Data journal for writing delivery events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
 
-    /// Recorded effect outcomes for replay suppression.
-    pub effect_history: Option<Arc<EffectHistory>>,
-
     /// This run's effect history, folded from `data_journal`.
     pub current_run_history: CurrentRunHistory,
 
@@ -629,18 +626,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
 
                 ctx.subscription = Some(subscription);
 
-                // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
-                let recorded_history = ctx.runtime_execution.archive_for_io();
-                if let Some(archive) = recorded_history {
-                    let stage = obzenflow_core::StageKey::from(ctx.stage_name.clone());
-                    let history = EffectHistory::load(archive, &stage).await.map_err(|e| {
-                        FsmError::HandlerError(format!(
-                            "Failed to load effect history for '{}': {e}",
-                            ctx.stage_name
-                        ))
-                    })?;
-                    ctx.effect_history = Some(Arc::new(history));
-
+                if let Some(archive) = ctx.runtime_execution.archive_for_io() {
                     if let (Some(_), Some(classification)) = (
                         ctx.runtime_execution.resume_control(),
                         ctx.receipt_classification.take(),
@@ -1364,7 +1350,6 @@ mod tests {
             flow_id: FlowId::new(),
             data_journal: data.clone(),
             error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
-            effect_history: None,
             current_run_history: crate::effects::CurrentRunHistory::new(data.clone()),
             runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
             effect_ports: Default::default(),

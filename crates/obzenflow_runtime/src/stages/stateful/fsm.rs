@@ -753,12 +753,14 @@ impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> StatefulAction<H
                     if let Some(archive) = recorded_history {
                         let stage = obzenflow_core::StageKey::from(ctx.stage_name.clone());
                         let history =
-                            H::load_effect_history(archive, &stage).await.map_err(|e| {
-                                obzenflow_fsm::FsmError::HandlerError(format!(
-                                    "Failed to load effect history for '{}': {e}",
-                                    ctx.stage_name
-                                ))
-                            })?;
+                            EffectHistory::load(archive, &stage, H::effect_history_scan())
+                                .await
+                                .map_err(|e| {
+                                    obzenflow_fsm::FsmError::HandlerError(format!(
+                                        "Failed to load effect history for '{}': {e}",
+                                        ctx.stage_name
+                                    ))
+                                })?;
                         let history = Arc::new(history);
                         ctx.catch_up.install_history(history.clone()).await;
                         ctx.effect_history = Some(history);
