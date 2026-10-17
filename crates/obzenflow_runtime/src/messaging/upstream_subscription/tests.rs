@@ -1983,7 +1983,6 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     assert_eq!(reader_progress[0].reader_seq, SeqNo(0));
     assert_eq!(reader_progress[0].receipted_seq, SeqNo(0));
     assert!(reader_progress[0].last_event_id.is_none());
-    assert_eq!(subscription.delivered_data_count(), 0);
     assert_eq!(subscription.delivered_counts()[0], DeliveredCount(0));
     assert_eq!(subscription.last_delivered_stage_input_position(), None);
 
@@ -3792,7 +3791,6 @@ async fn long_filtered_run_yields_bounded_cursor_progress_before_delivery() {
                 "filtered poll {completed} should yield cursor progress before scanning on: {other:?}"
             ),
         }
-        assert_eq!(subscription.delivered_data_count(), 0);
         assert_eq!(subscription.last_delivered_stage_input_position(), None);
     }
 
@@ -3802,7 +3800,10 @@ async fn long_filtered_run_yields_bounded_cursor_progress_before_delivery() {
         }
         other => panic!("selected row should eventually deliver: {other:?}"),
     }
-    assert_eq!(subscription.delivered_data_count(), 1);
+    assert_eq!(
+        subscription.last_delivered_stage_input_position(),
+        Some(StageInputPosition(1))
+    );
 }
 
 #[tokio::test]

@@ -7,8 +7,10 @@ use crate::execution::RuntimeExecution;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handler_error::StageFatal;
+use crate::stages::join::phase::{check_crossing_phase, PhaseReads};
+use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, ReaderGeneration, StageId, StageKey, WriterId};
 use obzenflow_fsm::{
@@ -20,7 +22,7 @@ use std::sync::Arc;
 pub(crate) enum CatchUpDisposition {
     Consumed,
     Crossed(ReaderGeneration),
-    Failed(String),
+    Failed(StageFatal),
     Refused(StageFatal),
 }
 
@@ -30,7 +32,7 @@ pub(crate) enum CatchUpState {
     Announcing { crossed: ReaderGeneration },
     Live { crossed: ReaderGeneration },
     Refused { fatal: StageFatal },
-    Failed { message: String },
+    Failed { fatal: StageFatal },
 }
 
 impl CatchUpState {
@@ -60,16 +62,19 @@ impl StateVariant for CatchUpState {
 pub(crate) enum CatchUpEvent {
     FrontierReached {
         generation: ReaderGeneration,
-        delivered: u64,
+    },
+    JoinFrontierReached {
+        generation: ReaderGeneration,
+        reads: PhaseReads,
     },
     InputsEnded,
     RecordedCrossingReached {
         generation: ReaderGeneration,
     },
-    RecordedActionsExhausted {
-        delivered: u64,
+    RecordedActionsExhausted,
+    UnsettledDelivery {
+        edges_redelivering: usize,
     },
-    SettledDeliveriesExhausted,
     RecordedInputEnded {
         recorded: ReaderGeneration,
         generation: ReaderGeneration,
@@ -81,10 +86,11 @@ impl EventVariant for CatchUpEvent {
     fn variant_name(&self) -> &str {
         match self {
             Self::FrontierReached { .. } => "FrontierReached",
+            Self::JoinFrontierReached { .. } => "JoinFrontierReached",
             Self::InputsEnded => "InputsEnded",
             Self::RecordedCrossingReached { .. } => "RecordedCrossingReached",
-            Self::RecordedActionsExhausted { .. } => "RecordedActionsExhausted",
-            Self::SettledDeliveriesExhausted => "SettledDeliveriesExhausted",
+            Self::RecordedActionsExhausted => "RecordedActionsExhausted",
+            Self::UnsettledDelivery { .. } => "UnsettledDelivery",
             Self::RecordedInputEnded { .. } => "RecordedInputEnded",
             Self::HandoffAnnounced => "HandoffAnnounced",
         }
@@ -109,12 +115,18 @@ pub(crate) struct MarkerWriter {
     pub(crate) flow_context: FlowContext,
 }
 
+enum Recorded {
+    Nothing,
+    Actions(Arc<EffectHistory>),
+    JoinPhases(Vec<JoinPhaseFact>),
+}
+
 pub(crate) struct CatchUpContext {
     stage_id: StageId,
     stage_key: StageKey,
     writer: Option<MarkerWriter>,
     execution: RuntimeExecution,
-    history: Option<Arc<EffectHistory>>,
+    recorded: Recorded,
 }
 
 impl FsmContext for CatchUpContext {}
@@ -127,22 +139,53 @@ impl CatchUpContext {
     }
 
     fn unreproduced(&self) -> Option<StageFatal> {
-        let expected = self.history.as_ref()?.actions().next_unreproduced()?;
+        let Recorded::Actions(history) = &self.recorded else {
+            return None;
+        };
+        let expected = history.actions().next_unreproduced()?;
         Some(ActionDeparture::skipped(self.stage_key.clone(), None, expected).stage_fatal())
     }
 
-    fn short_redelivery(&self, delivered: u64) -> Option<String> {
-        let max = self
-            .execution
-            .resume_control()?
-            .recorded_delivered_high_water(self.stage_id)?;
-        (delivered < max).then(|| {
-            format!(
-                "stage '{}' crossed its catch-up boundary after {delivered} delivered data events \
-                 but the archive records {max}; torn or short re-delivery (FLOWIP-120n F15)",
-                self.stage_key.as_str()
-            )
-        })
+    fn phase_divergence(
+        &self,
+        generation: ReaderGeneration,
+        reads: PhaseReads,
+    ) -> Option<StageFatal> {
+        let Recorded::JoinPhases(archived) = &self.recorded else {
+            return None;
+        };
+        check_crossing_phase(self.stage_key.as_str(), archived, generation, reads)
+            .err()
+            .map(|detail| {
+                StageFatal::new(
+                    StageFatalCode::Replay,
+                    StageFatalReason::ReplayDivergence,
+                    detail,
+                )
+            })
+    }
+
+    fn failure(&self, error: FsmError) -> StageFatal {
+        match error {
+            FsmError::UnhandledEvent { state, event } => StageFatal::new(
+                StageFatalCode::Coordination,
+                StageFatalReason::CoordinationFailure,
+                format!(
+                    "stage '{}' received catch-up event {event} while {state}",
+                    self.stage_key.as_str()
+                ),
+            ),
+            FsmError::HandlerError(detail) => StageFatal::new(
+                StageFatalCode::Journal,
+                StageFatalReason::JournalFailure,
+                detail,
+            ),
+            other => StageFatal::new(
+                StageFatalCode::Coordination,
+                StageFatalReason::CoordinationFailure,
+                other.to_string(),
+            ),
+        }
     }
 
     fn crossing(
@@ -178,17 +221,52 @@ impl CatchUpContext {
 
     fn going_live(
         &self,
-        delivered: u64,
         crossed: ReaderGeneration,
         generation: ReaderGeneration,
     ) -> Transition<CatchUpState, CatchUpAction> {
-        if let Some(fatal) = self.unreproduced() {
-            return to(CatchUpState::Refused { fatal });
+        match self.unreproduced() {
+            Some(fatal) => to(CatchUpState::Refused { fatal }),
+            None => self.crossing(crossed, generation, true),
         }
-        if let Some(message) = self.short_redelivery(delivered) {
-            return to(CatchUpState::Failed { message });
+    }
+
+    fn frontier(
+        &self,
+        crossed: ReaderGeneration,
+        generation: ReaderGeneration,
+    ) -> Transition<CatchUpState, CatchUpAction> {
+        if self
+            .resume_generation()
+            .is_some_and(|resume| generation >= resume)
+        {
+            self.going_live(crossed, generation)
+        } else {
+            self.crossing(crossed, generation, false)
         }
-        self.crossing(crossed, generation, true)
+    }
+
+    fn recorded_crossing(
+        &self,
+        crossed: ReaderGeneration,
+        generation: ReaderGeneration,
+    ) -> Transition<CatchUpState, CatchUpAction> {
+        match self.resume_generation() {
+            Some(resume) if generation >= resume => to(CatchUpState::Failed {
+                fatal: StageFatal::new(
+                    StageFatalCode::Replay,
+                    StageFatalReason::ReplayDivergence,
+                    format!(
+                        "stage '{}' reached a recorded crossing into generation {} at or above \
+                         the resume generation {}",
+                        self.stage_key.as_str(),
+                        generation.0,
+                        resume.0
+                    ),
+                ),
+            }),
+            _ if generation > crossed => self.crossing(crossed, generation, false),
+            _ => to(CatchUpState::Rebuilding { crossed }),
+        }
     }
 }
 
@@ -206,40 +284,37 @@ fn step(
 ) -> Transition<CatchUpState, CatchUpAction> {
     let resume = ctx.resume_generation();
     match (state, event) {
+        (CatchUpState::Rebuilding { crossed }, CatchUpEvent::FrontierReached { generation })
+            if generation > crossed =>
+        {
+            ctx.frontier(*crossed, *generation)
+        }
         (
             CatchUpState::Rebuilding { crossed },
-            CatchUpEvent::FrontierReached {
-                generation,
-                delivered,
-            },
-        ) if generation > crossed => {
-            if resume.is_some_and(|resume| *generation >= resume) {
-                ctx.going_live(*delivered, *crossed, *generation)
-            } else {
-                ctx.crossing(*crossed, *generation, false)
-            }
-        }
+            CatchUpEvent::JoinFrontierReached { generation, reads },
+        ) if generation > crossed => match ctx.phase_divergence(*generation, *reads) {
+            Some(fatal) => to(CatchUpState::Failed { fatal }),
+            None => ctx.frontier(*crossed, *generation),
+        },
         (
             CatchUpState::Rebuilding { crossed },
             CatchUpEvent::RecordedCrossingReached { generation },
-        ) if generation > crossed => ctx.crossing(*crossed, *generation, false),
-        (
-            CatchUpState::Rebuilding { crossed },
-            CatchUpEvent::RecordedActionsExhausted { delivered },
-        ) => match resume {
-            Some(generation) if generation > *crossed => {
-                ctx.going_live(*delivered, *crossed, generation)
-            }
-            _ => to(state.clone()),
-        },
-        (CatchUpState::Rebuilding { crossed }, CatchUpEvent::SettledDeliveriesExhausted) => {
+        ) => ctx.recorded_crossing(*crossed, *generation),
+        (CatchUpState::Rebuilding { crossed }, CatchUpEvent::RecordedActionsExhausted) => {
             match resume {
-                Some(generation) if generation > *crossed => {
-                    ctx.crossing(*crossed, generation, true)
-                }
+                Some(generation) if generation > *crossed => ctx.going_live(*crossed, generation),
                 _ => to(state.clone()),
             }
         }
+        (
+            CatchUpState::Rebuilding { crossed },
+            CatchUpEvent::UnsettledDelivery {
+                edges_redelivering: 0,
+            },
+        ) => match resume {
+            Some(generation) if generation > *crossed => ctx.going_live(*crossed, generation),
+            _ => to(state.clone()),
+        },
         (CatchUpState::Rebuilding { .. }, CatchUpEvent::InputsEnded) if resume.is_some() => {
             match ctx.unreproduced() {
                 Some(fatal) => to(CatchUpState::Refused { fatal }),
@@ -286,6 +361,21 @@ fn transition<'a>(
 ) -> futures::future::BoxFuture<'a, Result<Transition<CatchUpState, CatchUpAction>, FsmError>> {
     let next = step(state, event, ctx);
     Box::pin(async move { Ok(next) })
+}
+
+fn refuse_unhandled<'a>(
+    state: &'a CatchUpState,
+    event: &'a CatchUpEvent,
+    _ctx: &'a mut CatchUpContext,
+) -> futures::future::BoxFuture<'a, Result<(), FsmError>> {
+    let outcome = match state {
+        CatchUpState::Refused { .. } | CatchUpState::Failed { .. } => Ok(()),
+        _ => Err(FsmError::UnhandledEvent {
+            state: state.variant_name().to_string(),
+            event: event.variant_name().to_string(),
+        }),
+    };
+    Box::pin(async move { outcome })
 }
 
 #[async_trait::async_trait]
@@ -344,19 +434,25 @@ fn machine(initial: CatchUpState) -> CatchUpMachine {
         context: CatchUpContext;
         action: CatchUpAction;
         initial: initial;
-        unhandled => |_state: &CatchUpState, _event: &CatchUpEvent, _ctx: &mut CatchUpContext| {
-            Box::pin(async { Ok(()) })
-        };
+        unhandled => refuse_unhandled;
         state CatchUpState::Rebuilding {
             on CatchUpEvent::FrontierReached => transition;
+            on CatchUpEvent::JoinFrontierReached => transition;
             on CatchUpEvent::InputsEnded => transition;
             on CatchUpEvent::RecordedCrossingReached => transition;
             on CatchUpEvent::RecordedActionsExhausted => transition;
-            on CatchUpEvent::SettledDeliveriesExhausted => transition;
+            on CatchUpEvent::UnsettledDelivery => transition;
             on CatchUpEvent::RecordedInputEnded => transition;
         }
         state CatchUpState::Announcing {
             on CatchUpEvent::HandoffAnnounced => transition;
+        }
+        state CatchUpState::Live {
+            on CatchUpEvent::FrontierReached => transition;
+            on CatchUpEvent::JoinFrontierReached => transition;
+            on CatchUpEvent::InputsEnded => transition;
+            on CatchUpEvent::RecordedActionsExhausted => transition;
+            on CatchUpEvent::UnsettledDelivery => transition;
         }
     }
 }
@@ -410,23 +506,17 @@ impl CatchUpHandle {
                 stage_key,
                 writer,
                 execution,
-                history: None,
+                recorded: Recorded::Nothing,
             },
         })))
     }
 
     pub(crate) async fn install_history(&self, history: Arc<EffectHistory>) {
-        self.0.lock().await.context.history = Some(history);
+        self.0.lock().await.context.recorded = Recorded::Actions(history);
     }
 
-    pub(crate) async fn has_crossed(&self, generation: ReaderGeneration) -> bool {
-        self.0
-            .lock()
-            .await
-            .machine
-            .state()
-            .crossed()
-            .is_some_and(|crossed| crossed >= generation)
+    pub(crate) async fn install_join_phases(&self, phases: Vec<JoinPhaseFact>) {
+        self.0.lock().await.context.recorded = Recorded::JoinPhases(phases);
     }
 
     pub(crate) async fn send(&self, event: CatchUpEvent) -> CatchUpDisposition {
@@ -438,14 +528,11 @@ impl CatchUpHandle {
             Err(error) => Err(error),
         };
         if let Err(error) = outcome {
-            return CatchUpDisposition::Failed(match error {
-                FsmError::HandlerError(message) => message,
-                other => other.to_string(),
-            });
+            return CatchUpDisposition::Failed(context.failure(error));
         }
         match machine.state() {
             CatchUpState::Refused { fatal } => CatchUpDisposition::Refused(fatal.clone()),
-            CatchUpState::Failed { message } => CatchUpDisposition::Failed(message.clone()),
+            CatchUpState::Failed { fatal } => CatchUpDisposition::Failed(fatal.clone()),
             state => match state.crossed() {
                 Some(crossed) if Some(crossed) != before => CatchUpDisposition::Crossed(crossed),
                 _ => CatchUpDisposition::Consumed,
@@ -457,16 +544,25 @@ impl CatchUpHandle {
         &self,
         generation: ReaderGeneration,
         all_inputs_caught_up: bool,
-        delivered: u64,
     ) -> CatchUpDisposition {
         if !all_inputs_caught_up {
             return CatchUpDisposition::Consumed;
         }
-        self.send(CatchUpEvent::FrontierReached {
-            generation,
-            delivered,
-        })
-        .await
+        self.send(CatchUpEvent::FrontierReached { generation })
+            .await
+    }
+
+    pub(crate) async fn join_frontier_reached(
+        &self,
+        generation: ReaderGeneration,
+        all_inputs_caught_up: bool,
+        reads: PhaseReads,
+    ) -> CatchUpDisposition {
+        if !all_inputs_caught_up {
+            return CatchUpDisposition::Consumed;
+        }
+        self.send(CatchUpEvent::JoinFrontierReached { generation, reads })
+            .await
     }
 
     pub(crate) async fn watermark_delivered(
@@ -474,12 +570,8 @@ impl CatchUpHandle {
         subscription: &UpstreamSubscription<ChainEvent>,
         generation: ReaderGeneration,
     ) -> CatchUpDisposition {
-        self.frontier_reached(
-            generation,
-            subscription.all_readers_caught_up(generation),
-            subscription.delivered_data_count(),
-        )
-        .await
+        self.frontier_reached(generation, subscription.all_readers_caught_up(generation))
+            .await
     }
 
     pub(crate) async fn eof_delivered(
@@ -490,12 +582,8 @@ impl CatchUpHandle {
         if generation == ReaderGeneration(0) {
             return CatchUpDisposition::Consumed;
         }
-        self.frontier_reached(
-            generation,
-            subscription.all_readers_caught_up(generation),
-            subscription.delivered_data_count(),
-        )
-        .await
+        self.frontier_reached(generation, subscription.all_readers_caught_up(generation))
+            .await
     }
 }
 
@@ -674,19 +762,27 @@ mod tests {
             .await;
     }
 
+    async fn with_join_phases(stage: &Stage, phases: Vec<JoinPhaseFact>) {
+        stage.catch_up.install_join_phases(phases).await;
+    }
+
+    fn unsettled(edges_redelivering: usize) -> CatchUpEvent {
+        CatchUpEvent::UnsettledDelivery { edges_redelivering }
+    }
+
     #[tokio::test]
     async fn a_frontier_crossing_authors_each_generation_once_and_goes_live() {
         let stage = stage(resumed(3), true);
         assert!(matches!(
             stage
                 .catch_up
-                .frontier_reached(ReaderGeneration(1), false, 0)
+                .frontier_reached(ReaderGeneration(1), false)
                 .await,
             CatchUpDisposition::Consumed
         ));
         let first = stage
             .catch_up
-            .frontier_reached(ReaderGeneration(1), true, 0)
+            .frontier_reached(ReaderGeneration(1), true)
             .await;
         assert!(
             matches!(first, CatchUpDisposition::Crossed(ReaderGeneration(1))),
@@ -696,35 +792,29 @@ mod tests {
         assert!(matches!(
             stage
                 .catch_up
-                .frontier_reached(ReaderGeneration(3), true, 0)
+                .frontier_reached(ReaderGeneration(3), true)
                 .await,
             CatchUpDisposition::Crossed(ReaderGeneration(3))
         ));
         assert!(matches!(
             stage
                 .catch_up
-                .frontier_reached(ReaderGeneration(3), true, 0)
+                .frontier_reached(ReaderGeneration(3), true)
                 .await,
             CatchUpDisposition::Consumed
         ));
         assert_eq!(stage.journal.markers(), vec![1, 2, 3]);
         assert!(live(&stage));
-        assert!(stage.catch_up.has_crossed(ReaderGeneration(3)).await);
     }
 
     #[tokio::test]
-    async fn a_crossing_below_the_resume_generation_checks_neither_guard() {
+    async fn a_crossing_below_the_resume_generation_skips_the_archived_action_check() {
         let stage = stage(resumed(3), true);
         with_actions(&stage, vec![effect(4)]).await;
-        stage
-            .execution
-            .resume_control()
-            .expect("resumed")
-            .record_delivered_high_water(stage.id, 3);
         assert!(matches!(
             stage
                 .catch_up
-                .frontier_reached(ReaderGeneration(2), true, 0)
+                .frontier_reached(ReaderGeneration(2), true)
                 .await,
             CatchUpDisposition::Crossed(ReaderGeneration(2))
         ));
@@ -734,27 +824,31 @@ mod tests {
 
     #[tokio::test]
     async fn every_crossing_into_live_work_refuses_while_archived_actions_remain() {
-        let stage = stage(resumed(1), true);
-        with_actions(&stage, vec![effect(4)]).await;
-        match stage
-            .catch_up
-            .frontier_reached(ReaderGeneration(1), true, 0)
-            .await
-        {
-            CatchUpDisposition::Refused(fatal) => {
-                assert_eq!(fatal.reason, StageFatalReason::UnusedEffectHistory);
-                assert_eq!(
-                    fatal.detail,
-                    "stage 'allocate_stock' skipped a ReserveStock effect its recording holds"
-                );
-                assert!(fatal
-                    .departure
-                    .is_some_and(|departure| departure.offered.is_none()));
+        for event in [
+            CatchUpEvent::FrontierReached {
+                generation: ReaderGeneration(1),
+            },
+            CatchUpEvent::RecordedActionsExhausted,
+            unsettled(0),
+        ] {
+            let stage = stage(resumed(1), true);
+            with_actions(&stage, vec![effect(4)]).await;
+            match stage.catch_up.send(event).await {
+                CatchUpDisposition::Refused(fatal) => {
+                    assert_eq!(fatal.reason, StageFatalReason::UnusedEffectHistory);
+                    assert_eq!(
+                        fatal.detail,
+                        "stage 'allocate_stock' skipped a ReserveStock effect its recording holds"
+                    );
+                    assert!(fatal
+                        .departure
+                        .is_some_and(|departure| departure.offered.is_none()));
+                }
+                other => panic!("a crossing with archived actions left must refuse: {other:?}"),
             }
-            _ => panic!("a crossing with archived actions left must refuse"),
+            assert!(stage.journal.markers().is_empty());
+            assert!(!live(&stage));
         }
-        assert!(stage.journal.markers().is_empty());
-        assert!(!live(&stage));
 
         let ended = self::stage(resumed(1), true);
         with_actions(&ended, vec![effect(4)]).await;
@@ -762,34 +856,6 @@ mod tests {
             ended.catch_up.send(CatchUpEvent::InputsEnded).await,
             CatchUpDisposition::Refused(_)
         ));
-    }
-
-    #[tokio::test]
-    async fn a_short_redelivery_fails_whichever_event_crosses() {
-        for event in [
-            CatchUpEvent::FrontierReached {
-                generation: ReaderGeneration(1),
-                delivered: 2,
-            },
-            CatchUpEvent::RecordedActionsExhausted { delivered: 2 },
-        ] {
-            let stage = stage(resumed(1), true);
-            stage
-                .execution
-                .resume_control()
-                .expect("resumed")
-                .record_delivered_high_water(stage.id, 3);
-            match stage.catch_up.send(event).await {
-                CatchUpDisposition::Failed(message) => {
-                    assert!(
-                        message.contains("after 2 delivered data events"),
-                        "{message}"
-                    )
-                }
-                _ => panic!("a short re-delivery must fail the crossing"),
-            }
-            assert!(stage.journal.markers().is_empty());
-        }
     }
 
     #[tokio::test]
@@ -808,33 +874,167 @@ mod tests {
         assert!(matches!(
             stage
                 .catch_up
-                .send(CatchUpEvent::RecordedActionsExhausted { delivered: 0 })
+                .send(CatchUpEvent::RecordedActionsExhausted)
                 .await,
             CatchUpDisposition::Crossed(ReaderGeneration(2))
         ));
         assert!(live(&stage));
-        assert!(matches!(
-            stage
-                .catch_up
-                .frontier_reached(ReaderGeneration(2), true, 0)
-                .await,
-            CatchUpDisposition::Consumed
-        ));
+        for repeat in [
+            CatchUpEvent::FrontierReached {
+                generation: ReaderGeneration(2),
+            },
+            CatchUpEvent::RecordedActionsExhausted,
+            CatchUpEvent::InputsEnded,
+        ] {
+            assert!(matches!(
+                stage.catch_up.send(repeat).await,
+                CatchUpDisposition::Consumed
+            ));
+        }
         assert_eq!(stage.journal.markers(), vec![1, 2]);
     }
 
     #[tokio::test]
-    async fn a_terminal_stage_records_its_boundary_without_a_marker() {
+    async fn a_sink_goes_live_at_an_unsettled_delivery_once_its_edges_redelivered() {
         let stage = stage(resumed(1), false);
         assert!(matches!(
-            stage
-                .catch_up
-                .send(CatchUpEvent::SettledDeliveriesExhausted)
-                .await,
+            stage.catch_up.send(unsettled(1)).await,
+            CatchUpDisposition::Consumed
+        ));
+        assert!(!live(&stage));
+        assert!(matches!(
+            stage.catch_up.send(unsettled(0)).await,
             CatchUpDisposition::Crossed(ReaderGeneration(1))
         ));
         assert!(live(&stage));
+        assert!(matches!(
+            stage.catch_up.send(unsettled(0)).await,
+            CatchUpDisposition::Consumed
+        ));
         assert!(stage.journal.markers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_join_crossing_fails_when_its_archive_entered_a_later_phase() {
+        let stage = stage(resumed(2), true);
+        with_join_phases(
+            &stage,
+            vec![JoinPhaseFact::LiveEntered {
+                generation: 0,
+                ended_by: Vec::new(),
+            }],
+        )
+        .await;
+        match stage
+            .catch_up
+            .join_frontier_reached(ReaderGeneration(1), true, PhaseReads::Stream)
+            .await
+        {
+            CatchUpDisposition::Failed(fatal) => {
+                assert_eq!(fatal.reason, StageFatalReason::ReplayDivergence);
+                assert!(
+                    fatal
+                        .detail
+                        .contains("its archive had already entered live"),
+                    "{}",
+                    fatal.detail
+                );
+            }
+            other => panic!("a join behind its archived phase must fail: {other:?}"),
+        }
+        assert!(stage.journal.markers().is_empty());
+
+        let caught_up = self::stage(resumed(2), true);
+        with_join_phases(
+            &caught_up,
+            vec![JoinPhaseFact::LiveEntered {
+                generation: 0,
+                ended_by: Vec::new(),
+            }],
+        )
+        .await;
+        assert!(matches!(
+            caught_up
+                .catch_up
+                .join_frontier_reached(ReaderGeneration(1), true, PhaseReads::Both)
+                .await,
+            CatchUpDisposition::Crossed(ReaderGeneration(1))
+        ));
+        assert_eq!(caught_up.journal.markers(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn an_event_no_stage_sends_in_its_state_fails_the_stage() {
+        let rebuilding = stage(resumed(1), true);
+        match rebuilding
+            .catch_up
+            .send(CatchUpEvent::HandoffAnnounced)
+            .await
+        {
+            CatchUpDisposition::Failed(fatal) => {
+                assert_eq!(fatal.code, StageFatalCode::Coordination);
+                assert_eq!(fatal.reason, StageFatalReason::CoordinationFailure);
+                assert_eq!(
+                    fatal.detail,
+                    "stage 'allocate_stock' received catch-up event HandoffAnnounced while \
+                     Rebuilding"
+                );
+            }
+            other => panic!("an announcement outside a handoff must fail: {other:?}"),
+        }
+        assert!(!live(&rebuilding));
+
+        let crossed = self::stage(resumed(1), true);
+        assert!(matches!(
+            crossed
+                .catch_up
+                .send(CatchUpEvent::RecordedActionsExhausted)
+                .await,
+            CatchUpDisposition::Crossed(ReaderGeneration(1))
+        ));
+        assert!(matches!(
+            crossed
+                .catch_up
+                .send(CatchUpEvent::RecordedCrossingReached {
+                    generation: ReaderGeneration(1),
+                })
+                .await,
+            CatchUpDisposition::Failed(_)
+        ));
+        assert_eq!(crossed.journal.markers(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_crossing_at_the_resume_generation_fails_without_crossing() {
+        let stage = stage(resumed(2), true);
+        match stage
+            .catch_up
+            .send(CatchUpEvent::RecordedCrossingReached {
+                generation: ReaderGeneration(2),
+            })
+            .await
+        {
+            CatchUpDisposition::Failed(fatal) => {
+                assert_eq!(fatal.reason, StageFatalReason::ReplayDivergence);
+            }
+            other => panic!("a recorded crossing into the resume generation must fail: {other:?}"),
+        }
+        assert!(stage.journal.markers().is_empty());
+        assert!(!live(&stage));
+    }
+
+    #[tokio::test]
+    async fn a_refused_stage_keeps_reporting_its_refusal() {
+        let stage = stage(resumed(1), true);
+        with_actions(&stage, vec![effect(4)]).await;
+        assert!(matches!(
+            stage.catch_up.send(CatchUpEvent::InputsEnded).await,
+            CatchUpDisposition::Refused(_)
+        ));
+        assert!(matches!(
+            stage.catch_up.send(CatchUpEvent::HandoffAnnounced).await,
+            CatchUpDisposition::Refused(_)
+        ));
     }
 
     #[tokio::test]
@@ -868,14 +1068,14 @@ mod tests {
         assert!(matches!(
             stage
                 .catch_up
-                .frontier_reached(ReaderGeneration(2), true, 0)
+                .frontier_reached(ReaderGeneration(2), true)
                 .await,
             CatchUpDisposition::Crossed(ReaderGeneration(2))
         ));
         assert!(matches!(
             stage
                 .catch_up
-                .send(CatchUpEvent::RecordedActionsExhausted { delivered: 0 })
+                .send(CatchUpEvent::RecordedActionsExhausted)
                 .await,
             CatchUpDisposition::Consumed
         ));

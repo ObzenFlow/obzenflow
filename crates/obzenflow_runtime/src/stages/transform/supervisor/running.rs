@@ -894,8 +894,8 @@ async fn catch_up_directive<
         CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
             Ok(EventLoopDirective::Continue)
         }
-        CatchUpDisposition::Failed(message) => Ok(EventLoopDirective::Transition(
-            TransformEvent::Error(message),
+        CatchUpDisposition::Failed(fatal) => Ok(EventLoopDirective::Transition(
+            TransformEvent::Error(fatal.detail),
         )),
         CatchUpDisposition::Refused(fatal) => {
             let writer_id = ctx

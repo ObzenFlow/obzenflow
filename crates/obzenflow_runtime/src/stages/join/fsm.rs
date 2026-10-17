@@ -538,8 +538,6 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
 
     pub(crate) pending_promotion: Option<(JoinSubscriptionSide, obzenflow_core::ReaderGeneration)>,
 
-    pub(crate) archived_phases: Vec<JoinPhaseFact>,
-
     /// Live-mode fairness cap (see `JoinConfig.reference_batch_cap`).
     pub reference_batch_cap: Option<usize>,
 
@@ -787,10 +785,11 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 ctx.stream_subscription = Some(stream_subscription);
 
                 if let Some(archive) = ctx.runtime_execution.archive_for_io().cloned() {
-                    ctx.archived_phases =
+                    let archived_phases =
                         super::phase::load_archived_phases(&archive, &ctx.stage_name)
                             .await
                             .map_err(obzenflow_fsm::FsmError::HandlerError)?;
+                    ctx.catch_up.install_join_phases(archived_phases).await;
                 }
 
                 if let Some(recorded) = &ctx.recorded {

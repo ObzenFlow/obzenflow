@@ -687,13 +687,6 @@ where
         self.last_delivered_generation
     }
 
-    /// Count of data events delivered so far (FLOWIP-120n F15): the fail-closed
-    /// re-delivery validation input, compared against the recorded high water
-    /// when the catch-up watermark arrives.
-    pub fn delivered_data_count(&self) -> u64 {
-        self.next_stage_input_position - 1
-    }
-
     /// The caught-up frontier aggregate (FLOWIP-120n F10): true once every
     /// reader has crossed to `target` or is EOF-exhausted. An EOF-exhausted
     /// reader counts as vacuously crossed, authored EOF being strictly

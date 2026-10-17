@@ -229,6 +229,37 @@ impl ChatClient for HangingChatClient {
     }
 }
 
+struct FinalizeHangingChatClient {
+    target: ChatTarget,
+    map_calls: Arc<AtomicUsize>,
+    finalize_entered: Arc<Notify>,
+}
+
+#[async_trait]
+impl ChatClient for FinalizeHangingChatClient {
+    fn target(&self) -> &ChatTarget {
+        &self.target
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiClientError> {
+        if request
+            .messages
+            .iter()
+            .any(|message| message.content.ends_with("partials"))
+        {
+            self.finalize_entered.notify_one();
+            return std::future::pending().await;
+        }
+        self.map_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ChatResponse {
+            text: "recorded [^1]".to_string(),
+            tool_calls: Vec::new(),
+            usage: None,
+            raw: None,
+        })
+    }
+}
+
 #[async_trait]
 impl ChatClient for InternallyRetryingChatClient {
     fn target(&self) -> &ChatTarget {
@@ -2537,6 +2568,76 @@ async fn resume_closes_a_generated_plan_interrupted_before_its_manifest() {
         .collect::<Vec<_>>();
     assert_eq!(manifests.len(), 1);
     assert_eq!(manifests[0].chunk_count, 5);
+}
+
+#[tokio::test]
+async fn resume_reproduces_a_map_that_passed_its_manifest_through() {
+    let temp = tempfile::tempdir().expect("temporary manifest pass-through journal root");
+    let journal_base = temp.path().join("journals");
+    let map_calls = Arc::new(AtomicUsize::new(0));
+    let finalize_entered = Arc::new(Notify::new());
+    let ports = ChatPortRecipe::Eager(Arc::new(FinalizeHangingChatClient {
+        target: target(),
+        map_calls: map_calls.clone(),
+        finalize_entered: finalize_entered.clone(),
+    }));
+
+    let live_task = tokio::spawn({
+        let journal_base = journal_base.clone();
+        async move {
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .run_async(build_chunk_interruption_flow(
+                    journal_base,
+                    Arc::new(Mutex::new(Vec::new())),
+                    ports,
+                ))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), finalize_entered.notified())
+        .await
+        .expect("the finalize call starts after the map passed its manifest through");
+    live_task.abort();
+    let _ = live_task.await;
+    assert_eq!(map_calls.load(Ordering::SeqCst), 5);
+
+    let interrupted = latest_run_dir(&journal_base);
+    let interrupted_map = stage_envelopes(&interrupted, "interrupt_digest__map").await;
+    assert_eq!(
+        interrupted_map
+            .iter()
+            .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
+            .count(),
+        1,
+        "the interrupted map journal holds the manifest it passed through"
+    );
+
+    let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
+    let resumed_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--resume-from"),
+            interrupted.as_os_str().to_os_string(),
+        ])
+        .run_async(build_chunk_interruption_flow(
+            journal_base.clone(),
+            resumed_outputs.clone(),
+            eager_chat_port(resumed_calls.clone(), false),
+        ))
+        .await
+        .expect("resume reproduces the map's archived actions past its manifest");
+
+    assert_eq!(
+        *resumed_outputs.lock().expect("resumed outputs lock"),
+        vec![DigestOut { total: 15 }]
+    );
+    assert_eq!(
+        resumed_calls.load(Ordering::SeqCst),
+        1,
+        "only the interrupted finalize call runs live"
+    );
 }
 
 #[cfg(feature = "e2e")]

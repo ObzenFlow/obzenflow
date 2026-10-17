@@ -512,7 +512,7 @@ where
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
     ) -> Result<EffectHistory, EffectError> {
-        EffectHistory::load_with_actions(archive, stage).await
+        EffectHistory::load_with_actions(archive, stage, None).await
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {

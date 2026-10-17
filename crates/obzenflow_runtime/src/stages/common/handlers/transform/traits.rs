@@ -128,12 +128,10 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
     }
 
     async fn load_effect_history(
+        &self,
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
-    ) -> Result<EffectHistory, EffectError>
-    where
-        Self: Sized,
-    {
+    ) -> Result<EffectHistory, EffectError> {
         EffectHistory::load(archive, stage).await
     }
 
@@ -333,10 +331,12 @@ where
     H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     async fn load_effect_history(
+        &self,
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
     ) -> Result<EffectHistory, EffectError> {
-        EffectHistory::load_with_actions(archive, stage).await
+        EffectHistory::load_with_actions(archive, stage, self.pass_through_descriptor.as_ref())
+            .await
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {

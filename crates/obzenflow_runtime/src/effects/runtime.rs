@@ -228,9 +228,17 @@ impl AuthoringHalt {
                 cursor: cursor.clone(),
             },
             Self::Reconstruction(refusal) => refusal.error(),
-            Self::Crossing(fatal) => EffectError::RecordingDeparture {
-                detail: fatal.detail.clone(),
-            },
+            Self::Crossing(fatal) if fatal.reason.departs_from_archive() => {
+                EffectError::RecordingDeparture {
+                    detail: fatal.detail.clone(),
+                }
+            }
+            Self::Crossing(fatal)
+                if fatal.code == obzenflow_core::event::StageFatalCode::Journal =>
+            {
+                EffectError::Journal(fatal.detail.clone())
+            }
+            Self::Crossing(fatal) => EffectError::Execution(fatal.detail.clone()),
         }
     }
 
@@ -495,10 +503,8 @@ impl EffectsCore {
         if self.ctx.runtime_execution.resume_control().is_none() {
             return Ok(());
         }
-        self.send_catch_up(CatchUpEvent::RecordedActionsExhausted {
-            delivered: self.ctx.input_seq.0,
-        })
-        .await
+        self.send_catch_up(CatchUpEvent::RecordedActionsExhausted)
+            .await
     }
 
     async fn reauthor_recorded_crossing(
@@ -531,8 +537,9 @@ impl EffectsCore {
         .await;
         match disposition {
             CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => Ok(()),
-            CatchUpDisposition::Failed(message) => Err(EffectError::Journal(message)),
-            CatchUpDisposition::Refused(fatal) => Err(self.latch(AuthoringHalt::Crossing(fatal))),
+            CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
+                Err(self.latch(AuthoringHalt::Crossing(fatal)))
+            }
         }
     }
 

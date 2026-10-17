@@ -327,10 +327,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
             CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
                 EventLoopDirective::Continue
             }
-            CatchUpDisposition::Failed(message) => {
-                EventLoopDirective::Transition(JournalSinkEvent::Error(message))
-            }
-            CatchUpDisposition::Refused(fatal) => {
+            CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
                 EventLoopDirective::Transition(JournalSinkEvent::Error(fatal.detail))
             }
         });
@@ -342,12 +339,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
     if envelope.is_eof() {
         match ctx.catch_up.eof_delivered(subscription).await {
             CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {}
-            CatchUpDisposition::Failed(message) => {
-                return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
-                    message,
-                )));
-            }
-            CatchUpDisposition::Refused(fatal) => {
+            CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
                 return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
                     fatal.detail,
                 )));
@@ -894,21 +886,13 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
     let scope = match (ctx.receipt_classification.as_mut(), upstream_stage) {
         (Some(classification), Some(upstream)) => {
             let settlement = classification.classify(upstream);
-            if settlement == crate::execution::DeliverySettlement::FirstDelivery
-                && classification.take_boundary()
-            {
-                match ctx
-                    .catch_up
-                    .send(CatchUpEvent::SettledDeliveriesExhausted)
-                    .await
-                {
+            if settlement == crate::execution::DeliverySettlement::FirstDelivery {
+                let unsettled = CatchUpEvent::UnsettledDelivery {
+                    edges_redelivering: classification.edges_redelivering(),
+                };
+                match ctx.catch_up.send(unsettled).await {
                     CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {}
-                    CatchUpDisposition::Failed(message) => {
-                        return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
-                            message,
-                        )));
-                    }
-                    CatchUpDisposition::Refused(fatal) => {
+                    CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
                         return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
                             fatal.detail,
                         )));

@@ -6,10 +6,28 @@ use super::*;
 use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::CausalFrontier;
 use obzenflow_core::journal::ArchiveStatus;
-use obzenflow_core::StageKey;
+use obzenflow_core::{EventDescriptor, StageKey};
 use std::collections::{BTreeMap, HashSet};
 
 type GroupedJournalEvents = HashMap<String, Vec<(usize, Option<JournalGroupMember>, ChainEvent)>>;
+
+enum HistoryScan {
+    Cursors,
+    Actions {
+        pass_through: Option<EventDescriptor>,
+    },
+}
+
+impl HistoryScan {
+    fn actions(&self) -> Option<super::actions::ActionScan> {
+        match self {
+            Self::Cursors => None,
+            Self::Actions { pass_through } => Some(super::actions::ActionScan::passing_through(
+                pass_through.clone(),
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct EffectCursorCoordinator {
@@ -135,22 +153,26 @@ impl EffectHistory {
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
     ) -> Result<Self, EffectError> {
-        Self::load_lineage(archive, stage, false).await
+        Self::load_lineage(archive, stage, &HistoryScan::Cursors).await
     }
 
-    /// Load the history of a stage with an effect runtime, its recorded
-    /// actions joined across the lineage as its cursor histories are.
+    /// Load the history of a stage with an effect runtime, its recorded actions
+    /// joined across the lineage and excluding rows of its pass-through type.
     pub async fn load_with_actions(
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
+        pass_through: Option<&EventDescriptor>,
     ) -> Result<Self, EffectError> {
-        Self::load_lineage(archive, stage, true).await
+        let scan = HistoryScan::Actions {
+            pass_through: pass_through.cloned(),
+        };
+        Self::load_lineage(archive, stage, &scan).await
     }
 
     async fn load_lineage(
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
-        with_actions: bool,
+        scan: &HistoryScan,
     ) -> Result<Self, EffectError> {
         let mut joined: Option<Self> = None;
         for ancestor in archive.ancestors().iter().rev() {
@@ -160,13 +182,13 @@ impl EffectHistory {
             ) {
                 continue;
             }
-            let older = Self::load_archive(ancestor, stage.as_str(), with_actions).await?;
+            let older = Self::load_archive(ancestor, stage.as_str(), scan).await?;
             joined = Some(match joined {
                 Some(oldest) => oldest.joined_with(&older, stage)?,
                 None => older,
             });
         }
-        let head = Self::load_archive(archive, stage.as_str(), with_actions).await?;
+        let head = Self::load_archive(archive, stage.as_str(), scan).await?;
         match joined {
             Some(ancestors) => ancestors.joined_with(&head, stage),
             None => Ok(head),
@@ -292,7 +314,7 @@ impl EffectHistory {
     async fn load_archive(
         archive: &Arc<dyn ReplayArchive>,
         stage_key: &str,
-        with_actions: bool,
+        scan: &HistoryScan,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
@@ -305,14 +327,14 @@ impl EffectHistory {
         let mut attempt_positions = HashMap::new();
         let mut attempt_events = HashMap::new();
         let mut position = 0_usize;
-        let mut actions = super::actions::ActionScan::default();
+        let mut actions = scan.actions();
 
         while let Some(envelope) = reader
             .next()
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
-            if with_actions {
+            if let Some(actions) = actions.as_mut() {
                 actions.observe(&envelope.authored())?;
             }
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
@@ -470,7 +492,7 @@ impl EffectHistory {
         history.attempt_events = Arc::new(attempt_events);
         validate_group_grammar(&history, &grouped_events)?;
         history.grouped_events = Arc::new(grouped_events);
-        let actions = actions.finish(
+        let actions = actions.unwrap_or_default().finish(
             |cursor| {
                 history.index.contains_key(cursor)
                     || history.attempts.contains_key(cursor)

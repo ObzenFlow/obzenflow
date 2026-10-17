@@ -90,7 +90,6 @@ pub(crate) struct SinkReceiptClassification {
     edges: SinkResumeEdges,
     settled: HashMap<String, u64>,
     delivered: HashMap<StageId, u64>,
-    boundary_recorded: bool,
 }
 
 impl SinkReceiptClassification {
@@ -128,16 +127,15 @@ impl SinkReceiptClassification {
         }
     }
 
-    pub(crate) fn take_boundary(&mut self) -> bool {
-        if self.boundary_recorded {
-            return false;
-        }
-        let redelivered = self.edges.certified.iter().all(|(upstream, key)| {
-            self.delivered.get(upstream).copied().unwrap_or(0)
-                >= self.settled.get(key).copied().unwrap_or(0)
-        });
-        self.boundary_recorded = redelivered;
-        redelivered
+    pub(crate) fn edges_redelivering(&self) -> usize {
+        self.edges
+            .certified
+            .iter()
+            .filter(|&(upstream, key)| {
+                self.delivered.get(upstream).copied().unwrap_or(0)
+                    < self.settled.get(key).copied().unwrap_or(0)
+            })
+            .count()
     }
 }
 
@@ -235,15 +233,11 @@ mod tests {
             classification.classify(uncertified),
             DeliverySettlement::Unclassified
         );
-        assert!(classification.take_boundary());
-        assert!(
-            !classification.take_boundary(),
-            "the boundary is recorded once"
-        );
+        assert_eq!(classification.edges_redelivering(), 0);
     }
 
     #[test]
-    fn a_sink_with_two_edges_records_its_boundary_after_both_redeliver() {
+    fn a_sink_with_two_edges_counts_each_edge_still_redelivering() {
         let (left, right) = (StageId::new(), StageId::new());
         let mut classification = SinkReceiptClassification::new(SinkResumeEdges {
             certified: HashMap::from([(left, "left".to_string()), (right, "right".to_string())]),
@@ -256,8 +250,9 @@ mod tests {
             classification.classify(left),
             DeliverySettlement::FirstDelivery
         );
-        assert!(
-            !classification.take_boundary(),
+        assert_eq!(
+            classification.edges_redelivering(),
+            1,
             "the right edge has not re-delivered its settled input"
         );
         assert_eq!(classification.classify(right), DeliverySettlement::Settled);
@@ -265,6 +260,6 @@ mod tests {
             classification.classify(left),
             DeliverySettlement::FirstDelivery
         );
-        assert!(classification.take_boundary());
+        assert_eq!(classification.edges_redelivering(), 0);
     }
 }

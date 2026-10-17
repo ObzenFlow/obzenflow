@@ -9033,11 +9033,15 @@ async fn reconstruction_reauthors_a_recorded_crossing_before_the_action_it_ancho
     );
     assert!(events[1].authored().replay_context.is_some());
     assert!(
-        catch_up
-            .has_crossed(obzenflow_core::ReaderGeneration(1))
-            .await,
+        matches!(
+            catch_up
+                .frontier_reached(obzenflow_core::ReaderGeneration(1), true)
+                .await,
+            crate::stages::common::supervision::catch_up::CatchUpDisposition::Consumed
+        ),
         "the supervisor's frontier events see the re-authored crossing"
     );
+    assert_eq!(markers(&journal), vec![obzenflow_core::ReaderGeneration(1)]);
 }
 
 #[tokio::test]

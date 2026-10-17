@@ -796,8 +796,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                                 d.frontier().crossed_generation(),
                                             )
                                         });
-                                    control
-                                        .record_delivered_high_water(self.stage_id, replayed_count);
                                     let generation = control.resume_generation();
                                     let catch_up = begin_catch_up_handoff(
                                         &self.data_journal,

@@ -494,15 +494,7 @@ async fn flip(
     };
     let all = caught_up(sup.batch_subscription.as_ref())
         && (batch_phase || caught_up(sup.live_subscription.as_ref()));
-    let delivered = sup
-        .batch_subscription
-        .as_ref()
-        .map_or(0, |subscription| subscription.delivered_data_count())
-        + sup
-            .live_subscription
-            .as_ref()
-            .map_or(0, |subscription| subscription.delivered_data_count());
-    let disposition = ctx.catch_up.frontier_reached(target, all, delivered).await;
+    let disposition = ctx.catch_up.frontier_reached(target, all).await;
     if let (true, CatchUpDisposition::Crossed(crossed)) = (batch_phase, &disposition) {
         ctx.pending_promotion = Some(*crossed);
     }
@@ -541,10 +533,7 @@ async fn handle_control(
             CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
                 EventLoopDirective::Continue
             }
-            CatchUpDisposition::Failed(message) => {
-                EventLoopDirective::Transition(MergeEvent::Error(message))
-            }
-            CatchUpDisposition::Refused(fatal) => {
+            CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
                 EventLoopDirective::Transition(MergeEvent::Error(fatal.detail))
             }
         }));
@@ -563,10 +552,13 @@ async fn handle_control(
     if envelope.is_eof() {
         let target = max_generation(sup);
         if target != obzenflow_core::ReaderGeneration(0) {
-            if let CatchUpDisposition::Failed(message) = flip(sup, ctx, target, batch_phase).await {
-                return Ok(Err(EventLoopDirective::Transition(MergeEvent::Error(
-                    message,
-                ))));
+            match flip(sup, ctx, target, batch_phase).await {
+                CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
+                    return Ok(Err(EventLoopDirective::Transition(MergeEvent::Error(
+                        fatal.detail,
+                    ))));
+                }
+                CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {}
             }
         }
         if let Some(kind) = last_eof_outcome

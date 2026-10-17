@@ -944,12 +944,22 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                 let recorded_history = ctx.runtime_execution.archive_for_io();
                 if let Some(archive) = recorded_history {
                     let stage = obzenflow_core::StageKey::from(ctx.stage_name.clone());
-                    let history = H::load_effect_history(archive, &stage).await.map_err(|e| {
+                    let handler = ctx.handler.as_ref().ok_or_else(|| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to load effect history for '{}': {e}",
+                            "transform '{}' has no handler to load its effect history",
                             ctx.stage_name
                         ))
                     })?;
+                    let history =
+                        handler
+                            .load_effect_history(archive, &stage)
+                            .await
+                            .map_err(|e| {
+                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "Failed to load effect history for '{}': {e}",
+                                    ctx.stage_name
+                                ))
+                            })?;
                     let history = Arc::new(history);
                     ctx.catch_up.install_history(history.clone()).await;
                     ctx.effect_history = Some(history);

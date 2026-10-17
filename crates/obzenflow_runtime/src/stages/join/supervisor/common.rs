@@ -13,7 +13,7 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::join::fsm::{JoinEvent, JoinResources, JoinSubscriptionSide, PendingTransition};
-use crate::stages::join::phase::{check_crossing_phase, PhaseReads};
+use crate::stages::join::phase::PhaseReads;
 use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
@@ -76,22 +76,9 @@ async fn join_flip<H: UnifiedJoinHandler>(
     };
     let caught_up = (!reads.reads_reference() || side_caught_up(reference))
         && (!reads.reads_stream() || side_caught_up(stream));
-    if caught_up && !ctx.catch_up.has_crossed(target).await {
-        if let Err(message) =
-            check_crossing_phase(&ctx.stage_name, &ctx.archived_phases, target, reads)
-        {
-            return CatchUpDisposition::Failed(message);
-        }
-    }
-    let delivered = reference
-        .map(|subscription| subscription.delivered_data_count())
-        .unwrap_or(0)
-        + stream
-            .map(|subscription| subscription.delivered_data_count())
-            .unwrap_or(0);
     let disposition = ctx
         .catch_up
-        .frontier_reached(target, caught_up, delivered)
+        .join_frontier_reached(target, caught_up, reads)
         .await;
     if let CatchUpDisposition::Crossed(crossed) = disposition {
         if let Some(held) = reads.held() {
@@ -112,10 +99,7 @@ pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
         CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
             crate::supervised_base::EventLoopDirective::Continue
         }
-        CatchUpDisposition::Failed(message) => {
-            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message))
-        }
-        CatchUpDisposition::Refused(fatal) => {
+        CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
             crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail))
         }
     }
@@ -142,10 +126,7 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
     }
     match join_flip(reference, stream, ctx, target, reads).await {
         CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => None,
-        CatchUpDisposition::Failed(message) => Some(
-            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message)),
-        ),
-        CatchUpDisposition::Refused(fatal) => Some(
+        CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => Some(
             crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail)),
         ),
     }

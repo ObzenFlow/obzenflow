@@ -1063,7 +1063,6 @@ async fn transport_filtered_data_completes_one_physical_credit_without_handler_d
         .subscription
         .as_ref()
         .expect("subscription moved");
-    assert_eq!(subscription.delivered_data_count(), 0);
     assert_eq!(subscription.last_delivered_stage_input_position(), None);
     assert_eq!(subscription.last_delivered_upstream_stage(), None);
 

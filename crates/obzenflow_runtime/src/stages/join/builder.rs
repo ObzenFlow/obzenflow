@@ -221,7 +221,6 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             witnessed_eofs: std::collections::HashMap::new(),
             drain_without_held_inputs: false,
             pending_promotion: None,
-            archived_phases: Vec::new(),
             reference_batch_cap: self.config.reference_batch_cap,
             reference_since_last_stream: 0,
             events_since_last_heartbeat: 0,

@@ -1067,7 +1067,6 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceSupervis
             )
         };
         let generation = control.resume_generation();
-        control.record_delivered_high_water(self.stage_id, replayed_count);
 
         let handoff = match frontier {
             Ok(handoff) => handoff,

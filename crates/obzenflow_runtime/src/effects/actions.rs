@@ -5,7 +5,7 @@
 use super::*;
 use crate::stages::common::handler_error::StageFatal;
 use obzenflow_core::event::{Departure, DepartureAction, StageFatalCode, StageFatalReason};
-use obzenflow_core::{EventType, ReaderGeneration, StageKey};
+use obzenflow_core::{EventDescriptor, EventType, ReaderGeneration, StageKey};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -418,9 +418,17 @@ pub(crate) struct ActionScan {
     seen: HashSet<EffectCursor>,
     pending: Option<ReaderGeneration>,
     anchors: HashMap<ActionRow, ReaderGeneration>,
+    pass_through: Option<EventDescriptor>,
 }
 
 impl ActionScan {
+    pub(crate) fn passing_through(pass_through: Option<EventDescriptor>) -> Self {
+        Self {
+            pass_through,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn observe(&mut self, event: &ChainEvent) -> Result<(), EffectError> {
         use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
         if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
@@ -431,6 +439,13 @@ impl ActionScan {
                 self.pending
                     .map_or(*generation, |held| held.max(*generation)),
             );
+            return Ok(());
+        }
+        if self
+            .pass_through
+            .as_ref()
+            .is_some_and(|descriptor| *descriptor == event.descriptor())
+        {
             return Ok(());
         }
         let row = if EffectAttemptStarted::matches_event_type(&event.event_type()) {
@@ -790,5 +805,42 @@ mod tests {
         scan.effect(cursor(5, 0), &EffectType::from(SETTLEMENT_EFFECT_TYPE));
         let actions = scan.finish(|_| false, |_| false);
         assert!(actions.actions().is_empty());
+    }
+
+    #[test]
+    fn a_row_of_the_pass_through_type_names_no_action_and_takes_no_anchor() {
+        use obzenflow_core::event::ChainEventFactory;
+        let writer = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
+        let row = |event_type: &str| {
+            ChainEventFactory::data_event(
+                writer,
+                event_type,
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            )
+        };
+        let manifest = row("map_reduce.planning_manifest");
+        let partial = row("map_reduce.partial");
+        let marker =
+            ChainEventFactory::catch_up_complete_event(writer, ReaderGeneration(1), stage());
+
+        let mut scan = ActionScan::passing_through(Some(manifest.descriptor()));
+        scan.observe(&marker).unwrap();
+        scan.observe(&manifest).unwrap();
+        scan.observe(&partial).unwrap();
+        let actions = scan.finish(|_| true, |_| false);
+
+        assert_eq!(
+            actions.actions(),
+            [RecordedAction::Fact {
+                id: partial.id,
+                event_type: EventType::from("map_reduce.partial"),
+            }]
+        );
+        assert_eq!(
+            actions.crossing_before(&ActionRow::Fact(partial.id)),
+            Some(ReaderGeneration(1))
+        );
+        assert_eq!(actions.crossing_before(&ActionRow::Fact(manifest.id)), None);
     }
 }

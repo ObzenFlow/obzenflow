@@ -439,8 +439,9 @@ pub(crate) async fn complete_catch_up_handoff(catch_up: &CatchUpHandle) -> Resul
 fn handoff_settled(disposition: CatchUpDisposition) -> Result<(), BoxError> {
     match disposition {
         CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => Ok(()),
-        CatchUpDisposition::Failed(message) => Err(message.into()),
-        CatchUpDisposition::Refused(fatal) => Err(fatal.detail.into()),
+        CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
+            Err(fatal.detail.into())
+        }
     }
 }
 

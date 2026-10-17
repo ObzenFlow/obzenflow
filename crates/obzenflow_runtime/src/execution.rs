@@ -285,9 +285,6 @@ pub struct ResumeState {
     /// Each replaying source's answer at the end of its recorded input, from
     /// its admitted continuation and recorded completion (FLOWIP-134i B8).
     source_exhaustion: Mutex<HashMap<StageId, SourceReplayExhaustion>>,
-    /// Per-stage recorded delivered-data maxima, the F15 fail-closed
-    /// validation input. Sources register theirs at driver exhaustion.
-    recorded_delivered_high_water: Mutex<HashMap<StageId, u64>>,
     /// Told whenever a stage crosses into the resume generation, so the
     /// pipeline supervisor can record reconstruction completion (FLOWIP-134i B6).
     crossings: Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
@@ -299,7 +296,6 @@ impl ResumeState {
             resume_generation,
             frontier_by_stage: Mutex::new(HashMap::new()),
             source_exhaustion: Mutex::new(HashMap::new()),
-            recorded_delivered_high_water: Mutex::new(HashMap::new()),
             crossings: Mutex::new(None),
         }
     }
@@ -409,26 +405,6 @@ impl ResumeControl {
             .lock()
             .expect("resume source registry lock poisoned")
             .insert(stage, exhaustion);
-    }
-
-    /// Register a stage's recorded delivered-data maximum, the F15 validation
-    /// input. Sources register theirs at replay-driver exhaustion.
-    pub fn record_delivered_high_water(&self, stage: StageId, count: u64) {
-        self.0
-            .recorded_delivered_high_water
-            .lock()
-            .expect("resume delivered high-water lock poisoned")
-            .insert(stage, count);
-    }
-
-    /// The recorded delivered-data maximum for a stage, when known.
-    pub fn recorded_delivered_high_water(&self, stage: StageId) -> Option<u64> {
-        self.0
-            .recorded_delivered_high_water
-            .lock()
-            .expect("resume delivered high-water lock poisoned")
-            .get(&stage)
-            .copied()
     }
 }
 
