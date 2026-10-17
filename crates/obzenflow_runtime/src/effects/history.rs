@@ -569,7 +569,23 @@ impl EffectHistory {
         recorded_flow_id: impl Into<RecordedFlowId>,
         records: Vec<EffectRecord>,
     ) -> Result<Self, EffectError> {
-        Self::from_records_with_policy(recorded_flow_id, records, true)
+        let mut history = Self::from_records_with_policy(recorded_flow_id, records, true)?;
+        let mut seen = std::collections::HashSet::new();
+        let ordered = history
+            .records
+            .iter()
+            .filter(|record| {
+                history.index.contains_key(&record.cursor) && seen.insert(record.cursor.clone())
+            })
+            .map(|record| {
+                super::RecordedAction::recorded(
+                    record.cursor.clone(),
+                    &record.descriptor.effect_type,
+                )
+            })
+            .collect();
+        history.actions = Arc::new(super::RecordedActions::new(ordered, HashMap::new()));
+        Ok(history)
     }
 
     #[cfg(test)]
@@ -671,19 +687,6 @@ impl EffectHistory {
         }
 
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
-        let mut ordered = Vec::<super::RecordedAction>::new();
-        for record in &records {
-            if index.contains_key(&record.cursor)
-                && !ordered
-                    .iter()
-                    .any(|action| action.cursor() == Some(&record.cursor))
-            {
-                ordered.push(super::RecordedAction::recorded(
-                    record.cursor.clone(),
-                    &record.descriptor.effect_type,
-                ));
-            }
-        }
 
         Ok(Self {
             causal: Arc::new(HashMap::new()),
@@ -701,7 +704,7 @@ impl EffectHistory {
             grouped_events: Arc::new(HashMap::new()),
             attempt_positions: Arc::new(HashMap::new()),
             attempt_events: Arc::new(HashMap::new()),
-            actions: Arc::new(super::RecordedActions::new(ordered, HashMap::new())),
+            actions: Arc::new(super::RecordedActions::default()),
         })
     }
 
