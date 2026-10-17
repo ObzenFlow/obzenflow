@@ -13,6 +13,7 @@ and replay. A dash means there is no dedicated tutorial or run guide yet.
 | [one_shot_inference_demo](one_shot_inference_demo/main.rs) | One bounded input and one model decision | — |
 | [payment_gateway_resilience](payment_gateway_resilience/flow.rs) | Gateway effects with retries, circuit breaking, and rate limiting | [Run guide](payment_gateway_resilience/README.md) |
 | [flash_sale_allocation](flash_sale_allocation/flow.rs) | Stateful stock reservation and cancellation | [Run guide](flash_sale_allocation/README.md) |
+| [aml_overnight_monitoring](aml_overnight_monitoring/flow.rs) | A recorded risk verdict per transaction, cases, and a resumed batch | [Run guide](aml_overnight_monitoring/README.md) |
 | [prometheus_demo](prometheus_demo/main.rs) | Metrics reporting, circuit breaking, and backpressure | [Run guide](prometheus_demo/README.md) |
 | [product_catalog_enrichment](product_catalog_enrichment/flow.rs) | Multi-way inner, left, and strict joins | — |
 | [flight_delays_simple](flight_delays_simple/flow.rs) | Stream-table reference enrichment | — |
@@ -28,7 +29,7 @@ cargo run -p obzenflow --example <name>
 ```
 
 Follow the local run guides above for payments, flash-sale allocation,
-and metrics. The bank and AI examples use these commands:
+overnight AML monitoring and metrics. The bank and AI examples use these commands:
 
 ```sh
 cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host

@@ -296,6 +296,8 @@ fn renamed_facade_macros_and_constructors_compile() {
     let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => joined);
     let _ = merge!(Fact => merges::then_live);
     let _ = of::flow::merge!(Fact => merges::then_live);
+    let _ = merge!(first input: Fact => merges::concat);
+    let _ = of::flow::merge!(first input: Fact => merges::concat);
     let then_live = joins::inner_then_live(
         |fact: &Fact| fact.0,
         |fact: &Fact| fact.0,

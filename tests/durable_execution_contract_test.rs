@@ -617,6 +617,7 @@ fn durable_execution_contract_child() {
         Graph::ThenLive | Graph::ThenLiveEffect => {
             app.run_blocking(then_live::build_flow(scenario))
         }
+        Graph::Concat => app.run_blocking(concat::build_flow(scenario)),
         Graph::PaymentDemo => app
             .with_presentation(payment_demo::presentation())
             .run_blocking(payment_demo::build_flow(scenario)),
@@ -656,6 +657,7 @@ enum Graph {
     Payment,
     ThenLive,
     ThenLiveEffect,
+    Concat,
     PaymentDemo,
     TwoEffects,
     EmitOnly,
@@ -2894,9 +2896,180 @@ mod then_live {
     }
 }
 
+mod concat {
+    use super::*;
+    use obzenflow::flow::merge;
+    use obzenflow::middleware::rate_limit;
+    use obzenflow::stages::merges;
+
+    const EARLY: [&str; 4] = ["e-1", "e-2", "e-3", "e-4"];
+    const LATE: [&str; 8] = ["l-1", "l-2", "l-3", "l-4", "l-5", "l-6", "l-7", "l-8"];
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Note {
+        note: String,
+    }
+    impl TypedPayload for Note {
+        const EVENT_TYPE: &'static str = "durable_contract.concat.note";
+    }
+
+    #[derive(Clone, Debug)]
+    struct NoteYaml;
+    impl YamlDecoder for NoteYaml {
+        type Output = Note;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<Note, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    fn input(scenario: &Scenario, producer: &str) -> PathBuf {
+        scenario.inputs.join(format!("{producer}.yaml"))
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::Concat);
+        for (producer, notes) in [("early", &EARLY[..]), ("late", &LATE[..])] {
+            let rows: String = notes
+                .iter()
+                .map(|note| format!("  - note: \"{note}\"\n"))
+                .collect();
+            std::fs::write(input(&scenario, producer), format!("notes:\n{rows}"))
+                .expect("write notes");
+        }
+        scenario
+    }
+
+    fn yaml(path: PathBuf) -> YamlSource<NoteYaml> {
+        YamlSource::builder(NoteYaml)
+            .path(path)
+            .selection(YamlSelection::SequenceAt("/notes".into()))
+            .batch_size(1)
+            .build()
+            .expect("the notes channel is configured")
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        let early_input = yaml(input(scenario, "early"));
+        let late_input = yaml(input(scenario, "late"));
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let collected = DiscardSink::<Note>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_concat",
+                journals: disk_journals(journals),
+
+                stages: {
+                    early = source!(Note => early_input with rate_limit(2.0));
+                    late = source!(Note => late_input with rate_limit(2.0));
+                    merged = merge!(first early: Note => merges::concat);
+                    collected = sink!(Note => collected);
+                },
+
+                topology: {
+                    early |> merged;
+                    late |> merged;
+                    merged |> collected;
+                }
+            })
+        })
+    }
+
+    fn merged(archive: &Archive) -> Vec<String> {
+        archive
+            .facts::<Note>("merged")
+            .map(|(_, note)| note.note)
+            .collect()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Cut {
+        FirstPhase,
+        LastPhase,
+    }
+
+    impl Cut {
+        fn holds(self, archive: &Archive) -> bool {
+            let merged = merged(archive);
+            match self {
+                Self::FirstPhase => !merged.is_empty() && archive.eof("early").is_none(),
+                Self::LastPhase => {
+                    merged.iter().any(|note| note.starts_with("l-"))
+                        && archive.eof("late").is_none()
+                }
+            }
+        }
+    }
+
+    async fn row(name: &str, cut: Cut) {
+        let scenario = fresh(name);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive| cut.holds(archive)).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&resumed).await;
+        let expected: Vec<String> = EARLY
+            .iter()
+            .chain(&LATE)
+            .map(|note| (*note).into())
+            .collect();
+        assert_eq!(
+            merged(&archive),
+            expected,
+            "{name}: every note passes the merge once, early before late"
+        );
+        let boundary = archive
+            .rows("merged", RunJournalKind::Data)
+            .position(|row| {
+                matches!(&row.payload, ChainPayload::FlowControl(control)
+                    if control.eof_kind() == Some(EofKind::Natural))
+            })
+            .expect("the merge passes on the first producer's natural EOF");
+        let before: Vec<String> = archive
+            .rows("merged", RunJournalKind::Data)
+            .take(boundary)
+            .filter(|row| row.event_type() == Note::event_type_name())
+            .map(|row| {
+                row.payload()["note"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            before, EARLY,
+            "{name}: only early notes precede the boundary"
+        );
+
+        remove_input(&input(&scenario, "early"));
+        remove_input(&input(&scenario, "late"));
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_in_the_first_phase_resumes_both_phases_once() {
+        row("concat_first_phase", Cut::FirstPhase).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_in_the_last_phase_resumes_it_once() {
+        row("concat_last_phase", Cut::LastPhase).await;
+    }
+}
+
 mod payment_demo {
     use super::*;
-    use gateway_demo::domain::PaymentAuthorizationUnavailable;
+    use gateway_demo::domain::{PaymentAuthorizationUnavailable, TrafficPhase};
     use gateway_demo::fixtures;
     use gateway_demo::gateway::GatewayTransform;
     use obzenflow::application::{Banner, Presentation};
@@ -2907,11 +3080,11 @@ mod payment_demo {
     const UNAVAILABLE: &str = "unavailable";
     const WARMUP_ORDERS: usize = 8;
     const RECOVERY_ROUTES: [(&str, &str); 5] = [
-        ("web-recovery-0", AUTHORIZED),
-        ("store-recovery-3", DECLINED),
-        ("web-recovery-4", DECLINED),
-        ("store-recovery-5", AUTHORIZED),
-        ("web-recovery-6", AUTHORIZED),
+        ("web-10490", AUTHORIZED),
+        ("store-4481", DECLINED),
+        ("web-10492", DECLINED),
+        ("store-4482", AUTHORIZED),
+        ("web-10493", AUTHORIZED),
     ];
 
     pub(super) fn presentation() -> Presentation {
@@ -2928,20 +3101,20 @@ mod payment_demo {
         )
     }
 
-    fn routes(archive: &Archive) -> BTreeMap<String, &'static str> {
+    fn routes(archive: &Archive) -> BTreeMap<String, (TrafficPhase, &'static str)> {
         let stage = "authorize_payment";
         archive
             .facts::<PaymentAuthorized>(stage)
-            .map(|(_, fact)| (fact.order_id, AUTHORIZED))
+            .map(|(_, fact)| (fact.order_id, (fact.phase, AUTHORIZED)))
             .chain(
                 archive
                     .facts::<PaymentDeclined>(stage)
-                    .map(|(_, fact)| (fact.order_id, DECLINED)),
+                    .map(|(_, fact)| (fact.order_id, (fact.phase, DECLINED))),
             )
             .chain(
                 archive
                     .facts::<PaymentAuthorizationUnavailable>(stage)
-                    .map(|(_, fact)| (fact.order_id, UNAVAILABLE)),
+                    .map(|(_, fact)| (fact.order_id, (fact.phase, UNAVAILABLE))),
             )
             .collect()
     }
@@ -2979,14 +3152,10 @@ mod payment_demo {
             let routes = routes(archive);
             archive.eof("web_orders") == Some(EofKind::Natural)
                 && archive.eof("store_orders") == Some(EofKind::Natural)
+                && routes.len() == WARMUP_ORDERS
                 && routes
-                    .keys()
-                    .filter(|order| order.contains("-warmup-"))
-                    .count()
-                    == WARMUP_ORDERS
-                && !routes
-                    .keys()
-                    .any(|order| order.contains("-outage-") || order.contains("-recovery-"))
+                    .values()
+                    .all(|(phase, _)| *phase == TrafficPhase::Warmup)
         };
         until(&killed, name, outage_begun).await;
         child.signal(Signal::Kill);
@@ -3005,7 +3174,7 @@ mod payment_demo {
         let routes = routes(&archive);
         for (order, route) in RECOVERY_ROUTES {
             assert_eq!(
-                routes.get(order).copied(),
+                routes.get(order).map(|(_, routed)| *routed),
                 Some(route),
                 "{name}: {order} routes as in the uninterrupted demo"
             );

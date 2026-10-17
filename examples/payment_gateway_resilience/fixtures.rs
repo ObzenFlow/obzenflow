@@ -7,9 +7,10 @@ use super::domain::{CustomerOrderPlaced, OrderChannel, PaymentMethodState, Traff
 /// Scripted upstream event sequences used by the demo sources (FLOWIP-095d).
 ///
 /// The original single stream is split across two order channels, web and
-/// store, by alternating orders. The channels deliberately end at different
-/// lengths (13 web, 12 store) so the earlier-ending channel's merged EOF
-/// point is a real thing to reproduce under replay.
+/// store, by alternating orders, and each channel numbers its own orders. The
+/// channels deliberately end at different lengths (13 web, 12 store) so the
+/// earlier-ending channel's merged EOF point is a real thing to reproduce
+/// under replay.
 ///
 /// The combined sequence keeps the three scripted phases so it is easy to
 /// reason about circuit breaker behaviour:
@@ -30,73 +31,75 @@ pub fn scripted_store_orders() -> Vec<CustomerOrderPlaced> {
 fn split_channel(channel: OrderChannel) -> Vec<CustomerOrderPlaced> {
     scripted_orders()
         .into_iter()
-        .enumerate()
-        .filter(|(index, _)| match channel {
-            OrderChannel::Web => index % 2 == 0,
-            OrderChannel::Store => index % 2 == 1,
-        })
-        .map(|(_, mut order)| {
-            order.order_id = format!("{}-{}", channel.label(), order.order_id);
-            order.channel = channel;
-            order
-        })
+        .filter(|order| order.channel == channel)
         .collect()
 }
 
 fn scripted_orders() -> Vec<CustomerOrderPlaced> {
-    let mut orders = Vec::new();
+    use PaymentMethodState::{AddressMismatch, InsufficientFunds, InvalidNumber, Valid};
 
     // Warmup: healthy dependency. Some payment methods are declined by the
     // gateway even though they pass local structural validation.
-    for i in 0..8 {
-        orders.push(CustomerOrderPlaced {
-            order_id: format!("warmup-{i}"),
-            customer_id: format!("cust-{i}"),
-            channel: OrderChannel::Web,
-            amount_cents: 10_00,
-            payment_method_state: match i {
-                2 => PaymentMethodState::InsufficientFunds,
-                5 => PaymentMethodState::AddressMismatch,
-                _ => PaymentMethodState::Valid,
-            },
-            phase: TrafficPhase::Warmup,
-        });
-    }
+    let warmup = [
+        ("cust-2041", 48_20, Valid),
+        ("cust-1187", 86_40, Valid),
+        ("cust-3302", 94_99, InsufficientFunds),
+        ("cust-7160", 23_75, Valid),
+        ("cust-2958", 64_00, Valid),
+        ("cust-1453", 57_30, AddressMismatch),
+        ("cust-6390", 12_50, Valid),
+        ("cust-2624", 39_95, Valid),
+    ];
 
     // Outage: dependency begins to fail even for valid orders.
-    for i in 0..10 {
-        orders.push(CustomerOrderPlaced {
-            order_id: format!("outage-{i}"),
-            customer_id: format!("cust-{}", 100 + i),
-            channel: OrderChannel::Web,
-            amount_cents: 20_00,
-            payment_method_state: PaymentMethodState::Valid,
-            phase: TrafficPhase::Outage,
-        });
-    }
+    let outage = [
+        ("cust-5017", 71_25, Valid),
+        ("cust-3741", 18_00, Valid),
+        ("cust-8822", 45_60, Valid),
+        ("cust-1906", 29_99, Valid),
+        ("cust-4815", 83_10, Valid),
+        ("cust-7308", 52_75, Valid),
+        ("cust-2189", 66_40, Valid),
+        ("cust-9054", 15_25, Valid),
+        ("cust-3627", 77_80, Valid),
+        ("cust-6143", 33_50, Valid),
+    ];
 
     // Recovery: dependency is healthy again, but we also inject a
     // couple of locally invalid orders and gateway declines to keep
     // domain outcomes separate from circuit-breaker behaviour.
-    let recovery_pattern = [
-        (PaymentMethodState::Valid, 30_00),
-        (PaymentMethodState::InvalidNumber, 30_00),
-        (PaymentMethodState::Valid, 0),
-        (PaymentMethodState::InsufficientFunds, 15_00),
-        (PaymentMethodState::AddressMismatch, 15_00),
-        (PaymentMethodState::Valid, 50_00),
-        (PaymentMethodState::Valid, 50_00),
+    let recovery = [
+        ("cust-1702", 54_10, Valid),
+        ("cust-8461", 27_30, InvalidNumber),
+        ("cust-2930", 0, Valid),
+        ("cust-5586", 91_20, InsufficientFunds),
+        ("cust-4219", 18_25, AddressMismatch),
+        ("cust-7795", 76_80, Valid),
+        ("cust-3068", 42_60, Valid),
     ];
 
-    for (idx, (payment_method_state, amount_cents)) in recovery_pattern.into_iter().enumerate() {
-        orders.push(CustomerOrderPlaced {
-            order_id: format!("recovery-{idx}"),
-            customer_id: format!("cust-{}", 200 + idx),
-            channel: OrderChannel::Web,
-            amount_cents,
-            payment_method_state,
-            phase: TrafficPhase::Recovery,
-        });
+    let mut orders = Vec::new();
+    for (phase, script) in [
+        (TrafficPhase::Warmup, warmup.as_slice()),
+        (TrafficPhase::Outage, outage.as_slice()),
+        (TrafficPhase::Recovery, recovery.as_slice()),
+    ] {
+        for (customer_id, amount_cents, payment_method_state) in script {
+            let index = orders.len();
+            let (channel, first_order_number) = if index % 2 == 0 {
+                (OrderChannel::Web, 10_481)
+            } else {
+                (OrderChannel::Store, 4_471)
+            };
+            orders.push(CustomerOrderPlaced {
+                order_id: format!("{}-{}", channel.label(), first_order_number + index / 2),
+                customer_id: customer_id.to_string(),
+                channel,
+                amount_cents: *amount_cents,
+                payment_method_state: payment_method_state.clone(),
+                phase: phase.clone(),
+            });
+        }
     }
 
     orders

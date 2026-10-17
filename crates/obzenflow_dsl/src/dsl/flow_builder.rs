@@ -444,11 +444,11 @@ where
                 .expect("planned then-live join")
                 .set_phase_witnesses(witnesses.clone());
         }
-        for (binding, batch, live) in &then_live_plan.merge_producers {
+        for (binding, first_phase, held) in &then_live_plan.merge_producers {
             descriptors
                 .get_mut(binding)
                 .expect("planned merge")
-                .set_merge_producers(batch.clone(), live.clone());
+                .set_merge_producers(first_phase.clone(), held.clone());
         }
 
         // FLOWIP-095m: an order observer (an effect, a stateful fold, or a

@@ -5880,10 +5880,65 @@ macro_rules! transform {
 /// use obzenflow_runtime::stages::merges;
 /// let _stage = obzenflow_dsl::merge!(Fact => merges::then_live with rate_limit(10.0));
 /// ```
+///
+/// A `concat` merge names the producer it reads first, left of `=>`, and
+/// topology wires both producers with plain edges.
+///
+/// ```
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "merge_doc.fact"; }
+/// use obzenflow_runtime::stages::merges;
+/// let _stage = obzenflow_dsl::merge!(first score: Fact => merges::concat);
+/// ```
+///
+/// A `concat` merge without a `first` clause does not compile.
+///
+/// ```compile_fail
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "merge_doc.fact"; }
+/// use obzenflow_runtime::stages::merges;
+/// let _stage = obzenflow_dsl::merge!(Fact => merges::concat);
+/// ```
+///
+/// A `then_live` merge orders its producers by their sources and takes no
+/// `first` clause.
+///
+/// ```compile_fail
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "merge_doc.fact"; }
+/// use obzenflow_runtime::stages::merges;
+/// let _stage = obzenflow_dsl::merge!(first score: Fact => merges::then_live);
+/// ```
 #[macro_export]
 macro_rules! merge {
     (@backpressure) => { None };
     (@backpressure $bp:expr) => { Some($bp) };
+    (name: $name:literal, first $first:ident : $ty:ty => $($strategy:ident)::+ $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::dsl::typing::first_merge_descriptor::<$ty, _>(
+            $name,
+            stringify!($first),
+            $($strategy)::+,
+            $crate::merge!(@backpressure $($bp)?),
+        )
+    };
+    (name: $name:literal, first $first:ident : $ty:ty => $($strategy:ident)::+ with $($rest:tt)*) => {
+        compile_error!("merge! takes no `with` clause. A merge runs no author code, so middleware has nothing to attach to.")
+    };
+    (name: $name:literal, first $first:ident : $ty:ty $(,)?) => {
+        compile_error!("merge! needs a strategy, for example `merge!(first score: AlertRaised => merges::concat)`.\nA merge has no default strategy.")
+    };
+    (first $first:ident : $ty:ty => $($strategy:ident)::+ $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::merge!(name: "__obzenflow_binding_derived_name__", first $first: $ty => $($strategy)::+ $(, backpressure: $bp)?)
+    };
+    (first $first:ident : $ty:ty => $($strategy:ident)::+ with $($rest:tt)*) => {
+        compile_error!("merge! takes no `with` clause. A merge runs no author code, so middleware has nothing to attach to.")
+    };
+    (first $first:ident : $ty:ty $(,)?) => {
+        compile_error!("merge! needs a strategy, for example `merge!(first score: AlertRaised => merges::concat)`.\nA merge has no default strategy.")
+    };
     (name: $name:literal, $ty:ty => $($strategy:ident)::+ $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::dsl::typing::merge_descriptor::<$ty, _>(
             $name,

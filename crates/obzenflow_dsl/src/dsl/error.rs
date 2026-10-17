@@ -196,9 +196,11 @@ pub enum FlowBuildError {
         detail: &'static str,
     },
 
-    /// A then-live join or `then_live` merge the build refuses.
+    /// A join or merge whose phases the build refuses: a then-live join, a
+    /// `then_live` or `concat` merge, or a hold that could never end under
+    /// enforced backpressure.
     #[error("{0}")]
-    ThenLiveTopology(String),
+    PhaseTopology(String),
 
     #[error("Unsupported cycle topology: {0}")]
     UnsupportedCycleTopology(String),
