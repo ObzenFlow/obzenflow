@@ -2896,7 +2896,7 @@ mod then_live {
 
 mod payment_demo {
     use super::*;
-    use gateway_demo::domain::PaymentAuthorizationUnavailable;
+    use gateway_demo::domain::{PaymentAuthorizationUnavailable, TrafficPhase};
     use gateway_demo::fixtures;
     use gateway_demo::gateway::GatewayTransform;
     use obzenflow::application::{Banner, Presentation};
@@ -2907,11 +2907,11 @@ mod payment_demo {
     const UNAVAILABLE: &str = "unavailable";
     const WARMUP_ORDERS: usize = 8;
     const RECOVERY_ROUTES: [(&str, &str); 5] = [
-        ("web-recovery-0", AUTHORIZED),
-        ("store-recovery-3", DECLINED),
-        ("web-recovery-4", DECLINED),
-        ("store-recovery-5", AUTHORIZED),
-        ("web-recovery-6", AUTHORIZED),
+        ("web-10490", AUTHORIZED),
+        ("store-4481", DECLINED),
+        ("web-10492", DECLINED),
+        ("store-4482", AUTHORIZED),
+        ("web-10493", AUTHORIZED),
     ];
 
     pub(super) fn presentation() -> Presentation {
@@ -2928,20 +2928,20 @@ mod payment_demo {
         )
     }
 
-    fn routes(archive: &Archive) -> BTreeMap<String, &'static str> {
+    fn routes(archive: &Archive) -> BTreeMap<String, (TrafficPhase, &'static str)> {
         let stage = "authorize_payment";
         archive
             .facts::<PaymentAuthorized>(stage)
-            .map(|(_, fact)| (fact.order_id, AUTHORIZED))
+            .map(|(_, fact)| (fact.order_id, (fact.phase, AUTHORIZED)))
             .chain(
                 archive
                     .facts::<PaymentDeclined>(stage)
-                    .map(|(_, fact)| (fact.order_id, DECLINED)),
+                    .map(|(_, fact)| (fact.order_id, (fact.phase, DECLINED))),
             )
             .chain(
                 archive
                     .facts::<PaymentAuthorizationUnavailable>(stage)
-                    .map(|(_, fact)| (fact.order_id, UNAVAILABLE)),
+                    .map(|(_, fact)| (fact.order_id, (fact.phase, UNAVAILABLE))),
             )
             .collect()
     }
@@ -2979,14 +2979,10 @@ mod payment_demo {
             let routes = routes(archive);
             archive.eof("web_orders") == Some(EofKind::Natural)
                 && archive.eof("store_orders") == Some(EofKind::Natural)
+                && routes.len() == WARMUP_ORDERS
                 && routes
-                    .keys()
-                    .filter(|order| order.contains("-warmup-"))
-                    .count()
-                    == WARMUP_ORDERS
-                && !routes
-                    .keys()
-                    .any(|order| order.contains("-outage-") || order.contains("-recovery-"))
+                    .values()
+                    .all(|(phase, _)| *phase == TrafficPhase::Warmup)
         };
         until(&killed, name, outage_begun).await;
         child.signal(Signal::Kill);
@@ -3005,7 +3001,7 @@ mod payment_demo {
         let routes = routes(&archive);
         for (order, route) in RECOVERY_ROUTES {
             assert_eq!(
-                routes.get(order).copied(),
+                routes.get(order).map(|(_, routed)| *routed),
                 Some(route),
                 "{name}: {order} routes as in the uninterrupted demo"
             );
