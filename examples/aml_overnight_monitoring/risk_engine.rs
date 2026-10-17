@@ -1,0 +1,438 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+use super::domain::{
+    AccountHistory, AccountKey, PaymentFormat, ProfiledTransaction, ReasonCode, Reasons,
+    RulesVersion, TxnId,
+};
+use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
+use async_trait::async_trait;
+use obzenflow::effects::{EffectPortSlot, IdempotencyKey};
+use obzenflow::schema::FlowId;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::{Mutex, PoisonError};
+
+pub const RULES_VERSION: &str = "sim-2026.10";
+
+pub const RISK_ENGINE: EffectPortSlot<dyn RiskEnginePort> = EffectPortSlot::new("risk_engine");
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScoreRequest {
+    pub txn_id: TxnId,
+    pub timestamp: String,
+    pub payer: AccountKey,
+    pub payee: AccountKey,
+    pub amount_paid: f64,
+    pub payment_currency: String,
+    pub amount_received: f64,
+    pub receiving_currency: String,
+    pub payment_format: PaymentFormat,
+    pub history: Option<AccountHistory>,
+}
+
+impl ScoreRequest {
+    pub fn for_transaction(profiled: &ProfiledTransaction) -> Self {
+        let transaction = &profiled.transaction;
+        Self {
+            txn_id: transaction.txn_id,
+            timestamp: transaction.timestamp.clone(),
+            payer: transaction.payer(),
+            payee: transaction.payee(),
+            amount_paid: transaction.amount_paid,
+            payment_currency: transaction.payment_currency.clone(),
+            amount_received: transaction.amount_received,
+            receiving_currency: transaction.receiving_currency.clone(),
+            payment_format: transaction.payment_format,
+            history: profiled.history.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum RiskVerdict {
+    Cleared {
+        rules_version: RulesVersion,
+    },
+    Flagged {
+        reasons: Reasons,
+        rules_version: RulesVersion,
+    },
+}
+
+impl LedgerAnswer for RiskVerdict {
+    const DECIDED: CallResult = CallResult::Scored;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the risk engine could not record the call: {0}")]
+pub struct RiskEngineError(#[from] std::io::Error);
+
+#[async_trait]
+pub trait RiskEnginePort: Send + Sync {
+    async fn score(
+        &self,
+        key: &IdempotencyKey,
+        flow_id: FlowId,
+        request: &ScoreRequest,
+    ) -> Result<RiskVerdict, RiskEngineError>;
+}
+
+pub struct SimulatedRiskEngine {
+    ledger: Mutex<Ledger<RiskVerdict>>,
+}
+
+impl SimulatedRiskEngine {
+    pub fn open(ledger: &Path) -> Result<Self, LedgerError> {
+        Ok(Self {
+            ledger: Mutex::new(Ledger::open(ledger)?),
+        })
+    }
+}
+
+#[async_trait]
+impl RiskEnginePort for SimulatedRiskEngine {
+    async fn score(
+        &self,
+        key: &IdempotencyKey,
+        flow_id: FlowId,
+        request: &ScoreRequest,
+    ) -> Result<RiskVerdict, RiskEngineError> {
+        let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(first) = ledger.first_answer(&key.0).cloned() {
+            ledger.record_repeat(&key.0, flow_id)?;
+            return Ok(first);
+        }
+        let verdict = decide(request);
+        ledger.record_first(&key.0, flow_id, verdict.clone())?;
+        Ok(verdict)
+    }
+}
+
+struct Rule {
+    code: &'static str,
+    fires: fn(&ScoreRequest, f64) -> bool,
+}
+
+const RULES: [Rule; 4] = [
+    Rule {
+        code: "first_payment_large_cash",
+        fires: first_payment_large_cash,
+    },
+    Rule {
+        code: "format_switch",
+        fires: format_switch,
+    },
+    Rule {
+        code: "fan_out_large_payment",
+        fires: fan_out_large_payment,
+    },
+    Rule {
+        code: "thin_history_large_transfer",
+        fires: thin_history_large_transfer,
+    },
+];
+
+pub fn decide(request: &ScoreRequest) -> RiskVerdict {
+    let usd = usd(request.amount_paid, &request.payment_currency);
+    let fired = RULES
+        .iter()
+        .filter(|rule| (rule.fires)(request, usd))
+        .map(|rule| ReasonCode(rule.code.to_owned()))
+        .collect();
+    let rules_version = RulesVersion(RULES_VERSION.to_owned());
+    match Reasons::from_fired(fired) {
+        Some(reasons) => RiskVerdict::Flagged {
+            reasons,
+            rules_version,
+        },
+        None => RiskVerdict::Cleared { rules_version },
+    }
+}
+
+fn usd(amount: f64, currency: &str) -> f64 {
+    let rate = match currency {
+        "Yuan" => 0.14,
+        "Yen" => 0.0071,
+        "Rupee" => 0.012,
+        "Bitcoin" => 19_500.0,
+        "Swiss Franc" => 1.02,
+        "UK Pound" => 1.15,
+        "Ruble" => 0.017,
+        "Canadian Dollar" => 0.75,
+        "Australian Dollar" => 0.67,
+        "Shekel" => 0.29,
+        "Brazil Real" => 0.19,
+        "Mexican Peso" => 0.05,
+        "Saudi Riyal" => 0.27,
+        _ => 1.0,
+    };
+    amount * rate
+}
+
+fn first_payment_large_cash(request: &ScoreRequest, usd: f64) -> bool {
+    request.history.is_none() && request.payment_format == PaymentFormat::Cash && usd >= 10_000.0
+}
+
+fn format_switch(request: &ScoreRequest, usd: f64) -> bool {
+    request
+        .history
+        .as_ref()
+        .is_some_and(|history| !history.formats.contains(&request.payment_format))
+        && usd >= 20_000.0
+}
+
+fn fan_out_large_payment(request: &ScoreRequest, usd: f64) -> bool {
+    request.history.as_ref().is_some_and(|history| {
+        history.counterparties >= 20 && history.counterparties * 10 >= history.payments * 9
+    }) && usd >= 10_000.0
+}
+
+fn thin_history_large_transfer(request: &ScoreRequest, usd: f64) -> bool {
+    request
+        .history
+        .as_ref()
+        .is_some_and(|history| history.payments <= 2)
+        && matches!(
+            request.payment_format,
+            PaymentFormat::Wire | PaymentFormat::Bitcoin
+        )
+        && usd >= 50_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::domain::Transaction;
+    use super::*;
+
+    fn transaction(txn_id: u64, format: PaymentFormat, amount: f64, currency: &str) -> Transaction {
+        Transaction {
+            txn_id: TxnId(txn_id),
+            timestamp: "2022/09/05 10:15".to_owned(),
+            from_bank: "70".to_owned(),
+            from_account: "8000A1B2C".to_owned(),
+            to_bank: "12".to_owned(),
+            to_account: "8000D3E4F".to_owned(),
+            amount_received: amount,
+            receiving_currency: currency.to_owned(),
+            amount_paid: amount,
+            payment_currency: currency.to_owned(),
+            payment_format: format,
+            is_laundering: true,
+        }
+    }
+
+    fn history(payments: u64, counterparties: u64, formats: &[PaymentFormat]) -> AccountHistory {
+        AccountHistory {
+            bank: "70".to_owned(),
+            account: "8000A1B2C".to_owned(),
+            payments,
+            counterparties,
+            formats: formats.to_vec(),
+        }
+    }
+
+    fn request(transaction: Transaction, history: Option<AccountHistory>) -> ScoreRequest {
+        ScoreRequest::for_transaction(&ProfiledTransaction {
+            transaction,
+            history,
+        })
+    }
+
+    fn reasons(verdict: &RiskVerdict) -> Vec<&str> {
+        match verdict {
+            RiskVerdict::Flagged { reasons, .. } => {
+                reasons.iter().map(|reason| reason.0.as_str()).collect()
+            }
+            RiskVerdict::Cleared { .. } => Vec::new(),
+        }
+    }
+
+    fn key(txn_id: u64) -> IdempotencyKey {
+        IdempotencyKey(format!("aml-score:{txn_id}"))
+    }
+
+    fn ledger_lines(path: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .expect("ledger is readable")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("ledger line is JSON"))
+            .collect()
+    }
+
+    #[test]
+    fn the_request_never_carries_the_laundering_label() {
+        let request = request(
+            transaction(1, PaymentFormat::Cheque, 120.0, "US Dollar"),
+            None,
+        );
+        let json = serde_json::to_string(&request).expect("request serializes");
+        assert!(!json.contains("laundering"), "{json}");
+    }
+
+    #[test]
+    fn each_rule_and_both_verdicts() {
+        let cases = [
+            (
+                request(
+                    transaction(1, PaymentFormat::Cash, 15_000.0, "US Dollar"),
+                    None,
+                ),
+                vec!["first_payment_large_cash"],
+            ),
+            (
+                request(
+                    transaction(2, PaymentFormat::Cash, 9_999.0, "US Dollar"),
+                    None,
+                ),
+                vec![],
+            ),
+            (
+                request(
+                    transaction(3, PaymentFormat::Cash, 2_000_000.0, "Yen"),
+                    Some(history(4, 2, &[PaymentFormat::Cash])),
+                ),
+                vec![],
+            ),
+            (
+                request(
+                    transaction(4, PaymentFormat::CreditCard, 25_000.0, "US Dollar"),
+                    Some(history(30, 6, &[PaymentFormat::Ach, PaymentFormat::Cheque])),
+                ),
+                vec!["format_switch"],
+            ),
+            (
+                request(
+                    transaction(5, PaymentFormat::Ach, 12_000.0, "US Dollar"),
+                    Some(history(40, 38, &[PaymentFormat::Ach])),
+                ),
+                vec!["fan_out_large_payment"],
+            ),
+            (
+                request(
+                    transaction(6, PaymentFormat::Wire, 80_000.0, "US Dollar"),
+                    Some(history(2, 2, &[PaymentFormat::Wire])),
+                ),
+                vec!["thin_history_large_transfer"],
+            ),
+        ];
+        for (request, expected) in cases {
+            let verdict = decide(&request);
+            assert_eq!(reasons(&verdict), expected, "txn {}", request.txn_id);
+            let rules_version = match &verdict {
+                RiskVerdict::Cleared { rules_version }
+                | RiskVerdict::Flagged { rules_version, .. } => rules_version,
+            };
+            assert_eq!(rules_version.0, RULES_VERSION);
+        }
+    }
+
+    #[test]
+    fn a_flag_lists_every_rule_that_fired_in_the_engine_order() {
+        let verdict = decide(&request(
+            transaction(7, PaymentFormat::Wire, 60_000.0, "US Dollar"),
+            Some(history(1, 1, &[PaymentFormat::Cheque])),
+        ));
+        assert_eq!(
+            reasons(&verdict),
+            vec!["format_switch", "thin_history_large_transfer"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_key_is_answered_replayed_with_the_first_answer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("risk.jsonl");
+        let flagged = request(
+            transaction(8, PaymentFormat::Wire, 60_000.0, "US Dollar"),
+            Some(history(1, 1, &[PaymentFormat::Cheque])),
+        );
+        let engine = SimulatedRiskEngine::open(&path).expect("ledger opens");
+        let first_run = FlowId::new();
+        let first = engine
+            .score(&key(8), first_run, &flagged)
+            .await
+            .expect("first call");
+        let repeat = engine
+            .score(&key(8), first_run, &flagged)
+            .await
+            .expect("repeated call");
+        assert_eq!(repeat, first);
+
+        let lines = ledger_lines(&path);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            serde_json::json!({
+                "key": "aml-score:8",
+                "result": "scored",
+                "flow_id": first_run.to_string(),
+                "verdict": "flagged",
+                "reasons": ["format_switch", "thin_history_large_transfer"],
+                "rules_version": RULES_VERSION,
+            })
+        );
+        assert_eq!(
+            lines[1],
+            serde_json::json!({
+                "key": "aml-score:8",
+                "result": "replayed",
+                "flow_id": first_run.to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reopened_engine_answers_from_the_first_line_of_each_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("risk.jsonl");
+        let flagged = request(
+            transaction(9, PaymentFormat::Wire, 60_000.0, "US Dollar"),
+            Some(history(1, 1, &[PaymentFormat::Cheque])),
+        );
+        let first = SimulatedRiskEngine::open(&path)
+            .expect("ledger opens")
+            .score(&key(9), FlowId::new(), &flagged)
+            .await
+            .expect("first call");
+
+        let changed = request(
+            transaction(9, PaymentFormat::Cheque, 10.0, "US Dollar"),
+            Some(history(1, 1, &[PaymentFormat::Cheque])),
+        );
+        let resumed = FlowId::new();
+        let reopened = SimulatedRiskEngine::open(&path).expect("ledger reopens");
+        let repeat = reopened
+            .score(&key(9), resumed, &changed)
+            .await
+            .expect("repeated call after reopening");
+        assert_eq!(repeat, first);
+        assert_eq!(
+            reasons(&repeat),
+            vec!["format_switch", "thin_history_large_transfer"]
+        );
+
+        let cleared = reopened
+            .score(&key(10), resumed, &changed)
+            .await
+            .expect("new key after reopening");
+        assert!(matches!(cleared, RiskVerdict::Cleared { .. }));
+
+        let lines = ledger_lines(&path);
+        let results: Vec<_> = lines
+            .iter()
+            .map(|line| (line["key"].as_str(), line["result"].as_str()))
+            .collect();
+        assert_eq!(
+            results,
+            vec![
+                (Some("aml-score:9"), Some("scored")),
+                (Some("aml-score:9"), Some("replayed")),
+                (Some("aml-score:10"), Some("scored")),
+            ]
+        );
+        assert_eq!(lines[1]["flow_id"], resumed.to_string());
+    }
+}
