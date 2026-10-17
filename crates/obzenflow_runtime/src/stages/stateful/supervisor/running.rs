@@ -401,6 +401,7 @@ pub(super) async fn dispatch_accumulating<
                             heartbeat_state: heartbeat_state.clone(),
                             parent: envelope.clone(),
                             effect_history: ctx.effect_history.clone(),
+                            current_run_history: ctx.current_run_history.clone(),
                             runtime_execution: ctx.runtime_execution.clone(),
                             effect_ports: ctx.effect_ports.clone(),
                             effect_declarations: ctx.effect_declarations.clone(),

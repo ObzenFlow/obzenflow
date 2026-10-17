@@ -31,45 +31,26 @@ impl HistoryScan {
 
 #[derive(Debug, Default)]
 pub(crate) struct EffectCursorCoordinator {
-    locks: Mutex<HashMap<EffectCursor, Arc<tokio::sync::Mutex<()>>>>,
+    locks: Mutex<HashMap<EffectCursor, CursorLock>>,
     poisoned: Mutex<HashSet<EffectCursor>>,
+}
+
+#[derive(Debug)]
+struct CursorLock {
+    mutex: Arc<tokio::sync::Mutex<()>>,
+    holders: usize,
 }
 
 impl EffectCursorCoordinator {
     pub(crate) async fn lock(
-        &self,
+        self: &Arc<Self>,
         cursor: &EffectCursor,
-    ) -> Result<tokio::sync::OwnedMutexGuard<()>, EffectError> {
-        if self
-            .poisoned
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(cursor)
-        {
-            return Err(EffectError::Execution(format!(
-                "effect cursor {cursor:?} is poisoned after a failed publication"
-            )));
-        }
-        let lock = self
-            .locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(cursor.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let guard = lock.lock_owned().await;
-        if self
-            .poisoned
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(cursor)
-        {
-            drop(guard);
-            return Err(EffectError::Execution(format!(
-                "effect cursor {cursor:?} is poisoned after a failed publication"
-            )));
-        }
-        Ok(guard)
+    ) -> Result<EffectCursorGuard, EffectError> {
+        self.refuse_poisoned(cursor)?;
+        let (mut held, mutex) = EffectCursorGuard::claim(self, cursor);
+        held.guard = Some(mutex.lock_owned().await);
+        self.refuse_poisoned(cursor)?;
+        Ok(held)
     }
 
     pub(crate) fn poison(&self, cursor: EffectCursor) {
@@ -77,6 +58,82 @@ impl EffectCursorCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(cursor);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn held_cursors(&self) -> usize {
+        self.locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    fn refuse_poisoned(&self, cursor: &EffectCursor) -> Result<(), EffectError> {
+        if self
+            .poisoned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(cursor)
+        {
+            return Err(EffectError::Execution(format!(
+                "effect cursor {cursor:?} is poisoned after a failed publication"
+            )));
+        }
+        Ok(())
+    }
+
+    fn release(&self, cursor: &EffectCursor) {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(lock) = locks.get_mut(cursor) {
+            lock.holders = lock.holders.saturating_sub(1);
+            if lock.holders == 0 {
+                locks.remove(cursor);
+            }
+        }
+    }
+}
+
+pub(crate) struct EffectCursorGuard {
+    coordinator: Arc<EffectCursorCoordinator>,
+    cursor: EffectCursor,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl EffectCursorGuard {
+    fn claim(
+        coordinator: &Arc<EffectCursorCoordinator>,
+        cursor: &EffectCursor,
+    ) -> (Self, Arc<tokio::sync::Mutex<()>>) {
+        let mutex = {
+            let mut locks = coordinator
+                .locks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = locks.entry(cursor.clone()).or_insert_with(|| CursorLock {
+                mutex: Arc::new(tokio::sync::Mutex::new(())),
+                holders: 0,
+            });
+            lock.holders += 1;
+            lock.mutex.clone()
+        };
+        (
+            Self {
+                coordinator: coordinator.clone(),
+                cursor: cursor.clone(),
+                guard: None,
+            },
+            mutex,
+        )
+    }
+}
+
+impl Drop for EffectCursorGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.coordinator.release(&self.cursor);
     }
 }
 
@@ -740,6 +797,7 @@ impl EffectHistory {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn current_cursor_history(
     journal: &Arc<dyn Journal<ChainEvent>>,
     cursor: &EffectCursor,
@@ -1179,7 +1237,7 @@ fn event_groups_identity_equal(
     Ok(true)
 }
 
-fn validate_cursor_history(
+pub(super) fn validate_cursor_history(
     cursor: &EffectCursor,
     history: &EffectCursorHistory,
 ) -> Result<(), EffectError> {
@@ -1277,7 +1335,7 @@ fn validate_cursor_history(
     Ok(())
 }
 
-fn validate_attempt_event(
+pub(super) fn validate_attempt_event(
     event: &ChainEvent,
     started: &EffectAttemptStarted,
 ) -> Result<(), EffectError> {
@@ -1316,7 +1374,7 @@ fn validate_attempt_event(
     Ok(())
 }
 
-fn validate_abandonment_event(
+pub(super) fn validate_abandonment_event(
     event: &ChainEvent,
     abandoned: &EffectRecoveryAbandoned,
 ) -> Result<(), EffectError> {
@@ -1637,7 +1695,7 @@ fn validate_group_grammar_parts(
     Ok(())
 }
 
-fn validate_atomic_group_members(
+pub(super) fn validate_atomic_group_members(
     group_id: &str,
     events: &[(usize, Option<JournalGroupMember>, ChainEvent)],
 ) -> Result<(), EffectError> {

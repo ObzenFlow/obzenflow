@@ -229,6 +229,7 @@ async fn dispatch_draining_inner<
                     heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                     parent: envelope_clone.clone(),
                     effect_history: ctx.effect_history.clone(),
+                    current_run_history: ctx.current_run_history.clone(),
                     runtime_execution: ctx.runtime_execution.clone(),
                     effect_ports: ctx.effect_ports.clone(),
                     effect_declarations: ctx.effect_declarations.clone(),

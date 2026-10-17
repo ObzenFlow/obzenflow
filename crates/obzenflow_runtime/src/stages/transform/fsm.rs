@@ -29,7 +29,7 @@ use std::task::{Context, Poll};
 use crate::backpressure::{
     BackpressureReader, BackpressureRegistry, BackpressureWriter, DirectFactAdmission,
 };
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
@@ -754,6 +754,8 @@ pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
 
     /// Stage-local effect history loaded from replay archive.
     pub effect_history: Option<Arc<EffectHistory>>,
+
+    pub current_run_history: CurrentRunHistory,
 
     /// Runtime execution strategy (FLOWIP-120r).
     pub runtime_execution: crate::execution::RuntimeExecution,

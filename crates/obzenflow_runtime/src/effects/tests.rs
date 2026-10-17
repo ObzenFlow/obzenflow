@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+mod current_run;
+
 #[derive(Debug)]
 struct TestAllowAllEffectBoundary;
 
@@ -152,10 +154,12 @@ impl EffectBoundary for CountingAbortBoundary {
     }
 }
 
+type MemoryRecords<T> = Arc<Mutex<Vec<JournalRecord<<T as JournalEvent>::Payload>>>>;
+
 struct MemoryJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
-    events: Mutex<Vec<JournalRecord<T::Payload>>>,
+    events: MemoryRecords<T>,
     fail_group_prefixes: Mutex<Vec<String>>,
     fail_event_types: Mutex<Vec<String>>,
 }
@@ -165,7 +169,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
         Self {
             id: JournalId::new(),
             owner: Some(owner),
-            events: Mutex::new(Vec::new()),
+            events: Arc::new(Mutex::new(Vec::new())),
             fail_group_prefixes: Mutex::new(Vec::new()),
             fail_event_types: Mutex::new(Vec::new()),
         }
@@ -175,7 +179,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
         Self {
             id: JournalId::new(),
             owner: Some(owner),
-            events: Mutex::new(Vec::new()),
+            events: Arc::new(Mutex::new(Vec::new())),
             fail_group_prefixes: Mutex::new(vec![prefix.into()]),
             fail_event_types: Mutex::new(Vec::new()),
         }
@@ -185,7 +189,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
         Self {
             id: JournalId::new(),
             owner: Some(owner),
-            events: Mutex::new(Vec::new()),
+            events: Arc::new(Mutex::new(Vec::new())),
             fail_group_prefixes: Mutex::new(Vec::new()),
             fail_event_types: Mutex::new(vec![event_type.into()]),
         }
@@ -197,7 +201,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
 }
 
 struct MemoryJournalReader<T: JournalEvent> {
-    events: Vec<JournalRecord<T::Payload>>,
+    events: MemoryRecords<T>,
     position: usize,
 }
 
@@ -206,7 +210,12 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
     for MemoryJournalReader<T>
 {
     async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
-        let next = self.events.get(self.position).cloned();
+        let next = self
+            .events
+            .lock()
+            .expect("events lock poisoned")
+            .get(self.position)
+            .cloned();
         if next.is_some() {
             self.position += 1;
         }
@@ -215,6 +224,27 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
 
     fn storage_position(&self) -> u64 {
         self.position as u64
+    }
+
+    fn storage_is_at_end(&self) -> bool {
+        self.position >= self.events.lock().expect("events lock poisoned").len()
+    }
+}
+
+struct EmptyJournalReader;
+
+#[async_trait]
+impl obzenflow_core::journal::JournalStorageReader<ChainEvent> for EmptyJournalReader {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
+        Ok(None)
+    }
+
+    fn storage_position(&self) -> u64 {
+        0
+    }
+
+    fn storage_is_at_end(&self) -> bool {
+        true
     }
 }
 
@@ -324,7 +354,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for M
         position: u64,
     ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(MemoryJournalReader {
-            events: self.events(),
+            events: self.events.clone(),
             position: position as usize,
         }))
     }
@@ -413,10 +443,7 @@ impl obzenflow_core::journal::JournalStorage<ChainEvent> for FailingStartJournal
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
-        Err(JournalError::Implementation {
-            message: "failing Start journal has no reader".to_string(),
-            source: "test-only journal".into(),
-        })
+        Ok(Box::new(EmptyJournalReader))
     }
 
     async fn storage_read_last_n(
@@ -472,10 +499,7 @@ impl obzenflow_core::journal::JournalStorage<ChainEvent> for InspectingFailJourn
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
-        Err(JournalError::Implementation {
-            message: "failing append journal has no reader".to_string(),
-            source: "test-only journal".into(),
-        })
+        Ok(Box::new(EmptyJournalReader))
     }
 
     async fn storage_read_last_n(
@@ -1746,6 +1770,7 @@ fn invocation_context_with_mode(
     let runtime_execution =
         crate::execution::RuntimeExecution::from_effect_runtime_mode(effect_runtime_mode, None);
     let catch_up = stage_catch_up(stage_id, journal.clone(), runtime_execution.clone());
+    let current_run_history = CurrentRunHistory::new(journal.clone());
     EffectInvocationContext {
         flow_id: FlowId::new(),
         stage_id,
@@ -1762,6 +1787,7 @@ fn invocation_context_with_mode(
         heartbeat_state: None,
         parent: parent.into(),
         effect_history,
+        current_run_history,
         runtime_execution,
         effect_ports,
         effect_declarations: vec![
@@ -2093,7 +2119,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     let parent = parent_envelope(WriterId::from(stage_id));
 
     let fresh_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let fresh = EffectsCore::new(invocation_context_with_mode(
+    let mut fresh = EffectsCore::new(invocation_context_with_mode(
         fresh_journal.clone(),
         parent.clone(),
         None,
@@ -2129,7 +2155,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
             .expect("completed history indexes"),
     );
     let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let completed = EffectsCore::new(invocation_context_with_mode(
+    let mut completed = EffectsCore::new(invocation_context_with_mode(
         completed_journal.clone(),
         parent.clone(),
         Some(completed_history),
@@ -2207,7 +2233,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     )
     .expect("archived in-doubt history is valid");
     in_doubt_ctx.effect_history = Some(Arc::new(archived_start));
-    let in_doubt = EffectsCore::new(in_doubt_ctx);
+    let mut in_doubt = EffectsCore::new(in_doubt_ctx);
     let in_doubt_error = in_doubt
         .preflight_next_effect_cursor_is_empty()
         .await
@@ -8618,36 +8644,40 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
 
     let make_ctx = |journal: Arc<MemoryJournal<ChainEvent>>,
                     boundary: Option<Arc<dyn EffectBoundary>>,
-                    ports: EffectPortRegistry| EffectInvocationContext {
-        flow_id,
-        stage_id,
-        stage_key: "effect_stage".to_string(),
-        writer_id,
-        input_seq: StageInputPosition(1),
-        lineage: obzenflow_core::config::LineagePolicy::default(),
-        stage_logic_version: "test-v1".to_string(),
-        data_journal: journal,
-        flow_context: None,
-        observers: None,
+                    ports: EffectPortRegistry| {
+        let current_run_history = CurrentRunHistory::new(journal.clone());
+        EffectInvocationContext {
+            flow_id,
+            stage_id,
+            stage_key: "effect_stage".to_string(),
+            writer_id,
+            input_seq: StageInputPosition(1),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            stage_logic_version: "test-v1".to_string(),
+            data_journal: journal,
+            flow_context: None,
+            observers: None,
 
-        instrumentation: None,
-        heartbeat_state: None,
-        parent: parent.clone().into(),
-        effect_history: None,
-        runtime_execution: crate::execution::RuntimeExecution::new(
-            crate::execution::RuntimeMode::Live,
-            None,
-        ),
-        effect_ports: ports,
-        effect_declarations: vec![
-            EffectDeclaration::of::<CountingEffect>(),
-            EffectDeclaration::transactional(&binding),
-        ],
-        output_contract: StageOutputContract::empty(),
-        backpressure_writer: BackpressureWriter::disabled(),
-        emit_enabled: false,
-        effect_boundary: boundary,
-        catch_up: None,
+            instrumentation: None,
+            heartbeat_state: None,
+            parent: parent.clone().into(),
+            effect_history: None,
+            current_run_history,
+            runtime_execution: crate::execution::RuntimeExecution::new(
+                crate::execution::RuntimeMode::Live,
+                None,
+            ),
+            effect_ports: ports,
+            effect_declarations: vec![
+                EffectDeclaration::of::<CountingEffect>(),
+                EffectDeclaration::transactional(&binding),
+            ],
+            output_contract: StageOutputContract::empty(),
+            backpressure_writer: BackpressureWriter::disabled(),
+            emit_enabled: false,
+            effect_boundary: boundary,
+            catch_up: None,
+        }
     };
 
     // Run A: aborted transactional effect, then a counting effect.

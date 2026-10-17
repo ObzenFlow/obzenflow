@@ -51,6 +51,7 @@ mod boundary;
 mod commit;
 mod completion;
 mod context;
+mod current_run;
 mod declaration;
 mod effect_set;
 mod error;
@@ -86,6 +87,8 @@ pub use boundary::{
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
 pub use context::{EffectContext, EffectInvocationContext, EffectPortMetadataContext};
+pub(crate) use current_run::CurrentRunFailure;
+pub use current_run::CurrentRunHistory;
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
@@ -104,9 +107,10 @@ pub use effect_set::{
 };
 pub use error::EffectError;
 pub use fault::{BindingAuthorityFault, BindingMismatchKind};
+#[cfg(test)]
+pub(crate) use history::current_cursor_history;
 pub(crate) use history::{
-    current_cursor_history, merge_cursor_histories, EffectCursorCoordinator, EffectCursorHistory,
-    EffectHistorySelection,
+    merge_cursor_histories, EffectCursorCoordinator, EffectCursorHistory, EffectHistorySelection,
 };
 pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};
 pub use identity::{

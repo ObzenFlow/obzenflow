@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Completed source -> trivial transforms -> sink, with fixed two-worker runtime.
-//! Fixture/build and output checks are excluded; start, publication and drain are timed.
+//! Completed source -> trivial transforms -> sink, with fixed two-worker runtime,
+//! and completed flows whose one effectful transform performs one effect per
+//! input. Fixture/build and output checks are excluded; start, publication and
+//! drain are timed.
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use obzenflow_benchmarks::case::{declare, Category};
@@ -11,22 +13,30 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
 use obzenflow_dsl::dsl::backpressure_clause::enforced;
-use obzenflow_dsl::{async_source, flow, sink, transform, FlowDefinition};
+use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
+use obzenflow_runtime::effects::{
+    DomainFacts, Effect, EffectContext, EffectError, EffectSafety, Effects, Portless,
+    StageCompletion,
+};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
-    TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
+    TypedAsyncFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{
+    path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::runtime::Runtime;
 
 const INPUTS: u64 = 128;
+const EFFECT_INPUTS: [u64; 2] = [2_000, 8_000];
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Input {
     index: u64,
@@ -38,6 +48,7 @@ impl TypedPayload for Input {
 #[derive(Clone, Debug)]
 struct Source {
     index: u64,
+    inputs: u64,
     origin: Instant,
     sparse: bool,
 }
@@ -45,7 +56,7 @@ struct Source {
 impl TypedAsyncFiniteSourceHandler for Source {
     type Output = Input;
     async fn next(&mut self) -> Result<Option<Vec<Input>>, SourceError> {
-        if self.index == INPUTS {
+        if self.index == self.inputs {
             return Ok(None);
         }
         if self.sparse {
@@ -110,6 +121,7 @@ where
     FlowDefinition::materialize(move |_| {
         let source = Source {
             index: 0,
+            inputs: INPUTS,
             origin,
             sparse,
         };
@@ -198,6 +210,137 @@ fn bench(c: &mut Criterion) {
                     let mut latencies: Vec<_> = rows.iter().map(|(_, latency)| *latency).collect();
                     latencies.sort();
                     eprintln!("{name}: completed={INPUTS}, first valid sample latency p50={:?}, p99={:?}; not Criterion estimates", latencies[latencies.len()/2], latencies[latencies.len()*99/100]);
+                    reported = true;
+                }
+            }
+            elapsed
+        }));
+    }
+    group.finish();
+    bench_effect_bookkeeping(c, &rt);
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Settled {
+    index: u64,
+}
+impl TypedPayload for Settled {
+    const EVENT_TYPE: &'static str = "bench.effect_settled";
+}
+#[derive(Clone, Debug)]
+struct Settle {
+    index: u64,
+}
+#[async_trait]
+impl Effect for Settle {
+    const EFFECT_TYPE: &'static str = "bench.settle";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = Portless;
+    type Outcome = Settled;
+    type OutcomeSemantics = DomainFacts;
+    fn label(&self) -> &str {
+        "settle"
+    }
+    fn canonical_input(&self) -> Value {
+        json!({ "index": self.index })
+    }
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Settled, EffectError> {
+        Ok(Settled { index: self.index })
+    }
+}
+#[derive(Clone, Debug)]
+struct SettleEach;
+#[async_trait]
+impl EffectfulTransformHandler for SettleEach {
+    type Input = Input;
+    type Output = obzenflow_core::stage_fact_set![Settled];
+    type AllowedEffects = obzenflow_runtime::effect_set![Settle];
+    async fn process(
+        &self,
+        input: Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        fx.perform(Settle { index: input.index })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+        Ok(fx.complete()?)
+    }
+}
+#[derive(Clone, Debug)]
+struct SettledSink {
+    settled: Arc<Mutex<Vec<u64>>>,
+}
+#[async_trait]
+impl InlineSink for SettledSink {
+    type Input = Settled;
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::Noop)
+    }
+    async fn write(&mut self, event: Settled) -> Result<(), SinkWriteFailure> {
+        self.settled.lock().unwrap().push(event.index);
+        Ok(())
+    }
+}
+async fn build_effectful(
+    directory: &Path,
+    inputs: u64,
+    settled: Arc<Mutex<Vec<u64>>>,
+) -> FlowHandle {
+    let journals = disk_journals(directory.to_owned());
+    FlowDefinition::materialize(move |_| {
+        let source = Source {
+            index: 0,
+            inputs,
+            origin: Instant::now(),
+            sparse: false,
+        };
+        let sink = SettledSink { settled };
+        Ok(flow! {
+            journals: journals,
+            backpressure: enforced(64).stall_timeout_ms(30_000),
+            stages: {
+                src = async_source!(Input => source);
+                settle = effectful_transform!(Input -> Settled uses Settle => SettleEach);
+                snk = sink!(Settled => sink);
+            },
+            topology: { src |> settle; settle |> snk; }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .unwrap()
+}
+fn bench_effect_bookkeeping(c: &mut Criterion, rt: &Runtime) {
+    let mut group = c.benchmark_group("effect_bookkeeping");
+    for inputs in EFFECT_INPUTS {
+        let name = format!("inputs_{inputs}");
+        declare(
+            &format!("effect_bookkeeping/{name}"),
+            Category::Flow,
+            &format!("{inputs}-input completed flow through one effectful transform performing one repeatable effect per input on disk journals; build excluded"),
+        );
+        group.throughput(Throughput::Elements(inputs));
+        let mut reported = false;
+        group.bench_function(name.as_str(), |b| b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iterations {
+                let directory = tempfile::tempdir().unwrap();
+                let settled = Arc::new(Mutex::new(Vec::with_capacity(inputs as usize)));
+                let handle = rt.block_on(build_effectful(directory.path(), inputs, settled.clone()));
+                let started = Instant::now();
+                rt.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(60), async {
+                        handle.start().await.unwrap();
+                        handle.wait_for_completion().await.unwrap();
+                    }).await.expect("timeout invalidates the effect bookkeeping sample");
+                });
+                let sample = started.elapsed();
+                elapsed += sample;
+                let mut rows = settled.lock().unwrap().clone();
+                rows.sort_unstable();
+                assert_eq!(rows, (0..inputs).collect::<Vec<_>>(), "missing or duplicate settlement");
+                if !reported {
+                    eprintln!("effect_bookkeeping/{name}: completed={inputs}, first valid sample {sample:?}, {:?} per input; not a Criterion estimate", sample / inputs as u32);
                     reported = true;
                 }
             }

@@ -15,10 +15,10 @@ use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{BoundedBindingEvidence, FlowId, JournalId, JournalOwner, TypedPayload};
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
-    transactional_effect_port_slot, Effect, EffectBindingEvidence, EffectBindingUse,
-    EffectCommitHandle, EffectContext, EffectDeclaration, EffectInvocationContext,
-    EffectPortRegistry, EffectPortSlotSet, EffectRegistrationBuilder, Effects,
-    LogicalEffectBindingName, Named, NamedEffect, TransactionalEffectPort,
+    transactional_effect_port_slot, CurrentRunHistory, Effect, EffectBindingEvidence,
+    EffectBindingUse, EffectCommitHandle, EffectContext, EffectDeclaration,
+    EffectInvocationContext, EffectPortRegistry, EffectPortSlotSet, EffectRegistrationBuilder,
+    Effects, LogicalEffectBindingName, Named, NamedEffect, TransactionalEffectPort,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;
@@ -314,6 +314,10 @@ async fn effect_context(
     let effect_ports =
         EffectPortRegistry::collect_from_declarations([&authored_declaration]).unwrap();
 
+    let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(AppendOnlyJournal::new(
+        JournalOwner::stage(stage_id),
+        matches!(mode, TransactionProbeMode::AppendFailure),
+    ));
     let context = EffectInvocationContext {
         flow_id: FlowId::new(),
         stage_id,
@@ -322,10 +326,7 @@ async fn effect_context(
         input_seq: StageInputPosition(1),
         lineage: obzenflow_core::config::LineagePolicy::default(),
         stage_logic_version: "test-v1".to_string(),
-        data_journal: Arc::new(AppendOnlyJournal::new(
-            JournalOwner::stage(stage_id),
-            matches!(mode, TransactionProbeMode::AppendFailure),
-        )),
+        data_journal: data_journal.clone(),
         flow_context: None,
         observers: None,
 
@@ -333,6 +334,7 @@ async fn effect_context(
         heartbeat_state: None,
         parent: parent.into(),
         effect_history: None,
+        current_run_history: CurrentRunHistory::new(data_journal),
         runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
         effect_ports,
         effect_declarations: vec![authored_declaration.runtime_projection()],

@@ -10,7 +10,7 @@
 
 use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::execution::RuntimeExecution;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
@@ -460,6 +460,9 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
 
     /// Recorded effect outcomes for replay suppression.
     pub effect_history: Option<Arc<EffectHistory>>,
+
+    /// This run's effect history, folded from `data_journal`.
+    pub current_run_history: CurrentRunHistory,
 
     /// Runtime execution strategy (FLOWIP-120r).
     pub runtime_execution: RuntimeExecution,
@@ -1362,6 +1365,7 @@ mod tests {
             data_journal: data.clone(),
             error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
             effect_history: None,
+            current_run_history: crate::effects::CurrentRunHistory::new(data.clone()),
             runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
             effect_ports: Default::default(),
             effect_declarations: Vec::new(),

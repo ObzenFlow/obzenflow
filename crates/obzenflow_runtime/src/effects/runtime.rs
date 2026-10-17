@@ -585,7 +585,9 @@ impl EffectsCore {
         drained
     }
 
-    pub(crate) async fn preflight_next_effect_cursor_is_empty(&self) -> Result<(), EffectError> {
+    pub(crate) async fn preflight_next_effect_cursor_is_empty(
+        &mut self,
+    ) -> Result<(), EffectError> {
         let (cursor, selection) = self.next_cursor_selection().await?;
         match selection {
             EffectHistorySelection::Miss => Ok(()),
@@ -609,7 +611,7 @@ impl EffectsCore {
     }
 
     pub(crate) async fn settlement_divergence(
-        &self,
+        &mut self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {
         let resumed_next = match (
             self.ctx.runtime_execution.resume_control(),
@@ -657,7 +659,7 @@ impl EffectsCore {
     }
 
     async fn next_cursor_selection(
-        &self,
+        &mut self,
     ) -> Result<(EffectCursor, EffectHistorySelection), EffectError> {
         self.gate_authoring()?;
         let cursor = self.next_cursor();
@@ -667,11 +669,29 @@ impl EffectsCore {
             .as_ref()
             .map(|history| history.cursor_history(&cursor))
             .unwrap_or_default();
-        let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
-        let selected = merge_cursor_histories(&cursor, archived, current)?;
+        let current = self.current_run_history(&cursor).await?;
+        let selected = self.history_shape(merge_cursor_histories(&cursor, archived, current))?;
         crate::supervised_base::publication::incorporate(&selected.causal)
             .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
         Ok((cursor, selected.select()))
+    }
+
+    async fn current_run_history(
+        &mut self,
+        cursor: &EffectCursor,
+    ) -> Result<EffectCursorHistory, EffectError> {
+        match self
+            .ctx
+            .current_run_history
+            .cursor_history(&self.ctx.data_journal, cursor)
+            .await
+        {
+            Ok(history) => Ok(history),
+            Err(CurrentRunFailure::Journal(error)) => Err(error),
+            Err(CurrentRunFailure::History(error)) => {
+                Err(self.refuse(ReconstructionRefusal::HistoryShape(error)))
+            }
+        }
     }
 
     pub(crate) async fn request_generated_live_admission(&self) -> Result<(), EffectError> {
@@ -1006,7 +1026,7 @@ impl EffectsCore {
             .as_ref()
             .map(|history| history.cursor_history(&cursor))
             .unwrap_or_default();
-        let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
+        let current = self.current_run_history(&cursor).await?;
         let selected = self.history_shape(merge_cursor_histories(&cursor, archived, current))?;
         let incorporated = self.incorporate_history(&selected.causal);
         self.history_shape(incorporated)?;

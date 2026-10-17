@@ -81,7 +81,8 @@ const INVALID_ORDER: &str = "S-BAD";
 const FIRST_AFTER_INVALID: &str = "S-03";
 /// Held after its charge at the first cut, and again when S5b re-executes it.
 const FIRST_CUT: &str = "S-12";
-/// Held inside S4's resumed run once its reconstruction completes (S5).
+/// Held inside S4's resumed runs: once reconstruction completes in S5, and
+/// before it can in S5b, so the store channel cannot reach its end.
 const SECOND_CUT: &str = "S-18";
 const HELD_RECEIPT: &str = "W-01";
 const DECLINES: [(&str, &str); 3] = [
@@ -249,6 +250,7 @@ fn idempotency_key(order_id: &str) -> String {
 enum Hold {
     Gateway(String),
     Receipt(String),
+    ReceiptAndGateway { receipt: String, gateway: String },
     BetweenEffects(String),
 }
 
@@ -503,6 +505,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
     let (gateway_hold, receipt_hold) = match hold {
         Some(Hold::Gateway(order)) => (Some(order), None),
         Some(Hold::Receipt(order)) => (None, Some(order)),
+        Some(Hold::ReceiptAndGateway { receipt, gateway }) => (Some(gateway), Some(receipt)),
         Some(Hold::BetweenEffects(_)) | None => (None, None),
     };
     let authorize = Authorize {
@@ -1765,24 +1768,28 @@ impl History {
             if !archive.manifest()["resume"].is_object() {
                 continue;
             }
-            let Some(parent) = archive.link().map(|link| canonical(&link)) else {
-                continue;
-            };
-            let Some((parent, _)) = self
-                .runs
-                .iter()
-                .find(|(other, _)| canonical(&other.dir) == parent)
-            else {
-                continue;
-            };
-            let (rows, parent_rows) = (
-                archive.decision_rows("authorize_payment"),
-                parent.decision_rows("authorize_payment"),
-            );
-            assert!(
-                rows.len() >= parent_rows.len() && rows[..parent_rows.len()] == parent_rows[..],
-                "{name} {dir}: the resume's decision rows do not extend its parent's"
-            );
+            let rows = archive.decision_rows("authorize_payment");
+            let reached = archive.outcomes().values().flatten().count() as u64;
+            let ancestors = std::iter::successors(Some(archive), |run| {
+                let link = canonical(&run.link()?);
+                self.runs
+                    .iter()
+                    .map(|(other, _)| other)
+                    .find(|other| canonical(&other.dir) == link)
+            });
+            for ancestor in ancestors.skip(1) {
+                let recorded = ancestor.decision_rows("authorize_payment");
+                let due = recorded
+                    .iter()
+                    .filter(|(_, delivered, _)| *delivered < reached)
+                    .count();
+                assert!(
+                    rows.len() >= due && rows.iter().zip(&recorded).all(|(row, then)| row == then),
+                    "{name} {dir}: after {reached} outcomes the resume's decision rows {rows:?} \
+                     depart from {}'s {recorded:?}",
+                    ancestor.dir.display()
+                );
+            }
         }
         assert!(
             recorded_archives == 0 || rows_seen > 0,
@@ -2052,14 +2059,19 @@ async fn durable_execution_contract() {
     after_rebuild.record(&rebuilt_head, Ended::Natural).await;
 
     let mut before_rebuild = History::new("S5b", &s4);
-    before_rebuild.in_flight.insert(FIRST_CUT.into());
+    before_rebuild
+        .in_flight
+        .extend([FIRST_CUT.into(), SECOND_CUT.into()]);
     before_rebuild
         .record(&killed, Ended::Interrupted { killed: true })
         .await;
     let child = Child::spawn(
         &s4,
         resume(&killed),
-        Some(Hold::Receipt(HELD_RECEIPT.into())),
+        Some(Hold::ReceiptAndGateway {
+            receipt: HELD_RECEIPT.into(),
+            gateway: SECOND_CUT.into(),
+        }),
     );
     let torn = child.run().await;
     cut(&torn, "S5b", |archive| {

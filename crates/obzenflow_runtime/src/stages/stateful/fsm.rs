@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{CurrentRunHistory, EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
@@ -531,6 +531,9 @@ pub struct StatefulResources<H: UnifiedStatefulHandler> {
 
     /// Recorded effect outcomes for replay suppression.
     pub effect_history: Option<Arc<EffectHistory>>,
+
+    /// This run's effect history, folded from `data_journal`.
+    pub current_run_history: CurrentRunHistory,
 
     /// Runtime execution strategy (FLOWIP-120r).
     pub runtime_execution: crate::execution::RuntimeExecution,
