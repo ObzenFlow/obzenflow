@@ -59,7 +59,8 @@ pub use payloads::source_diagnostic::{
     SourceErrorCodeError, SourceLocation, TextPosition, MAX_FIELD_PATH_DEPTH,
 };
 pub use payloads::stage_fatal_payload::{
-    StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
+    Departure, DepartureAction, StageFatalCode, StageFatalReason, StageFatalRecorded,
+    StageFatalSeverity,
 };
 pub use payloads::system_payload::{
     CommandDiscardDisposition, MetricsCoordinationEvent, PipelineCancellationCause,

@@ -868,6 +868,7 @@ fn primary_execution_failures_remain_visible_in_default_human_and_jsonl_views() 
                 code: StageFatalCode::Journal,
                 reason: StageFatalReason::JournalFailure,
                 detail: "journal append failed".into(),
+                departure: None,
             }),
         ),
         execution(
@@ -933,6 +934,70 @@ fn primary_execution_failures_remain_visible_in_default_human_and_jsonl_views() 
                     version
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn a_departure_reaches_jsonl_and_the_human_view_keeps_its_detail() {
+    use obzenflow_core::event::payloads::effect_payload::{
+        EffectInputPosition, EffectOrdinal, EffectType,
+    };
+    use obzenflow_core::event::{
+        Departure, DepartureAction, StageFatalCode, StageFatalReason, StageFatalRecorded,
+        StageFatalSeverity,
+    };
+    let detail = "stage 'score' would perform Score at input 3, but its recording settled \
+                  that input without an action";
+    let departure = Departure {
+        offered: Some(DepartureAction::Effect {
+            effect_type: EffectType::from("app_identity.score"),
+            input_position: EffectInputPosition::new(3),
+            effect_ordinal: EffectOrdinal::new(0),
+        }),
+        expected: DepartureAction::Settlement {
+            input_position: EffectInputPosition::new(3),
+        },
+    };
+    let record = execution(
+        100,
+        &[],
+        ExecutionPayload::StageFatalRecorded(StageFatalRecorded {
+            severity: StageFatalSeverity::Primary,
+            stage_id: id(2).parse().unwrap(),
+            stage_key: "score".into(),
+            causal_event_id: None,
+            input_position: Some(3),
+            primary_cause_event_id: None,
+            code: StageFatalCode::Replay,
+            reason: StageFatalReason::MissingRecordedEffect,
+            detail: detail.into(),
+            departure: Some(departure.clone()),
+        }),
+    );
+    for jsonl in [false, true] {
+        let view = ViewArgs {
+            jsonl,
+            ..ViewArgs::default()
+        };
+        let mut renderer = Renderer::new(&view, false, false, std::iter::once(&record.journal));
+        let mut output = Vec::new();
+        renderer.record(&mut output, record.clone()).unwrap();
+        renderer.flush_pending(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        if jsonl {
+            let row: RunRecord = serde_json::from_str(output.trim_end()).unwrap();
+            let RunRecordData::Chain(row) = &row.record else {
+                panic!("chain row")
+            };
+            let ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) = &row.payload
+            else {
+                panic!("stage fatal row")
+            };
+            assert_eq!(fatal.departure.as_ref(), Some(&departure));
+            assert_eq!(fatal.detail, detail);
+        } else {
+            assert!(output.contains(detail), "{output}");
         }
     }
 }

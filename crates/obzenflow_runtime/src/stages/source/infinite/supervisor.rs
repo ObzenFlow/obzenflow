@@ -21,13 +21,13 @@ use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
 use crate::stages::source::strategies::SourceCompletionCause;
 use crate::stages::source::supervision::{
-    announce_resumed_live, around_source_boundary, commit_catch_up_markers, commit_reader_acquired,
-    commit_source_open_failure, commit_source_reattached, drain_pending_outputs_sync,
-    emit_batch_to_pending_outputs, normalise_source_poll_error, observe_source_boundary_rejection,
-    poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
-    source_error_kind, stage_boundary_control_events, stage_source_poll_outputs,
-    terminal_poll_failure, PendingFailure, SourceExit, SourceOpenFailureCommit,
-    SourcePollObservation, SourceRelease,
+    announce_resumed_live, around_source_boundary, begin_catch_up_handoff, commit_reader_acquired,
+    commit_source_open_failure, commit_source_reattached, complete_catch_up_handoff,
+    drain_pending_outputs_sync, emit_batch_to_pending_outputs, normalise_source_poll_error,
+    observe_source_boundary_rejection, poll_error_backoff, poll_error_summary,
+    record_source_release, record_source_stage_fatal, source_error_kind,
+    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
+    PendingFailure, SourceExit, SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
@@ -799,10 +799,11 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                     control
                                         .record_delivered_high_water(self.stage_id, replayed_count);
                                     let generation = control.resume_generation();
-                                    commit_catch_up_markers(
+                                    let catch_up = begin_catch_up_handoff(
                                         &self.data_journal,
                                         &ctx.instrumentation,
                                         &stage_flow_context,
+                                        &ctx.runtime_execution,
                                         crossed,
                                         generation,
                                     )
@@ -839,7 +840,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                     // The boundary flips source phase, stage scope, and
                                     // heartbeat to live; late prefix events stay
                                     // reconstruction-scoped by their in-band generation.
-                                    control.record_generation_boundary(self.stage_id, generation);
+                                    complete_catch_up_handoff(&catch_up).await?;
                                     self.idle_backoff.reset();
                                     self.pending_idle_delay = None;
                                     self.replay_driver = None;

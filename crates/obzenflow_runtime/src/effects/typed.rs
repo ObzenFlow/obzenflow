@@ -219,7 +219,7 @@ where
     pub(crate) async fn end_of_invocation_fatal(
         &mut self,
     ) -> Result<Option<crate::stages::common::handler_error::StageFatal>, EffectError> {
-        if let Err(error) = self.core.settle_without_act().await {
+        if let Err(error) = self.core.settle_without_action().await {
             return match self.core.authoring_halt_fatal() {
                 Some(fatal) => Ok(Some(fatal)),
                 None => Err(error),

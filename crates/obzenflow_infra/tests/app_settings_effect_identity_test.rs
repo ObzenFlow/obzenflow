@@ -12,15 +12,19 @@ use obzenflow_adapters::sources::{
     YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection, YamlSource,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::effect_payload::SETTLEMENT_EFFECT_TYPE;
+use obzenflow_core::event::payloads::effect_payload::{
+    EffectInputPosition, EffectOrdinal, EffectType, SETTLEMENT_EFFECT_TYPE,
+};
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, SourceContinuationRefusal,
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainPayload, StageFatalReason};
+use obzenflow_core::event::{
+    ChainPayload, Departure, DepartureAction, StageFatalReason, StageFatalRecorded,
+};
 use obzenflow_core::journal::archive_actions::FailureEvidence;
 use obzenflow_core::journal::read::RunRecordData;
-use obzenflow_core::TypedPayload;
+use obzenflow_core::{EventType, TypedPayload};
 use obzenflow_dsl::dsl::FlowBuildError;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
@@ -460,7 +464,7 @@ fn recorded_override(run: &Path) -> Result<bool> {
     Ok(manifest["replay"]["allow_incomplete_archive"] == json!(true))
 }
 
-async fn stage_fatals(run_dir: &Path) -> Result<Vec<(String, StageFatalReason, String)>> {
+async fn stage_fatals(run_dir: &Path) -> Result<Vec<StageFatalRecorded>> {
     let mut snapshot = open_disk_run(run_dir).await?;
     let mut fatals = Vec::new();
     while let Some(record) = snapshot.next().await? {
@@ -468,7 +472,7 @@ async fn stage_fatals(run_dir: &Path) -> Result<Vec<(String, StageFatalReason, S
             if let ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) =
                 &row.payload
             {
-                fatals.push((fatal.stage_key.clone(), fatal.reason, fatal.detail.clone()));
+                fatals.push(fatal.clone());
             }
         }
     }
@@ -490,19 +494,40 @@ async fn source_refusals(run_dir: &Path) -> Result<Vec<(String, SourceContinuati
     Ok(refusals)
 }
 
-async fn assert_refused(run_dir: &Path, reason: StageFatalReason) -> Result<String> {
+async fn assert_refused(run_dir: &Path, reason: StageFatalReason) -> Result<StageFatalRecorded> {
     let fatals = stage_fatals(run_dir).await?;
     assert_eq!(fatals.len(), 1, "{fatals:?}");
-    let (stage, recorded, detail) = fatals.into_iter().next().unwrap();
-    assert_eq!(stage, "score");
-    assert_eq!(recorded, reason);
+    let fatal = fatals.into_iter().next().unwrap();
+    assert_eq!(fatal.stage_key, "score");
+    assert_eq!(fatal.reason, reason);
     let unscored = replay_testkit::read_stage_envelopes_appended(run_dir, "score")
         .await
         .iter()
         .filter(|record| Unscored::from_event(&record.authored()).is_some())
         .count();
     assert_eq!(unscored, 0, "the handler's fallback fact never commits");
-    Ok(detail)
+    Ok(fatal)
+}
+
+fn score_effect(input: u64, ordinal: u32) -> DepartureAction {
+    DepartureAction::Effect {
+        effect_type: EffectType::from(ScoreEffect::EFFECT_TYPE),
+        input_position: EffectInputPosition::new(input),
+        effect_ordinal: EffectOrdinal::new(ordinal),
+    }
+}
+
+async fn recorded_fact<T: TypedPayload>(run_dir: &Path) -> DepartureAction {
+    let event = replay_testkit::read_stage_envelopes_appended(run_dir, "score")
+        .await
+        .iter()
+        .map(|row| row.authored())
+        .find(|event| T::from_event(event).is_some())
+        .expect("the recording holds the fact");
+    DepartureAction::Fact {
+        event_type: EventType::from(event.event_type()),
+        event_id: event.id,
+    }
 }
 
 fn changed_keys(run_dir: &Path) -> Result<Vec<(PathBuf, Vec<String>)>> {
@@ -549,8 +574,16 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
         run_refused(&journal_base, 1, 0, changed).await?;
     }
     let replay = replay_testkit::latest_run_dir(&journal_base);
-    let detail = assert_refused(&replay, StageFatalReason::DescriptorMismatch).await?;
-    assert!(detail.starts_with("effect descriptor mismatch"), "{detail}");
+    let refusal = assert_refused(&replay, StageFatalReason::DescriptorMismatch).await?;
+    assert!(
+        refusal.detail.starts_with("effect descriptor mismatch"),
+        "{}",
+        refusal.detail
+    );
+    assert_eq!(
+        refusal.departure, None,
+        "a descriptor mismatch departs from no action"
+    );
     assert_eq!(
         failure(&replay, ReplayVerb::Replay).await?,
         FailureEvidence::Other,
@@ -629,7 +662,11 @@ async fn an_app_value_that_adds_an_effect_refuses_replay_and_resume_catch_up() -
         run_refused(&journal_base, 1, 0, rescore).await?;
     }
     let replay = replay_testkit::latest_run_dir(&journal_base);
-    assert_refused(&replay, StageFatalReason::MissingRecordedEffect).await?;
+    let refusal = assert_refused(&replay, StageFatalReason::MissingRecordedEffect).await?;
+    assert_eq!(
+        refusal.departure, None,
+        "strict replay checks no archived actions"
+    );
     assert_eq!(
         read_configuration_refusals(&replay).await?,
         stages(&["score"])
@@ -646,7 +683,14 @@ async fn an_app_value_that_adds_an_effect_refuses_replay_and_resume_catch_up() -
         run_refused(&journal_base, 4, 0, rescore).await?;
     }
     let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
-    assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
+    let refusal = assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
+    assert_eq!(
+        refusal.departure,
+        Some(Departure {
+            offered: Some(score_effect(1, 1)),
+            expected: recorded_fact::<Scored>(&r0).await,
+        })
+    );
     assert_eq!(read_configuration_refusals(&r1).await?, stages(&["score"]));
     assert_eq!(changed_keys(&r1)?, [(r0, vec![KEY.to_string()])]);
     Ok(())
@@ -657,12 +701,12 @@ async fn run_departed(journal_base: &Path, app: App) -> Result<()> {
     let outcome = tokio::time::timeout(Duration::from_secs(30), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for the departed resume to end"))?;
-    assert!(outcome.is_err(), "a departing act fails the resume");
+    assert!(outcome.is_err(), "a departing action fails the resume");
     assert_eq!(run.executed(), Vec::<u64>::new(), "zero live calls");
     Ok(())
 }
 
-async fn assert_crossing_after_archived_acts(run_dir: &Path) {
+async fn assert_crossing_after_archived_actions(run_dir: &Path) {
     let rows = replay_testkit::read_stage_envelopes_appended(run_dir, "score").await;
     let marker = rows
         .iter()
@@ -715,12 +759,22 @@ async fn a_changed_value_that_adds_a_fact_refuses_resume_until_the_recorded_valu
         run_departed(&journal_base, annotate).await?;
     }
     let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
-    let detail = assert_refused(&r1, StageFatalReason::MissingRecordedFact).await?;
+    let refusal = assert_refused(&r1, StageFatalReason::MissingRecordedFact).await?;
     assert_eq!(
-        detail,
-        "stage 'score' emitted Noted at input 1, but its recording's next act is a \
+        refusal.detail,
+        "stage 'score' emitted Noted at input 1, but its recording's next action is a \
          Score effect"
     );
+    let departure = refusal.departure.expect("the refusal names both actions");
+    assert!(
+        matches!(
+            &departure.offered,
+            Some(DepartureAction::Fact { event_type, .. })
+                if Noted::matches_event_type(event_type.as_str())
+        ),
+        "{departure:?}"
+    );
+    assert_eq!(departure.expected, score_effect(2, 0));
     assert_eq!(changed_keys(&r1)?, [(r0.clone(), vec![KEY.to_string()])]);
 
     {
@@ -734,7 +788,7 @@ async fn a_changed_value_that_adds_a_fact_refuses_resume_until_the_recorded_valu
     }
     let r2 = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(stage_fatals(&r2).await?, Vec::new());
-    assert_crossing_after_archived_acts(&r2).await;
+    assert_crossing_after_archived_actions(&r2).await;
     Ok(())
 }
 
@@ -755,10 +809,17 @@ async fn a_changed_value_that_skips_a_recorded_fact_refuses_resume() -> Result<(
         run_departed(&journal_base, RECORDED).await?;
     }
     let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
-    let detail = assert_refused(&r1, StageFatalReason::UnusedFactHistory).await?;
+    let refusal = assert_refused(&r1, StageFatalReason::UnusedFactHistory).await?;
     assert_eq!(
-        detail,
+        refusal.detail,
         "stage 'score' skipped a Noted fact its recording holds"
+    );
+    assert_eq!(
+        refusal.departure,
+        Some(Departure {
+            offered: Some(score_effect(2, 0)),
+            expected: recorded_fact::<Noted>(&r0).await,
+        })
     );
     assert_eq!(changed_keys(&r1)?, [(r0, vec!["app.annotate".to_string()])]);
     Ok(())
@@ -810,11 +871,18 @@ async fn a_changed_value_that_turns_a_settled_input_into_a_call_refuses_resume()
         run_departed(&journal_base, RECORDED).await?;
     }
     let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
-    let detail = assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
+    let refusal = assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
     assert_eq!(
-        detail,
-        "stage 'score' would perform Score at input 3, but its recording's next act is a \
+        refusal.detail,
+        "stage 'score' would perform Score at input 3, but its recording's next action is a \
          Capped fact"
+    );
+    assert_eq!(
+        refusal.departure,
+        Some(Departure {
+            offered: Some(score_effect(3, 0)),
+            expected: recorded_fact::<Capped>(&r0).await,
+        })
     );
     assert_eq!(changed_keys(&r1)?, [(r0, vec!["app.limit".to_string()])]);
     Ok(())
@@ -837,7 +905,7 @@ async fn settlements(run_dir: &Path) -> Vec<(u64, bool)> {
         .collect()
 }
 
-async fn record_a_settlement_without_an_act(journal_base: &Path, app: App) -> Result<PathBuf> {
+async fn record_a_settlement_without_an_action(journal_base: &Path, app: App) -> Result<PathBuf> {
     let (handle, run) = build(journal_base, 1, 3, app).await?;
     wait_for_running(&handle).await?;
     let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(journal_base))?;
@@ -858,8 +926,8 @@ async fn record_a_settlement_without_an_act(journal_base: &Path, app: App) -> Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_changed_value_that_acts_on_an_input_settled_without_an_act_refuses_resume() -> Result<()>
-{
+async fn a_changed_value_that_acts_on_an_input_settled_without_an_action_refuses_resume(
+) -> Result<()> {
     for (key, settled) in [
         (
             "app.quiet",
@@ -878,7 +946,7 @@ async fn a_changed_value_that_acts_on_an_input_settled_without_an_act_refuses_re
     ] {
         let temp = tempfile::tempdir()?;
         let journal_base = temp.path().join("journals");
-        let r0 = record_a_settlement_without_an_act(&journal_base, settled).await?;
+        let r0 = record_a_settlement_without_an_action(&journal_base, settled).await?;
 
         {
             let _bootstrap = install_bootstrap_config(
@@ -906,11 +974,21 @@ async fn a_changed_value_that_acts_on_an_input_settled_without_an_act_refuses_re
             run_departed(&journal_base, RECORDED).await?;
         }
         let r1 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
-        let detail = assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
+        let refusal = assert_refused(&r1, StageFatalReason::MissingRecordedEffect).await?;
         assert_eq!(
-            detail,
+            refusal.detail,
             "stage 'score' would perform Score at input 3, but its recording settled that \
-             input without an act",
+             input without an action",
+            "{key}"
+        );
+        assert_eq!(
+            refusal.departure,
+            Some(Departure {
+                offered: Some(score_effect(3, 0)),
+                expected: DepartureAction::Settlement {
+                    input_position: EffectInputPosition::new(3),
+                },
+            }),
             "{key}"
         );
         assert_eq!(changed_keys(&r1)?, [(r0.clone(), vec![key.to_string()])]);
@@ -933,7 +1011,7 @@ async fn a_changed_value_that_acts_on_an_input_settled_without_an_act_refuses_re
             [(3, true)],
             "{key}: the recorded value reproduces the settlement"
         );
-        assert_crossing_after_archived_acts(&r2).await;
+        assert_crossing_after_archived_actions(&r2).await;
     }
     Ok(())
 }

@@ -50,6 +50,26 @@ use tokio_test::{assert_pending, assert_ready};
 #[path = "deferred_ack_tests.rs"]
 mod deferred_ack;
 
+fn live_catch_up(
+    stage_id: StageId,
+    data_journal: Arc<dyn Journal<ChainEvent>>,
+    instrumentation: Arc<crate::metrics::instrumentation::StageInstrumentation>,
+    execution: crate::execution::RuntimeExecution,
+) -> crate::stages::common::supervision::catch_up::CatchUpHandle {
+    crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+        crate::stages::common::supervision::flow_context_factory::make_flow_context(
+            "test_flow",
+            "test_flow_id",
+            "t",
+            stage_id,
+            obzenflow_core::event::context::StageType::Transform,
+        ),
+        data_journal,
+        instrumentation,
+        execution,
+    )
+}
+
 async fn build_cycle_entry_harness<
     H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
     F: FnOnce(StageId) -> H,
@@ -116,6 +136,14 @@ async fn build_cycle_entry_harness<
     };
 
     let handler = handler_factory(t);
+    let runtime_execution =
+        crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
+    let catch_up = live_catch_up(
+        t,
+        data_journal.clone(),
+        instrumentation.clone(),
+        runtime_execution.clone(),
+    );
     let resources = TransformResources {
         handler: Some(handler),
         stage_id: t,
@@ -125,10 +153,7 @@ async fn build_cycle_entry_harness<
         flow_id: FlowId::new(),
         data_journal: data_journal.clone(),
         effect_history: None,
-        runtime_execution: crate::execution::RuntimeExecution::new(
-            crate::execution::RuntimeMode::Live,
-            None,
-        ),
+        runtime_execution,
         effect_ports: EffectPortRegistry::new(),
         effect_declarations: Vec::new(),
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
@@ -160,7 +185,7 @@ async fn build_cycle_entry_harness<
         drain_received: false,
         buffered_terminal_envelope: None,
         heartbeat: None,
-        catch_up_flip: None,
+        catch_up,
     };
 
     let mut ctx = TransformContext::new(resources);
@@ -477,6 +502,14 @@ async fn build_transform_harness<
     backpressure_readers.insert(s, registry.reader(s, t));
 
     let handler = handler_factory(t);
+    let runtime_execution =
+        crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
+    let catch_up = live_catch_up(
+        t,
+        data_journal.clone(),
+        instrumentation.clone(),
+        runtime_execution.clone(),
+    );
     let resources = TransformResources {
         handler: Some(handler),
         stage_id: t,
@@ -486,10 +519,7 @@ async fn build_transform_harness<
         flow_id: FlowId::new(),
         data_journal: data_journal.clone(),
         effect_history: None,
-        runtime_execution: crate::execution::RuntimeExecution::new(
-            crate::execution::RuntimeMode::Live,
-            None,
-        ),
+        runtime_execution,
         effect_ports: EffectPortRegistry::new(),
         effect_declarations: Vec::new(),
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
@@ -521,7 +551,7 @@ async fn build_transform_harness<
         drain_received: false,
         buffered_terminal_envelope: None,
         heartbeat: None,
-        catch_up_flip: None,
+        catch_up,
     };
 
     let mut ctx = TransformContext::new(resources);

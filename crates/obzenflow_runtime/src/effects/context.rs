@@ -134,6 +134,7 @@ pub struct EffectInvocationContext {
     /// FLOWIP-010 §7: build-resolved lineage policy from stage resources,
     /// consumed as data when effect facts derive from the parent event.
     pub lineage: obzenflow_core::config::LineagePolicy,
+    pub catch_up: Option<crate::stages::common::supervision::catch_up::CatchUpHandle>,
 }
 
 impl EffectInvocationContext {

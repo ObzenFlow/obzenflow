@@ -40,6 +40,7 @@ pub(crate) async fn record_stage_fatal(
         code: fatal.code,
         reason: fatal.reason,
         detail: fatal.detail.clone(),
+        departure: fatal.departure.as_deref().cloned(),
     };
     let event = match commit.parent {
         Some(parent) => obzenflow_core::event::schema::TypedFact::from_payload(payload)?

@@ -10,7 +10,7 @@
 
 use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{ArchivedActs, EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::execution::RuntimeExecution;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
@@ -43,7 +43,7 @@ use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainPayload, CommandDiscardDisposition, SinkOperationPhase};
 use obzenflow_core::journal::{AppendOptions, Journal};
-use obzenflow_core::{ChainEvent, EventId, FlowId, ReaderGeneration, StageId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, FsmError, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -528,10 +528,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
-    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
-    /// flipped at, making the flip idempotent per generation across both
-    /// triggers (watermark and authored EOF).
-    pub(crate) catch_up_flip: Option<ReaderGeneration>,
+    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 
     pub(crate) receipt_classification: Option<super::receipts::SinkReceiptClassification>,
 
@@ -632,14 +629,13 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                 // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
                 let recorded_history = ctx.runtime_execution.archive_for_io();
                 if let Some(archive) = recorded_history {
-                    let history = EffectHistory::load(archive, &ctx.stage_name, ArchivedActs::Skip)
-                        .await
-                        .map_err(|e| {
-                            FsmError::HandlerError(format!(
-                                "Failed to load effect history for '{}': {e}",
-                                ctx.stage_name
-                            ))
-                        })?;
+                    let stage = obzenflow_core::StageKey::from(ctx.stage_name.clone());
+                    let history = EffectHistory::load(archive, &stage).await.map_err(|e| {
+                        FsmError::HandlerError(format!(
+                            "Failed to load effect history for '{}': {e}",
+                            ctx.stage_name
+                        ))
+                    })?;
                     ctx.effect_history = Some(Arc::new(history));
 
                     if let (Some(_), Some(classification)) = (
@@ -1391,7 +1387,11 @@ mod tests {
             backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
             backpressure_readers: HashMap::new(),
             heartbeat: None,
-            catch_up_flip: None,
+            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::terminal(
+                stage_id,
+                obzenflow_core::StageKey::from("audit_sink"),
+                RuntimeExecution::new(RuntimeMode::Live, None),
+            ),
             receipt_classification: None,
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,

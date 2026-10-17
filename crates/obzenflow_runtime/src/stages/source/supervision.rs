@@ -95,6 +95,9 @@ use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
+use crate::stages::common::supervision::catch_up::{
+    CatchUpDisposition, CatchUpEvent, CatchUpHandle,
+};
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_source_poll_observers;
 use crate::stages::observer::{
@@ -404,34 +407,41 @@ pub(crate) async fn commit_source_seek_failure(
     })
 }
 
-/// Commit a source's catch-up markers behind its reconstructed prefix, one
-/// per generation after the last its recorded markers crossed, so a source
-/// torn before crossing crosses each skipped generation vacuously and every
-/// reader advances one generation per marker (FLOWIP-134i B6). The caller
-/// advances the stage's generation only after they commit.
-pub(crate) async fn commit_catch_up_markers(
+pub(crate) async fn begin_catch_up_handoff(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     stage_flow_context: &FlowContext,
-    crossed: obzenflow_core::ReaderGeneration,
+    execution: &crate::execution::RuntimeExecution,
+    recorded: obzenflow_core::ReaderGeneration,
     generation: obzenflow_core::ReaderGeneration,
-) -> Result<(), BoxError> {
-    for next in crossed.0.saturating_add(1)..=generation.0 {
-        let mut marker = ChainEventFactory::catch_up_complete_event(
-            WriterId::from(stage_flow_context.stage_id),
-            obzenflow_core::ReaderGeneration(next),
-            obzenflow_core::StageKey::from(stage_flow_context.stage_name.clone()),
-        );
-        marker.flow_context = stage_flow_context.clone();
-        crate::stages::common::supervision::output_committer::commit_control_output(
-            data_journal,
-            instrumentation,
-            marker,
-        )
-        .await
-        .map_err(|error| -> BoxError { error.to_string().into() })?;
+) -> Result<CatchUpHandle, BoxError> {
+    let catch_up = CatchUpHandle::producing(
+        stage_flow_context.clone(),
+        data_journal.clone(),
+        instrumentation.clone(),
+        execution.clone(),
+    );
+    handoff_settled(
+        catch_up
+            .send(CatchUpEvent::RecordedInputEnded {
+                recorded,
+                generation,
+            })
+            .await,
+    )?;
+    Ok(catch_up)
+}
+
+pub(crate) async fn complete_catch_up_handoff(catch_up: &CatchUpHandle) -> Result<(), BoxError> {
+    handoff_settled(catch_up.send(CatchUpEvent::HandoffAnnounced).await)
+}
+
+fn handoff_settled(disposition: CatchUpDisposition) -> Result<(), BoxError> {
+    match disposition {
+        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => Ok(()),
+        CatchUpDisposition::Failed(message) => Err(message.into()),
+        CatchUpDisposition::Refused(fatal) => Err(fatal.detail.into()),
     }
-    Ok(())
 }
 
 /// Commit a reattaching source's declared guarantee behind its catch-up

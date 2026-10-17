@@ -534,32 +534,6 @@ fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
     !archive_is_sealed(status) && allow_incomplete
 }
 
-/// The last catch-up generation each stage authored in this run, shared by
-/// the stage's supervisor and its effect runtime so each crossing is authored once.
-#[derive(Debug, Default)]
-pub struct StageCrossings(Mutex<HashMap<StageId, ReaderGeneration>>);
-
-impl StageCrossings {
-    /// The last generation `stage` authored; zero before any.
-    pub fn crossed(&self, stage: StageId) -> ReaderGeneration {
-        self.0
-            .lock()
-            .expect("stage crossings lock poisoned")
-            .get(&stage)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    /// Record that `stage` authored `generation`; a lower generation is ignored.
-    pub fn advance(&self, stage: StageId, generation: ReaderGeneration) {
-        let mut crossed = self.0.lock().expect("stage crossings lock poisoned");
-        let entry = crossed.entry(stage).or_default();
-        if generation > *entry {
-            *entry = generation;
-        }
-    }
-}
-
 /// The runtime-owned execution authority. Holds the chosen strategy and the
 /// archive as an I/O resource, and forwards every replay-versus-live query to
 /// the strategy. This is the callers' surface; the strategy itself never sees
@@ -572,7 +546,6 @@ pub struct RuntimeExecution {
     observations: Arc<ObservationRegistry>,
     /// Present only under `RuntimeMode::Resume` (FLOWIP-120n).
     resume: Option<ResumeControl>,
-    crossings: Arc<StageCrossings>,
 }
 
 impl std::fmt::Debug for RuntimeExecution {
@@ -623,13 +596,21 @@ impl RuntimeExecution {
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
             resume,
-            crossings: Arc::default(),
         }
     }
 
-    /// The catch-up generations each stage authored in this run.
-    pub fn stage_crossings(&self) -> &Arc<StageCrossings> {
-        &self.crossings
+    #[cfg(test)]
+    pub(crate) fn resume_for_test(resume_generation: ReaderGeneration) -> Self {
+        let state = Arc::new(ResumeState::new(resume_generation));
+        Self {
+            strategy: Arc::new(Resume {
+                state: Arc::clone(&state),
+            }),
+            archive: None,
+            effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
+            observations: Arc::new(ObservationRegistry::default()),
+            resume: Some(ResumeControl(state)),
+        }
     }
 
     /// The resume write handle; `None` outside `RuntimeMode::Resume`.
@@ -684,7 +665,6 @@ impl RuntimeExecution {
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             observations: Arc::new(ObservationRegistry::default()),
             resume,
-            crossings: Arc::default(),
         }
     }
 
@@ -1017,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_leaves_an_effect_miss_to_the_archived_acts() {
+    fn resume_leaves_an_effect_miss_to_the_archived_actions() {
         let state = Arc::new(ResumeState::new(ReaderGeneration(1)));
         let s = Resume {
             state: Arc::clone(&state),
@@ -1028,17 +1008,6 @@ mod tests {
             generation: None,
         };
         assert_eq!(s.missing_outcome(at), UnrecordedEffect::Execute);
-    }
-
-    #[test]
-    fn stage_crossings_are_monotonic_per_stage() {
-        let crossings = StageCrossings::default();
-        let stage = StageId::new();
-        assert_eq!(crossings.crossed(stage), ReaderGeneration(0));
-        crossings.advance(stage, ReaderGeneration(2));
-        crossings.advance(stage, ReaderGeneration(1));
-        assert_eq!(crossings.crossed(stage), ReaderGeneration(2));
-        assert_eq!(crossings.crossed(StageId::new()), ReaderGeneration(0));
     }
 
     #[test]

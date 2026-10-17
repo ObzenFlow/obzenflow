@@ -19,8 +19,8 @@ pub enum EffectError {
     #[error("missing recorded effect for cursor {cursor:?}")]
     MissingRecordedEffect { cursor: EffectCursor },
 
-    /// A resumed stage authored an act other than the next one its archive
-    /// recorded; `detail` names the archived act.
+    /// A resumed stage authored an action other than the next one its archive
+    /// recorded; `detail` names the archived action.
     #[error("{detail}")]
     RecordingDeparture { detail: String },
 

@@ -15,6 +15,8 @@ use serde_json::Value;
 
 pub const EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE: &str = "effect.execution_succeeded";
 pub const CAPTURE_EVENT_TYPE: &str = "effect.value_captured";
+/// Descriptor type of the record an `fx.capture` call writes.
+pub const CAPTURE_EFFECT_TYPE: &str = "obzenflow.capture";
 /// Descriptor type of the record a stage with an effect runtime writes for an
 /// input it settles with no effect, capture or fact.
 pub const SETTLEMENT_EFFECT_TYPE: &str = "obzenflow.settlement";
@@ -138,6 +140,18 @@ string_newtype!(
     "Stage key component of an effect replay cursor."
 );
 string_newtype!(EffectType, "Stable effect declaration name.");
+
+impl EffectType {
+    /// Whether this names an `fx.capture` record.
+    pub fn is_capture(&self) -> bool {
+        self.as_str() == CAPTURE_EFFECT_TYPE
+    }
+
+    /// Whether this names the record of an input settled without an action.
+    pub fn is_settlement(&self) -> bool {
+        self.as_str() == SETTLEMENT_EFFECT_TYPE
+    }
+}
 string_newtype!(
     EffectLabel,
     "Per-call effect label included in descriptor drift checks."
@@ -872,10 +886,8 @@ impl EffectRecord {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        let capture = matches!(
-            self.descriptor.effect_type.as_str(),
-            "obzenflow.capture" | SETTLEMENT_EFFECT_TYPE
-        );
+        let capture =
+            self.descriptor.effect_type.is_capture() || self.descriptor.effect_type.is_settlement();
         let valid = match (&self.observation, &self.outcome) {
             (EffectObservation::ValueCaptured {}, EffectOutcomePayload::Succeeded { .. }) => {
                 capture

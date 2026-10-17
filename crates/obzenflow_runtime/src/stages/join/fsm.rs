@@ -596,10 +596,7 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
 
     pub(crate) recorded_order: Option<crate::messaging::upstream_subscription::RecordedOrder>,
 
-    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
-    /// flipped at, making the flip idempotent per generation across both
-    /// triggers (watermark and authored EOF) and both sides.
-    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
+    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 }
 
 pub struct JoinContext<H: UnifiedJoinHandler> {

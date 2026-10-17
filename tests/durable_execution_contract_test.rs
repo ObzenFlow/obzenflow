@@ -1916,7 +1916,7 @@ async fn strict_replay(history: &mut History, archive: &Path) -> PathBuf {
     replayed
 }
 
-fn is_act_row(row: &JournalRecord<ChainPayload>) -> bool {
+fn is_action_row(row: &JournalRecord<ChainPayload>) -> bool {
     row.consumes_data_credit() || row.authored().effect_provenance.is_some()
 }
 
@@ -1937,10 +1937,13 @@ fn around_crossing<'a>(
             )
         })
         .unwrap_or_else(|| panic!("{stage} crosses"));
-    let acts = |rows: &[&'a JournalRecord<ChainPayload>]| {
-        rows.iter().copied().filter(|row| is_act_row(row)).collect()
+    let actions = |rows: &[&'a JournalRecord<ChainPayload>]| {
+        rows.iter()
+            .copied()
+            .filter(|row| is_action_row(row))
+            .collect()
     };
-    (acts(&rows[..marker]), acts(&rows[marker + 1..]))
+    (actions(&rows[..marker]), actions(&rows[marker + 1..]))
 }
 
 fn assert_lineage_at_crossing(archive: &Archive, stage: &str, name: &str) {
@@ -3030,7 +3033,7 @@ mod payment_demo {
         let replay = Archive::read(&replayed).await;
         let unmarked: Vec<String> = replay
             .rows("authorize_payment", RunJournalKind::Data)
-            .filter(|row| is_act_row(row) || breaker_or_policy_row(row))
+            .filter(|row| is_action_row(row) || breaker_or_policy_row(row))
             .filter(|row| row.authored().replay_context.is_none())
             .map(|row| row.event_type().to_string())
             .collect();
@@ -3539,16 +3542,16 @@ mod emit_only {
     }
 
     fn crossings(archive: &Archive) -> Vec<usize> {
-        let mut acts = 0;
+        let mut actions = 0;
         let mut positions = Vec::new();
         for row in archive.rows("stamp", RunJournalKind::Data) {
             if matches!(
                 &row.payload,
                 ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
             ) {
-                positions.push(acts);
-            } else if is_act_row(row) {
-                acts += 1;
+                positions.push(actions);
+            } else if is_action_row(row) {
+                actions += 1;
             }
         }
         positions

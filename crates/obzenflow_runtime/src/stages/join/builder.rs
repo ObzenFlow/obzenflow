@@ -240,7 +240,18 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             deterministic_fan_in,
             recorded,
             recorded_order: None,
-            catch_up_flip: None,
+            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+                crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                    &self.config.flow_name,
+                    &self.resources.flow_id.to_string(),
+                    &self.config.stage_name,
+                    self.config.stage_id,
+                    obzenflow_core::event::context::StageType::Join,
+                ),
+                self.resources.data_journal.clone(),
+                instrumentation.clone(),
+                self.resources.runtime_execution.clone(),
+            ),
         };
 
         let context = JoinContext::new(resources);

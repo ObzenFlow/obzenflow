@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{ArchivedActs, EffectDeclaration, EffectHistory, EffectPortRegistry};
+use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
@@ -652,10 +652,7 @@ pub struct StatefulResources<H: UnifiedStatefulHandler> {
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
-    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
-    /// flipped at, making the flip idempotent per generation across both
-    /// triggers (watermark and authored EOF).
-    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
+    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 }
 
 pub struct StatefulContext<H: UnifiedStatefulHandler> {
@@ -751,24 +748,17 @@ impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> StatefulAction<H
                     // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
                     let recorded_history = ctx.runtime_execution.archive_for_io();
                     if let Some(archive) = recorded_history {
-                        let archived_acts = if ctx
-                            .handler
-                            .as_ref()
-                            .is_some_and(|handler| handler.has_effect_runtime())
-                        {
-                            ArchivedActs::Load
-                        } else {
-                            ArchivedActs::Skip
-                        };
-                        let history = EffectHistory::load(archive, &ctx.stage_name, archived_acts)
-                            .await
-                            .map_err(|e| {
+                        let stage = obzenflow_core::StageKey::from(ctx.stage_name.clone());
+                        let history =
+                            H::load_effect_history(archive, &stage).await.map_err(|e| {
                                 obzenflow_fsm::FsmError::HandlerError(format!(
                                     "Failed to load effect history for '{}': {e}",
                                     ctx.stage_name
                                 ))
                             })?;
-                        ctx.effect_history = Some(Arc::new(history));
+                        let history = Arc::new(history);
+                        ctx.catch_up.install_history(history.clone()).await;
+                        ctx.effect_history = Some(history);
                     }
 
                     tracing::info!(

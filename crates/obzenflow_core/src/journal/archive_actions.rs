@@ -639,6 +639,7 @@ mod tests {
             code: StageFatalCode::Replay,
             reason,
             detail: String::new(),
+            departure: None,
         })
     }
 

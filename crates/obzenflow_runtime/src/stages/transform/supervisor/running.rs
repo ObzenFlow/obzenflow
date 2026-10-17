@@ -10,9 +10,7 @@ use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::catch_up::{
-    flip_on_authored_eof, maybe_flip_caught_up, CatchUpDisposition, CatchUpStage,
-};
+use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use crate::stages::common::supervision::control_resolution::{
     is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction,
 };
@@ -286,26 +284,10 @@ async fn dispatch_running_inner<
                             .subscription
                             .as_ref()
                             .expect("subscription presence checked above");
-                        let disposition = maybe_flip_caught_up(
-                            *announced,
-                            subscription.all_readers_caught_up(*announced),
-                            subscription.delivered_data_count(),
-                            CatchUpStage {
-                                stage_id: ctx.stage_id,
-                                stage_name: &ctx.stage_name,
-                                flow_name: &ctx.flow_name,
-                                flow_id: &flow_context.flow_id,
-                                stage_type: StageType::Transform,
-                                writer_id: ctx.writer_id,
-                                data_journal: &ctx.data_journal,
-                                instrumentation: &ctx.instrumentation,
-                                effect_history: ctx.effect_history.as_ref(),
-                            },
-                            /* author_marker */ true,
-                            &ctx.runtime_execution,
-                            &mut ctx.catch_up_flip,
-                        )
-                        .await;
+                        let disposition = ctx
+                            .catch_up
+                            .watermark_delivered(subscription, *announced)
+                            .await;
                         return catch_up_directive(ctx, disposition, Some(&envelope)).await;
                     }
 
@@ -317,25 +299,11 @@ async fn dispatch_running_inner<
                             .subscription
                             .as_ref()
                             .expect("subscription presence checked above");
-                        let disposition = flip_on_authored_eof(
-                            subscription,
-                            CatchUpStage {
-                                stage_id: ctx.stage_id,
-                                stage_name: &ctx.stage_name,
-                                flow_name: &ctx.flow_name,
-                                flow_id: &flow_context.flow_id,
-                                stage_type: StageType::Transform,
-                                writer_id: ctx.writer_id,
-                                data_journal: &ctx.data_journal,
-                                instrumentation: &ctx.instrumentation,
-                                effect_history: ctx.effect_history.as_ref(),
-                            },
-                            /* author_marker */ true,
-                            &ctx.runtime_execution,
-                            &mut ctx.catch_up_flip,
-                        )
-                        .await;
-                        if !matches!(disposition, CatchUpDisposition::Consumed) {
+                        let disposition = ctx.catch_up.eof_delivered(subscription).await;
+                        if matches!(
+                            disposition,
+                            CatchUpDisposition::Failed(_) | CatchUpDisposition::Refused(_)
+                        ) {
                             return catch_up_directive(ctx, disposition, Some(&envelope)).await;
                         }
                     }
@@ -389,18 +357,14 @@ async fn dispatch_running_inner<
                                 && ctx.terminal_eof_kind.unwrap_or(EofKind::Natural)
                                     == EofKind::Natural
                             {
-                                if let Some(fatal) = crate::effects::unreproduced_acts_fatal(
-                                    ctx.effect_history.as_ref(),
-                                    &ctx.runtime_execution,
-                                    ctx.stage_id,
-                                    &ctx.stage_name,
+                                let disposition =
+                                    ctx.catch_up.send(CatchUpEvent::InputsEnded).await;
+                                if matches!(
+                                    disposition,
+                                    CatchUpDisposition::Failed(_) | CatchUpDisposition::Refused(_)
                                 ) {
-                                    return catch_up_directive(
-                                        ctx,
-                                        CatchUpDisposition::Refused(fatal),
-                                        Some(&envelope),
-                                    )
-                                    .await;
+                                    return catch_up_directive(ctx, disposition, Some(&envelope))
+                                        .await;
                                 }
                             }
                             ctx.buffered_eof = Some(envelope.authored());
@@ -541,6 +505,7 @@ async fn dispatch_running_inner<
                             backpressure_writer: ctx.backpressure_writer.clone(),
                             emit_enabled: true,
                             effect_boundary: None,
+                            catch_up: Some(ctx.catch_up.clone()),
                         })
                     });
 
@@ -926,7 +891,9 @@ async fn catch_up_directive<
     parent: Option<&obzenflow_core::event::JournalRecord<ChainPayload>>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     match disposition {
-        CatchUpDisposition::Consumed => Ok(EventLoopDirective::Continue),
+        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
+            Ok(EventLoopDirective::Continue)
+        }
         CatchUpDisposition::Failed(message) => Ok(EventLoopDirective::Transition(
             TransformEvent::Error(message),
         )),

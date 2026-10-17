@@ -6,14 +6,17 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
-use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
+use crate::effects::{
+    EffectBoundary, EffectError, EffectHistory, EffectInvocationContext, Effects,
+};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::schema::{TypedFact, TypedPayload};
 use obzenflow_core::event::ChainPayload;
-use obzenflow_core::{ChainEvent, JournalRecord, OneFactStageOutput, WriterId};
+use obzenflow_core::journal::archive::ReplayArchive;
+use obzenflow_core::{ChainEvent, JournalRecord, OneFactStageOutput, StageKey, WriterId};
 use std::{fmt, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy)]
@@ -155,8 +158,14 @@ pub trait StatefulHandler: Send + Sync {
 pub trait UnifiedStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
 
-    fn has_effect_runtime(&self) -> bool {
-        false
+    async fn load_effect_history(
+        archive: &Arc<dyn ReplayArchive>,
+        stage: &StageKey,
+    ) -> Result<EffectHistory, EffectError>
+    where
+        Self: Sized,
+    {
+        EffectHistory::load(archive, stage).await
     }
 
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
@@ -499,8 +508,11 @@ impl<H> UnifiedStatefulHandler for EffectfulStatefulHandlerAdapter<H>
 where
     H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    fn has_effect_runtime(&self) -> bool {
-        true
+    async fn load_effect_history(
+        archive: &Arc<dyn ReplayArchive>,
+        stage: &StageKey,
+    ) -> Result<EffectHistory, EffectError> {
+        EffectHistory::load_with_actions(archive, stage).await
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {

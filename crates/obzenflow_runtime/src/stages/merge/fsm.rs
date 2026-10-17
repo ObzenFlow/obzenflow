@@ -172,7 +172,7 @@ pub struct MergeContext {
     pub(crate) buffered_eof: Option<ChainEvent>,
     pub(crate) drain_without_held_inputs: bool,
     pub(crate) pending_promotion: Option<ReaderGeneration>,
-    pub(crate) catch_up_flip: Option<ReaderGeneration>,
+    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 }
 
 impl FsmContext for MergeContext {}

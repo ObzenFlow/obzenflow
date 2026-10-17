@@ -45,7 +45,7 @@ use crate::stages::common::supervision::output_committer::{
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 
-mod acts;
+mod actions;
 mod binding;
 mod boundary;
 mod commit;
@@ -65,7 +65,9 @@ mod typed;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use acts::{ActCheck, ActKey, ActRow, ArchivedAct, StageActs};
+pub(crate) use actions::{
+    ActionCheck, ActionDeparture, ActionRow, RecordedAction, RecordedActions,
+};
 #[doc(hidden)]
 pub use binding::EffectInvocationBinding;
 pub use binding::{
@@ -106,7 +108,7 @@ pub(crate) use history::{
     current_cursor_history, merge_cursor_histories, EffectCursorCoordinator, EffectCursorHistory,
     EffectHistorySelection,
 };
-pub use history::{ArchivedActs, EffectHistory, EffectHistoryReader, EffectHistoryStore};
+pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};
 pub use identity::{
     deterministic_effect_record_event_id, deterministic_effect_record_event_time,
     deterministic_event_id, deterministic_event_time, deterministic_payload_event_id,
@@ -117,7 +119,7 @@ pub use ports::{
     EffectPortResolverWithMetadata, EffectRegistrationBuilder, EffectRegistrationCollectionError,
     ResolvedEffectPort,
 };
-pub(crate) use runtime::{unreproduced_acts_fatal, EffectsCore};
+pub(crate) use runtime::EffectsCore;
 // FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can
 // report failures in handler vocabulary without weakening the underlying set
 // membership and containment proofs.

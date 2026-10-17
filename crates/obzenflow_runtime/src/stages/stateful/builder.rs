@@ -139,6 +139,18 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             .emit_interval
             .or_else(|| handler.emit_interval_hint());
         let initial_state = handler.initial_state();
+        let catch_up = crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+            crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                &self.config.flow_name,
+                &self.resources.flow_id.to_string(),
+                &self.config.stage_name,
+                self.config.stage_id,
+                obzenflow_core::event::context::StageType::Stateful,
+            ),
+            self.resources.data_journal.clone(),
+            instrumentation.clone(),
+            self.resources.runtime_execution.clone(),
+        );
         let resources = StatefulResources {
             handler: Some(Arc::new(handler)),
             stage_id: self.config.stage_id,
@@ -183,7 +195,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
             backpressure_stall: Default::default(),
             heartbeat,
-            catch_up_flip: None,
+            catch_up,
         };
 
         let context = StatefulContext::new(resources);
