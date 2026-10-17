@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 #[path = "../examples/payment_gateway_resilience/support.rs"]
 pub mod gateway_demo;
@@ -2240,6 +2241,73 @@ async fn run_cli_flow(journal_base: &Path, args: &[&std::ffi::OsStr]) -> PathBuf
     std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves")
 }
 
+async fn stop_cli_flow_with_a_lagging_sink(journal_base: &Path) -> PathBuf {
+    #[derive(Clone, Debug)]
+    struct SlowDiscard;
+
+    #[async_trait::async_trait]
+    impl obzenflow::stages::sinks::InlineSink for SlowDiscard {
+        type Input = Tick;
+
+        fn describe(&self) -> obzenflow::stages::sinks::SinkDescription {
+            obzenflow::stages::sinks::SinkDescription::method(
+                obzenflow::stages::sinks::DeliveryMethod::Noop,
+            )
+            .with_redelivery_safety(obzenflow::stages::sinks::SinkRedeliverySafety::SafeToRepeat)
+        }
+
+        async fn write(
+            &mut self,
+            _input: Tick,
+        ) -> Result<(), obzenflow::stages::sinks::SinkWriteFailure> {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(())
+        }
+    }
+
+    let root = journal_base.to_path_buf();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let ticks_handler = Ticks::new();
+        let out_handler = SlowDiscard;
+        Ok(flow! {
+            name: "cli_verify",
+            journals: disk_journals(root),
+
+            stages: {
+                ticks = source!(Tick => ticks_handler);
+                out = sink!(Tick => out_handler);
+            },
+
+            topology: {
+                ticks |> out;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .expect("the flow builds");
+    let run = std::fs::canonicalize(latest_run_dir(journal_base)).expect("the run resolves");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !replay_testkit::read_stage_envelopes_appended(&run, "ticks")
+        .await
+        .iter()
+        .any(|record| record.is_eof())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the source did not end in time"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.stop().await.expect("stop is accepted");
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+        .await
+        .expect("the stopped run terminates")
+        .expect("the stopped run resolves");
+    drop(handle);
+    run
+}
+
 /// FLOWIP-134i B6, B7, B13, B16: `show` reports where a run stands in its
 /// history and how each source of a resumed run continued.
 #[tokio::test(flavor = "multi_thread")]
@@ -2269,7 +2337,7 @@ async fn show_reports_lineage_and_source_continuation() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
-    let r0 = run_cli_flow(&journal_base, &[]).await;
+    let r0 = stop_cli_flow_with_a_lagging_sink(&journal_base).await;
     let r1 = run_cli_flow(&journal_base, &["--resume-from".as_ref(), r0.as_os_str()]).await;
     let replay = run_cli_flow(&journal_base, &["--replay-from".as_ref(), r1.as_os_str()]).await;
     let (r0_dir, r1_dir) = (r0.display(), r1.display());

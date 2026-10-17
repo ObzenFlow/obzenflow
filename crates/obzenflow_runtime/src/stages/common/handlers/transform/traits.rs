@@ -6,12 +6,15 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
+use crate::effects::{
+    EffectBoundary, EffectError, EffectHistory, EffectInvocationContext, Effects,
+};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::{ChainEvent, EventDescriptor, WriterId};
+use obzenflow_core::journal::archive::ReplayArchive;
+use obzenflow_core::{ChainEvent, EventDescriptor, StageKey, WriterId};
 use std::fmt;
 use std::sync::Arc;
 
@@ -122,6 +125,14 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
 
     fn stage_logic_version(&self) -> &str {
         "1"
+    }
+
+    async fn load_effect_history(
+        &self,
+        archive: &Arc<dyn ReplayArchive>,
+        stage: &StageKey,
+    ) -> Result<EffectHistory, EffectError> {
+        EffectHistory::load(archive, stage).await
     }
 
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
@@ -319,6 +330,15 @@ impl<H> UnifiedTransformHandler for EffectfulTransformHandlerAdapter<H>
 where
     H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
+    async fn load_effect_history(
+        &self,
+        archive: &Arc<dyn ReplayArchive>,
+        stage: &StageKey,
+    ) -> Result<EffectHistory, EffectError> {
+        EffectHistory::load_with_actions(archive, stage, self.pass_through_descriptor.as_ref())
+            .await
+    }
+
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
         self.effect_boundary.install_observation_recorder(recorder);
     }
@@ -348,12 +368,12 @@ where
             return Err(HandlerError::Fatal(fatal));
         }
         match handler_result {
-            Ok(_completion) => match fx.settlement_divergence().await {
+            Ok(_completion) => match fx.end_of_invocation_fatal().await? {
                 Some(divergence) => Err(HandlerError::Fatal(divergence)),
                 None => Ok(Vec::new()),
             },
             Err(error) if error.is_fatal() => Err(error),
-            Err(error) => match fx.settlement_divergence().await {
+            Err(error) => match fx.end_of_invocation_fatal().await? {
                 Some(divergence) => Err(HandlerError::Fatal(divergence)),
                 None => Err(error),
             },

@@ -236,6 +236,7 @@ async fn dispatch_draining_inner<
                     backpressure_writer: ctx.backpressure_writer.clone(),
                     emit_enabled: true,
                     effect_boundary: None,
+                    catch_up: Some(ctx.catch_up.clone()),
                 })
             });
 

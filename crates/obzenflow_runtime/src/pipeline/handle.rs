@@ -43,6 +43,8 @@ pub(crate) struct FlowHandleExtras {
     /// FLOWIP-010: the build-resolved effective config, carried out of the
     /// build so the host can serve the per-flow/per-stage read surface.
     pub flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
+    pub archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
+    pub resume_notices: Vec<String>,
 }
 
 /// Flow handle for external control - the public API returned by the DSL
@@ -96,6 +98,10 @@ pub struct FlowHandle {
 
     /// FLOWIP-010: the build-resolved effective config with provenance.
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
+
+    archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
+
+    resume_notices: Vec<String>,
 }
 
 impl FlowHandle {
@@ -137,6 +143,8 @@ impl FlowHandle {
             liveness_snapshots,
             run_substrate,
             flow_effective_config,
+            archive_flow_evidence,
+            resume_notices,
         } = extras;
 
         Self {
@@ -159,6 +167,8 @@ impl FlowHandle {
             liveness_snapshots,
             run_substrate,
             flow_effective_config,
+            archive_flow_evidence,
+            resume_notices,
         }
     }
 
@@ -220,6 +230,30 @@ impl FlowHandle {
     /// locator, or ephemeral with none (FLOWIP-120u).
     pub fn run_substrate(&self) -> &RunSubstrateState {
         &self.run_substrate
+    }
+
+    /// How the run ended, as its terminal pipeline event records it; `None`
+    /// before it ends or when it never started.
+    pub fn terminal_status(&self) -> Option<obzenflow_core::journal::ArchiveStatus> {
+        use super::termination::ExecutionOutcome;
+        use obzenflow_core::journal::ArchiveStatus;
+        match &self.published_outcome.get()?.outcome {
+            ExecutionOutcome::Completed => Some(ArchiveStatus::Completed),
+            ExecutionOutcome::Cancelled { .. } => Some(ArchiveStatus::Cancelled),
+            ExecutionOutcome::Failed(_) => Some(ArchiveStatus::Failed),
+            ExecutionOutcome::NotStarted => None,
+        }
+    }
+
+    /// Notices naming each resumed sink edge whose deliveries are scoped by
+    /// generation.
+    pub fn resume_notices(&self) -> &[String] {
+        &self.resume_notices
+    }
+
+    /// The facts the flow builder derived from this flow.
+    pub fn archive_flow_evidence(&self) -> &obzenflow_core::journal::archive_actions::FlowEvidence {
+        &self.archive_flow_evidence
     }
 
     /// The build-resolved effective config (FLOWIP-010), when the flow was

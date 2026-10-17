@@ -202,7 +202,7 @@ async fn wait_for_postings(sink: &Collect, count: usize) -> Result<()> {
     .map_err(|_| anyhow!("timeout waiting for {count} postings"))
 }
 
-async fn stop(handle: &FlowHandle) -> Result<()> {
+async fn stop(handle: FlowHandle) -> Result<()> {
     handle.stop_graceful(Duration::from_secs(10)).await?;
     tokio::time::timeout(Duration::from_secs(15), handle.wait_for_completion())
         .await
@@ -306,7 +306,7 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
     handle.start().await?;
     wait_for_running(&handle).await?;
     wait_for_postings(&sink, 8).await?;
-    stop(&handle).await?;
+    stop(handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
     assert_eq!(
@@ -422,7 +422,7 @@ async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()
     handle.start().await?;
     wait_for_running(&handle).await?;
     wait_for_postings(&sink, 1).await?;
-    stop(&handle).await?;
+    stop(handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
     let transactions = stage_rows(&run, "transactions").await;
@@ -486,7 +486,7 @@ async fn a_hold_longer_than_the_stall_ceiling_completes_under_enforce() -> Resul
     handle.start().await?;
     wait_for_running(&handle).await?;
     wait_for_postings(&sink, 11).await?;
-    stop(&handle).await?;
+    stop(handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
     for stage in [
@@ -582,7 +582,7 @@ async fn a_join_with_no_batch_stream_input_journals_only_live_entered() -> Resul
     handle.start().await?;
     wait_for_running(&handle).await?;
     wait_for_postings(&sink, 1).await?;
-    stop(&handle).await?;
+    stop(handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
     let posted = stage_rows(&run, "posted").await;
@@ -668,7 +668,7 @@ async fn a_finite_eof_join_stopped_while_hydrating_posts_nothing() -> Result<()>
     })
     .await
     .map_err(|_| anyhow!("the catalog never started"))?;
-    stop(&handle).await?;
+    stop(handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
     let posted = stage_rows(&run, "posted").await;
@@ -769,7 +769,7 @@ async fn a_merge_reads_live_only_after_every_batch_producer_ends() -> Result<()>
     handle.start().await?;
     wait_for_running(&handle).await?;
     wait_for_postings(&sink, 10).await?;
-    stop(&handle).await?;
+    stop(handle).await?;
     let run = replay_testkit::latest_run_dir(&journal_base);
 
     let transactions = stage_rows(&run, "transactions").await;

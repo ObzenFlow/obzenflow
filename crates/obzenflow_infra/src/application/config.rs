@@ -148,14 +148,19 @@ pub struct FlowConfig {
     #[arg(long)]
     pub control_plane_hmac_replay_window_secs: Option<u64>,
 
-    /// Replay sources from a completed or cancelled archived run directory (FLOWIP-095a).
+    /// Replay sources from a completed or cancelled archived run directory.
     ///
     /// The path must be the exact run directory containing `run_manifest.json`.
     #[arg(long)]
     pub replay_from: Option<PathBuf>,
 
     /// Resume a recorded run: catch up on the archive with effects suppressed,
-    /// then continue live from the recorded high-water mark (FLOWIP-120n).
+    /// then continue live from the recorded high-water mark.
+    ///
+    /// Resume with a build and configuration that act the same on the inputs
+    /// the run settled; a stage that departs from its archive refuses the
+    /// resume. Check a changed build first with `--replay-from <run> --verify`
+    /// against a recording that ended with a terminal record.
     ///
     /// The path must be the exact run directory containing `run_manifest.json`.
     /// Mutually exclusive with `--replay-from`.
@@ -169,27 +174,26 @@ pub struct FlowConfig {
     pub allow_incomplete_archive: bool,
 
     /// Allow `--replay-from` or `--resume-from` to proceed past sinks whose
-    /// delivery path is non-idempotent or undeclared (FLOWIP-120n F16,
-    /// FLOWIP-120v).
+    /// delivery path is non-idempotent or undeclared.
     ///
     /// Both archive verbs re-execute recorded work at sinks, so those sinks
     /// may duplicate their external writes. Requires an archive verb.
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_duplicate_sink_delivery: bool,
 
-    /// Verify the replay output against the source archive after completion
-    /// (FLOWIP-095j). Requires `--replay-from`. The source archive must remain
+    /// Verify the replay output against the source archive after completion.
+    /// Requires `--replay-from`. The source archive must remain
     /// present through completion; on a fully certified match the run prints
     /// "output matched the original run, 0 differences" and exits 0.
     #[arg(long, action = ArgAction::SetTrue)]
     pub verify: bool,
 
-    /// Behaviour when the pipeline reaches a terminal state under --server
-    /// (FLOWIP-114d): exit the process (default) or park until a signal.
+    /// Behaviour when the pipeline reaches a terminal state under --server:
+    /// exit the process (default) or park until a signal.
     #[arg(long, value_enum)]
     pub server_on_terminal: Option<OnTerminalArg>,
 
-    /// Enable Studio phonebook registration (FLOWIP-114d).
+    /// Enable Studio phonebook registration.
     #[arg(long, action = ArgAction::SetTrue)]
     pub studio_enabled: bool,
 
@@ -315,6 +319,7 @@ impl ResolvedStartupConfig {
             // The host opens the archive at launch and fills this in before the
             // install (FLOWIP-120u); config resolution carries settings only.
             replay_archive: None,
+            archive_evidence: None,
         }
     }
 }

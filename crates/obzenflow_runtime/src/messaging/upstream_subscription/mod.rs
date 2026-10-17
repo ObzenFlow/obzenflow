@@ -250,12 +250,7 @@ where
     /// Readers for each upstream journal
     readers: Vec<ReaderSlot<T>>,
 
-    /// Replay identity alias for each current upstream stage. Re-admitted
-    /// source facts preserve their first-generation writer, so contract
-    /// authorship couples this topology-keyed immediate-archive map with the
-    /// runtime-stamped replay context instead of comparing unrelated per-run
-    /// StageIds. That remains valid across replay-of-replay generations.
-    archived_stage_ids_by_current: HashMap<StageId, StageId>,
+    archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
 
     /// Selected Data event types by upstream reader stage.
     ///
@@ -690,13 +685,6 @@ where
     /// reader's generation at delivery time.
     pub fn last_delivered_generation(&self) -> Option<ReaderGeneration> {
         self.last_delivered_generation
-    }
-
-    /// Count of data events delivered so far (FLOWIP-120n F15): the fail-closed
-    /// re-delivery validation input, compared against the recorded high water
-    /// when the catch-up watermark arrives.
-    pub fn delivered_data_count(&self) -> u64 {
-        self.next_stage_input_position - 1
     }
 
     /// The caught-up frontier aggregate (FLOWIP-120n F10): true once every

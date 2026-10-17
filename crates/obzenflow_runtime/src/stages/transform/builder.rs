@@ -144,6 +144,18 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_observation_recorder(instrumentation.observation_recorder());
         handler.install_writer_id(WriterId::from(self.config.stage_id));
+        let catch_up = crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+            crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                &self.config.flow_name,
+                &self.resources.flow_id.to_string(),
+                &self.config.stage_name,
+                self.config.stage_id,
+                obzenflow_core::event::context::StageType::Transform,
+            ),
+            self.resources.data_journal.clone(),
+            instrumentation.clone(),
+            self.resources.runtime_execution.clone(),
+        );
         let resources = TransformResources {
             handler: Some(handler),
             stage_id: self.config.stage_id,
@@ -186,7 +198,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             drain_received: false,
             buffered_terminal_envelope: None,
             heartbeat,
-            catch_up_flip: None,
+            catch_up,
         };
 
         let context = TransformContext::new(resources);

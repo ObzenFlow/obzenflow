@@ -551,6 +551,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
         .await
         .expect("cancelled run should terminate")
         .expect("cancelled run should resolve");
+    drop(handle);
 
     // Replay: A reproduces Natural, B synthesizes Truncated, and the fan-in's
     // own authored EOF is the worst-wins join.
@@ -845,6 +846,7 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
         .await
         .expect("cancelled cycle run should terminate")
         .expect("cancelled cycle run should resolve");
+    drop(handle);
 
     // Replay the cancelled cycle archive: it must terminate cleanly, with the
     // Truncated kind carried through the entry point's buffered-EOF path.

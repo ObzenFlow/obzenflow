@@ -83,6 +83,8 @@ pub struct PipelineBuilder {
     run_substrate: Option<RunSubstrateState>,
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
     runtime_execution: Option<crate::execution::RuntimeExecution>,
+    archive_flow_evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
+    resume_notices: Vec<String>,
 }
 
 impl PipelineBuilder {
@@ -145,7 +147,25 @@ impl PipelineBuilder {
             run_substrate: None,
             flow_effective_config: None,
             runtime_execution: None,
+            archive_flow_evidence: Default::default(),
+            resume_notices: Vec::new(),
         }
+    }
+
+    /// Notices naming each resumed sink edge whose deliveries are scoped by
+    /// generation, printed after the run banner.
+    pub fn with_resume_notices(mut self, notices: Vec<String>) -> Self {
+        self.resume_notices = notices;
+        self
+    }
+
+    /// Attach the facts the flow builder derived from this flow.
+    pub fn with_archive_flow_evidence(
+        mut self,
+        evidence: obzenflow_core::journal::archive_actions::FlowEvidence,
+    ) -> Self {
+        self.archive_flow_evidence = evidence;
+        self
     }
 
     /// Attach the selected run substrate (FLOWIP-120u). The DSL always sets
@@ -515,6 +535,8 @@ impl PipelineBuilder {
                     .clone()
                     .unwrap_or(RunSubstrateState::Ephemeral),
                 flow_effective_config: self.flow_effective_config.clone(),
+                archive_flow_evidence: self.archive_flow_evidence.clone(),
+                resume_notices: self.resume_notices.clone(),
             },
         ))
     }

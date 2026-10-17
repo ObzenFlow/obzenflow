@@ -8,14 +8,12 @@ use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::catch_up::{
-    maybe_flip_caught_up, CatchUpDisposition, CatchUpStage,
-};
+use crate::stages::common::supervision::catch_up::CatchUpDisposition;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::join::fsm::{JoinEvent, JoinResources, JoinSubscriptionSide, PendingTransition};
-use crate::stages::join::phase::{check_crossing_phase, PhaseReads};
+use crate::stages::join::phase::PhaseReads;
 use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
@@ -78,44 +76,13 @@ async fn join_flip<H: UnifiedJoinHandler>(
     };
     let caught_up = (!reads.reads_reference() || side_caught_up(reference))
         && (!reads.reads_stream() || side_caught_up(stream));
-    let already_flipped = ctx.catch_up_flip.is_some_and(|flipped| flipped >= target);
-    if caught_up && !already_flipped {
-        if let Err(message) =
-            check_crossing_phase(&ctx.stage_name, &ctx.archived_phases, target, reads)
-        {
-            return CatchUpDisposition::Failed(message);
-        }
-    }
-    let delivered = reference
-        .map(|subscription| subscription.delivered_data_count())
-        .unwrap_or(0)
-        + stream
-            .map(|subscription| subscription.delivered_data_count())
-            .unwrap_or(0);
-    let flow_id = ctx.flow_id.to_string();
-    let before = ctx.catch_up_flip;
-    let disposition = maybe_flip_caught_up(
-        target,
-        caught_up,
-        delivered,
-        CatchUpStage {
-            stage_id: ctx.stage_id,
-            stage_name: &ctx.stage_name,
-            flow_name: &ctx.flow_name,
-            flow_id: &flow_id,
-            stage_type: StageType::Join,
-            writer_id: ctx.writer_id,
-            data_journal: &ctx.data_journal,
-            instrumentation: &ctx.instrumentation,
-        },
-        /* author_marker */ true,
-        &ctx.runtime_execution,
-        &mut ctx.catch_up_flip,
-    )
-    .await;
-    if ctx.catch_up_flip != before {
+    let disposition = ctx
+        .catch_up
+        .join_frontier_reached(target, caught_up, reads)
+        .await;
+    if let CatchUpDisposition::Crossed(crossed) = disposition {
         if let Some(held) = reads.held() {
-            ctx.pending_promotion = Some((held, target));
+            ctx.pending_promotion = Some((held, crossed));
         }
     }
     disposition
@@ -129,9 +96,11 @@ pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
     reads: PhaseReads,
 ) -> crate::supervised_base::EventLoopDirective<JoinEvent<H>> {
     match join_flip(reference, stream, ctx, announced, reads).await {
-        CatchUpDisposition::Consumed => crate::supervised_base::EventLoopDirective::Continue,
-        CatchUpDisposition::Failed(message) => {
-            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message))
+        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
+            crate::supervised_base::EventLoopDirective::Continue
+        }
+        CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
+            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail))
         }
     }
 }
@@ -156,9 +125,9 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
         return None;
     }
     match join_flip(reference, stream, ctx, target, reads).await {
-        CatchUpDisposition::Consumed => None,
-        CatchUpDisposition::Failed(message) => Some(
-            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message)),
+        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => None,
+        CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => Some(
+            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail)),
         ),
     }
 }

@@ -160,9 +160,9 @@ impl<'a> EventView<'a> {
             output: event_type(self.record),
             forwarded_author: self.record.journal.stage.as_ref().and_then(|stage| {
                 let author = record_writer_id(self.record);
-                // Prior-run writer IDs are explained by replay provenance;
-                // they do not establish a forwarding hop in this run.
-                (!replayed(self.record) && author != stage.id.into())
+                let copied_runtime =
+                    replayed(self.record) && Category::of(self.record) == Category::Runtime;
+                ((!replayed(self.record) || copied_runtime) && author != stage.id.into())
                     .then(|| self.context.writer_name(&author.to_string()).to_owned())
             }),
             inputs,

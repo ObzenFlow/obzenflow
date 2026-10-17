@@ -165,8 +165,13 @@ where
     /// from elsewhere".
     fn writer_matches_upstream(&self, writer: WriterId, stage_id: StageId) -> bool {
         matches!(writer, WriterId::Stage(author)
-            if author == stage_id
-                || self.archived_stage_ids_by_current.get(&stage_id) == Some(&author))
+            if author == stage_id || self.is_archived_author(stage_id, author))
+    }
+
+    fn is_archived_author(&self, stage_id: StageId, author: StageId) -> bool {
+        self.archived_stage_ids_by_current
+            .get(&stage_id)
+            .is_some_and(|archived| archived.contains(&author))
     }
 
     /// Resolve a re-admitted source row through the immediately archived
@@ -180,16 +185,11 @@ where
         chain_event: &ChainEvent,
         stage_id: StageId,
     ) -> bool {
-        if !chain_event.consumes_data_credit() {
-            return false;
-        }
-        let Some(archived_stage_id) = self.archived_stage_ids_by_current.get(&stage_id) else {
-            return false;
-        };
-        chain_event
-            .replay_context
-            .as_ref()
-            .is_some_and(|context| context.original_stage_id == *archived_stage_id)
+        chain_event.consumes_data_credit()
+            && chain_event
+                .replay_context
+                .as_ref()
+                .is_some_and(|context| self.is_archived_author(stage_id, context.original_stage_id))
     }
 
     fn eof_authored_by_upstream(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {

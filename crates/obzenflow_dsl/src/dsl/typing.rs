@@ -2257,74 +2257,75 @@ pub fn validate_stage_typing_metadata(
     Ok(())
 }
 
-/// FLOWIP-120n F16 archive sink delivery-safety gate, covering both archive
-/// verbs since FLOWIP-120v: deterministic replay re-consumes the recorded
-/// stream and resume re-delivers the recorded prefix during catch-up, so
-/// every sink must be classified. `SafeToRepeat` passes;
-/// `DuplicateSensitive` and undeclared sinks refuse fail-loud unless the
-/// operator passed `allow_duplicate_sink_delivery`, which lets both through
-/// with a warning naming the stage. Live runs never call this.
-#[allow(clippy::result_large_err)]
-pub fn validate_archive_sink_delivery_safety(
+/// The facts archive admission reads from the flow itself, namely its cycle
+/// members, each source's declared continuation and each sink's redelivery safety.
+pub fn archive_flow_evidence(
+    topology: &obzenflow_topology::Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
-    verb: obzenflow_runtime::bootstrap::ReplayVerb,
-    allow_duplicate_sink_delivery: bool,
-) -> Result<(), crate::dsl::error::FlowBuildError> {
-    use crate::dsl::error::FlowBuildError;
-    use obzenflow_runtime::bootstrap::ReplayVerb;
-    use obzenflow_runtime::effects::SinkRedeliverySafety;
+) -> obzenflow_core::journal::archive_actions::FlowEvidence {
+    let cycle_members: Vec<String> = topology
+        .stages()
+        .filter(|stage| topology.is_in_cycle(stage.id))
+        .map(|stage| stage.name.as_str().to_string())
+        .collect();
+    flow_evidence_with_cycle(cycle_members, descriptors)
+}
 
+pub(crate) fn flow_evidence_with_cycle(
+    mut cycle_members: Vec<String>,
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+) -> obzenflow_core::journal::archive_actions::FlowEvidence {
+    cycle_members.sort();
+    let mut sources = Vec::new();
+    let mut sinks = Vec::new();
+    for descriptor in descriptors.values() {
+        if let Some(continuation) = descriptor.source_continuation() {
+            sources.push((descriptor.name().to_string(), continuation));
+        }
+        if descriptor.stage_type() == StageType::Sink {
+            sinks.push((
+                descriptor.name().to_string(),
+                descriptor
+                    .sink_description()
+                    .and_then(SinkDescription::redelivery_safety),
+            ));
+        }
+    }
+    sources.sort_by(|(left, _), (right, _)| left.cmp(right));
+    sinks.sort_by(|(left, _), (right, _)| left.cmp(right));
+    obzenflow_core::journal::archive_actions::FlowEvidence {
+        cycle_members,
+        sources,
+        sinks,
+    }
+}
+
+/// Logs a warning naming each sink admitted only under
+/// `allow_duplicate_sink_delivery`.
+pub fn warn_duplicate_sink_delivery(
+    verb: obzenflow_runtime::bootstrap::ReplayVerb,
+    admission: &obzenflow_core::journal::archive_actions::Admission,
+) {
+    use obzenflow_runtime::bootstrap::ReplayVerb;
     let verb_phrase = match verb {
         ReplayVerb::Replay => "replay will re-perform",
         ReplayVerb::Resume => "catch-up will duplicate",
     };
-
-    // Sorted so the refusal names a deterministic stage across builds.
-    let mut names: Vec<&String> = descriptors.keys().collect();
-    names.sort();
-
-    for name in names {
-        let descriptor = &descriptors[name];
-        // Only plain sinks exist (FLOWIP-120v removed the effectful surface).
-        if descriptor.stage_type() != StageType::Sink {
-            continue;
-        }
-
-        match descriptor
-            .sink_description()
-            .and_then(SinkDescription::redelivery_safety)
-        {
-            Some(SinkRedeliverySafety::SafeToRepeat) => {}
-            Some(SinkRedeliverySafety::DuplicateSensitive) => {
-                if !allow_duplicate_sink_delivery {
-                    return Err(FlowBuildError::ArchiveRefusedNonIdempotentSink {
-                        stage: name.clone(),
-                        verb,
-                    });
-                }
-                tracing::warn!(
-                    stage = %name,
-                    "allow_duplicate_sink_delivery: proceeding past non-idempotent \
-                     sink; {verb_phrase} its external writes"
-                );
-            }
-            None => {
-                if !allow_duplicate_sink_delivery {
-                    return Err(FlowBuildError::ArchiveRefusedUndeclaredSink {
-                        stage: name.clone(),
-                        verb,
-                    });
-                }
-                tracing::warn!(
-                    stage = %name,
-                    "allow_duplicate_sink_delivery: proceeding past sink with \
-                     undeclared delivery safety; {verb_phrase} its deliveries"
-                );
-            }
+    for (stage, safety) in &admission.duplicate_sinks {
+        if safety.is_some() {
+            tracing::warn!(
+                stage = %stage,
+                "allow_duplicate_sink_delivery: proceeding past non-idempotent \
+                 sink; {verb_phrase} its external writes"
+            );
+        } else {
+            tracing::warn!(
+                stage = %stage,
+                "allow_duplicate_sink_delivery: proceeding past sink with \
+                 undeclared delivery safety; {verb_phrase} its deliveries"
+            );
         }
     }
-
-    Ok(())
 }
 
 /// Validate edge typing across forward edges in a built topology.

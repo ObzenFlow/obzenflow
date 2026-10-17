@@ -10,13 +10,13 @@ use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::catch_up::{
-    flip_on_authored_eof, maybe_flip_caught_up, CatchUpDisposition, CatchUpStage,
-};
+use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
+use crate::stages::common::supervision::error_routing::{
+    error_row_in_scope, route_to_error_journal,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -30,6 +30,7 @@ use crate::stages::observer::dispatch::{
 use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
@@ -176,31 +177,11 @@ pub(super) async fn dispatch_accumulating<
                             .subscription
                             .as_ref()
                             .expect("subscription checked above");
-                        let disposition = maybe_flip_caught_up(
-                            *announced,
-                            subscription.all_readers_caught_up(*announced),
-                            subscription.delivered_data_count(),
-                            CatchUpStage {
-                                stage_id: ctx.stage_id,
-                                stage_name: &ctx.stage_name,
-                                flow_name: &ctx.flow_name,
-                                flow_id: &flow_id,
-                                stage_type: StageType::Stateful,
-                                writer_id: ctx.writer_id,
-                                data_journal: &ctx.data_journal,
-                                instrumentation: &ctx.instrumentation,
-                            },
-                            /* author_marker */ true,
-                            &ctx.runtime_execution,
-                            &mut ctx.catch_up_flip,
-                        )
-                        .await;
-                        return Ok(match disposition {
-                            CatchUpDisposition::Consumed => EventLoopDirective::Continue,
-                            CatchUpDisposition::Failed(message) => {
-                                EventLoopDirective::Transition(StatefulEvent::Error(message))
-                            }
-                        });
+                        let disposition = ctx
+                            .catch_up
+                            .watermark_delivered(subscription, *announced)
+                            .await;
+                        return catch_up_directive(ctx, disposition, Some(&envelope)).await;
                     }
 
                     // FLOWIP-120n F17: an authored EOF can be the delivery
@@ -211,27 +192,12 @@ pub(super) async fn dispatch_accumulating<
                             .subscription
                             .as_ref()
                             .expect("subscription checked above");
-                        if let Some(message) = flip_on_authored_eof(
-                            subscription,
-                            CatchUpStage {
-                                stage_id: ctx.stage_id,
-                                stage_name: &ctx.stage_name,
-                                flow_name: &ctx.flow_name,
-                                flow_id: &flow_id,
-                                stage_type: StageType::Stateful,
-                                writer_id: ctx.writer_id,
-                                data_journal: &ctx.data_journal,
-                                instrumentation: &ctx.instrumentation,
-                            },
-                            /* author_marker */ true,
-                            &ctx.runtime_execution,
-                            &mut ctx.catch_up_flip,
-                        )
-                        .await
-                        {
-                            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                                message,
-                            )));
+                        let disposition = ctx.catch_up.eof_delivered(subscription).await;
+                        if matches!(
+                            disposition,
+                            CatchUpDisposition::Failed(_) | CatchUpDisposition::Refused(_)
+                        ) {
+                            return catch_up_directive(ctx, disposition, Some(&envelope)).await;
                         }
                     }
 
@@ -285,6 +251,20 @@ pub(super) async fn dispatch_accumulating<
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
+                            if envelope.is_eof()
+                                && ctx.terminal_eof_kind.unwrap_or(EofKind::Natural)
+                                    == EofKind::Natural
+                            {
+                                let disposition =
+                                    ctx.catch_up.send(CatchUpEvent::InputsEnded).await;
+                                if matches!(
+                                    disposition,
+                                    CatchUpDisposition::Failed(_) | CatchUpDisposition::Refused(_)
+                                ) {
+                                    return catch_up_directive(ctx, disposition, Some(&envelope))
+                                        .await;
+                                }
+                            }
                             ctx.buffered_eof = Some(envelope.authored());
                             ctx.terminal_envelope = Some(envelope.clone());
                             EventLoopDirective::Transition(StatefulEvent::ReceivedEOF)
@@ -428,6 +408,7 @@ pub(super) async fn dispatch_accumulating<
                             backpressure_writer: ctx.backpressure_writer.clone(),
                             emit_enabled: true,
                             effect_boundary: None,
+                            catch_up: Some(ctx.catch_up.clone()),
                         })
                     });
                     let accumulate_result = handler
@@ -489,6 +470,11 @@ pub(super) async fn dispatch_accumulating<
                             return Ok(directive);
                         }
                     }
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        stage_input_position,
+                        delivered_generation,
+                    );
                     run_stateful_after_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
                     if let Some(state) = &heartbeat_state {
@@ -515,7 +501,8 @@ pub(super) async fn dispatch_accumulating<
                     if let Err(err) = accumulate_result {
                         ctx.instrumentation.record_error(err.kind());
                         let reason = format!("Stateful handler error: {err:?}");
-                        let error_event = event.mark_as_error(reason, err.kind());
+                        let error_event =
+                            error_row_in_scope(event.mark_as_error(reason, err.kind()), scope);
 
                         if route_to_error_journal(&error_event) {
                             crate::supervised_base::publication::append(
@@ -1016,6 +1003,44 @@ pub(super) async fn dispatch_emitting<
             );
             Ok(EventLoopDirective::Transition(StatefulEvent::Error(
                 format!("Emit error: {e}"),
+            )))
+        }
+    }
+}
+
+async fn catch_up_directive<
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &mut StatefulResources<H>,
+    disposition: CatchUpDisposition,
+    parent: Option<&obzenflow_core::event::JournalRecord<ChainPayload>>,
+) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    match disposition {
+        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
+            Ok(EventLoopDirective::Continue)
+        }
+        CatchUpDisposition::Failed(fatal) => Ok(EventLoopDirective::Transition(
+            StatefulEvent::Error(fatal.detail),
+        )),
+        CatchUpDisposition::Refused(fatal) => {
+            let writer_id = ctx
+                .writer_id
+                .ok_or_else(|| "refused stateful input has no stage writer id".to_string())?;
+            record_stage_fatal(
+                &fatal,
+                StageFatalCommit {
+                    error_journal: &ctx.error_journal,
+                    writer_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: &ctx.stage_name,
+                    input_position: None,
+                    parent,
+                    lineage: ctx.lineage_policy,
+                },
+            )
+            .await?;
+            Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                fatal.detail,
             )))
         }
     }

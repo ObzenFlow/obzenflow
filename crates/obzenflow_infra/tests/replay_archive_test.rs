@@ -63,6 +63,7 @@ fn write_manifest(dir: &Path) {
 
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
         flow_id: "flow_01H00000000000000000000000".to_string(),
+        recorded_flow_id: None,
         pipeline_writer_id: SystemId::new().into(),
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
@@ -358,7 +359,7 @@ async fn open_gates_required_capabilities_before_journal_decode() {
 }
 
 #[tokio::test]
-async fn open_requires_completed_status_by_default() {
+async fn open_reports_a_failed_status_for_core_to_refuse() {
     let dir = tempdir().unwrap();
     write_manifest(dir.path());
 
@@ -377,11 +378,25 @@ async fn open_requires_completed_status_by_default() {
 
     write_framed_log_record(dir.path(), &record).await;
 
-    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
-        .err()
         .unwrap();
-    assert!(matches!(err, ReplayError::IncompleteArchive { .. }));
+    let evidence = archive.evidence();
+    assert_eq!(evidence.status, ArchiveStatus::Failed);
+    assert!(!evidence.live_writer);
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
+    assert!(matches!(
+        decide(
+            ReplayVerb::Replay,
+            dir.path(),
+            &evidence,
+            &FlowEvidence::default(),
+            ArchiveOverrides::default(),
+        ),
+        Err(ArchiveRefusal::Failed { .. })
+    ));
 }
 
 #[tokio::test]

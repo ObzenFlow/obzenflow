@@ -157,7 +157,16 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             heartbeat,
-            catch_up_flip: None,
+            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::terminal(
+                self.config.stage_id,
+                obzenflow_core::StageKey::from(self.config.stage_name.clone()),
+                self.resources.runtime_execution.clone(),
+            ),
+            receipt_classification: self
+                .resources
+                .sink_resume_edges
+                .clone()
+                .map(super::receipts::SinkReceiptClassification::new),
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
         };

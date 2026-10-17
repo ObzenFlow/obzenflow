@@ -340,6 +340,7 @@ async fn effect_context(
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: None,
+        catch_up: None,
     };
     (context, invocation)
 }

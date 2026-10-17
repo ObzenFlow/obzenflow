@@ -24,6 +24,17 @@ cargo run -p obzenflow --example payment_gateway_resilience -- \
   --replay-from <archive> --verify
 ```
 
+To try crash recovery, kill the run with `kill -9` after its order feeds
+finish, about 0.6 s in, then resume the killed run:
+
+```sh
+cargo run -p obzenflow --example payment_gateway_resilience -- \
+  --resume-from <archive>
+```
+
+The feeds are fixed lists, which cannot continue a partial read, so a run
+killed before they finish refuses to resume. Replay it instead.
+
 Inspect the same run, including framework evidence and sink lifecycle audits:
 
 ```sh

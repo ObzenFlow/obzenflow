@@ -374,6 +374,7 @@ async fn bootstrap_from(
             allow_duplicate_sink_delivery: false,
             verb,
         }),
+        archive_evidence: Some(archive.evidence()),
         replay_archive: Some(Arc::new(archive)),
         ..BootstrapConfig::default()
     }

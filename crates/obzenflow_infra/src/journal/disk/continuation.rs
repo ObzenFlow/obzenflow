@@ -178,11 +178,10 @@ pub(crate) fn publish_claim(
     }
 }
 
-/// Refuse to resume `run` unless it is the head of its history: no live
-/// journal writer, no claim, a parent claim naming it unless it recorded
-/// reconstruction completion, and a location that can hold its claim.
-pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<(), ReplayError> {
-    refuse_live_writer(run, manifest)?;
+pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayError> {
+    if has_live_writer(run, manifest)? {
+        return Ok(true);
+    }
     if read_claim(run)?.is_some() {
         return Err(ReplayError::AlreadyContinued {
             archive: run.to_path_buf(),
@@ -192,12 +191,13 @@ pub(crate) fn admit(run: &Path, manifest: &RunManifest) -> Result<(), ReplayErro
     if let Some(resume) = &manifest.resume {
         refuse_orphan(run, manifest, &resume.resumed_from)?;
     }
-    refuse_unwritable(run)
+    refuse_unwritable(run)?;
+    Ok(false)
 }
 
 /// The journal writers' OS locks are the evidence of a live run; the OS
 /// releases them when its process dies.
-fn refuse_live_writer(run: &Path, manifest: &RunManifest) -> Result<(), ReplayError> {
+pub(crate) fn has_live_writer(run: &Path, manifest: &RunManifest) -> Result<bool, ReplayError> {
     for file in super::identity::manifest_journal_files(manifest) {
         let path = run.join(file);
         let journal = match File::open(&path) {
@@ -212,11 +212,7 @@ fn refuse_live_writer(run: &Path, manifest: &RunManifest) -> Result<(), ReplayEr
         };
         match journal.try_lock_shared() {
             Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                return Err(ReplayError::StillRunning {
-                    archive: run.to_path_buf(),
-                })
-            }
+            Err(TryLockError::WouldBlock) => return Ok(true),
             Err(TryLockError::Error(error)) => {
                 return Err(io_error(
                     format!("Failed to probe the writer of {}", path.display()),
@@ -225,7 +221,7 @@ fn refuse_live_writer(run: &Path, manifest: &RunManifest) -> Result<(), ReplayEr
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Whether a resumed run took over the run it resumed from.

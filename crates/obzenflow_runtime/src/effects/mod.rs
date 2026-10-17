@@ -45,6 +45,7 @@ use crate::stages::common::supervision::output_committer::{
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 
+mod actions;
 mod binding;
 mod boundary;
 mod commit;
@@ -64,6 +65,9 @@ mod typed;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use actions::{
+    ActionCheck, ActionDeparture, ActionRow, RecordedAction, RecordedActions,
+};
 #[doc(hidden)]
 pub use binding::EffectInvocationBinding;
 pub use binding::{

@@ -202,10 +202,7 @@ where
         T: TypedPayload + OutputAllowsFact<Output, At>,
     {
         self.core.preflight_next_effect_cursor_is_empty().await?;
-        if !self.core.is_replaying() {
-            self.core.request_generated_live_admission().await?;
-        }
-        self.emit(fact).await?;
+        self.core.emit_pre_effect(fact).await?;
         self.complete()
     }
 
@@ -219,9 +216,15 @@ where
         self.core.authoring_halt_fatal()
     }
 
-    pub(crate) async fn settlement_divergence(
-        &self,
-    ) -> Option<crate::stages::common::handler_error::StageFatal> {
-        self.core.settlement_divergence().await
+    pub(crate) async fn end_of_invocation_fatal(
+        &mut self,
+    ) -> Result<Option<crate::stages::common::handler_error::StageFatal>, EffectError> {
+        if let Err(error) = self.core.settle_without_action().await {
+            return match self.core.authoring_halt_fatal() {
+                Some(fatal) => Ok(Some(fatal)),
+                None => Err(error),
+            };
+        }
+        Ok(self.core.settlement_divergence().await)
     }
 }

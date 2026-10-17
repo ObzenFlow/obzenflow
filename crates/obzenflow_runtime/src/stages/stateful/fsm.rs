@@ -652,10 +652,7 @@ pub struct StatefulResources<H: UnifiedStatefulHandler> {
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
-    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
-    /// flipped at, making the flip idempotent per generation across both
-    /// triggers (watermark and authored EOF).
-    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
+    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 }
 
 pub struct StatefulContext<H: UnifiedStatefulHandler> {
@@ -751,27 +748,17 @@ impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> StatefulAction<H
                     // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
                     let recorded_history = ctx.runtime_execution.archive_for_io();
                     if let Some(archive) = recorded_history {
-                        let history = EffectHistory::load(archive, &ctx.stage_name)
-                            .await
-                            .map_err(|e| {
+                        let stage = obzenflow_core::StageKey::from(ctx.stage_name.clone());
+                        let history =
+                            H::load_effect_history(archive, &stage).await.map_err(|e| {
                                 obzenflow_fsm::FsmError::HandlerError(format!(
                                     "Failed to load effect history for '{}': {e}",
                                     ctx.stage_name
                                 ))
                             })?;
-                        // FLOWIP-120n F7: register the recorded effect mark so a
-                        // prefix cursor miss fails loud and a live-tail miss runs.
-                        if let Some(control) = ctx.runtime_execution.resume_control() {
-                            if let Some(max) = history.max_recorded_input_seq() {
-                                control.record_effect_high_water(
-                                    ctx.stage_id,
-                                    crate::messaging::upstream_subscription::StageInputPosition(
-                                        max,
-                                    ),
-                                );
-                            }
-                        }
-                        ctx.effect_history = Some(Arc::new(history));
+                        let history = Arc::new(history);
+                        ctx.catch_up.install_history(history.clone()).await;
+                        ctx.effect_history = Some(history);
                     }
 
                     tracing::info!(

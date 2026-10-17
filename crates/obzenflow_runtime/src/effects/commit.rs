@@ -143,7 +143,7 @@ where
     async fn commit_success_inline(&self, output: &T) -> Result<(), EffectError> {
         self.ensure_available()?;
 
-        let (kind, public_fact_count, events, observation_events) =
+        let (kind, public_fact_count, mut events, observation_events) =
             match S::prepare_success(output)? {
                 PreparedEffectSuccess::DomainFacts(facts) => {
                     let output_ordinal = self.inner.output_ordinal.ok_or_else(|| {
@@ -195,6 +195,9 @@ where
                     (EffectOutcomeKind::RecordedReply, 0, vec![event], Vec::new())
                 }
             };
+        for event in &mut events {
+            event.replay_context = None;
+        }
         self.begin_commit()?;
         let persisted = !self.inner.defer_persistence;
         if persisted {
@@ -303,12 +306,13 @@ where
             origin: None,
         };
 
-        let event = build_effect_record_event(
+        let mut event = build_effect_record_event(
             self.inner.writer_id,
             &self.inner.parent,
             record,
             self.inner.lineage,
         )?;
+        event.replay_context = None;
         self.begin_commit()?;
         let persisted = !self.inner.defer_persistence;
         if persisted {
@@ -577,27 +581,9 @@ pub(super) async fn append_domain_effect_success_facts(
     heartbeat_state: Option<&Arc<HeartbeatState>>,
     output_contract: Option<&StageOutputContract>,
     backpressure_writer: &BackpressureWriter,
-    writer_id: WriterId,
     parent: &DeliveredRecord<ChainPayload>,
-    cursor: EffectCursor,
-    descriptor_hash: EffectDescriptorHash,
-    descriptor: EffectDescriptor,
-    facts: Vec<TypedFact>,
-    base_output_ordinal: EffectOutputOrdinal,
-    origin: Option<EffectFactOrigin>,
-    lineage: obzenflow_core::config::LineagePolicy,
+    events: Vec<ChainEvent>,
 ) -> Result<Vec<ChainEvent>, EffectError> {
-    let events = build_domain_effect_success_facts(
-        writer_id,
-        parent,
-        cursor,
-        descriptor_hash,
-        descriptor,
-        facts,
-        base_output_ordinal,
-        origin,
-        lineage,
-    )?;
     let committer = OutputCommitter {
         data_journal,
         flow_context,
@@ -640,14 +626,10 @@ pub(super) async fn append_domain_effect_success_facts(
 // fail-loud backstop would no longer cover it.
 pub(super) async fn append_effect_record(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    writer_id: WriterId,
+    event: ChainEvent,
     parent: &DeliveredRecord<ChainPayload>,
-    record: EffectRecord,
-    lineage: obzenflow_core::config::LineagePolicy,
     backpressure_writer: &BackpressureWriter,
 ) -> Result<(), EffectError> {
-    let event = build_effect_record_event(writer_id, parent, record, lineage)?;
-
     // Framework effect/capture records are physical Data rows even though the
     // transport filter hides them from handlers. Track them around the durable
     // append so downstream filtering can complete the same physical credit.

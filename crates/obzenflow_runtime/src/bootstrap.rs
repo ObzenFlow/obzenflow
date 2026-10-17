@@ -14,6 +14,7 @@ use std::time::Duration;
 use std::{fmt, mem};
 
 use obzenflow_core::journal::archive::ReplayArchive;
+use obzenflow_core::journal::archive_actions::ArchiveEvidence;
 
 #[cfg(any(test, feature = "test-support"))]
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
@@ -42,15 +43,7 @@ impl StartupMode {
     }
 }
 
-/// The operator's archive verb (FLOWIP-120n): bounded reconstruction that
-/// drains, or catch-up that continues live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplayVerb {
-    /// `--replay-from`.
-    Replay,
-    /// `--resume-from`.
-    Resume,
-}
+pub use obzenflow_core::journal::archive_actions::ReplayVerb;
 
 /// Replay settings needed to bootstrap a flow from an existing run archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +76,9 @@ pub struct BootstrapConfig {
     /// The host opens it at config resolution (the concrete opener lives in
     /// infra, below the DSL in the dependency graph) and the build consumes it.
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+    /// What the host decoded from `replay_archive`; the flow build checks the
+    /// replay or resume request against it.
+    pub archive_evidence: Option<ArchiveEvidence>,
 }
 
 impl Default for BootstrapConfig {
@@ -92,6 +88,7 @@ impl Default for BootstrapConfig {
             startup_mode: StartupMode::Auto,
             replay: None,
             replay_archive: None,
+            archive_evidence: None,
         }
     }
 }
@@ -223,6 +220,11 @@ pub fn replay_archive() -> Option<Arc<dyn ReplayArchive>> {
     bootstrap_config().replay_archive
 }
 
+/// The evidence the host decoded from the installed archive.
+pub fn archive_evidence() -> Option<ArchiveEvidence> {
+    bootstrap_config().archive_evidence
+}
+
 fn active_install_owner() -> &'static AtomicUsize {
     static ACTIVE_INSTALL: OnceLock<AtomicUsize> = OnceLock::new();
     ACTIVE_INSTALL.get_or_init(|| AtomicUsize::new(0))
@@ -318,6 +320,7 @@ mod tests {
             startup_mode: StartupMode::Auto,
             replay: None,
             replay_archive: None,
+            archive_evidence: None,
         };
         set_bootstrap_config(baseline.clone());
 
@@ -332,6 +335,7 @@ mod tests {
                     verb: ReplayVerb::Replay,
                 }),
                 replay_archive: None,
+                archive_evidence: None,
             });
 
             assert_eq!(shutdown_timeout(), Duration::from_secs(5));

@@ -781,6 +781,25 @@ async fn a_torn_resume_without_an_agreeing_ancestor_refuses() -> Result<()> {
         stranger.join("run_continuation.json"),
     )?;
     match DiskReplayArchive::open_for_resume(r1.clone(), true).await {
+        Err(ReplayError::NamespaceDisagrees { archive, ancestor }) => {
+            assert_eq!((archive, ancestor), (torn.clone(), stranger.clone()));
+        }
+        Err(other) => panic!("expected the stranger's namespace to refuse: {other}"),
+        Ok(_) => panic!("a stranger's namespace must refuse the resume"),
+    }
+    let stranger_manifest = stranger.join("run_manifest.json");
+    let mut unrecorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&stranger_manifest)?)?;
+    unrecorded
+        .as_object_mut()
+        .expect("a manifest is an object")
+        .remove("recorded_flow_id")
+        .expect("a fresh run records its namespace");
+    std::fs::write(
+        &stranger_manifest,
+        serde_json::to_string_pretty(&unrecorded)?,
+    )?;
+    match DiskReplayArchive::open_for_resume(r1.clone(), true).await {
         Err(ReplayError::AncestorDisagrees {
             archive,
             ancestor,

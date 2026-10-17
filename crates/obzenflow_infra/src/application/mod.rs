@@ -24,6 +24,6 @@ pub use config::{ControlPlaneAuthModeArg, CorsModeArg, FlowConfig, OnTerminalArg
 pub use error::ApplicationError;
 pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};
 pub use obzenflow_core::journal::factory::{CurrentRunLocator, RunSubstrateState};
-pub use presentation::{Banner, Footer, Presentation, RunPresentationOutcome};
+pub use presentation::{ArchiveOffers, Banner, Footer, Presentation, RunPresentationOutcome};
 pub use run_mode::{ReplayRunContext, RunMode};
 pub use web_surface::{WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext};

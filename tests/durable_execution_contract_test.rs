@@ -24,6 +24,9 @@
 #[path = "../examples/payment_gateway_resilience/support.rs"]
 pub mod gateway_demo;
 
+#[path = "../examples/flash_sale_allocation/support.rs"]
+pub mod flash_sale_demo;
+
 use async_trait::async_trait;
 use gateway_demo::domain::{
     CustomerOrderPlaced, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
@@ -80,6 +83,7 @@ const FIRST_AFTER_INVALID: &str = "S-03";
 const FIRST_CUT: &str = "S-12";
 /// Held inside S4's resumed run once its reconstruction completes (S5).
 const SECOND_CUT: &str = "S-18";
+const HELD_RECEIPT: &str = "W-01";
 const DECLINES: [(&str, &str); 3] = [
     ("S-05", "InsufficientFunds"),
     ("S-14", "AddressMismatch"),
@@ -241,6 +245,19 @@ fn idempotency_key(order_id: &str) -> String {
     format!("payment-authorize:{order_id}")
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum Hold {
+    Gateway(String),
+    Receipt(String),
+    BetweenEffects(String),
+}
+
+async fn hold_until(release: &Path) {
+    while !release.exists() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Appends every physical call to the ledger with one unbuffered write, which
 /// survives SIGKILL. Holds `hold` after recording its call until `release`
 /// exists.
@@ -292,9 +309,7 @@ impl Gateway {
         )
         .map_err(|error| EffectError::Transport(error.to_string()))?;
         if self.hold.as_deref() == Some(order.order_id.as_str()) {
-            while !self.release.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            hold_until(&self.release).await;
         }
         Ok(outcome)
     }
@@ -443,10 +458,11 @@ struct Receipt {
     authorization_id: String,
 }
 
-/// Appends one receipt per delivery; repeating a recorded write is safe.
 #[derive(Clone, Debug)]
 struct ReceiptFile {
     path: PathBuf,
+    hold: Option<String>,
+    release: PathBuf,
 }
 
 #[async_trait]
@@ -461,6 +477,7 @@ impl InlineSink for ReceiptFile {
     }
 
     async fn write(&mut self, payment: PaymentAuthorized) -> Result<(), SinkWriteFailure> {
+        let held = self.hold.as_deref() == Some(payment.order_id.as_str());
         append_line(
             &self.path,
             &Receipt {
@@ -473,21 +490,32 @@ impl InlineSink for ReceiptFile {
                 SinkWritePhase::Execute,
                 SinkOperationError::remote(error.to_string()),
             )
-        })
+        })?;
+        if held {
+            hold_until(&self.release).await;
+        }
+        Ok(())
     }
 }
 
-fn build_flow(scenario: &Scenario, hold: Option<String>, web: WebOrders) -> FlowDefinition {
+fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDefinition {
     let store_orders_input = orders(scenario.store_input(), "/store_orders");
+    let (gateway_hold, receipt_hold) = match hold {
+        Some(Hold::Gateway(order)) => (Some(order), None),
+        Some(Hold::Receipt(order)) => (None, Some(order)),
+        Some(Hold::BetweenEffects(_)) | None => (None, None),
+    };
     let authorize = Authorize {
         gateway: Gateway {
             ledger: scenario.ledger(),
-            hold,
+            hold: gateway_hold,
             release: scenario.release(),
         },
     };
     let receipt_file = ReceiptFile {
         path: scenario.receipts(),
+        hold: receipt_hold,
+        release: scenario.release(),
     };
     let journals = scenario.journals();
     FlowDefinition::materialize(move |_runtime_config| {
@@ -556,7 +584,9 @@ fn build_flow(scenario: &Scenario, hold: Option<String>, web: WebOrders) -> Flow
 struct Plan {
     scenario: Scenario,
     args: Vec<String>,
-    hold: Option<String>,
+    hold: Option<Hold>,
+    #[serde(default)]
+    fix: bool,
 }
 
 #[test]
@@ -566,24 +596,40 @@ fn durable_execution_contract_child() {
         .expect("the plan parses");
     let args = std::iter::once("obzenflow".to_string()).chain(plan.args);
     let mut app = FlowApplication::builder().with_cli_args(args);
-    if plan.scenario.then_live {
-        if let Err(error) = app.run_blocking(then_live::build_flow(&plan.scenario)) {
-            eprintln!("{error}");
-            std::process::exit(2);
+    let scenario = &plan.scenario;
+    let result = match scenario.graph {
+        Graph::Payment => {
+            let web = match scenario.http {
+                Some(_) => WebOrders::Http(app.http_ingress(
+                    HttpOrders,
+                    IngestionConfig {
+                        base_path: HTTP_BASE.into(),
+                        ..IngestionConfig::default()
+                    },
+                )),
+                None => WebOrders::Yaml(orders(scenario.web_input(), "/web_orders")),
+            };
+            app.run_blocking(build_flow(scenario, plan.hold, web))
         }
-        return;
-    }
-    let web = match plan.scenario.http {
-        Some(_) => WebOrders::Http(app.http_ingress(
-            HttpOrders,
-            IngestionConfig {
-                base_path: HTTP_BASE.into(),
-                ..IngestionConfig::default()
-            },
-        )),
-        None => WebOrders::Yaml(orders(plan.scenario.web_input(), "/web_orders")),
+        Graph::ThenLive | Graph::ThenLiveEffect => {
+            app.run_blocking(then_live::build_flow(scenario))
+        }
+        Graph::PaymentDemo => app
+            .with_presentation(payment_demo::presentation())
+            .run_blocking(payment_demo::build_flow(scenario)),
+        Graph::TwoEffects => {
+            app.run_blocking(two_effects::build_flow(scenario, plan.hold, plan.fix))
+        }
+        Graph::EmitOnly => app.run_blocking(emit_only::build_flow(scenario)),
+        Graph::FlashSale => app
+            .with_config_file(flash_sale::config(scenario))
+            .run_blocking(flash_sale::build_flow(scenario)),
+        Graph::RateLimitedSink => app.run_blocking(lagging::rate_limited_flow(scenario)),
+        Graph::UnorderedFanIn => app
+            .with_presentation(lagging::presentation())
+            .run_blocking(lagging::fan_in_flow(scenario)),
     };
-    if let Err(error) = app.run_blocking(build_flow(&plan.scenario, plan.hold, web)) {
+    if let Err(error) = result {
         eprintln!("{error}");
         std::process::exit(2);
     }
@@ -598,7 +644,21 @@ struct Scenario {
     /// The port of an HTTP history's server; every run of it serves there.
     http: Option<u16>,
     #[serde(default)]
-    then_live: bool,
+    graph: Graph,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum Graph {
+    #[default]
+    Payment,
+    ThenLive,
+    ThenLiveEffect,
+    PaymentDemo,
+    TwoEffects,
+    EmitOnly,
+    FlashSale,
+    RateLimitedSink,
+    UnorderedFanIn,
 }
 
 impl Scenario {
@@ -626,6 +686,18 @@ impl Scenario {
         Self::create(name, Some(port))
     }
 
+    fn for_graph(name: &str, graph: Graph) -> Self {
+        let root = Self::directory(name);
+        let inputs = root.join("inputs");
+        std::fs::create_dir(&inputs).expect("create the inputs");
+        Self {
+            root,
+            inputs,
+            http: None,
+            graph,
+        }
+    }
+
     fn create(name: &str, http: Option<u16>) -> Self {
         let root = Self::directory(name);
         let inputs = root.join("inputs");
@@ -634,7 +706,7 @@ impl Scenario {
             root,
             inputs,
             http,
-            then_live: false,
+            graph: Graph::Payment,
         };
         std::fs::write(scenario.store_input(), store_input()).expect("write store orders");
         scenario
@@ -648,7 +720,7 @@ impl Scenario {
             root: Self::directory(name),
             inputs: from.inputs.clone(),
             http: from.http,
-            then_live: from.then_live,
+            graph: from.graph,
         };
         let copy = scenario
             .journals()
@@ -736,11 +808,13 @@ fn remove_input(input: &Path) {
 }
 
 fn resume(archive: &Path) -> Vec<String> {
-    vec![
-        "--resume-from".into(),
-        archive.display().to_string(),
-        "--allow-incomplete-archive".into(),
-    ]
+    vec!["--resume-from".into(), archive.display().to_string()]
+}
+
+fn resume_failed(archive: &Path) -> Vec<String> {
+    let mut args = resume(archive);
+    args.push("--allow-incomplete-archive".into());
+    args
 }
 
 fn replay(archive: &Path) -> Vec<String> {
@@ -757,7 +831,16 @@ struct Child {
 static CHILDREN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl Child {
-    fn spawn(scenario: &Scenario, mut args: Vec<String>, hold: Option<&str>) -> Self {
+    fn spawn(scenario: &Scenario, args: Vec<String>, hold: Option<Hold>) -> Self {
+        Self::spawn_with(scenario, args, hold, false)
+    }
+
+    fn spawn_with(
+        scenario: &Scenario,
+        mut args: Vec<String>,
+        hold: Option<Hold>,
+        fix: bool,
+    ) -> Self {
         if let Some(port) = scenario.http {
             args.extend(["--server".into(), "--server-port".into(), port.to_string()]);
         }
@@ -768,7 +851,8 @@ impl Child {
         let plan = Plan {
             scenario: scenario.clone(),
             args,
-            hold: hold.map(str::to_owned),
+            hold,
+            fix,
         };
         let process =
             tokio::process::Command::new(std::env::current_exe().expect("the test executable"))
@@ -825,10 +909,22 @@ impl Child {
     /// Run to the end and return the run it wrote.
     async fn completed(self) -> PathBuf {
         let run = self.run().await;
+        let log = self.log.clone();
         let status = self.exit().await;
-        assert!(status.success(), "{} failed: {status}", run.display());
+        assert!(
+            status.success(),
+            "{} failed: {status}\n{}",
+            run.display(),
+            log_tail(&log)
+        );
         run
     }
+}
+
+fn log_tail(log: &Path) -> String {
+    let text = read_log(log);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(40)..].join("\n")
 }
 
 /// Wait until `holds` is true of the running archive, with `store_orders`
@@ -1820,6 +1916,51 @@ async fn strict_replay(history: &mut History, archive: &Path) -> PathBuf {
     replayed
 }
 
+fn is_action_row(row: &JournalRecord<ChainPayload>) -> bool {
+    row.consumes_data_credit() || row.authored().effect_provenance.is_some()
+}
+
+fn around_crossing<'a>(
+    archive: &'a Archive,
+    stage: &'a str,
+) -> (
+    Vec<&'a JournalRecord<ChainPayload>>,
+    Vec<&'a JournalRecord<ChainPayload>>,
+) {
+    let rows: Vec<_> = archive.rows(stage, RunJournalKind::Data).collect();
+    let marker = rows
+        .iter()
+        .position(|row| {
+            matches!(
+                &row.payload,
+                ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+            )
+        })
+        .unwrap_or_else(|| panic!("{stage} crosses"));
+    let actions = |rows: &[&'a JournalRecord<ChainPayload>]| {
+        rows.iter()
+            .copied()
+            .filter(|row| is_action_row(row))
+            .collect()
+    };
+    (actions(&rows[..marker]), actions(&rows[marker + 1..]))
+}
+
+fn assert_lineage_at_crossing(archive: &Archive, stage: &str, name: &str) {
+    let (rebuilt, live) = around_crossing(archive, stage);
+    assert!(
+        rebuilt
+            .iter()
+            .all(|row| row.authored().replay_context.is_some()),
+        "{name}: every row {stage} rebuilt carries replay_context"
+    );
+    assert!(
+        live.iter()
+            .all(|row| row.authored().replay_context.is_none()),
+        "{name}: no row {stage}'s live work wrote carries replay_context"
+    );
+}
+
 /// The first cut: web orders finished, store orders stalled behind the held
 /// order, which the gateway charged without a committed outcome.
 async fn first_cut(scenario: &Scenario, child: &Child, name: &str) -> PathBuf {
@@ -1853,7 +1994,7 @@ async fn durable_execution_contract() {
     let s2 = Scenario::fresh("s2");
     let mut stopped = History::new("S2", &s2);
     stopped.in_flight.insert(FIRST_CUT.into());
-    let child = Child::spawn(&s2, Vec::new(), Some(FIRST_CUT));
+    let child = Child::spawn(&s2, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
     let run = first_cut(&s2, &child, "S2").await;
     child.signal(Signal::Term);
     std::fs::write(s2.release(), b"").expect("release the held order");
@@ -1874,7 +2015,7 @@ async fn durable_execution_contract() {
     // S4: SIGKILL at the cut with the held order uncommitted. Its archive
     // starts two histories over the same inputs: S5's copy and S5b's original.
     let s4 = Scenario::fresh("s4");
-    let child = Child::spawn(&s4, Vec::new(), Some(FIRST_CUT));
+    let child = Child::spawn(&s4, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
     let killed = first_cut(&s4, &child, "S4").await;
     child.signal(Signal::Kill);
     assert!(!child.exit().await.success());
@@ -1890,7 +2031,11 @@ async fn durable_execution_contract() {
     after_rebuild
         .record(&killed_copy, Ended::Interrupted { killed: true })
         .await;
-    let child = Child::spawn(&s5, resume(&killed_copy), Some(SECOND_CUT));
+    let child = Child::spawn(
+        &s5,
+        resume(&killed_copy),
+        Some(Hold::Gateway(SECOND_CUT.into())),
+    );
     let torn = child.run().await;
     cut(&torn, "S5", |archive| {
         archive.reconstruction_completed()
@@ -1906,25 +2051,30 @@ async fn durable_execution_contract() {
     let rebuilt_head = Child::spawn(&s5, resume(&torn), None).completed().await;
     after_rebuild.record(&rebuilt_head, Ended::Natural).await;
 
-    // S5b: SIGKILL inside S4's resumed run before its reconstruction
-    // completes, while the gateway holds the re-executed in-doubt order;
-    // resume of the resume with S4's archive present.
     let mut before_rebuild = History::new("S5b", &s4);
     before_rebuild.in_flight.insert(FIRST_CUT.into());
     before_rebuild
         .record(&killed, Ended::Interrupted { killed: true })
         .await;
-    let child = Child::spawn(&s4, resume(&killed), Some(FIRST_CUT));
+    let child = Child::spawn(
+        &s4,
+        resume(&killed),
+        Some(Hold::Receipt(HELD_RECEIPT.into())),
+    );
     let torn = child.run().await;
     cut(&torn, "S5b", |archive| {
         !archive.reconstruction_completed()
+            && read_lines::<Receipt>(&s4.receipts())
+                .iter()
+                .filter(|receipt| receipt.order_id == HELD_RECEIPT)
+                .count()
+                == 2
             && s4
                 .calls()
                 .iter()
                 .filter(|call| call.order_id == FIRST_CUT)
                 .count()
                 == 2
-            && !archive.outcomes().contains_key(FIRST_CUT)
     })
     .await;
     child.signal(Signal::Kill);
@@ -2030,9 +2180,12 @@ async fn durable_execution_contract() {
             .filter(|call| call.order_id.starts_with("W-"))
             .count();
         assert_eq!(web_calls, 0, "{name}: nothing is charged before the cut");
-        let resumed = Child::spawn(&scenario, resume(&run), None)
-            .completed()
-            .await;
+        let args = if killed {
+            resume(&run)
+        } else {
+            resume_failed(&run)
+        };
+        let resumed = Child::spawn(&scenario, args, None).completed().await;
         let opening = never_pinned
             .record(&resumed, Ended::Natural)
             .await
@@ -2077,7 +2230,7 @@ async fn durable_execution_contract_over_http() {
 
     // H1, before commit: the held store order and backpressure stall the web
     // channel, so a request sits uncommitted until the server is killed.
-    let child = Child::spawn(&scenario, Vec::new(), Some(FIRST_CUT));
+    let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
     let first = child.run().await;
     sender.live().await;
     cut(&first, "H1", |archive| {
@@ -2100,7 +2253,7 @@ async fn durable_execution_contract_over_http() {
     // sender gives up, then the hold is released and the server is killed
     // once that request's row commits.
     let held = pool.next().expect("an order to hold");
-    let child = Child::spawn(&scenario, resume(&first), Some(&held));
+    let child = Child::spawn(&scenario, resume(&first), Some(Hold::Gateway(held.clone())));
     let second = child.run().await;
     sender.live().await;
     assert!(matches!(
@@ -2193,6 +2346,114 @@ async fn durable_execution_contract_over_http() {
     history.report();
 }
 
+fn strip_ansi(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for code in chars.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push(c);
+    }
+    plain
+}
+
+fn read_log(log: &Path) -> String {
+    strip_ansi(&std::fs::read_to_string(log).expect("the child log is readable"))
+}
+
+fn copy_run(run: &Path, into: &Scenario) -> PathBuf {
+    let copy = into
+        .journals()
+        .join("flows")
+        .join(run.file_name().expect("a run directory"));
+    std::fs::create_dir_all(&copy).expect("create the copy");
+    for entry in std::fs::read_dir(run).expect("read the run") {
+        let entry = entry.expect("a run file");
+        std::fs::copy(entry.path(), copy.join(entry.file_name())).expect("copy a run file");
+    }
+    std::fs::canonicalize(copy).expect("resolve the copy")
+}
+
+fn delivered_keys<T: TypedPayload + DeserializeOwned, K: Clone>(
+    archive: &Archive,
+    upstream: &str,
+    sink: &str,
+    key: impl Fn(T) -> K,
+) -> Vec<K> {
+    let keys: BTreeMap<EventId, K> = archive
+        .facts::<T>(upstream)
+        .map(|(row, fact)| (*row.id(), key(fact)))
+        .collect();
+    archive
+        .rows(sink, RunJournalKind::Data)
+        .filter_map(|row| match &row.payload {
+            ChainPayload::Delivery(delivery)
+                if matches!(delivery.result, DeliveryResult::Success { .. }) =>
+            {
+                keys.get(&delivery.subject.input.event_id).cloned()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn verify_exit(baseline: &Path, candidate: &Path) -> (Option<i32>, String) {
+    let verdict = std::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+        .args(["verify", "--baseline"])
+        .arg(baseline)
+        .arg("--candidate")
+        .arg(candidate)
+        .output()
+        .expect("obzenflow verify runs");
+    (
+        verdict.status.code(),
+        String::from_utf8_lossy(&verdict.stdout).into_owned(),
+    )
+}
+
+fn run_files(run: &Path) -> BTreeSet<std::ffi::OsString> {
+    std::fs::read_dir(run)
+        .expect("read the run directory")
+        .map(|entry| entry.expect("a run file").file_name())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_run_refuses_resume_and_replay() {
+    let scenario = Scenario::fresh("still_running");
+    let child = Child::spawn(&scenario, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
+    let running = first_cut(&scenario, &child, "still running").await;
+    let files = run_files(&running);
+    let runs = scenario.runs();
+    for (args, verb) in [(resume(&running), "resume"), (replay(&running), "replay")] {
+        let refused = Child::spawn(&scenario, args, None);
+        let log = refused.log.clone();
+        assert_eq!(refused.exit().await.code(), Some(2), "the {verb} refuses");
+        let refusal = std::fs::read_to_string(log).expect("the refusal is logged");
+        assert!(
+            refusal.contains(&format!(
+                "cannot {verb} {}: it is still running.\nStop it, then {verb} it again.",
+                running.display()
+            )),
+            "{refusal}"
+        );
+        assert_eq!(scenario.runs(), runs, "the {verb} leaves no run directory");
+        assert_eq!(
+            run_files(&running),
+            files,
+            "the {verb} writes nothing into the running run"
+        );
+    }
+    std::fs::write(scenario.release(), b"").expect("release the held order");
+    assert!(child.exit().await.success(), "the running run completes");
+}
+
 mod then_live {
     use super::*;
     use obzenflow::flow::{join, merge};
@@ -2263,16 +2524,8 @@ mod then_live {
         scenario.inputs.join("entries.yaml")
     }
 
-    fn fresh(name: &str) -> Scenario {
-        let root = Scenario::directory(name);
-        let inputs = root.join("inputs");
-        std::fs::create_dir(&inputs).expect("create the inputs");
-        let scenario = Scenario {
-            root,
-            inputs,
-            http: None,
-            then_live: true,
-        };
+    fn fresh(name: &str, graph: Graph) -> Scenario {
+        let scenario = Scenario::for_graph(name, graph);
         let accounts: String = ACCOUNTS
             .iter()
             .map(|account| format!("  - account_id: \"{account}\"\n"))
@@ -2297,6 +2550,80 @@ mod then_live {
             .expect("the batch channel is configured")
     }
 
+    const AUDITED: [&str; 2] = ["e-1", "e-2"];
+
+    fn audit_ledger(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("audit-ledger.jsonl")
+    }
+
+    #[derive(Clone, Debug)]
+    struct Audit {
+        entry: Entry,
+        ledger: PathBuf,
+    }
+
+    #[async_trait]
+    impl Effect for Audit {
+        const EFFECT_TYPE: &'static str = "durable_contract.then_live.audit";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+        type BindingMode = obzenflow::effects::Portless;
+        type Outcome = Entry;
+        type OutcomeSemantics = obzenflow::effects::DomainFacts;
+
+        fn label(&self) -> &str {
+            "audit"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({ "note": self.entry.note })
+        }
+
+        async fn execute(&self, _: &mut EffectContext) -> Result<Entry, EffectError> {
+            append_line(&self.ledger, &self.entry.note)
+                .map_err(|error| EffectError::Transport(error.to_string()))?;
+            Ok(self.entry.clone())
+        }
+
+        fn idempotency_key(&self) -> Option<IdempotencyKey> {
+            Some(IdempotencyKey(format!("audit:{}", self.entry.note)))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct Vet {
+        ledger: PathBuf,
+    }
+
+    #[async_trait]
+    impl EffectfulTransformHandler for Vet {
+        type Input = Entry;
+        type Output = Entry;
+        type AllowedEffects = obzenflow::effects::effect_set![Audit];
+
+        async fn process(
+            &self,
+            entry: Entry,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            if AUDITED.contains(&entry.note.as_str()) {
+                fx.perform(Audit {
+                    entry,
+                    ledger: self.ledger.clone(),
+                })
+                .await
+                .map_err(|error| HandlerError::Other(error.to_string()))?;
+            } else {
+                fx.emit(entry).await?;
+            }
+            Ok(fx.complete()?)
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
     pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
         let batch_accounts_input = yaml(AccountYaml, accounts_input(scenario), "/accounts");
         let batch_tx_input = yaml(EntryYaml, entries_input(scenario), "/entries");
@@ -2306,6 +2633,10 @@ mod then_live {
         let live_accounts_input = ChannelSource::new(live_accounts_input);
         let live_tx_input = ChannelSource::new(live_tx_input);
         let journals = scenario.journals();
+        let graph = scenario.graph;
+        let vet = Vet {
+            ledger: audit_ledger(scenario),
+        };
         FlowDefinition::materialize(move |_runtime_config| {
             let post_entry = joins::inner_then_live(
                 |account: &Account| account.account_id.clone(),
@@ -2316,6 +2647,34 @@ mod then_live {
                 },
             );
             let ledger = DiscardSink::<Posted>::new();
+            if graph == Graph::ThenLiveEffect {
+                return Ok(flow! {
+                    name: "durable_execution_contract_then_live",
+                    journals: disk_journals(journals),
+
+                    stages: {
+                        batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
+                        batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
+                        vet = effectful_transform!(Entry -> Entry uses Audit => vet);
+                        live_accounts = async_infinite_source!(Account => live_accounts_input);
+                        live_tx = async_infinite_source!(Entry => live_tx_input);
+                        accounts = merge!(Account => merges::then_live);
+                        transactions = merge!(Entry => merges::then_live);
+                        posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                        ledger = sink!(Posted => ledger);
+                    },
+
+                    topology: {
+                        batch_accounts |> accounts;
+                        live_accounts |> accounts;
+                        batch_tx |> vet;
+                        vet |> transactions;
+                        live_tx |> transactions;
+                        (accounts, transactions) |> posted;
+                        posted |> ledger;
+                    }
+                });
+            }
             Ok(flow! {
                 name: "durable_execution_contract_then_live",
                 journals: disk_journals(journals),
@@ -2365,12 +2724,18 @@ mod then_live {
         Hydrating,
         Enriching,
         Live,
+        PastAudits,
     }
 
     impl Cut {
         fn holds(self, archive: &Archive) -> bool {
             let phases = phases(archive);
             match self {
+                Self::PastAudits => {
+                    phases.len() == 1
+                        && archive.facts::<Entry>("vet").count() > AUDITED.len()
+                        && archive.eof("batch_tx").is_none()
+                }
                 Self::Hydrating => {
                     archive.facts::<Account>("accounts").count() >= 1
                         && phases.is_empty()
@@ -2386,8 +2751,8 @@ mod then_live {
         }
     }
 
-    async fn row(name: &str, cut: Cut, generations: (u64, u64)) {
-        let scenario = fresh(name);
+    async fn row(name: &str, graph: Graph, cut: Cut, generations: (u64, u64)) {
+        let scenario = fresh(name, graph);
         let child = Child::spawn(&scenario, Vec::new(), None);
         let killed = child.run().await;
         until(&killed, name, |archive| cut.holds(archive)).await;
@@ -2440,11 +2805,23 @@ mod then_live {
                 },
                 JoinPhaseFact::LiveEntered {
                     generation: generations.1,
-                    ended_by: vec![StageKey::from("batch_tx")],
+                    ended_by: vec![StageKey::from(if graph == Graph::ThenLiveEffect {
+                        "vet"
+                    } else {
+                        "batch_tx"
+                    })],
                 },
             ],
             "{name}: one fact per transition, in the generation that made it"
         );
+        if graph == Graph::ThenLiveEffect {
+            assert_eq!(
+                read_lines::<String>(&audit_ledger(&scenario)),
+                AUDITED,
+                "{name}: each audit runs once"
+            );
+            assert_lineage_at_crossing(&archive, "vet", name);
+        }
 
         remove_input(&accounts_input(&scenario));
         remove_input(&entries_input(&scenario));
@@ -2468,16 +2845,1377 @@ mod then_live {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kill_while_hydrating_resumes_into_the_batch() {
-        row("then_live_hydrating", Cut::Hydrating, (1, 1)).await;
+        row(
+            "then_live_hydrating",
+            Graph::ThenLive,
+            Cut::Hydrating,
+            (1, 1),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kill_while_enriching_resumes_the_batch_once() {
-        row("then_live_enriching", Cut::Enriching, (0, 1)).await;
+        row(
+            "then_live_enriching",
+            Graph::ThenLive,
+            Cut::Enriching,
+            (0, 1),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kill_once_live_reconstructs_both_phases() {
-        row("then_live_live", Cut::Live, (0, 0)).await;
+        row("then_live_live", Graph::ThenLive, Cut::Live, (0, 0)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_effect_stage_past_its_last_call_resumes_without_a_phase_refusal() {
+        row(
+            "then_live_effect",
+            Graph::ThenLiveEffect,
+            Cut::PastAudits,
+            (0, 1),
+        )
+        .await;
+    }
+}
+
+mod payment_demo {
+    use super::*;
+    use gateway_demo::domain::PaymentAuthorizationUnavailable;
+    use gateway_demo::fixtures;
+    use gateway_demo::gateway::GatewayTransform;
+    use obzenflow::application::{Banner, Presentation};
+
+    const BANNER: &str = "Durable execution contract: payment demo";
+    const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
+    const GATEWAY_CALLS_PER_SECOND: f64 = 20.0;
+    const UNAVAILABLE: &str = "unavailable";
+    const WARMUP_ORDERS: usize = 8;
+    const RECOVERY_ROUTES: [(&str, &str); 5] = [
+        ("web-recovery-0", AUTHORIZED),
+        ("store-recovery-3", DECLINED),
+        ("web-recovery-4", DECLINED),
+        ("store-recovery-5", AUTHORIZED),
+        ("web-recovery-6", AUTHORIZED),
+    ];
+
+    pub(super) fn presentation() -> Presentation {
+        Presentation::new(Banner::new(BANNER))
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        gateway_demo::flow::assemble_flow(
+            fixtures::scripted_web_orders(),
+            fixtures::scripted_store_orders(),
+            GatewayTransform::with_first_recovery_pause(FIRST_RECOVERY_PAUSE),
+            GATEWAY_CALLS_PER_SECOND,
+            scenario.journals(),
+        )
+    }
+
+    fn routes(archive: &Archive) -> BTreeMap<String, &'static str> {
+        let stage = "authorize_payment";
+        archive
+            .facts::<PaymentAuthorized>(stage)
+            .map(|(_, fact)| (fact.order_id, AUTHORIZED))
+            .chain(
+                archive
+                    .facts::<PaymentDeclined>(stage)
+                    .map(|(_, fact)| (fact.order_id, DECLINED)),
+            )
+            .chain(
+                archive
+                    .facts::<PaymentAuthorizationUnavailable>(stage)
+                    .map(|(_, fact)| (fact.order_id, UNAVAILABLE)),
+            )
+            .collect()
+    }
+
+    fn manual_reviews(archive: &Archive) -> BTreeSet<String> {
+        delivered_keys(
+            archive,
+            "authorize_payment",
+            "manual_review",
+            |fact: PaymentAuthorizationUnavailable| fact.order_id,
+        )
+        .into_iter()
+        .collect()
+    }
+
+    fn breaker_or_policy_row(row: &JournalRecord<ChainPayload>) -> bool {
+        let event_type = row.event_type();
+        [
+            "runtime.circuit_breaker.",
+            "runtime.retry.",
+            "runtime.rate_limiter.",
+            "runtime.resilience.",
+        ]
+        .iter()
+        .any(|prefix| event_type.as_str().starts_with(prefix))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_payment_loop_killed_during_the_outage_routes_as_the_demo_does() {
+        let name = "payment_loop";
+        let scenario = Scenario::for_graph(name, Graph::PaymentDemo);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        let outage_begun = |archive: &Archive| {
+            let routes = routes(archive);
+            archive.eof("web_orders") == Some(EofKind::Natural)
+                && archive.eof("store_orders") == Some(EofKind::Natural)
+                && routes
+                    .keys()
+                    .filter(|order| order.contains("-warmup-"))
+                    .count()
+                    == WARMUP_ORDERS
+                && !routes
+                    .keys()
+                    .any(|order| order.contains("-outage-") || order.contains("-recovery-"))
+        };
+        until(&killed, name, outage_begun).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        assert!(
+            outage_begun(&at_kill),
+            "{name}: the kill landed as the outage began"
+        );
+        let reviewed_before = manual_reviews(&at_kill);
+
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let log = child.log.clone();
+        let resumed = child.completed().await;
+        let archive = Archive::read(&resumed).await;
+        let routes = routes(&archive);
+        for (order, route) in RECOVERY_ROUTES {
+            assert_eq!(
+                routes.get(order).copied(),
+                Some(route),
+                "{name}: {order} routes as in the uninterrupted demo"
+            );
+        }
+        let log = read_log(&log);
+        let observed: BTreeSet<String> = log
+            .lines()
+            .filter(|line| line.contains("manual-review record written to console"))
+            .filter_map(|line| line.split("order_id=").nth(1))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+        let first: BTreeSet<String> = manual_reviews(&archive)
+            .difference(&reviewed_before)
+            .cloned()
+            .collect();
+        assert!(
+            !first.is_empty(),
+            "{name}: the resume makes first manual-review deliveries"
+        );
+        assert_eq!(
+            observed, first,
+            "{name}: the observer sees exactly the first deliveries"
+        );
+        assert_lineage_at_crossing(&archive, "authorize_payment", name);
+        let (rebuilt, _) = around_crossing(&archive, "authorize_payment");
+        assert!(
+            !rebuilt.is_empty(),
+            "{name}: the resume rebuilds the recorded outage"
+        );
+
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+        let replay = Archive::read(&replayed).await;
+        let unmarked: Vec<String> = replay
+            .rows("authorize_payment", RunJournalKind::Data)
+            .filter(|row| is_action_row(row) || breaker_or_policy_row(row))
+            .filter(|row| row.authored().replay_context.is_none())
+            .map(|row| row.event_type().to_string())
+            .collect();
+        assert!(
+            unmarked.is_empty(),
+            "{name}: every effect, breaker, recovery and limiter row of the replay carries \
+             replay_context: {unmarked:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_stopped_before_its_feeds_finish_offers_only_replay() {
+        let name = "payment_early_stop";
+        let scenario = Scenario::for_graph(name, Graph::PaymentDemo);
+        let early = |archive: &Archive| {
+            archive.facts::<CustomerOrderPlaced>("web_orders").count() >= 2
+                && archive.eof("web_orders").is_none()
+        };
+
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, early).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let runs = scenario.runs();
+        let refused = Child::spawn(&scenario, resume(&killed), None);
+        let log = refused.log.clone();
+        assert_eq!(
+            refused.exit().await.code(),
+            Some(2),
+            "{name}: the resume refuses"
+        );
+        let log = read_log(&log);
+        let refusal = log
+            .lines()
+            .find(|line| line.starts_with(&format!("cannot resume {}: ", killed.display())))
+            .unwrap_or_else(|| panic!("{name}: the refusal prints: {log}"));
+        assert!(
+            refusal.contains("'web_orders'")
+                && refusal.ends_with("cannot continue interrupted input."),
+            "{refusal}"
+        );
+        assert!(
+            !log.contains(BANNER),
+            "{name}: no banner precedes the refusal"
+        );
+        assert!(
+            !log.contains("Flow failed"),
+            "{name}: the refusal prints alone: {log}"
+        );
+        assert_eq!(scenario.runs(), runs, "{name}: no run directory");
+
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let log = child.log.clone();
+        let stopped = child.run().await;
+        until(&stopped, name, early).await;
+        child.signal(Signal::Interrupt);
+        assert!(
+            child.exit().await.success(),
+            "{name}: a Ctrl-C exits cleanly"
+        );
+        let log = read_log(&log);
+        let (_, footer) = log.split_once(BANNER).expect("the banner prints");
+        assert!(
+            footer.contains("payment_gateway_resilience_demo stopped."),
+            "{footer}"
+        );
+        assert!(footer.contains("--replay-from"), "{footer}");
+        assert!(
+            !footer.contains("--resume-from"),
+            "{name}: the footer offers only replay: {footer}"
+        );
+    }
+}
+
+mod two_effects {
+    use super::*;
+
+    const ORDERS: [&str; 3] = ["T-01", "T-02", "T-03"];
+    const INTERRUPTED: &str = "T-02";
+    const AMOUNT_CENTS: u64 = 2_000;
+    const FIXED_AMOUNT_CENTS: u64 = 2_500;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct ChargeOrder {
+        order_id: String,
+    }
+    impl TypedPayload for ChargeOrder {
+        const EVENT_TYPE: &'static str = "durable_contract.two_effects.order";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Authorized {
+        order_id: String,
+    }
+    impl TypedPayload for Authorized {
+        const EVENT_TYPE: &'static str = "durable_contract.two_effects.authorized";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Captured {
+        order_id: String,
+        amount_cents: u64,
+    }
+    impl TypedPayload for Captured {
+        const EVENT_TYPE: &'static str = "durable_contract.two_effects.captured";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct LedgerCall {
+        order_id: String,
+        call: String,
+        amount_cents: u64,
+    }
+
+    fn ledger(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("two-effect-ledger.jsonl")
+    }
+
+    fn input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("orders.yaml")
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::TwoEffects);
+        let orders: String = ORDERS
+            .iter()
+            .map(|order| format!("  - order_id: \"{order}\"\n"))
+            .collect();
+        std::fs::write(input(&scenario), format!("orders:\n{orders}")).expect("write orders");
+        scenario
+    }
+
+    #[derive(Clone, Debug)]
+    struct ChargeOrderYaml;
+    impl YamlDecoder for ChargeOrderYaml {
+        type Output = ChargeOrder;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<ChargeOrder, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    fn record_call(ledger: &Path, call: LedgerCall) -> Result<(), EffectError> {
+        append_line(ledger, &call).map_err(|error| EffectError::Transport(error.to_string()))
+    }
+
+    #[derive(Clone, Debug)]
+    struct AuthorizeOrder {
+        order_id: String,
+        ledger: PathBuf,
+    }
+
+    #[async_trait]
+    impl Effect for AuthorizeOrder {
+        const EFFECT_TYPE: &'static str = "durable_contract.two_effects.authorize";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+        type BindingMode = obzenflow::effects::Portless;
+        type Outcome = Authorized;
+        type OutcomeSemantics = obzenflow::effects::DomainFacts;
+
+        fn label(&self) -> &str {
+            "authorize"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({ "order_id": self.order_id })
+        }
+
+        async fn execute(&self, _: &mut EffectContext) -> Result<Authorized, EffectError> {
+            record_call(
+                &self.ledger,
+                LedgerCall {
+                    order_id: self.order_id.clone(),
+                    call: "authorize".into(),
+                    amount_cents: 0,
+                },
+            )?;
+            Ok(Authorized {
+                order_id: self.order_id.clone(),
+            })
+        }
+
+        fn idempotency_key(&self) -> Option<IdempotencyKey> {
+            Some(IdempotencyKey(format!("authorize:{}", self.order_id)))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CaptureOrder {
+        order_id: String,
+        amount_cents: u64,
+        ledger: PathBuf,
+    }
+
+    #[async_trait]
+    impl Effect for CaptureOrder {
+        const EFFECT_TYPE: &'static str = "durable_contract.two_effects.capture";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+        type BindingMode = obzenflow::effects::Portless;
+        type Outcome = Captured;
+        type OutcomeSemantics = obzenflow::effects::DomainFacts;
+
+        fn label(&self) -> &str {
+            "capture"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({ "order_id": self.order_id, "amount_cents": self.amount_cents })
+        }
+
+        async fn execute(&self, _: &mut EffectContext) -> Result<Captured, EffectError> {
+            record_call(
+                &self.ledger,
+                LedgerCall {
+                    order_id: self.order_id.clone(),
+                    call: "capture".into(),
+                    amount_cents: self.amount_cents,
+                },
+            )?;
+            Ok(Captured {
+                order_id: self.order_id.clone(),
+                amount_cents: self.amount_cents,
+            })
+        }
+
+        fn idempotency_key(&self) -> Option<IdempotencyKey> {
+            Some(IdempotencyKey(format!("capture:{}", self.order_id)))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct Charge {
+        ledger: PathBuf,
+        hold: Option<String>,
+        release: PathBuf,
+        fix: bool,
+    }
+
+    #[async_trait]
+    impl EffectfulTransformHandler for Charge {
+        type Input = ChargeOrder;
+        type Output = obzenflow::schema::stage_fact_set![Authorized, Captured];
+        type AllowedEffects = obzenflow::effects::effect_set![AuthorizeOrder, CaptureOrder];
+
+        async fn process(
+            &self,
+            order: ChargeOrder,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            fx.perform(AuthorizeOrder {
+                order_id: order.order_id.clone(),
+                ledger: self.ledger.clone(),
+            })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+            if self.hold.as_deref() == Some(order.order_id.as_str()) {
+                hold_until(&self.release).await;
+            }
+            let amount_cents = if self.fix && order.order_id == INTERRUPTED {
+                FIXED_AMOUNT_CENTS
+            } else {
+                AMOUNT_CENTS
+            };
+            fx.perform(CaptureOrder {
+                order_id: order.order_id,
+                amount_cents,
+                ledger: self.ledger.clone(),
+            })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+            Ok(fx.complete()?)
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>, fix: bool) -> FlowDefinition {
+        let orders_input = YamlSource::builder(ChargeOrderYaml)
+            .path(input(scenario))
+            .selection(YamlSelection::SequenceAt("/orders".into()))
+            .batch_size(1)
+            .build()
+            .expect("the order channel is configured");
+        let charge = Charge {
+            ledger: ledger(scenario),
+            hold: match hold {
+                Some(Hold::BetweenEffects(order)) => Some(order),
+                _ => None,
+            },
+            release: scenario.release(),
+            fix,
+        };
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let captured = DiscardSink::<Captured>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_two_effects",
+                journals: disk_journals(journals),
+
+                stages: {
+                    orders = source!(ChargeOrder => orders_input);
+                    charge = effectful_transform!(
+                        ChargeOrder -> { Authorized, Captured }
+                            uses { AuthorizeOrder, CaptureOrder }
+                        => charge
+                    );
+                    captured = sink!(Captured => captured);
+                },
+
+                topology: {
+                    orders |> charge;
+                    charge |> captured;
+                }
+            })
+        })
+    }
+
+    fn fact_order<T: TypedPayload + DeserializeOwned>(
+        row: &JournalRecord<ChainPayload>,
+        order_id: impl Fn(T) -> String,
+    ) -> Option<String> {
+        (row.event_type() == T::event_type_name())
+            .then(|| order_id(serde_json::from_value(row.payload()).expect("a typed fact")))
+    }
+
+    async fn row(name: &str, fix: bool) {
+        let scenario = fresh(name);
+        let child = Child::spawn(
+            &scenario,
+            Vec::new(),
+            Some(Hold::BetweenEffects(INTERRUPTED.into())),
+        );
+        let killed = child.run().await;
+        until(&killed, name, |archive| {
+            archive
+                .facts::<Authorized>("charge")
+                .any(|(_, authorized)| authorized.order_id == INTERRUPTED)
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+
+        let resumed = Child::spawn_with(&scenario, resume(&killed), None, fix)
+            .completed()
+            .await;
+        let calls: Vec<LedgerCall> = read_lines(&ledger(&scenario));
+        for order in ORDERS {
+            for call in ["authorize", "capture"] {
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|recorded| recorded.order_id == order && recorded.call == call)
+                        .count(),
+                    1,
+                    "{name}: {order}'s {call} runs once"
+                );
+            }
+        }
+        let interrupted_capture = calls
+            .iter()
+            .find(|recorded| recorded.order_id == INTERRUPTED && recorded.call == "capture")
+            .expect("the interrupted order is captured");
+        assert_eq!(
+            interrupted_capture.amount_cents,
+            if fix {
+                FIXED_AMOUNT_CENTS
+            } else {
+                AMOUNT_CENTS
+            },
+            "{name}: the capture runs live under the resumed build"
+        );
+
+        let archive = Archive::read(&resumed).await;
+        assert_lineage_at_crossing(&archive, "charge", name);
+        let (rebuilt, live) = around_crossing(&archive, "charge");
+        assert!(
+            rebuilt
+                .iter()
+                .filter_map(|row| fact_order(row, |fact: Authorized| fact.order_id))
+                .any(|order| order == INTERRUPTED),
+            "{name}: the interrupted authorization reproduces before the crossing"
+        );
+        assert_eq!(
+            live.iter()
+                .find_map(|row| fact_order(row, |fact: Captured| fact.order_id)),
+            Some(INTERRUPTED.to_string()),
+            "{name}: the interrupted capture is the first live outcome"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_between_two_effects_runs_the_second_once() {
+        row("two_effects", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fix_to_the_interrupted_input_resumes_without_a_refusal() {
+        row("two_effects_fixed", true).await;
+    }
+}
+
+mod emit_only {
+    use super::*;
+    use obzenflow::middleware::rate_limit;
+
+    const TICKS: u64 = 12;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Tick {
+        n: u64,
+    }
+    impl TypedPayload for Tick {
+        const EVENT_TYPE: &'static str = "durable_contract.emit_only.tick";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Stamped {
+        n: u64,
+    }
+    impl TypedPayload for Stamped {
+        const EVENT_TYPE: &'static str = "durable_contract.emit_only.stamped";
+    }
+
+    fn input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("ticks.yaml")
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::EmitOnly);
+        let ticks: String = (1..=TICKS).map(|n| format!("  - n: {n}\n")).collect();
+        std::fs::write(input(&scenario), format!("ticks:\n{ticks}")).expect("write ticks");
+        scenario
+    }
+
+    #[derive(Clone, Debug)]
+    struct TickYaml;
+    impl YamlDecoder for TickYaml {
+        type Output = Tick;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<Tick, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct Stamp;
+
+    #[async_trait]
+    impl EffectfulTransformHandler for Stamp {
+        type Input = Tick;
+        type Output = Stamped;
+        type AllowedEffects = obzenflow::effects::effect_set![];
+
+        async fn process(
+            &self,
+            tick: Tick,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            fx.emit(Stamped { n: tick.n }).await?;
+            Ok(fx.complete()?)
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        let ticks_input = YamlSource::builder(TickYaml)
+            .path(input(scenario))
+            .selection(YamlSelection::SequenceAt("/ticks".into()))
+            .batch_size(1)
+            .build()
+            .expect("the tick channel is configured");
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let stamped = DiscardSink::<Stamped>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_emit_only",
+                journals: disk_journals(journals),
+
+                stages: {
+                    ticks = source!(Tick => ticks_input with {
+                        rate_limit(5.0).burst_capacity(1.0)
+                    });
+                    stamp = effectful_transform!(Tick -> Stamped => Stamp);
+                    stamped = sink!(Stamped => stamped);
+                },
+
+                topology: {
+                    ticks |> stamp;
+                    stamp |> stamped;
+                }
+            })
+        })
+    }
+
+    fn stamped(archive: &Archive) -> Vec<u64> {
+        archive
+            .facts::<Stamped>("stamp")
+            .map(|(_, stamped)| stamped.n)
+            .collect()
+    }
+
+    fn crossings(archive: &Archive) -> Vec<usize> {
+        let mut actions = 0;
+        let mut positions = Vec::new();
+        for row in archive.rows("stamp", RunJournalKind::Data) {
+            if matches!(
+                &row.payload,
+                ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+            ) {
+                positions.push(actions);
+            } else if is_action_row(row) {
+                actions += 1;
+            }
+        }
+        positions
+    }
+
+    fn live_after_crossing(archive: &Archive) -> usize {
+        crossings(archive).first().map_or(0, |crossing| {
+            stamped(archive).len().saturating_sub(*crossing)
+        })
+    }
+
+    async fn killed_when(
+        scenario: &Scenario,
+        args: Vec<String>,
+        name: &str,
+        holds: impl Fn(&Archive) -> bool,
+    ) -> PathBuf {
+        let child = Child::spawn(scenario, args, None);
+        let run = child.run().await;
+        until(&run, name, |archive| holds(archive)).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        run
+    }
+
+    fn mid_run(archive: &Archive) -> bool {
+        (3..TICKS as usize).contains(&stamped(archive).len())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_emit_only_stage_resumes_a_resume_killed_after_its_crossing() {
+        let name = "emit_only";
+        let scenario = fresh(name);
+        let first = killed_when(&scenario, Vec::new(), name, mid_run).await;
+        let torn = killed_when(&scenario, resume(&first), name, |archive| {
+            live_after_crossing(archive) >= 1 && stamped(archive).len() < TICKS as usize
+        })
+        .await;
+        let head = Child::spawn(&scenario, resume(&torn), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&head).await;
+        assert_eq!(
+            stamped(&archive),
+            (1..=TICKS).collect::<Vec<_>>(),
+            "{name}: every tick is stamped once, in order"
+        );
+        assert_eq!(
+            crossings(&archive).len(),
+            2,
+            "{name}: the head re-authors the torn run's crossing, then crosses itself"
+        );
+
+        remove_input(&input(&scenario));
+        let replayed = Child::spawn(&scenario, replay(&head), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&head, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+        assert_eq!(
+            crossings(&Archive::read(&replayed).await),
+            crossings(&archive),
+            "{name}: the replay re-authors each crossing where it was recorded"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_emit_only_resume_of_a_resume_needs_no_original_archive() {
+        let name = "emit_only_namespace";
+        let scenario = fresh(name);
+        let first = killed_when(&scenario, Vec::new(), name, mid_run).await;
+        let namespace = Archive::read(&first).await.manifest()["flow_id"].clone();
+        let rebuilt = killed_when(&scenario, resume(&first), name, |archive| {
+            archive.reconstruction_completed()
+                && live_after_crossing(archive) >= 1
+                && stamped(archive).len() < TICKS as usize
+        })
+        .await;
+        std::fs::remove_dir_all(&first).expect("delete the original archive");
+        let head = Child::spawn(&scenario, resume(&rebuilt), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&head).await;
+        assert_eq!(
+            stamped(&archive),
+            (1..=TICKS).collect::<Vec<_>>(),
+            "{name}: every tick is stamped once, in order"
+        );
+        assert_eq!(
+            archive.manifest()["recorded_flow_id"],
+            namespace,
+            "{name}: the head mints in the original run's namespace"
+        );
+    }
+}
+
+mod flash_sale {
+    use super::*;
+    use flash_sale_demo::domain::{ReservationConfirmed, SoldOut};
+    use flash_sale_demo::warehouse::WarehouseStats;
+
+    const INPUTS: usize = 6;
+
+    pub(super) fn config(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("obzenflow.toml")
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::FlashSale);
+        std::fs::write(
+            config(&scenario),
+            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 64\n\
+             stall_timeout_ms = 30000\n\n[app.warehouse]\nid = \"warehouse-contract\"\n\
+             reserve_latency_ms = 0\nreserve_unavailable = false\nreservation_pace_ms = 300\n",
+        )
+        .expect("write the configuration");
+        scenario
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        flash_sale_demo::flow::settings_flow(
+            flash_sale_demo::flow::scripted_inputs(),
+            std::sync::Arc::new(WarehouseStats::default()),
+            scenario.journals(),
+        )
+    }
+
+    fn settled(archive: &Archive) -> usize {
+        archive
+            .rows("allocate_stock", RunJournalKind::Data)
+            .filter(|row| row.consumes_data_credit())
+            .count()
+    }
+
+    fn confirmations(archive: &Archive) -> Vec<(String, u64)> {
+        archive
+            .facts::<ReservationConfirmed>("reservation_desk")
+            .map(|(_, confirmed)| (confirmed.order_id.0, confirmed.confirmation))
+            .collect()
+    }
+
+    fn crossed(archive: &Archive) -> bool {
+        archive
+            .rows("allocate_stock", RunJournalKind::Data)
+            .any(|row| {
+                matches!(
+                    &row.payload,
+                    ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+                )
+            })
+    }
+
+    async fn killed_when(
+        scenario: &Scenario,
+        args: Vec<String>,
+        name: &str,
+        holds: impl Fn(&Archive) -> bool,
+    ) -> PathBuf {
+        let child = Child::spawn(scenario, args, None);
+        let run = child.run().await;
+        until(&run, name, |archive| holds(archive)).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        run
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_reservation_desk_keeps_its_confirmations_across_resumes() {
+        let name = "flash_sale";
+        let scenario = fresh(name);
+        let killed = killed_when(&scenario, Vec::new(), name, |archive| {
+            archive.eof("allocation_inputs") == Some(EofKind::Natural)
+                && archive.eof("phone_reservations") == Some(EofKind::Natural)
+                && (1..INPUTS).contains(&settled(archive))
+        })
+        .await;
+        let again = fresh("flash_sale_again");
+        let killed_copy = copy_run(&killed, &again);
+
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&resumed).await;
+        assert_eq!(
+            settled(&archive),
+            INPUTS,
+            "{name}: every input settles once"
+        );
+        assert!(
+            archive
+                .facts::<SoldOut>("allocate_stock")
+                .all(|(row, _)| row.authored().effect_provenance.is_none()),
+            "{name}: a sold-out order settles without a warehouse call"
+        );
+        assert_lineage_at_crossing(&archive, "allocate_stock", name);
+        let issued = confirmations(&archive);
+        assert_eq!(
+            issued.len(),
+            5,
+            "{name}: three phone and two online reservations"
+        );
+
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+        assert_eq!(
+            confirmations(&Archive::read(&replayed).await),
+            issued,
+            "{name}: the replay keeps every confirmation number"
+        );
+
+        let torn = killed_when(&again, resume(&killed_copy), name, |archive| {
+            crossed(archive) && settled(archive) < INPUTS
+        })
+        .await;
+        let before_kill = confirmations(&Archive::read(&torn).await);
+        let head = Child::spawn(&again, resume(&torn), None).completed().await;
+        let finished = confirmations(&Archive::read(&head).await);
+        assert!(
+            finished.starts_with(&before_kill),
+            "{name}: every confirmation issued before the kill stays: {before_kill:?} then \
+             {finished:?}"
+        );
+        assert_eq!(
+            finished.len(),
+            5,
+            "{name}: the head confirms every reservation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_resume_continues_with_plain_resume_from() {
+        let name = "flash_sale_refused";
+        let scenario = fresh(name);
+        let killed = killed_when(&scenario, Vec::new(), name, |archive| {
+            archive.eof("allocation_inputs") == Some(EofKind::Natural)
+                && archive.eof("phone_reservations") == Some(EofKind::Natural)
+                && (1..INPUTS).contains(&settled(archive))
+        })
+        .await;
+        let recorded = std::fs::read_to_string(config(&scenario)).expect("read the configuration");
+        std::fs::write(
+            config(&scenario),
+            recorded.replace("warehouse-contract", "warehouse-other"),
+        )
+        .expect("change the warehouse id");
+
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let refused = child.run().await;
+        let log = child.log.clone();
+        assert!(
+            !child.exit().await.success(),
+            "{name}: the changed id refuses the resume"
+        );
+        let output = read_log(&log);
+        let remedy = output
+            .lines()
+            .find(|line| line.starts_with("To continue this run, restore what "))
+            .unwrap_or_else(|| panic!("{name}: the failure names its remedy: {output}"));
+        let dir_name = |run: &Path| run.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            remedy.contains(&format!(
+                "{} recorded, then add: --resume-from ",
+                dir_name(&killed)
+            )) && remedy.ends_with(&dir_name(&refused)),
+            "{name}: {remedy}"
+        );
+
+        std::fs::write(config(&scenario), recorded).expect("restore the warehouse id");
+        let resumed = Child::spawn(&scenario, resume(&refused), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&resumed).await;
+        assert_eq!(
+            settled(&archive),
+            INPUTS,
+            "{name}: every input settles once"
+        );
+        assert_lineage_at_crossing(&archive, "allocate_stock", name);
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(resumed.join("run_manifest.json")).expect("read the manifest"),
+        )
+        .expect("parse the manifest");
+        assert_eq!(
+            manifest["replay"]["allow_incomplete_archive"],
+            serde_json::json!(false),
+            "{name}: the remedy run records no override"
+        );
+    }
+}
+
+mod lagging {
+    use super::*;
+    use obzenflow::flow::transform;
+    use obzenflow::middleware::SinkDeliveryObserver;
+    use obzenflow::middleware::{rate_limit, sink_delivery_observer, ObserverResult};
+    use obzenflow::stages::sinks::{
+        ConsoleSink, DeliveryProvenance, SinkConnector, SinkOperationResult, SinkTerminalOutcome,
+        SinkWriteContext, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
+    };
+    use obzenflow::stages::transforms::TypedTransformHandler;
+
+    const ITEMS: u64 = 8;
+    const BANNER: &str = "Durable execution contract: unordered fan-in";
+
+    pub(super) fn presentation() -> obzenflow::application::Presentation {
+        obzenflow::application::Presentation::new(obzenflow::application::Banner::new(BANNER))
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Item {
+        n: u64,
+    }
+    impl TypedPayload for Item {
+        const EVENT_TYPE: &'static str = "durable_contract.lagging.item";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Combined {
+        n: u64,
+    }
+    impl TypedPayload for Combined {
+        const EVENT_TYPE: &'static str = "durable_contract.lagging.combined";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Written {
+        n: u64,
+        live: bool,
+    }
+
+    fn input(scenario: &Scenario, file: &str) -> PathBuf {
+        scenario.inputs.join(file)
+    }
+
+    fn written(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("written.jsonl")
+    }
+
+    fn observed(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("observed.jsonl")
+    }
+
+    fn write_items(path: &Path, items: impl Iterator<Item = u64>) {
+        let rows: String = items.map(|n| format!("  - n: {n}\n")).collect();
+        std::fs::write(path, format!("items:\n{rows}")).expect("write items");
+    }
+
+    fn fresh(name: &str, graph: Graph) -> Scenario {
+        let scenario = Scenario::for_graph(name, graph);
+        match graph {
+            Graph::UnorderedFanIn => {
+                write_items(&input(&scenario, "left.yaml"), 1..=ITEMS / 2);
+                write_items(&input(&scenario, "right.yaml"), ITEMS / 2 + 1..=ITEMS);
+            }
+            _ => write_items(&input(&scenario, "items.yaml"), 1..=ITEMS),
+        }
+        scenario
+    }
+
+    #[derive(Clone, Debug)]
+    struct ItemYaml;
+    impl YamlDecoder for ItemYaml {
+        type Output = Item;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<Item, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    fn items(path: PathBuf) -> YamlSource<ItemYaml> {
+        YamlSource::builder(ItemYaml)
+            .path(path)
+            .selection(YamlSelection::SequenceAt("/items".into()))
+            .batch_size(1)
+            .build()
+            .expect("the item channel is configured")
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingSink {
+        path: PathBuf,
+    }
+
+    #[derive(Debug)]
+    struct RecordingWriter {
+        path: PathBuf,
+    }
+
+    #[async_trait]
+    impl SinkConnector for RecordingSink {
+        type Input = Item;
+        type Writer = RecordingWriter;
+
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::method(DeliveryMethod::FileWrite {
+                path: self.path.clone(),
+            })
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        }
+
+        async fn open(
+            &self,
+            _context: SinkWriterInitContext,
+        ) -> SinkOperationResult<RecordingWriter> {
+            Ok(RecordingWriter {
+                path: self.path.clone(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SinkWriter for RecordingWriter {
+        type Input = Item;
+
+        async fn write(&mut self, item: Item, context: SinkWriteContext) -> SinkWriteResult {
+            let live = context.delivery().provenance() == DeliveryProvenance::Live;
+            append_line(&self.path, &Written { n: item.n, live }).map_err(|error| {
+                SinkWriteFailure::current_only(
+                    SinkWritePhase::Execute,
+                    SinkOperationError::remote(error.to_string()),
+                )
+            })?;
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
+                None,
+            )))
+        }
+    }
+
+    struct Observed {
+        path: PathBuf,
+    }
+
+    impl SinkDeliveryObserver for Observed {
+        type Input = Item;
+
+        fn on_delivered(&self, item: &Item) -> ObserverResult {
+            append_line(&self.path, &item.n)?;
+            Ok(())
+        }
+    }
+
+    pub(super) fn rate_limited_flow(scenario: &Scenario) -> FlowDefinition {
+        let items_input = items(input(scenario, "items.yaml"));
+        let recording = RecordingSink {
+            path: written(scenario),
+        };
+        let observer = Observed {
+            path: observed(scenario),
+        };
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            Ok(flow! {
+                name: "durable_execution_contract_rate_limited_sink",
+                journals: disk_journals(journals),
+
+                stages: {
+                    items = source!(Item => items_input);
+                    deliver = sink!(Item => recording with {
+                        rate_limit(4.0).burst_capacity(1.0),
+                        sink_delivery_observer("observed", observer)
+                    });
+                },
+
+                topology: {
+                    items |> deliver;
+                }
+            })
+        })
+    }
+
+    #[derive(Clone, Debug)]
+    struct Combine;
+    impl TypedTransformHandler for Combine {
+        type Input = Item;
+        type Output = Combined;
+
+        fn process(&self, item: Item) -> Result<Combined, HandlerError> {
+            Ok(Combined { n: item.n })
+        }
+    }
+
+    pub(super) fn fan_in_flow(scenario: &Scenario) -> FlowDefinition {
+        let left_input = items(input(scenario, "left.yaml"));
+        let right_input = items(input(scenario, "right.yaml"));
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let print = ConsoleSink::new(|combined: &Combined| format!("item {}", combined.n));
+            Ok(flow! {
+                name: "durable_execution_contract_unordered_fan_in",
+                journals: disk_journals(journals),
+
+                stages: {
+                    left = source!(Item => left_input);
+                    right = source!(Item => right_input);
+                    combine = transform!(Item -> Combined => Combine);
+                    print = sink!(
+                        Combined => print with { rate_limit(4.0).burst_capacity(1.0) },
+                        delivery: idempotent
+                    );
+                },
+
+                topology: {
+                    left |> combine;
+                    right |> combine;
+                    combine |> print;
+                }
+            })
+        })
+    }
+
+    fn deliveries(archive: &Archive, sink: &str) -> usize {
+        archive
+            .rows(sink, RunJournalKind::Data)
+            .filter(|row| {
+                matches!(&row.payload, ChainPayload::Delivery(delivery)
+                    if matches!(delivery.result, DeliveryResult::Success { .. }))
+            })
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lagging_rate_limited_sink_delivers_its_first_rows_live() {
+        let name = "rate_limited_sink";
+        let scenario = fresh(name, Graph::RateLimitedSink);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive| {
+            archive.eof("items") == Some(EofKind::Natural)
+                && (2..ITEMS as usize).contains(&deliveries(archive, "deliver"))
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        let settled: BTreeSet<u64> =
+            delivered_keys(&at_kill, "items", "deliver", |item: Item| item.n)
+                .into_iter()
+                .collect();
+        let written_before = read_lines::<Written>(&written(&scenario)).len();
+        let observed_before = read_lines::<u64>(&observed(&scenario)).len();
+
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        let writes: Vec<Written> = read_lines(&written(&scenario))
+            .into_iter()
+            .skip(written_before)
+            .collect();
+        assert_eq!(
+            writes.iter().map(|write| write.n).collect::<BTreeSet<_>>(),
+            (1..=ITEMS).collect(),
+            "{name}: the resumed run writes every item"
+        );
+        for write in &writes {
+            assert_eq!(
+                write.live,
+                !settled.contains(&write.n),
+                "{name}: item {} is labelled by its own delivery",
+                write.n
+            );
+        }
+        let first: BTreeSet<u64> = writes
+            .iter()
+            .filter(|write| write.live)
+            .map(|write| write.n)
+            .collect();
+        assert_eq!(
+            read_lines::<u64>(&observed(&scenario))
+                .into_iter()
+                .skip(observed_before)
+                .collect::<BTreeSet<_>>(),
+            first,
+            "{name}: observers run for exactly the first deliveries"
+        );
+
+        let archive = Archive::read(&resumed).await;
+        let inputs: BTreeMap<EventId, u64> = archive
+            .facts::<Item>("items")
+            .map(|(row, item)| (*row.id(), item.n))
+            .collect();
+        let rows: Vec<_> = archive.rows("deliver", RunJournalKind::Data).collect();
+        let last_redelivery = rows
+            .iter()
+            .rposition(|row| match &row.payload {
+                ChainPayload::Delivery(delivery) => inputs
+                    .get(&delivery.subject.input.event_id)
+                    .is_some_and(|n| settled.contains(n)),
+                _ => false,
+            })
+            .expect("the resume re-delivers the settled prefix");
+        let limiter_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.event_type()
+                    .as_str()
+                    .starts_with("runtime.rate_limiter.")
+            })
+            .map(|(position, _)| position)
+            .collect();
+        assert!(
+            !limiter_rows.is_empty(),
+            "{name}: the first deliveries pass the limiter"
+        );
+        assert!(
+            limiter_rows
+                .iter()
+                .all(|position| *position > last_redelivery),
+            "{name}: re-deliveries write no limiter evidence"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lagging_sink_below_an_unordered_fan_in_follows_generation() {
+        let name = "unordered_fan_in";
+        let scenario = fresh(name, Graph::UnorderedFanIn);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive| {
+            archive.eof("left") == Some(EofKind::Natural)
+                && archive.eof("right") == Some(EofKind::Natural)
+                && (1..ITEMS as usize).contains(&deliveries(archive, "print"))
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let log = child.log.clone();
+        child.completed().await;
+        let log = read_log(&log);
+        let (_, after_banner) = log.split_once(BANNER).expect("the banner prints");
+        assert!(
+            after_banner.contains(
+                "Sink print reads through combine, which takes its inputs in arrival order, so \
+                 deliveries it had not made before the stop are labelled [replay] and skip its \
+                 delivery policy."
+            ),
+            "{name}: the notice prints after the banner: {log}"
+        );
+        let printed: Vec<&str> = log
+            .lines()
+            .filter(|line| line.starts_with("item ") || line.starts_with("[replay] item "))
+            .collect();
+        let first_live = printed
+            .iter()
+            .position(|line| line.starts_with("item "))
+            .unwrap_or(printed.len());
+        assert!(
+            printed[first_live..]
+                .iter()
+                .all(|line| line.starts_with("item ")),
+            "{name}: the sink follows generation, replay before live: {printed:?}"
+        );
+        assert_eq!(
+            printed
+                .iter()
+                .map(|line| line.trim_start_matches("[replay] "))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            ITEMS as usize,
+            "{name}: every item prints"
+        );
     }
 }

@@ -25,6 +25,7 @@ pub struct StageFatal {
     pub reason: StageFatalReason,
     pub detail: String,
     pub primary_cause_event_id: Option<EventId>,
+    pub departure: Option<Box<obzenflow_core::event::Departure>>,
 }
 
 impl StageFatal {
@@ -42,11 +43,18 @@ impl StageFatal {
             reason,
             detail,
             primary_cause_event_id: None,
+            departure: None,
         }
     }
 
     pub fn secondary_to(mut self, primary_cause_event_id: EventId) -> Self {
         self.primary_cause_event_id = Some(primary_cause_event_id);
+        self
+    }
+
+    /// Attach the two actions a rebuild's check compared.
+    pub fn with_departure(mut self, departure: obzenflow_core::event::Departure) -> Self {
+        self.departure = Some(Box::new(departure));
         self
     }
 }

@@ -538,8 +538,6 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
 
     pub(crate) pending_promotion: Option<(JoinSubscriptionSide, obzenflow_core::ReaderGeneration)>,
 
-    pub(crate) archived_phases: Vec<JoinPhaseFact>,
-
     /// Live-mode fairness cap (see `JoinConfig.reference_batch_cap`).
     pub reference_batch_cap: Option<usize>,
 
@@ -596,10 +594,7 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
 
     pub(crate) recorded_order: Option<crate::messaging::upstream_subscription::RecordedOrder>,
 
-    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
-    /// flipped at, making the flip idempotent per generation across both
-    /// triggers (watermark and authored EOF) and both sides.
-    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
+    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 }
 
 pub struct JoinContext<H: UnifiedJoinHandler> {
@@ -790,10 +785,11 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 ctx.stream_subscription = Some(stream_subscription);
 
                 if let Some(archive) = ctx.runtime_execution.archive_for_io().cloned() {
-                    ctx.archived_phases =
+                    let archived_phases =
                         super::phase::load_archived_phases(&archive, &ctx.stage_name)
                             .await
                             .map_err(obzenflow_fsm::FsmError::HandlerError)?;
+                    ctx.catch_up.install_join_phases(archived_phases).await;
                 }
 
                 if let Some(recorded) = &ctx.recorded {

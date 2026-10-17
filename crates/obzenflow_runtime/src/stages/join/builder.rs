@@ -221,7 +221,6 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             witnessed_eofs: std::collections::HashMap::new(),
             drain_without_held_inputs: false,
             pending_promotion: None,
-            archived_phases: Vec::new(),
             reference_batch_cap: self.config.reference_batch_cap,
             reference_since_last_stream: 0,
             events_since_last_heartbeat: 0,
@@ -240,7 +239,18 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             deterministic_fan_in,
             recorded,
             recorded_order: None,
-            catch_up_flip: None,
+            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+                crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                    &self.config.flow_name,
+                    &self.resources.flow_id.to_string(),
+                    &self.config.stage_name,
+                    self.config.stage_id,
+                    obzenflow_core::event::context::StageType::Join,
+                ),
+                self.resources.data_journal.clone(),
+                instrumentation.clone(),
+                self.resources.runtime_execution.clone(),
+            ),
         };
 
         let context = JoinContext::new(resources);

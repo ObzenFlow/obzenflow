@@ -129,6 +129,7 @@ pub(super) async fn start_if_eligible<
         backpressure_writer: effect_writer,
         emit_enabled: true,
         effect_boundary: None,
+        catch_up: Some(ctx.catch_up.clone()),
     };
     let instrumentation_for_future = instrumentation.clone();
     let future = Box::pin(async move {

@@ -61,10 +61,6 @@ pub use boundary::{
     SourcePollCompletion, SourcePollExecution, SourcePollReport, SourcePollResult,
 };
 
-#[doc(hidden)]
-pub use crate::stages::common::handlers::source::{
-    sources_refusing_resume, RefusedBy, ResumeRefusal, SourceContinuation,
-};
 pub use crate::stages::common::handlers::source::{
     AsyncFiniteContinuation, AsyncInfiniteContinuation, AtMostOnce, FiniteContinuation,
     InfiniteContinuation, LatestState, LiveGuarantee, PositionedFiniteReader, Reattach,
@@ -72,6 +68,8 @@ pub use crate::stages::common::handlers::source::{
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
 };
+#[doc(hidden)]
+pub use crate::stages::common::handlers::source::{RefusedBy, ResumeRefusal, SourceContinuation};
 pub use connector::{
     AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
     InfiniteSourceConnector, SourceReaderInitContext,

@@ -25,19 +25,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 static NEXT_PENDING_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
-/// FLOWIP-120i per-delivery provenance projection.
+/// A delivery's provenance, derived from its own execution scope alone.
 #[derive(Debug, Clone)]
 pub struct DeliveryContext {
     provenance: DeliveryProvenance,
 }
 
 impl DeliveryContext {
-    fn from_event_and_scope(
-        event: &ChainEvent,
-        scope: obzenflow_core::MiddlewareExecutionScope,
-    ) -> Self {
+    fn from_scope(scope: obzenflow_core::MiddlewareExecutionScope) -> Self {
         Self {
-            provenance: if scope.is_deterministic_replay() || event.replay_context.is_some() {
+            provenance: if scope.is_deterministic_replay() {
                 DeliveryProvenance::Replayed
             } else {
                 DeliveryProvenance::Live
@@ -952,7 +949,7 @@ impl<W> SinkWriterAdapter<W> {
         let pending = lock_pending_registry(&self.registry).mint(subject);
         let current = pending.identity;
         let context = SinkWriteContext {
-            delivery: DeliveryContext::from_event_and_scope(&event, scope),
+            delivery: DeliveryContext::from_scope(scope),
             pending,
             registry: Arc::clone(&self.registry),
         };

@@ -1621,6 +1621,7 @@ async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_sa
         live_word.last().copied(),
         "the live destination row is the final delivered value"
     );
+    drop(handle);
 
     let replay_probe = PostgresTestProbe::default();
     FlowApplication::builder()

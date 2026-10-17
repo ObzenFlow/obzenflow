@@ -6,9 +6,28 @@ use super::*;
 use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::CausalFrontier;
 use obzenflow_core::journal::ArchiveStatus;
+use obzenflow_core::{EventDescriptor, StageKey};
 use std::collections::{BTreeMap, HashSet};
 
 type GroupedJournalEvents = HashMap<String, Vec<(usize, Option<JournalGroupMember>, ChainEvent)>>;
+
+enum HistoryScan {
+    Cursors,
+    Actions {
+        pass_through: Option<EventDescriptor>,
+    },
+}
+
+impl HistoryScan {
+    fn actions(&self) -> Option<super::actions::ActionScan> {
+        match self {
+            Self::Cursors => None,
+            Self::Actions { pass_through } => Some(super::actions::ActionScan::passing_through(
+                pass_through.clone(),
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct EffectCursorCoordinator {
@@ -89,6 +108,7 @@ pub struct EffectHistory {
     grouped_events: Arc<GroupedJournalEvents>,
     attempt_positions: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), usize>>,
     attempt_events: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), ChainEvent>>,
+    actions: Arc<super::RecordedActions>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,36 +147,56 @@ impl EffectCursorHistory {
 }
 
 impl EffectHistory {
-    /// A resume joins each cursor's history across the archive and the
-    /// ancestors it merges with (FLOWIP-134i B6), oldest first, failing closed
-    /// where they conflict. F7's recorded mark then derives from the join.
+    /// Load the cursor histories of a stage without an effect runtime from
+    /// `archive` and the ancestors it merges with, oldest first.
     pub async fn load(
         archive: &Arc<dyn ReplayArchive>,
-        stage_key: &str,
+        stage: &StageKey,
+    ) -> Result<Self, EffectError> {
+        Self::load_lineage(archive, stage, &HistoryScan::Cursors).await
+    }
+
+    /// Load the history of a stage with an effect runtime, its recorded actions
+    /// joined across the lineage and excluding rows of its pass-through type.
+    pub async fn load_with_actions(
+        archive: &Arc<dyn ReplayArchive>,
+        stage: &StageKey,
+        pass_through: Option<&EventDescriptor>,
+    ) -> Result<Self, EffectError> {
+        let scan = HistoryScan::Actions {
+            pass_through: pass_through.cloned(),
+        };
+        Self::load_lineage(archive, stage, &scan).await
+    }
+
+    async fn load_lineage(
+        archive: &Arc<dyn ReplayArchive>,
+        stage: &StageKey,
+        scan: &HistoryScan,
     ) -> Result<Self, EffectError> {
         let mut joined: Option<Self> = None;
         for ancestor in archive.ancestors().iter().rev() {
             if matches!(
-                ancestor.archived_stage_id(stage_key),
+                ancestor.archived_stage_id(stage.as_str()),
                 Err(ReplayError::StageNotInManifest { .. })
             ) {
                 continue;
             }
-            let older = Self::load_archive(ancestor, stage_key).await?;
+            let older = Self::load_archive(ancestor, stage.as_str(), scan).await?;
             joined = Some(match joined {
-                Some(oldest) => oldest.joined_with(&older)?,
+                Some(oldest) => oldest.joined_with(&older, stage)?,
                 None => older,
             });
         }
-        let head = Self::load_archive(archive, stage_key).await?;
+        let head = Self::load_archive(archive, stage.as_str(), scan).await?;
         match joined {
-            Some(ancestors) => ancestors.joined_with(&head),
+            Some(ancestors) => ancestors.joined_with(&head, stage),
             None => Ok(head),
         }
     }
 
-    /// Join a newer run's history over this one, per cursor.
-    pub(super) fn joined_with(self, newer: &Self) -> Result<Self, EffectError> {
+    pub(super) fn joined_with(self, newer: &Self, stage: &StageKey) -> Result<Self, EffectError> {
+        let actions = self.actions.joined_with(&newer.actions, stage)?;
         let cursors: std::collections::HashSet<EffectCursor> = [&self, newer]
             .into_iter()
             .flat_map(|history| {
@@ -186,7 +226,14 @@ impl EffectHistory {
         } else {
             self.recorded_flow_id.clone()
         };
-        Ok(Self::from_cursor_histories(recorded_flow_id, histories))
+        let mut history = Self::from_cursor_histories(recorded_flow_id, histories);
+        let actions = actions.with_in_doubt(|cursor| !history.index.contains_key(cursor));
+        history.actions = Arc::new(actions);
+        Ok(history)
+    }
+
+    pub(crate) fn actions(&self) -> &Arc<super::RecordedActions> {
+        &self.actions
     }
 
     fn holds_evidence(&self) -> bool {
@@ -260,12 +307,14 @@ impl EffectHistory {
             grouped_events: Arc::new(grouped_events),
             attempt_positions: Arc::new(attempt_positions),
             attempt_events: Arc::new(attempt_events),
+            actions: Arc::new(super::RecordedActions::default()),
         }
     }
 
     async fn load_archive(
         archive: &Arc<dyn ReplayArchive>,
         stage_key: &str,
+        scan: &HistoryScan,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
@@ -278,12 +327,16 @@ impl EffectHistory {
         let mut attempt_positions = HashMap::new();
         let mut attempt_events = HashMap::new();
         let mut position = 0_usize;
+        let mut actions = scan.actions();
 
         while let Some(envelope) = reader
             .next()
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
+            if let Some(actions) = actions.as_mut() {
+                actions.observe(&envelope.authored())?;
+            }
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
                 causal
                     .entry(effect.cursor.clone())
@@ -382,13 +435,32 @@ impl EffectHistory {
             }
         }
 
+        if let Some(namespace) = archive.recorded_flow_id() {
+            if let Some(record) = records
+                .iter()
+                .find(|record| record.cursor.recorded_flow_id.as_str() != namespace)
+            {
+                return Err(EffectError::ReplayArchive(format!(
+                    "stage '{stage_key}' recorded an effect in namespace `{}`, but its run \
+                     records namespace `{namespace}`",
+                    record.cursor.recorded_flow_id
+                )));
+            }
+        }
+        let fallback_namespace = archive
+            .recorded_flow_id()
+            .unwrap_or(archive.archive_flow_id())
+            .to_string();
         // Only a non-`Completed` archive may carry a torn tail, so only then is
         // an incomplete outcome group tolerated as absent.
         let mut history = Self::from_records_with_policy(
-            archive.archive_flow_id().to_string(),
+            fallback_namespace,
             records,
             archive.archive_status() != ArchiveStatus::Completed,
         )?;
+        if let Some(namespace) = archive.recorded_flow_id() {
+            history.recorded_flow_id = RecordedFlowId::from(namespace.to_string());
+        }
         validate_attempt_grammar(
             &attempts,
             &history.index,
@@ -420,6 +492,15 @@ impl EffectHistory {
         history.attempt_events = Arc::new(attempt_events);
         validate_group_grammar(&history, &grouped_events)?;
         history.grouped_events = Arc::new(grouped_events);
+        let actions = actions.unwrap_or_default().finish(
+            |cursor| {
+                history.index.contains_key(cursor)
+                    || history.attempts.contains_key(cursor)
+                    || history.abandonments.contains_key(cursor)
+            },
+            |cursor| !history.index.contains_key(cursor),
+        );
+        history.actions = Arc::new(actions);
         Ok(history)
     }
 
@@ -435,16 +516,42 @@ impl EffectHistory {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_actions_for_test(
+        recorded_flow_id: impl Into<RecordedFlowId>,
+        actions: Vec<super::RecordedAction>,
+        anchors: HashMap<super::ActionRow, obzenflow_core::ReaderGeneration>,
+    ) -> Self {
+        let mut built = Self::from_cursor_histories(recorded_flow_id.into(), Vec::new());
+        built.actions = Arc::new(super::RecordedActions::new(actions, anchors));
+        built
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_cursor_history_for_test(
         recorded_flow_id: impl Into<RecordedFlowId>,
         cursor: EffectCursor,
         history: EffectCursorHistory,
     ) -> Result<Self, EffectError> {
         validate_cursor_history(&cursor, &history)?;
-        Ok(Self::from_cursor_histories(
-            recorded_flow_id.into(),
-            vec![(cursor, history)],
-        ))
+        let action = super::RecordedAction::Effect {
+            cursor: cursor.clone(),
+            effect_type: history
+                .attempts
+                .first()
+                .map(|started| started.effect_type.clone())
+                .or_else(|| {
+                    history
+                        .records
+                        .first()
+                        .map(|record| record.descriptor.effect_type.clone())
+                })
+                .unwrap_or_else(|| EffectType::from("")),
+            in_doubt: history.records.is_empty(),
+        };
+        let mut built =
+            Self::from_cursor_histories(recorded_flow_id.into(), vec![(cursor, history)]);
+        built.actions = Arc::new(super::RecordedActions::new(vec![action], HashMap::new()));
+        Ok(built)
     }
 
     /// Build under an explicit torn-tail policy. With `tolerate_torn_tail` false
@@ -507,6 +614,19 @@ impl EffectHistory {
         }
 
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
+        let mut ordered = Vec::<super::RecordedAction>::new();
+        for record in &records {
+            if index.contains_key(&record.cursor)
+                && !ordered
+                    .iter()
+                    .any(|action| action.cursor() == Some(&record.cursor))
+            {
+                ordered.push(super::RecordedAction::recorded(
+                    record.cursor.clone(),
+                    &record.descriptor.effect_type,
+                ));
+            }
+        }
 
         Ok(Self {
             causal: Arc::new(HashMap::new()),
@@ -524,6 +644,7 @@ impl EffectHistory {
             grouped_events: Arc::new(HashMap::new()),
             attempt_positions: Arc::new(HashMap::new()),
             attempt_events: Arc::new(HashMap::new()),
+            actions: Arc::new(super::RecordedActions::new(ordered, HashMap::new())),
         })
     }
 
@@ -616,18 +737,6 @@ impl EffectHistory {
 
     pub fn recorded_flow_id(&self) -> &RecordedFlowId {
         &self.recorded_flow_id
-    }
-
-    /// Maximum recorded `input_seq` in the surviving index (FLOWIP-120n F7):
-    /// a position at or below it is recorded prefix, beyond it live tail.
-    /// Computed after torn-tail groups are dropped, so a torn boundary group
-    /// lowers the mark and resume re-executes it rather than failing loud.
-    pub fn max_recorded_input_seq(&self) -> Option<u64> {
-        self.index
-            .keys()
-            .chain(self.attempts.keys())
-            .map(|cursor| cursor.input_seq.get())
-            .max()
     }
 }
 

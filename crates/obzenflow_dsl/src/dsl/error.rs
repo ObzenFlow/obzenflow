@@ -5,71 +5,10 @@
 use thiserror::Error;
 
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
-use obzenflow_runtime::bootstrap::ReplayVerb;
-use obzenflow_runtime::stages::source::{RefusedBy, ResumeRefusal};
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
 use std::path::{Path, PathBuf};
-
-// One diagnostic names every source whose connector, or direct handler, cannot
-// continue its interrupted input (FLOWIP-134i B8, FLOWIP-122i).
-fn unfinished_sources_refusal(archive: &Path, sources: &[String], by: RefusedBy) -> String {
-    let quoted: Vec<String> = sources.iter().map(|source| format!("'{source}'")).collect();
-    let named = match quoted.as_slice() {
-        [] => String::new(),
-        [only] => only.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    };
-    let refuser = match by {
-        RefusedBy::Connector => "connector",
-        RefusedBy::Handler => "handler",
-    };
-    let (subject, their, refusers) = if sources.len() == 1 {
-        ("source", "its", format!("its {refuser} cannot"))
-    } else {
-        ("sources", "their", format!("their {refuser}s cannot"))
-    };
-    format!(
-        "cannot resume {}: {subject} {named} stopped with {their} input unfinished, and \
-         {refusers} continue interrupted input.\nUse a connector that continues \
-         interrupted input, or implement one.",
-        archive.display()
-    )
-}
-
-// Every source a resume refuses at archive admission, before any claim
-// (FLOWIP-134i B8, B22).
-fn resume_refusal(archive: &Path, refusals: &[(String, ResumeRefusal)]) -> String {
-    let mut paragraphs = Vec::new();
-    for refuser in [RefusedBy::Connector, RefusedBy::Handler] {
-        let unfinished: Vec<String> = refusals
-            .iter()
-            .filter(|(_, refusal)| *refusal == ResumeRefusal::UnfinishedInput { by: refuser })
-            .map(|(source, _)| source.clone())
-            .collect();
-        if !unfinished.is_empty() {
-            paragraphs.push(unfinished_sources_refusal(archive, &unfinished, refuser));
-        }
-    }
-    for (source, refusal) in refusals {
-        match refusal {
-            ResumeRefusal::UnfinishedInput { .. } => {}
-            ResumeRefusal::RecordedWithoutPositions => paragraphs.push(format!(
-                "cannot resume {}: source '{source}' recorded its input without positions, so \
-                 its connector cannot continue it from where it stopped.\nStart a new run.",
-                archive.display()
-            )),
-            ResumeRefusal::PositionVersion { recorded, expected } => paragraphs.push(format!(
-                "cannot resume {}: source '{source}' recorded positions in version {recorded} \
-                 of its connector's format, and the connector now reads version {expected}.\n\
-                 Resume with the version that recorded them, or start a new run.",
-                archive.display()
-            )),
-        }
-    }
-    paragraphs.join("\n")
-}
 
 fn journal_root_unused(root: &Path, located: Option<&Path>) -> String {
     match located {
@@ -83,45 +22,6 @@ fn journal_root_unused(root: &Path, located: Option<&Path>) -> String {
             root.display(),
             located.display()
         ),
-    }
-}
-
-// Verb-aware refusal copy for the archive sink delivery-safety gate
-// (FLOWIP-120n F16, extended to both archive verbs by FLOWIP-120v): one
-// variant pair serves both verbs.
-fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> String {
-    let (flag, re_execution) = match verb {
-        ReplayVerb::Replay => (
-            "--replay-from",
-            "deterministic replay re-consumes the recorded stream, so this sink would \
-             re-perform its external writes",
-        ),
-        ReplayVerb::Resume => (
-            "--resume-from",
-            "resume re-delivers the recorded prefix during catch-up, which would \
-             duplicate those writes",
-        ),
-    };
-    if undeclared {
-        format!(
-            "{flag} refused: sink '{stage}' has no redelivery-safety classification; \
-             {re_execution}, and the gate fails closed on undeclared sinks \
-             (FLOWIP-120n F16, FLOWIP-120v). Bind the sink before `flow!`, then use \
-             `delivery: idempotent` or `delivery: non_idempotent` on its `sink!` row, \
-             or return a \
-             classified `SinkDescription` from a custom `SinkConnector` or \
-             `InlineSink`. A duplicate-sensitive external write belongs behind \
-             the effect boundary (effectful transform plus plain sink). Or pass \
-             `allow_duplicate_sink_delivery`."
-        )
-    } else {
-        format!(
-            "{flag} refused: sink '{stage}' declares a duplicate-sensitive external \
-             delivery path; {re_execution} (FLOWIP-120n F16, FLOWIP-120v). Declare \
-             `delivery: idempotent` if the destination absorbs duplicates, route the \
-             write through the effect boundary (effectful transform plus plain sink), \
-             or pass `allow_duplicate_sink_delivery` to accept the duplication."
-        )
     }
 }
 
@@ -443,11 +343,9 @@ pub enum FlowBuildError {
     )]
     OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
 
-    #[error("{}", archive_sink_refusal(.verb, .stage, false))]
-    ArchiveRefusedNonIdempotentSink { stage: String, verb: ReplayVerb },
-
-    #[error("{}", archive_sink_refusal(.verb, .stage, true))]
-    ArchiveRefusedUndeclaredSink { stage: String, verb: ReplayVerb },
+    /// Archive admission refused the verb; displays the refusal verbatim.
+    #[error("{0}")]
+    ArchiveVerbRefused(obzenflow_core::journal::archive_actions::ArchiveRefusal),
 
     #[error(
         "Resume requires a durable current run (FLOWIP-120u F13). The live continuation \
@@ -457,12 +355,6 @@ pub enum FlowBuildError {
          for an effect-free bounded rehearsal."
     )]
     ResumeRefusedEphemeralRun,
-
-    #[error("{}", resume_refusal(.archive, .refusals))]
-    ResumeRefusedSources {
-        archive: PathBuf,
-        refusals: Vec<(String, ResumeRefusal)>,
-    },
 
     /// The resume could not take its parent's continuation claim (FLOWIP-134i
     /// B12); its run directory remains as an orphan that ran no stage.
@@ -516,110 +408,5 @@ impl FlowBuildError {
 impl From<FlowBuildError> for String {
     fn from(err: FlowBuildError) -> Self {
         err.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unfinished_source_refusal_names_every_source() {
-        let archive = Path::new("/runs/interrupted");
-        assert_eq!(
-            unfinished_sources_refusal(archive, &["web_orders".to_string()], RefusedBy::Connector),
-            "cannot resume /runs/interrupted: source 'web_orders' stopped with its input \
-             unfinished, and its connector cannot continue interrupted input.\nUse a connector \
-             that continues interrupted input, or implement one."
-        );
-        assert!(unfinished_sources_refusal(
-            archive,
-            &["a".to_string(), "b".to_string(), "c".to_string()],
-            RefusedBy::Connector
-        )
-        .starts_with(
-            "cannot resume /runs/interrupted: sources 'a', 'b' and 'c' stopped with their \
-             input unfinished, and their connectors cannot continue interrupted input."
-        ));
-    }
-
-    /// FLOWIP-122i: a direct handler declares no continuation, and the
-    /// refusal says so.
-    #[test]
-    fn an_unfinished_direct_handler_is_named_as_a_handler() {
-        let archive = Path::new("/runs/interrupted");
-        assert_eq!(
-            unfinished_sources_refusal(archive, &["local_orders".to_string()], RefusedBy::Handler),
-            "cannot resume /runs/interrupted: source 'local_orders' stopped with its input \
-             unfinished, and its handler cannot continue interrupted input.\nUse a connector \
-             that continues interrupted input, or implement one."
-        );
-        let refusals = vec![
-            (
-                "local_orders".to_string(),
-                ResumeRefusal::UnfinishedInput {
-                    by: RefusedBy::Handler,
-                },
-            ),
-            (
-                "cards".to_string(),
-                ResumeRefusal::UnfinishedInput {
-                    by: RefusedBy::Connector,
-                },
-            ),
-        ];
-        assert_eq!(
-            resume_refusal(archive, &refusals),
-            [
-                unfinished_sources_refusal(archive, &["cards".to_string()], RefusedBy::Connector),
-                unfinished_sources_refusal(
-                    archive,
-                    &["local_orders".to_string()],
-                    RefusedBy::Handler
-                ),
-            ]
-            .join("\n")
-        );
-    }
-
-    /// FLOWIP-134i B22: one refusal names every source, the unfinished ones
-    /// together and each positioned one with its own reason and remedy.
-    #[test]
-    fn resume_refusal_names_each_source_with_its_remedy() {
-        let archive = Path::new("/runs/interrupted");
-        let refusals = vec![
-            (
-                "cards".to_string(),
-                ResumeRefusal::UnfinishedInput {
-                    by: RefusedBy::Connector,
-                },
-            ),
-            (
-                "ledger".to_string(),
-                ResumeRefusal::RecordedWithoutPositions,
-            ),
-            (
-                "orders".to_string(),
-                ResumeRefusal::PositionVersion {
-                    recorded: std::num::NonZeroU32::MIN,
-                    expected: std::num::NonZeroU32::new(2).unwrap(),
-                },
-            ),
-        ];
-        assert_eq!(
-            resume_refusal(archive, &refusals),
-            [
-                unfinished_sources_refusal(archive, &["cards".to_string()], RefusedBy::Connector),
-                "cannot resume /runs/interrupted: source 'ledger' recorded its input without \
-                 positions, so its connector cannot continue it from where it stopped.\nStart a \
-                 new run."
-                    .to_string(),
-                "cannot resume /runs/interrupted: source 'orders' recorded positions in version 1 \
-                 of its connector's format, and the connector now reads version 2.\nResume with \
-                 the version that recorded them, or start a new run."
-                    .to_string(),
-            ]
-            .join("\n")
-        );
     }
 }

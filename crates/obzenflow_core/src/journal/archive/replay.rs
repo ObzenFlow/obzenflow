@@ -38,9 +38,6 @@ pub enum ReplayError {
     #[error("Replay archive system.log missing at {path}")]
     MissingSystemLog { path: PathBuf },
 
-    #[error("Replay archive status is '{status:?}' and replay requires a completed or cancelled archive; re-run with --allow-incomplete-archive to override")]
-    IncompleteArchive { status: ArchiveStatus },
-
     #[error("Stage '{stage_key}' not found in run manifest")]
     StageNotInManifest { stage_key: String },
 
@@ -115,6 +112,18 @@ pub enum ReplayError {
         stage_key: String,
     },
 
+    /// Archives of one merged lineage record different identity namespaces.
+    #[error(
+        "cannot resume {}: its reconstruction did not complete, and the archive it resumed \
+         from, {}, records a different identity namespace.\nRestore {} as it was recorded, \
+         then resume {} again.",
+        .archive.display(),
+        .ancestor.display(),
+        .ancestor.display(),
+        .archive.display()
+    )]
+    NamespaceDisagrees { archive: PathBuf, ancestor: PathBuf },
+
     /// Only the head of a history resumes (FLOWIP-134i B7).
     #[error(
         "cannot resume {}: it was already resumed by {}, the head of this history.\nResume {} \
@@ -147,13 +156,6 @@ pub enum ReplayError {
         parent: PathBuf,
         head: PathBuf,
     },
-
-    /// A journal of the run still has a live writer (B7).
-    #[error(
-        "cannot resume {}: it is still running.\nStop it, then resume it again.",
-        .archive.display()
-    )]
-    StillRunning { archive: PathBuf },
 
     /// The run's location cannot hold the claim a resume records (B12).
     #[error(
@@ -192,6 +194,22 @@ pub trait ReplayArchive: Send + Sync {
     fn source_data_journal_path(&self, stage_key: &str) -> Result<PathBuf, ReplayError>;
 
     fn archive_flow_id(&self) -> &str;
+
+    /// The identity namespace the archive's manifest records, if any.
+    fn recorded_flow_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Each stage's recorded inbound edges and delivery order.
+    fn stage_orders(&self) -> super::certification::StageOrders {
+        super::certification::StageOrders::default()
+    }
+
+    /// The stage that wrote each archived data journal, keyed by the journal
+    /// writer its records name.
+    fn journal_stages(&self) -> std::collections::HashMap<crate::JournalWriterId, String> {
+        std::collections::HashMap::new()
+    }
 
     fn archived_stage_id(&self, stage_key: &str) -> Result<StageId, ReplayError>;
 

@@ -265,11 +265,11 @@ where
         self
     }
 
-    /// Install stable replay aliases from current topology stages to the
-    /// corresponding archived stage authors.
+    /// Install stable replay aliases from each current topology stage to its
+    /// archived stage authors, one per member of a merged lineage.
     pub fn with_archived_stage_ids(
         mut self,
-        archived_stage_ids_by_current: HashMap<StageId, StageId>,
+        archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
     ) -> Self {
         self.archived_stage_ids_by_current = archived_stage_ids_by_current;
         self

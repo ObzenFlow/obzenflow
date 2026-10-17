@@ -81,9 +81,7 @@ pub struct SubscriptionFactory {
     /// Pre-computed stage names for all potential upstreams
     stage_names: HashMap<StageId, String>,
     advisory_contract_upstreams: HashSet<StageId>,
-    /// Stable current-to-archive stage identity used by contract authorship
-    /// during replay and resume.
-    archived_stage_ids_by_current: HashMap<StageId, StageId>,
+    archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
     /// The generation this run entered at, 0 live and the archive's maximum
     /// recorded generation plus one on replay or resume. Copied into every
     /// bound factory.
@@ -121,7 +119,7 @@ pub struct BoundSubscriptionFactory {
     pub owner_label: String,
     advisory_contract_upstreams: HashSet<StageId>,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
-    archived_stage_ids_by_current: HashMap<StageId, StageId>,
+    archived_stage_ids_by_current: HashMap<StageId, Vec<StageId>>,
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
     composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>>,
     /// Reader-selection policy for built subscriptions (FLOWIP-095d).
@@ -414,6 +412,17 @@ pub struct StageResources {
     /// FLOWIP-010: build-resolved `runtime.heartbeat_interval` for this
     /// stage (events between heartbeats; 0 disables).
     pub heartbeat_interval: u64,
+
+    /// A resumed sink's certified inbound edges; `None` outside a resume and
+    /// for other stages.
+    pub sink_resume_edges: Option<SinkResumeEdges>,
+}
+
+/// A resumed sink's inbound edges whose order certification passed against every
+/// archive the resume reads, by current upstream stage id, each with its stage key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SinkResumeEdges {
+    pub certified: HashMap<StageId, String>,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -437,6 +446,7 @@ pub struct StageResourcesBuilder {
     heartbeat_intervals: HashMap<StageId, u64>,
     source_contract_strict_mode:
         crate::messaging::upstream_subscription_policy::SourceContractStrictMode,
+    sink_resume_edges: HashMap<StageId, SinkResumeEdges>,
 }
 
 impl StageResourcesBuilder {
@@ -465,7 +475,14 @@ impl StageResourcesBuilder {
             lineage_policies: HashMap::new(),
             heartbeat_intervals: HashMap::new(),
             source_contract_strict_mode: Default::default(),
+            sink_resume_edges: HashMap::new(),
         }
+    }
+
+    /// Each resumed sink's certified inbound edges, by sink stage id.
+    pub fn with_sink_resume_edges(mut self, edges: HashMap<StageId, SinkResumeEdges>) -> Self {
+        self.sink_resume_edges = edges;
+        self
     }
 
     /// Resolve source-edge contract policy at the child subscription boundary.
@@ -590,6 +607,7 @@ impl StageResourcesBuilder {
 
         let mut archived_stage_ids_by_current = HashMap::new();
         if let Some(archive) = &self.replay_archive {
+            let ancestors = archive.ancestors();
             for stage_info in self.topology.stages() {
                 let current_stage = StageId::from_topology_id(stage_info.id);
                 let archived_stage =
@@ -601,7 +619,13 @@ impl StageResourcesBuilder {
                                 stage_info.name
                             )
                         })?;
-                archived_stage_ids_by_current.insert(current_stage, archived_stage);
+                let mut archived_stages = vec![archived_stage];
+                archived_stages.extend(
+                    ancestors
+                        .iter()
+                        .filter_map(|ancestor| ancestor.archived_stage_id(&stage_info.name).ok()),
+                );
+                archived_stage_ids_by_current.insert(current_stage, archived_stages);
             }
         }
 
@@ -942,6 +966,7 @@ impl StageResourcesBuilder {
                     .get(&stage_id)
                     .copied()
                     .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL),
+                sink_resume_edges: self.sink_resume_edges.get(&stage_id).cloned(),
             };
 
             tracing::debug!(

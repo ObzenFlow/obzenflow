@@ -360,16 +360,26 @@ impl Presentation {
     }
 }
 
+/// The archive verbs admitted as plain commands for the run just written and
+/// the flow just built. The footer prints a verb's line only when it is offered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArchiveOffers {
+    pub replay: bool,
+    pub resume: bool,
+}
+
 pub enum RunPresentationOutcome {
     Completed {
         flow_name: String,
         location: Option<CurrentRunLocator>,
         run_mode: RunMode,
+        offers: ArchiveOffers,
     },
     Stopped {
         flow_name: String,
         location: Option<CurrentRunLocator>,
         run_mode: RunMode,
+        offers: ArchiveOffers,
     },
     Failed {
         flow_name: Option<String>,
@@ -394,40 +404,76 @@ impl RunPresentationOutcome {
         }
     }
 
-    /// Default terminal copy for a finished run. Lives once: live runs are
-    /// invited to replay their journal; strict replays state what was
-    /// reconstructed and offer replay-of-replay, which a replay journal
-    /// supports by closure (FLOWIP-120b).
+    /// The archive verbs offered for the run just written; a failed run
+    /// offers none.
+    pub fn offers(&self) -> ArchiveOffers {
+        match self {
+            Self::Completed { offers, .. } | Self::Stopped { offers, .. } => *offers,
+            Self::Failed { .. } => ArchiveOffers::default(),
+        }
+    }
+
     fn terminal_paragraph(
         verb: &str,
         flow_name: &str,
         location: &CurrentRunLocator,
         mode: &RunMode,
+        offers: ArchiveOffers,
     ) -> String {
+        let mut lines = Vec::new();
         match mode {
             RunMode::Replay(ctx) => {
+                lines.push(format!(
+                    "{flow_name} {verb} (strict replay of {source}).",
+                    source = ctx.source_label()
+                ));
+                lines.push("Archived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.".to_string());
+                lines.push(format!("Replay journal: {location}"));
                 // Under --verify the comparison result follows this footer.
-                let verify_hint = if ctx.verify {
-                    String::new()
-                } else {
-                    format!(
-                        "Verify it against the source archive: re-run with --replay-from {} --verify\n",
+                if !ctx.verify {
+                    lines.push(format!(
+                        "Verify it against the source archive: re-run with --replay-from {} --verify",
                         ctx.archive_path.display()
-                    )
-                };
-                format!(
-                    "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {location}\n{verify_hint}Replay this replay with: --replay-from {location}",
-                    source = ctx.source_label(),
-                )
+                    ));
+                }
+                if offers.replay {
+                    lines.push(format!("Replay this replay with: --replay-from {location}"));
+                }
             }
-            RunMode::Resume(ctx) => format!(
-                "{flow_name} {verb} (resumed from {source}).\nRecorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.\nJournal: {location}\nReplay this run with: --replay-from {location}\nResume it again with: --resume-from {location}",
-                source = ctx.source_label(),
-            ),
-            _ => format!(
-                "{flow_name} {verb}. Journal: {location}\nTo verify with a bounded replay, add: --replay-from {location}\nTo continue this run live from where it left off, add: --resume-from {location}\n(Source settings are ignored during replay and catch-up)",
-            ),
+            RunMode::Resume(ctx) => {
+                lines.push(format!(
+                    "{flow_name} {verb} (resumed from {source}).",
+                    source = ctx.source_label()
+                ));
+                lines.push("Recorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.".to_string());
+                lines.push(format!("Journal: {location}"));
+                if offers.replay {
+                    lines.push(format!("Replay this run with: --replay-from {location}"));
+                }
+                if offers.resume {
+                    lines.push(format!("Resume it again with: --resume-from {location}"));
+                }
+            }
+            _ => {
+                lines.push(format!("{flow_name} {verb}. Journal: {location}"));
+                if offers.replay {
+                    lines.push(format!(
+                        "To verify with a bounded replay, add: --replay-from {location}"
+                    ));
+                }
+                if offers.resume {
+                    lines.push(format!(
+                        "To continue this run live from where it left off, add: --resume-from {location}"
+                    ));
+                }
+                if offers.replay || offers.resume {
+                    lines.push(
+                        "(Source settings are ignored during replay and catch-up)".to_string(),
+                    );
+                }
+            }
         }
+        lines.join("\n")
     }
 
     pub fn to_footer(&self) -> Footer {
@@ -436,12 +482,14 @@ impl RunPresentationOutcome {
                 flow_name,
                 location,
                 run_mode,
+                offers,
             } => match location {
                 Some(location) => Footer::new().paragraph(Self::terminal_paragraph(
                     "completed",
                     flow_name,
                     location,
                     run_mode,
+                    *offers,
                 )),
                 None => Footer::new().paragraph(format!("{flow_name} completed.")),
             },
@@ -449,9 +497,10 @@ impl RunPresentationOutcome {
                 flow_name,
                 location,
                 run_mode,
+                offers,
             } => match location {
                 Some(location) => Footer::new().paragraph(Self::terminal_paragraph(
-                    "stopped", flow_name, location, run_mode,
+                    "stopped", flow_name, location, run_mode, *offers,
                 )),
                 None => Footer::new().paragraph(format!("{flow_name} stopped.")),
             },
@@ -795,12 +844,22 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    const BOTH: ArchiveOffers = ArchiveOffers {
+        replay: true,
+        resume: true,
+    };
+    const REPLAY_ONLY: ArchiveOffers = ArchiveOffers {
+        replay: true,
+        resume: false,
+    };
+
     #[test]
     fn default_footer_matches_outcomes() {
         let completed = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
             location: None,
             run_mode: RunMode::Live,
+            offers: ArchiveOffers::default(),
         };
         assert_eq!(completed.default_footer(), "flow completed.");
 
@@ -809,27 +868,45 @@ mod tests {
             flow_name: "flow".to_string(),
             location: Some(location.clone()),
             run_mode: RunMode::Live,
+            offers: REPLAY_ONLY,
         };
         assert_eq!(
             completed_with_journal.default_footer(),
-            "flow completed. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\nTo continue this run live from where it left off, add: --resume-from tmp/run\n(Source settings are ignored during replay and catch-up)"
+            "flow completed. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\n(Source settings are ignored during replay and catch-up)"
         );
 
-        // FLOWIP-120n: a stopped run's footer offers both verbs with the
-        // journal path, the operator's path back to replay or resume.
         let stopped_with_journal = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
             location: Some(CurrentRunLocator::new(PathBuf::from("tmp/run"))),
             run_mode: RunMode::Live,
+            offers: BOTH,
         };
-        let stopped_footer = stopped_with_journal.default_footer();
-        assert!(stopped_footer.contains("--replay-from tmp/run"));
-        assert!(stopped_footer.contains("--resume-from tmp/run"));
+        assert_eq!(
+            stopped_with_journal.default_footer(),
+            "flow stopped. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\nTo continue this run live from where it left off, add: --resume-from tmp/run\n(Source settings are ignored during replay and catch-up)"
+        );
+        assert_eq!(stopped_with_journal.offers(), BOTH);
+
+        let early_stop = RunPresentationOutcome::Stopped {
+            flow_name: "flow".to_string(),
+            location: Some(location.clone()),
+            run_mode: RunMode::Live,
+            offers: REPLAY_ONLY,
+        };
+        assert!(!early_stop.default_footer().contains("--resume-from"));
+        let nothing = RunPresentationOutcome::Stopped {
+            flow_name: "flow".to_string(),
+            location: Some(location.clone()),
+            run_mode: RunMode::Live,
+            offers: ArchiveOffers::default(),
+        };
+        assert_eq!(nothing.default_footer(), "flow stopped. Journal: tmp/run");
 
         let stopped = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
             location: None,
             run_mode: RunMode::Live,
+            offers: ArchiveOffers::default(),
         };
         assert_eq!(stopped.default_footer(), "flow stopped.");
 
@@ -851,6 +928,7 @@ mod tests {
             failed_without_name.default_footer(),
             "Flow failed: err. Journal: tmp/run"
         );
+        assert_eq!(failed_without_name.offers(), ArchiveOffers::default());
     }
 
     #[test]
@@ -865,6 +943,7 @@ mod tests {
             flow_name: "flow".to_string(),
             location: Some(CurrentRunLocator::new(PathBuf::from("tmp/replay-run"))),
             run_mode: replay_mode.clone(),
+            offers: REPLAY_ONLY,
         };
         let footer = completed.default_footer();
         assert!(
@@ -910,6 +989,7 @@ mod tests {
                 archive_flow_id: Some("flow_01SOURCE".to_string()),
                 verify: true,
             }),
+            offers: REPLAY_ONLY,
         };
         let footer = completed.default_footer();
         assert!(
@@ -930,12 +1010,13 @@ mod tests {
             verify: false,
         });
 
-        let completed = RunPresentationOutcome::Completed {
+        let stopped = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
             location: Some(CurrentRunLocator::new(PathBuf::from("tmp/resume-run"))),
             run_mode: resume_mode.clone(),
+            offers: BOTH,
         };
-        let footer = completed.default_footer();
+        let footer = stopped.default_footer();
         assert!(
             footer.contains("resumed from flow_01SOURCE (tmp/archive)"),
             "resume footer must name the source archive: {footer}"
@@ -956,6 +1037,16 @@ mod tests {
             !footer.contains("--verify"),
             "a resume cannot be verified as a bounded replay: {footer}"
         );
+
+        let completed = RunPresentationOutcome::Completed {
+            flow_name: "flow".to_string(),
+            location: Some(CurrentRunLocator::new(PathBuf::from("tmp/resume-run"))),
+            run_mode: resume_mode.clone(),
+            offers: REPLAY_ONLY,
+        };
+        assert!(completed.default_footer().ends_with(
+            "Journal: tmp/resume-run\nReplay this run with: --replay-from tmp/resume-run"
+        ));
 
         let failed = RunPresentationOutcome::Failed {
             flow_name: Some("flow".to_string()),

@@ -724,6 +724,16 @@ impl TypedFiniteSourceHandler for StallingFiniteSource {
 #[derive(Clone, Debug)]
 struct MergedSink {
     delivered: Arc<AtomicU64>,
+    safety: Option<SinkRedeliverySafety>,
+}
+
+impl MergedSink {
+    fn safe_to_repeat(delivered: Arc<AtomicU64>) -> Self {
+        Self {
+            delivered,
+            safety: Some(SinkRedeliverySafety::SafeToRepeat),
+        }
+    }
 }
 
 #[async_trait]
@@ -731,8 +741,11 @@ impl InlineSink for MergedSink {
     type Input = Merged;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Noop)
-            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        let description = SinkDescription::method(DeliveryMethod::Noop);
+        match self.safety {
+            Some(safety) => description.with_redelivery_safety(safety),
+            None => description,
+        }
     }
 
     async fn write(&mut self, _input: Merged) -> Result<(), SinkWriteFailure> {
@@ -753,7 +766,7 @@ fn build_stalling_flow(
         };
         let infinite_handler = ReattachingSource(InfiniteChannelSource::new("i", 101, 2));
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink { delivered };
+        let collect_handler = MergedSink::safe_to_repeat(delivered);
 
         Ok(flow! {
             name: "resume_mixed_refusal",
@@ -838,7 +851,12 @@ async fn an_unfinished_refuse_source_refuses_the_resume_at_admission() -> Result
         .ok_or_else(|| anyhow!("an unfinished Refuse source must refuse the resume"))?
     };
     match &failure.error {
-        obzenflow_dsl::dsl::FlowBuildError::ResumeRefusedSources { archive, refusals } => {
+        obzenflow_dsl::dsl::FlowBuildError::ArchiveVerbRefused(
+            obzenflow_core::journal::archive_actions::ArchiveRefusal::Sources {
+                run: archive,
+                refusals,
+            },
+        ) => {
             assert_eq!(archive, &recorded_run);
             assert_eq!(
                 refusals,
@@ -902,7 +920,7 @@ fn build_ticker_flow(
             polls,
         };
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink { delivered };
+        let collect_handler = MergedSink::safe_to_repeat(delivered);
 
         Ok(flow! {
             name: "resume_direct_ticker",
@@ -928,6 +946,7 @@ fn build_reattaching_ticker_flow(
     journal_base: PathBuf,
     polls: Arc<AtomicUsize>,
     delivered: Arc<AtomicU64>,
+    sink_safety: Option<SinkRedeliverySafety>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let ticker_handler = ReattachingSource(PolledTicker {
@@ -935,7 +954,10 @@ fn build_reattaching_ticker_flow(
             polls,
         });
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink { delivered };
+        let collect_handler = MergedSink {
+            delivered,
+            safety: sink_safety,
+        };
 
         Ok(flow! {
             name: "resume_direct_ticker",
@@ -1000,7 +1022,9 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
         .ok_or_else(|| anyhow!("an interrupted infinite direct handler must refuse"))?
     };
     match &failure.error {
-        obzenflow_dsl::dsl::FlowBuildError::ResumeRefusedSources { refusals, .. } => {
+        obzenflow_dsl::dsl::FlowBuildError::ArchiveVerbRefused(
+            obzenflow_core::journal::archive_actions::ArchiveRefusal::Sources { refusals, .. },
+        ) => {
             assert_eq!(
                 refusals,
                 &vec![(
@@ -1029,6 +1053,41 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
     assert_eq!(resumed_polls.load(Ordering::SeqCst), 0);
     assert!(!recorded_run.join("run_continuation.json").exists());
 
+    let failure = {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(resume_bootstrap(&recorded_run)).await,
+        );
+        build_reattaching_ticker_flow(
+            journal_base.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            None,
+        )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .err()
+        .ok_or_else(|| anyhow!("an undeclared sink must refuse the resume"))?
+    };
+    assert!(
+        matches!(
+            &failure.error,
+            obzenflow_dsl::dsl::FlowBuildError::ArchiveVerbRefused(
+                obzenflow_core::journal::archive_actions::ArchiveRefusal::Sink {
+                    verb: ReplayVerb::Resume,
+                    stage,
+                    undeclared: true,
+                },
+            ) if stage == "collect"
+        ),
+        "{}",
+        failure.error
+    );
+    assert_eq!(
+        std::fs::read_dir(journal_base.join("flows"))?.count(),
+        runs_before,
+        "the sink refusal leaves no run directory"
+    );
+
     let delivered = Arc::new(AtomicU64::new(0));
     {
         let _bootstrap = install_bootstrap_config(
@@ -1038,10 +1097,29 @@ async fn an_infinite_direct_handler_refuses_until_it_becomes_a_connector() -> Re
             journal_base.clone(),
             Arc::new(AtomicUsize::new(0)),
             delivered.clone(),
+            Some(SinkRedeliverySafety::SafeToRepeat),
         )
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("the rebuilt flow must resume the refused archive: {e:?}"))?;
+        let facts = handle.archive_flow_evidence();
+        assert!(facts.cycle_members.is_empty());
+        assert_eq!(
+            facts.sources,
+            [(
+                "ticker".to_string(),
+                obzenflow_core::source::SourceContinuation::Reattach {
+                    guarantee: ReattachGuarantee::AtMostOnce
+                }
+            )]
+        );
+        assert_eq!(
+            facts.sinks,
+            [(
+                "collect".to_string(),
+                Some(SinkRedeliverySafety::SafeToRepeat)
+            )]
+        );
         wait_for_running(&handle).await?;
         // The sink re-consumes the recorded prefix during catch-up.
         wait_for_count(&delivered, 3).await?;
@@ -1080,7 +1158,7 @@ fn build_channel_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let channel_source = ChannelSource::new(ticks);
         let merge_handler = MergeTransform::new();
-        let collect_handler = MergedSink { delivered };
+        let collect_handler = MergedSink::safe_to_repeat(delivered);
 
         Ok(flow! {
             name: "resume_channel_source",

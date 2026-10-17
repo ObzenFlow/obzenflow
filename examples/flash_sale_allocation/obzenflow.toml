@@ -14,3 +14,5 @@ id = "warehouse-demo"
 reserve_latency_ms = 20
 # true makes every reservation fail as unavailable.
 reserve_unavailable = false
+# How long the allocator takes over each live order; 0 runs at full speed.
+reservation_pace_ms = 0

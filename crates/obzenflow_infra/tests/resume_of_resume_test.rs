@@ -723,10 +723,11 @@ async fn racing_resumes_of_one_archive_cannot_both_proceed() -> Result<()> {
     Ok(())
 }
 
-/// FLOWIP-134i B7: a run still being written refuses to resume until its
-/// process stops; its journal writers' OS locks are the evidence.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_still_being_written_refuses_until_its_process_stops() -> Result<()> {
+    use obzenflow_core::journal::archive_actions::{
+        decide, ArchiveOverrides, ArchiveRefusal, FlowEvidence, ReplayVerb,
+    };
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
     let delivered = Arc::new(AtomicU64::new(0));
@@ -737,10 +738,50 @@ async fn a_run_still_being_written_refuses_until_its_process_stops() -> Result<(
     wait_for_running(&handle).await?;
     wait_for_count(&delivered, 4).await?;
     let r0 = std::fs::canonicalize(replay_testkit::latest_run_dir(&journal_base))?;
-    match resume_refusal(&r0).await {
-        ReplayError::StillRunning { archive } => assert_eq!(archive, r0),
-        other => panic!("a live run must refuse: {other}"),
+    let files_before: Vec<_> = std::fs::read_dir(&r0)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<_, _>>()?;
+    for (verb, opened) in [
+        (
+            ReplayVerb::Resume,
+            DiskReplayArchive::open_for_resume(r0.clone(), true).await?,
+        ),
+        (
+            ReplayVerb::Replay,
+            DiskReplayArchive::open(r0.clone(), true).await?,
+        ),
+    ] {
+        let evidence = opened.evidence();
+        assert!(evidence.live_writer, "the opener reports the live writer");
+        let refusal = decide(
+            verb,
+            &r0,
+            &evidence,
+            &FlowEvidence::default(),
+            ArchiveOverrides {
+                allow_incomplete_archive: true,
+                allow_duplicate_sink_delivery: true,
+            },
+        )
+        .expect_err("a live run must refuse");
+        assert_eq!(
+            refusal,
+            ArchiveRefusal::StillRunning {
+                verb,
+                run: r0.clone()
+            }
+        );
     }
+    let mut files_after: Vec<_> = std::fs::read_dir(&r0)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<_, _>>()?;
+    let mut files_before = files_before;
+    files_before.sort();
+    files_after.sort();
+    assert_eq!(
+        files_before, files_after,
+        "no probe file and no claim in the running run's location"
+    );
 
     handle.stop().await?;
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())

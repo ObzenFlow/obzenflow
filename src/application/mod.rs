@@ -25,10 +25,11 @@
 //! ordinary launches continue to respect an embedding application's subscriber.
 
 pub use obzenflow_infra::application::{
-    ApplicationError, Banner, ControlPlaneAuthModeArg, CorsModeArg, CurrentRunLocator,
-    FlowApplication, FlowApplicationBuilder, FlowConfig, Footer, LogLevel, OnTerminalArg,
-    Presentation, ReplayRunContext, RunMode, RunPresentationOutcome, RunSubstrateState,
-    StartupMode, WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext,
+    ApplicationError, ArchiveOffers, Banner, ControlPlaneAuthModeArg, CorsModeArg,
+    CurrentRunLocator, FlowApplication, FlowApplicationBuilder, FlowConfig, Footer, LogLevel,
+    OnTerminalArg, Presentation, ReplayRunContext, RunMode, RunPresentationOutcome,
+    RunSubstrateState, StartupMode, WebSurfaceAttachment, WebSurfaceWiring,
+    WebSurfaceWiringContext,
 };
 
 pub mod control;

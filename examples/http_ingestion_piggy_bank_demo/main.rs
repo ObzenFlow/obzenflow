@@ -32,7 +32,7 @@
 //! - Strict replay (`-- --replay-from <run-dir>`) reuses the archived batch and
 //!   live data and never reopens either file; both ingresses answer
 //!   `503 not_ready` throughout.
-//! - Resume (`-- --resume-from <run-dir> --allow-incomplete-archive`) continues
+//! - Resume (`-- --resume-from <run-dir>`) continues
 //!   the CSV after its last committed row; resent live requests answer
 //!   `duplicate` with their original event ids.
 //! - Transaction ingress has its own rate limiter.

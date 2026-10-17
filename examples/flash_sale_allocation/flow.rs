@@ -5,15 +5,18 @@
 //! Flow assembly for the flash-sale allocation witness.
 
 use super::allocation::Allocator;
+use super::desk::ReservationDesk;
 use super::domain::{
-    AllocationInput, CancelIgnored, OrderCancelled, OrderId, OrderPlaced, ReservationFailed, Sku,
-    SoldOut, StockReleased, StockReserved,
+    AllocationInput, CancelIgnored, HoldId, OrderCancelled, OrderId, OrderPlaced,
+    ReservationConfirmed, ReservationFailed, Sku, SoldOut, StockReleased, StockReserved,
 };
 use super::warehouse::{
     ReleaseStock, ReserveStock, WarehouseBindingsBuildError, WarehouseConfig,
     WarehouseEffectBindings, WarehouseStats,
 };
-use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowBuildError, FlowDefinition};
+use obzenflow::flow::{
+    effectful_stateful, flow, sink, source, stateful, FlowBuildError, FlowDefinition,
+};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::circuit_breaker;
 use obzenflow::stages::sinks::TracingSink;
@@ -37,9 +40,14 @@ struct WarehouseSettings {
     id: String,
     reserve_latency_ms: u64,
     reserve_unavailable: bool,
+    reservation_pace_ms: u64,
 }
 
 impl WarehouseSettings {
+    fn reservation_pace(&self) -> Duration {
+        Duration::from_millis(self.reservation_pace_ms)
+    }
+
     fn into_config(self) -> WarehouseConfig {
         WarehouseConfig::new(
             self.id,
@@ -80,6 +88,17 @@ pub fn scripted_inputs() -> Vec<AllocationInput> {
     ]
 }
 
+pub fn phone_reservations() -> Vec<StockReserved> {
+    let sku = Sku::from("store-allotment");
+    (1..=3)
+        .map(|n| StockReserved {
+            order_id: OrderId(format!("phone-{n}")),
+            sku: sku.clone(),
+            hold_id: HoldId(format!("desk:phone-{n}")),
+        })
+        .collect()
+}
+
 pub fn build_flow() -> FlowDefinition {
     settings_flow(
         scripted_inputs(),
@@ -94,9 +113,11 @@ pub fn settings_flow(
     journal_root: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: FlashSaleSettings| {
+        let reservation_pace = settings.warehouse.reservation_pace();
         allocation_flow(
             inputs,
             settings.warehouse.into_config(),
+            reservation_pace,
             warehouse_stats,
             journal_root,
         )
@@ -112,8 +133,14 @@ pub fn assemble_flow(
     journal_root: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        allocation_flow(inputs, warehouse_config, warehouse_stats, journal_root)
-            .map_err(warehouse_binding_failed)
+        allocation_flow(
+            inputs,
+            warehouse_config,
+            Duration::ZERO,
+            warehouse_stats,
+            journal_root,
+        )
+        .map_err(warehouse_binding_failed)
     })
 }
 
@@ -127,6 +154,7 @@ fn warehouse_binding_failed(error: WarehouseBindingsBuildError) -> FlowBuildErro
 fn allocation_flow(
     inputs: Vec<AllocationInput>,
     warehouse_config: WarehouseConfig,
+    reservation_pace: Duration,
     warehouse_stats: Arc<WarehouseStats>,
     journal_root: PathBuf,
 ) -> Result<FlowDefinition, WarehouseBindingsBuildError> {
@@ -146,7 +174,16 @@ fn allocation_flow(
     let reserve_resilience = reserve_breaker;
 
     let allocation_feed = sources::ValuesSource::new(inputs);
-    let allocator = Allocator::new(1);
+    let phone_feed = sources::ValuesSource::new(phone_reservations());
+    let allocator = Allocator::new(1).with_reservation_pace(reservation_pace);
+    let desk = ReservationDesk;
+    let record_confirmation = TracingSink::new(|confirmed: &ReservationConfirmed| {
+        tracing::info!(
+            order_id = %confirmed.order_id.0,
+            confirmation = confirmed.confirmation,
+            "reservation confirmation delivered"
+        );
+    });
     let record_reservation = TracingSink::new(|reserved: &StockReserved| {
         tracing::info!(order_id = %reserved.order_id.0, "stock reservation delivered");
     });
@@ -194,6 +231,13 @@ fn allocation_flow(
                 ReservationFailed => record_reservation_failure,
                 delivery: idempotent
             );
+
+            phone_reservations = source!(StockReserved => phone_feed);
+            reservation_desk = stateful!(StockReserved -> ReservationConfirmed => desk);
+            confirmations = sink!(
+                ReservationConfirmed => record_confirmation,
+                delivery: idempotent
+            );
         },
 
         topology: {
@@ -201,6 +245,9 @@ fn allocation_flow(
             allocate_stock |> reservations;
             allocate_stock |> releases;
             allocate_stock |> reservation_failures;
+            allocate_stock |> reservation_desk;
+            phone_reservations |> reservation_desk;
+            reservation_desk |> confirmations;
         }
     })
 }

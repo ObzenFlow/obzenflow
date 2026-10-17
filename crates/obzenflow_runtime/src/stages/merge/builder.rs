@@ -163,7 +163,18 @@ impl SupervisorBuilder for MergeBuilder {
             buffered_eof: None,
             drain_without_held_inputs: false,
             pending_promotion: None,
-            catch_up_flip: None,
+            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+                crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                    &self.config.flow_name,
+                    &self.resources.flow_id.to_string(),
+                    &self.config.stage_name,
+                    self.config.stage_id,
+                    obzenflow_core::event::context::StageType::Merge,
+                ),
+                self.resources.data_journal.clone(),
+                instrumentation.clone(),
+                self.resources.runtime_execution.clone(),
+            ),
         };
 
         let supervisor = MergeSupervisor::new(self.config.stage_name.clone(), self.config.stage_id);
