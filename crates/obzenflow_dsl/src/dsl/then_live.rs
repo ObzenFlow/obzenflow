@@ -33,6 +33,7 @@ enum HoldState {
     Hydrating,
     Enriching,
     MergeBatch,
+    ConcatFirst,
 }
 
 #[derive(Default)]
@@ -237,7 +238,7 @@ impl std::fmt::Display for Refusal {
 
 impl From<Refusal> for FlowBuildError {
     fn from(refusal: Refusal) -> Self {
-        FlowBuildError::ThenLiveTopology(refusal.0)
+        FlowBuildError::PhaseTopology(refusal.0)
     }
 }
 
@@ -312,19 +313,43 @@ pub(crate) fn plan(
             continue;
         };
         let descriptor = descriptors[binding].as_ref();
-        if descriptor.merge_strategy() == Some(MergeStrategyKind::ThenLive) {
-            let (batch, live) = merge_producers(&graph, id)?;
-            let mut ending = BTreeSet::new();
-            for producer in &batch {
-                ending.extend(graph.roots(*producer).finite);
+        match descriptor.merge_strategy() {
+            Some(MergeStrategyKind::ThenLive) => {
+                let (batch, live) = merge_producers(&graph, id)?;
+                let mut ending = BTreeSet::new();
+                for producer in &batch {
+                    ending.extend(graph.roots(*producer).finite);
+                }
+                plan.holds.push(Hold {
+                    holder: id,
+                    state: HoldState::MergeBatch,
+                    must_flow: graph.must_flow(id, ending, &batch),
+                    held: live.clone(),
+                });
+                plan.merge_producers.push((binding.clone(), batch, live));
             }
-            plan.holds.push(Hold {
-                holder: id,
-                state: HoldState::MergeBatch,
-                must_flow: graph.must_flow(id, ending, &batch),
-                held: live.clone(),
-            });
-            plan.merge_producers.push((binding.clone(), batch, live));
+            Some(MergeStrategyKind::Concat) => {
+                let first = descriptor
+                    .first_producer_name()
+                    .and_then(|first| name_to_id.get(first))
+                    .copied()
+                    .ok_or_else(|| {
+                        Refusal(format!(
+                            "merge `{}` uses concat, but it names no first producer.",
+                            graph.name(id)
+                        ))
+                    })?;
+                let last = concat_last_producer(&graph, id, first)?;
+                plan.holds.push(Hold {
+                    holder: id,
+                    state: HoldState::ConcatFirst,
+                    must_flow: graph.must_flow(id, graph.roots(first).finite, &[first]),
+                    held: vec![last],
+                });
+                plan.merge_producers
+                    .push((binding.clone(), vec![first], vec![last]));
+            }
+            None => {}
         }
         let Some(shape) = descriptor.join_shape() else {
             continue;
@@ -413,6 +438,40 @@ fn merge_producers(
         )));
     }
     Ok((batch, live))
+}
+
+fn concat_last_producer(
+    graph: &Graph<'_>,
+    merge: StageId,
+    first: StageId,
+) -> Result<StageId, Refusal> {
+    let name = graph.name(merge);
+    let producers = graph.inputs(merge);
+    for producer in &producers {
+        let roots = graph.roots(*producer);
+        if roots.has_live() {
+            let live = graph
+                .sorted(roots.live.iter().copied())
+                .into_iter()
+                .map(|id| format!("`{}`", graph.name(id)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Refusal(format!(
+                "merge `{name}` uses concat, but its producer `{}` has a live source ({live}), so \
+                 its phase would never end.\nUse `merges::then_live` to put live producers after \
+                 batch ones.",
+                graph.name(*producer),
+            )));
+        }
+    }
+    match producers.as_slice() {
+        [a, b] if *a == first => Ok(*b),
+        [a, b] if *b == first => Ok(*a),
+        _ => Err(Refusal(format!(
+            "merge `{name}` uses concat, so it reads `{}` first and exactly one producer after it.",
+            graph.name(first),
+        ))),
+    }
 }
 
 fn then_live_join(
@@ -743,6 +802,10 @@ fn deadlock_message(
         HoldState::MergeBatch => (
             format!("merge `{holder}` would deadlock in its batch phase"),
             "its batch phase",
+        ),
+        HoldState::ConcatFirst => (
+            format!("merge `{holder}` would deadlock in its first phase"),
+            "its first phase",
         ),
     };
     let path = path

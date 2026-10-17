@@ -6,6 +6,7 @@ use obzenflow::schema::TypedPayload;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -25,7 +26,22 @@ pub struct AccountKey {
     pub account: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Day(pub String);
+
+impl Day {
+    pub fn of(timestamp: &str) -> Self {
+        Self(
+            timestamp
+                .split_once(' ')
+                .map_or(timestamp, |(day, _)| day)
+                .to_owned(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PaymentFormat {
     #[serde(rename = "ACH")]
     Ach,
@@ -52,6 +68,20 @@ impl FromStr for PaymentFormat {
             "Wire" => Ok(Self::Wire),
             other => Err(format!("unknown payment format '{other}'")),
         }
+    }
+}
+
+impl fmt::Display for PaymentFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Ach => "ACH",
+            Self::Bitcoin => "Bitcoin",
+            Self::Cash => "Cash",
+            Self::Cheque => "Cheque",
+            Self::CreditCard => "Credit Card",
+            Self::Reinvestment => "Reinvestment",
+            Self::Wire => "Wire",
+        })
     }
 }
 
@@ -109,6 +139,10 @@ impl Transaction {
             bank: self.to_bank.clone(),
             account: self.to_account.clone(),
         }
+    }
+
+    pub fn day(&self) -> Day {
+        Day::of(&self.timestamp)
     }
 }
 
@@ -189,12 +223,54 @@ impl TypedPayload for TransactionCleared {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AlertId(pub String);
+
+impl fmt::Display for AlertId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertSubject {
+    Transaction(TxnId),
+    Day(Day),
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AlertRaised {
-    pub txn_id: TxnId,
+    pub alert_id: AlertId,
+    pub subject: AlertSubject,
     pub account: AccountKey,
     pub reasons: Reasons,
     pub rules_version: RulesVersion,
+}
+
+impl AlertRaised {
+    pub fn new(
+        subject: AlertSubject,
+        account: AccountKey,
+        reasons: Reasons,
+        rules_version: RulesVersion,
+    ) -> Self {
+        let alert_id = match &subject {
+            AlertSubject::Transaction(txn_id) => AlertId(format!("txn:{txn_id}")),
+            AlertSubject::Day(day) => AlertId(format!(
+                "day:{}:{}/{}",
+                day.0, account.bank, account.account
+            )),
+        };
+        Self {
+            alert_id,
+            subject,
+            account,
+            reasons,
+            rules_version,
+        }
+    }
 }
 
 impl TypedPayload for AlertRaised {
@@ -217,7 +293,7 @@ impl TypedPayload for ScoreUnavailable {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CaseOpened {
     pub case_number: CaseNumber,
-    pub txn_id: TxnId,
+    pub alert_id: AlertId,
     pub account: AccountKey,
     pub reasons: Reasons,
     pub rules_version: RulesVersion,
@@ -230,13 +306,54 @@ impl TypedPayload for CaseOpened {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CaseUnavailable {
-    pub txn_id: TxnId,
+    pub alert_id: AlertId,
     pub account: AccountKey,
     pub reason: String,
 }
 
 impl TypedPayload for CaseUnavailable {
     const EVENT_TYPE: &'static str = "aml.case_unavailable";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UsdRates(pub BTreeMap<String, f64>);
+
+impl UsdRates {
+    pub fn usd(&self, amount: f64, currency: &str) -> Option<f64> {
+        self.0.get(currency).map(|rate| amount * rate)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DayTotals {
+    pub transactions: u64,
+    pub paid_usd: f64,
+    pub unpriced: u64,
+    pub by_format: BTreeMap<PaymentFormat, u64>,
+    pub labelled_laundering: u64,
+}
+
+impl DayTotals {
+    pub fn add(&mut self, transaction: &Transaction, usd_rates: &UsdRates) {
+        self.transactions += 1;
+        match usd_rates.usd(transaction.amount_paid, &transaction.payment_currency) {
+            Some(usd) => self.paid_usd += usd,
+            None => self.unpriced += 1,
+        }
+        *self
+            .by_format
+            .entry(transaction.payment_format)
+            .or_default() += 1;
+        if transaction.is_laundering {
+            self.labelled_laundering += 1;
+        }
+    }
+}
+
+impl TypedPayload for DayTotals {
+    const EVENT_TYPE: &'static str = "aml.day_totals";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -312,4 +429,102 @@ fn payment_formats<'de, D: Deserializer<'de>>(
     }
 
     deserializer.deserialize_any(Formats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account(bank: &str, account: &str) -> AccountKey {
+        AccountKey {
+            bank: bank.to_owned(),
+            account: account.to_owned(),
+        }
+    }
+
+    fn reasons(code: &str) -> Reasons {
+        Reasons {
+            first: ReasonCode(code.to_owned()),
+            rest: Vec::new(),
+        }
+    }
+
+    fn transaction(
+        format: PaymentFormat,
+        amount: f64,
+        currency: &str,
+        laundering: bool,
+    ) -> Transaction {
+        Transaction {
+            txn_id: TxnId(2800001),
+            timestamp: "2022/09/05 10:15".to_owned(),
+            from_bank: "48".to_owned(),
+            from_account: "81F0A0001".to_owned(),
+            to_bank: "48".to_owned(),
+            to_account: "81F0B0001".to_owned(),
+            amount_received: amount,
+            receiving_currency: currency.to_owned(),
+            amount_paid: amount,
+            payment_currency: currency.to_owned(),
+            payment_format: format,
+            is_laundering: laundering,
+        }
+    }
+
+    #[test]
+    fn alert_ids_derive_from_domain_fields_alone() {
+        let payer = account("70", "8000A1B2C");
+        let flagged = AlertRaised::new(
+            AlertSubject::Transaction(TxnId(2817341)),
+            payer.clone(),
+            reasons("format_switch"),
+            RulesVersion("sim-2026.10".to_owned()),
+        );
+        assert_eq!(flagged.alert_id, AlertId("txn:2817341".to_owned()));
+
+        let day = AlertRaised::new(
+            AlertSubject::Day(Day::of("2022/09/05 23:55")),
+            payer,
+            reasons("fan_out"),
+            RulesVersion("aml-daily-profile-v1".to_owned()),
+        );
+        assert_eq!(
+            day.alert_id,
+            AlertId("day:2022/09/05:70/8000A1B2C".to_owned())
+        );
+    }
+
+    #[test]
+    fn day_totals_count_unpriced_payments_instead_of_failing() {
+        let rates = UsdRates(BTreeMap::from([
+            ("US Dollar".to_owned(), 1.0),
+            ("Euro".to_owned(), 1.09),
+        ]));
+        let mut totals = DayTotals::default();
+        totals.add(
+            &transaction(PaymentFormat::Ach, 100.0, "US Dollar", false),
+            &rates,
+        );
+        totals.add(
+            &transaction(PaymentFormat::Wire, 200.0, "Euro", true),
+            &rates,
+        );
+        totals.add(
+            &transaction(PaymentFormat::Ach, 50.0, "Doubloon", false),
+            &rates,
+        );
+
+        assert_eq!(totals.transactions, 3);
+        assert!(
+            (totals.paid_usd - 318.0).abs() < 1e-9,
+            "{}",
+            totals.paid_usd
+        );
+        assert_eq!(totals.unpriced, 1);
+        assert_eq!(
+            totals.by_format,
+            BTreeMap::from([(PaymentFormat::Ach, 2), (PaymentFormat::Wire, 1)])
+        );
+        assert_eq!(totals.labelled_laundering, 1);
+    }
 }

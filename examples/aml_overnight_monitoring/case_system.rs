@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::domain::{AccountKey, AlertRaised, CaseNumber, Reasons, RulesVersion, TxnId};
+use super::domain::{AccountKey, AlertId, AlertRaised, CaseNumber, Reasons, RulesVersion};
 use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
 use async_trait::async_trait;
 use obzenflow::effects::{EffectPortSlot, IdempotencyKey};
@@ -15,7 +15,7 @@ pub const CASE_SYSTEM: EffectPortSlot<dyn CaseSystemPort> = EffectPortSlot::new(
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CaseRequest {
-    pub txn_id: TxnId,
+    pub alert_id: AlertId,
     pub account: AccountKey,
     pub reasons: Reasons,
     pub rules_version: RulesVersion,
@@ -24,7 +24,7 @@ pub struct CaseRequest {
 impl CaseRequest {
     pub fn for_alert(alert: &AlertRaised) -> Self {
         Self {
-            txn_id: alert.txn_id,
+            alert_id: alert.alert_id.clone(),
             account: alert.account.clone(),
             reasons: alert.reasons.clone(),
             rules_version: alert.rules_version.clone(),
@@ -106,7 +106,7 @@ mod tests {
 
     fn request(txn_id: u64) -> CaseRequest {
         CaseRequest {
-            txn_id: TxnId(txn_id),
+            alert_id: AlertId(format!("txn:{txn_id}")),
             account: AccountKey {
                 bank: "70".to_owned(),
                 account: "8000A1B2C".to_owned(),
@@ -120,7 +120,7 @@ mod tests {
     }
 
     fn key(txn_id: u64) -> IdempotencyKey {
-        IdempotencyKey(format!("aml-case:{txn_id}"))
+        IdempotencyKey(format!("aml-case:txn:{txn_id}"))
     }
 
     #[tokio::test]
@@ -150,9 +150,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                serde_json::json!({"key": "aml-case:5", "result": "opened", "flow_id": run.to_string(), "case_number": 1}),
-                serde_json::json!({"key": "aml-case:3", "result": "opened", "flow_id": run.to_string(), "case_number": 2}),
-                serde_json::json!({"key": "aml-case:5", "result": "replayed", "flow_id": run.to_string()}),
+                serde_json::json!({"key": "aml-case:txn:5", "result": "opened", "flow_id": run.to_string(), "case_number": 1}),
+                serde_json::json!({"key": "aml-case:txn:3", "result": "opened", "flow_id": run.to_string(), "case_number": 2}),
+                serde_json::json!({"key": "aml-case:txn:5", "result": "replayed", "flow_id": run.to_string()}),
             ]
         );
     }

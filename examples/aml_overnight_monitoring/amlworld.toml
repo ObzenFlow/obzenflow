@@ -3,6 +3,9 @@ mode = "enforce"
 window = 64
 stall_timeout_ms = 30000
 
+[runtime.backpressure.stages.daily_profile.edges.alerts]
+mode = "track"
+
 [app]
 account_history = "data/aml-history-2022-09-05.csv"
 transactions = "data/aml-2022-09-05.csv"
@@ -10,3 +13,24 @@ risk_ledger = "target/aml-risk-calls.jsonl"
 case_ledger = "target/aml-case-calls.jsonl"
 cleared_register = "target/aml-cleared.csv"
 case_register = "target/aml-cases.csv"
+
+[app.rules]
+fan_out_counterparties = 10
+fan_in_counterparties = 10
+
+[app.rules.usd_rates]
+"US Dollar" = 1.0
+"Euro" = 1.09
+"UK Pound" = 1.15
+"Swiss Franc" = 1.02
+"Canadian Dollar" = 0.75
+"Australian Dollar" = 0.67
+"Yuan" = 0.14
+"Yen" = 0.0071
+"Rupee" = 0.012
+"Ruble" = 0.017
+"Shekel" = 0.29
+"Brazil Real" = 0.19
+"Mexican Peso" = 0.05
+"Saudi Riyal" = 0.27
+"Bitcoin" = 19500.0

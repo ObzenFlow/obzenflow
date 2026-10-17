@@ -4,4 +4,4 @@
 
 //! Framework merge strategies, the closed set `merge!`'s `=>` slot accepts.
 
-pub use obzenflow_runtime::stages::merges::then_live;
+pub use obzenflow_runtime::stages::merges::{concat, then_live};

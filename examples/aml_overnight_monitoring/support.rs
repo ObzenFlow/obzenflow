@@ -5,6 +5,9 @@
 #[path = "case_system.rs"]
 pub mod case_system;
 
+#[path = "console.rs"]
+pub mod console;
+
 #[path = "domain.rs"]
 pub mod domain;
 

@@ -6,6 +6,12 @@
 pub mod support;
 
 use obzenflow::application::{verify_run_dirs, FlowApplication, LogLevel, VerifyOptions};
+use obzenflow::journal::read::{
+    open_disk_run, ChainPayload, FlowControlPayload, RunJournalKind, RunRecordData,
+};
+use obzenflow::journal::JournalRecord;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::{StageId, WriterId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -28,8 +34,34 @@ const PLANTED: [(u64, &[&str]); 13] = [
     (2800224, &["format_switch", "fan_out_large_payment"]),
 ];
 
+const WHOLE_DAY: [(&str, &[&str]); 4] = [
+    ("day:2022/09/05:12/80890E60D", &["fan_in"]),
+    ("day:2022/09/05:12/80B74F97B", &["fan_in"]),
+    ("day:2022/09/05:48/81F0A0001", &["fan_out"]),
+    ("day:2022/09/05:48/81F0A0003", &["fan_out", "fan_in"]),
+];
+
+const ENGINE_RULES: &str = "sim-2026.10";
+const WHOLE_DAY_RULES: &str = "aml-daily-profile-v1";
+
 fn example_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/aml_overnight_monitoring")
+}
+
+fn fixture_rows() -> Vec<Vec<String>> {
+    std::fs::read_to_string(example_dir().join("fixtures/transactions.csv"))
+        .expect("fixture is readable")
+        .lines()
+        .skip(1)
+        .map(|line| line.split(',').map(str::to_owned).collect())
+        .collect()
+}
+
+fn fixture_txn_ids() -> BTreeSet<u64> {
+    fixture_rows()
+        .iter()
+        .map(|row| row[0].parse().expect("txn_id column"))
+        .collect()
 }
 
 fn fixture_config(dir: &Path) -> PathBuf {
@@ -38,9 +70,17 @@ fn fixture_config(dir: &Path) -> PathBuf {
         .expect("shipped configuration is readable")
         .parse()
         .expect("shipped configuration parses");
-    let flow = &config["runtime"]["backpressure"]["flow"];
-    assert_eq!(flow["mode"].as_str(), Some("enforce"));
-    assert!(flow["window"].as_integer().expect("window") < 240);
+    let backpressure = &config["runtime"]["backpressure"];
+    assert_eq!(backpressure["flow"]["mode"].as_str(), Some("enforce"));
+    let window = backpressure["flow"]["window"].as_integer().expect("window");
+    assert!(
+        usize::try_from(window).expect("a positive window") < fixture_rows().len(),
+        "the window holds the transactions source mid-file"
+    );
+    assert_eq!(
+        backpressure["stages"]["daily_profile"]["edges"]["alerts"]["mode"].as_str(),
+        Some("track")
+    );
 
     let app = config
         .get_mut("app")
@@ -101,38 +141,86 @@ fn runs(journal_root: &Path) -> Vec<PathBuf> {
     runs
 }
 
-fn facts(run: &Path, scratch: &Path) -> BTreeMap<String, Vec<serde_json::Value>> {
-    let export = scratch.join("export.jsonl");
-    obzenflow_infra::journal::disk::inspect::export_jsonl(run, Some(&export))
-        .expect("journal exports");
-    let mut facts: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
-    for line in std::fs::read_to_string(&export)
-        .expect("export is readable")
-        .lines()
-    {
-        let row: serde_json::Value = serde_json::from_str(line).expect("export row is JSON");
-        let event = &row["envelope"]["provenance"]["event"];
-        if event["event_kind"] == "fact" {
-            if let Some(event_type) = event["event_type"].as_str() {
-                facts
-                    .entry(event_type.to_owned())
-                    .or_default()
-                    .push(row["payload"].clone());
-            }
-        }
+struct Archive {
+    rows: Vec<(String, JournalRecord<ChainPayload>)>,
+    stage_ids: BTreeMap<String, StageId>,
+}
+
+impl Archive {
+    fn read(run: &Path) -> Self {
+        tokio::runtime::Runtime::new()
+            .expect("a reader runtime")
+            .block_on(async {
+                let mut snapshot = open_disk_run(run).await.expect("the archive opens");
+                let mut archive = Self {
+                    rows: Vec::new(),
+                    stage_ids: BTreeMap::new(),
+                };
+                while let Some(record) = snapshot.next().await.expect("the archive reads") {
+                    let Some(stage) = record.journal.stage else {
+                        continue;
+                    };
+                    archive.stage_ids.insert(stage.key.clone(), stage.id);
+                    if let (RunJournalKind::Data, RunRecordData::Chain(row)) =
+                        (record.journal.kind, record.record)
+                    {
+                        archive.rows.push((stage.key, *row));
+                    }
+                }
+                archive
+            })
     }
-    facts
+
+    fn rows<'a>(
+        &'a self,
+        stage: &'a str,
+    ) -> impl Iterator<Item = &'a JournalRecord<ChainPayload>> + 'a {
+        self.rows
+            .iter()
+            .filter(move |(key, _)| key == stage)
+            .map(|(_, row)| row)
+    }
+
+    fn facts(&self, stage: &str, event_type: &str) -> Vec<serde_json::Value> {
+        self.rows(stage)
+            .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
+            .filter(|row| row.event_type() == event_type)
+            .map(JournalRecord::payload)
+            .collect()
+    }
+
+    fn all_facts(&self, event_type: &str) -> usize {
+        self.rows
+            .iter()
+            .filter(|(_, row)| {
+                matches!(row.payload, ChainPayload::Fact(_)) && row.event_type() == event_type
+            })
+            .count()
+    }
+
+    fn natural_eof_from(&self, stage: &str, author: &str) -> usize {
+        let author = self.stage_ids[author];
+        self.rows(stage)
+            .position(|row| {
+                matches!(&row.payload, ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    kind: EofKind::Natural,
+                    writer_id: Some(WriterId::Stage(writer)),
+                    ..
+                }) if *writer == author)
+            })
+            .unwrap_or_else(|| panic!("{stage} passes on {author}'s natural EOF"))
+    }
 }
 
-fn of<'a>(
-    facts: &'a BTreeMap<String, Vec<serde_json::Value>>,
-    event_type: &str,
-) -> &'a [serde_json::Value] {
-    facts.get(event_type).map(Vec::as_slice).unwrap_or_default()
+fn txn_id(verdict: &serde_json::Value) -> u64 {
+    verdict["txn_id"]
+        .as_u64()
+        .or_else(|| verdict["subject"]["transaction"].as_u64())
+        .expect("a transaction verdict")
 }
 
-fn txn_id(fact: &serde_json::Value) -> u64 {
-    fact["txn_id"].as_u64().expect("txn_id")
+fn alert_id(fact: &serde_json::Value) -> &str {
+    fact["alert_id"].as_str().expect("alert_id")
 }
 
 fn reasons(fact: &serde_json::Value) -> Vec<&str> {
@@ -151,20 +239,6 @@ fn line_count(path: &Path) -> usize {
         .count()
 }
 
-fn fixture_txn_ids() -> BTreeSet<u64> {
-    std::fs::read_to_string(example_dir().join("fixtures/transactions.csv"))
-        .expect("fixture is readable")
-        .lines()
-        .skip(1)
-        .map(|line| {
-            line.split(',')
-                .next()
-                .and_then(|id| id.parse().ok())
-                .expect("txn_id column")
-        })
-        .collect()
-}
-
 #[test]
 fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_system() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -177,26 +251,25 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
     assert_eq!(live.case_systems_built(), 1);
 
     let baseline = runs(&journal_root).pop().expect("the live run's archive");
-    let facts = facts(&baseline, dir.path());
-    let cleared = of(&facts, "aml.transaction_cleared");
-    let alerts = of(&facts, "aml.alert_raised");
-    let cases = of(&facts, "aml.case_opened");
-    assert!(of(&facts, "aml.score_unavailable").is_empty());
-    assert!(of(&facts, "aml.case_unavailable").is_empty());
+    let archive = Archive::read(&baseline);
+    assert_eq!(archive.all_facts("aml.score_unavailable"), 0);
+    assert_eq!(archive.all_facts("aml.case_unavailable"), 0);
 
-    let verdicts: Vec<u64> = cleared.iter().chain(alerts).map(txn_id).collect();
+    let cleared = archive.facts("score", "aml.transaction_cleared");
+    let flagged = archive.facts("score", "aml.alert_raised");
+    let verdicts: Vec<u64> = cleared.iter().chain(&flagged).map(txn_id).collect();
     let decided: BTreeSet<u64> = verdicts.iter().copied().collect();
     assert_eq!(verdicts.len(), decided.len(), "each transaction ends once");
     assert_eq!(decided, fixture_txn_ids());
 
-    let flagged: BTreeMap<u64, Vec<&str>> = alerts
+    let flags: BTreeMap<u64, Vec<&str>> = flagged
         .iter()
         .map(|alert| (txn_id(alert), reasons(alert)))
         .collect();
     for (txn, expected) in PLANTED {
         assert!(decided.contains(&txn), "planted {txn} has a verdict");
         assert_eq!(
-            flagged.get(&txn).cloned().unwrap_or_default(),
+            flags.get(&txn).cloned().unwrap_or_default(),
             expected.to_vec(),
             "planted {txn}"
         );
@@ -207,40 +280,112 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
         .map(|(txn, _)| *txn)
         .collect();
     assert_eq!(
-        flagged.keys().copied().collect::<BTreeSet<_>>(),
+        flags.keys().copied().collect::<BTreeSet<_>>(),
         planted_flags
     );
-
-    for verdict in cleared.iter().chain(alerts).chain(cases) {
-        assert_eq!(verdict["rules_version"], "sim-2026.10");
+    for verdict in cleared.iter().chain(&flagged) {
+        assert_eq!(verdict["rules_version"], ENGINE_RULES);
+    }
+    for alert in &flagged {
+        assert_eq!(alert_id(alert), format!("txn:{}", txn_id(alert)));
     }
 
-    let mut opened: Vec<(u64, u64)> = cases
+    let whole_day = archive.facts("daily_profile", "aml.alert_raised");
+    assert_eq!(
+        whole_day
+            .iter()
+            .map(|alert| (alert_id(alert), reasons(alert)))
+            .collect::<Vec<_>>(),
+        WHOLE_DAY
+            .iter()
+            .map(|(id, reasons)| (*id, reasons.to_vec()))
+            .collect::<Vec<_>>()
+    );
+    for alert in &whole_day {
+        assert_eq!(alert["subject"]["day"], "2022/09/05");
+        assert_eq!(alert["rules_version"], WHOLE_DAY_RULES);
+    }
+
+    let totals = archive.facts("day_totals", "aml.day_totals");
+    assert_eq!(totals.len(), 1, "the day's totals are journaled once");
+    let totals = &totals[0];
+    let transactions = archive.facts("transactions", "aml.transaction").len();
+    assert_eq!(transactions, fixture_rows().len());
+    assert_eq!(totals["transactions"].as_u64(), Some(transactions as u64));
+    assert_eq!(totals["unpriced"].as_u64(), Some(0));
+    assert_eq!(
+        totals["by_format"]
+            .as_object()
+            .expect("by_format")
+            .values()
+            .map(|count| count.as_u64().expect("a count"))
+            .sum::<u64>(),
+        transactions as u64
+    );
+    let labelled = fixture_rows()
+        .iter()
+        .filter(|row| row.last().map(String::as_str) == Some("1"))
+        .count();
+    assert_eq!(
+        totals["labelled_laundering"].as_u64(),
+        Some(labelled as u64)
+    );
+
+    let boundary = archive.natural_eof_from("alerts", "score");
+    let merged: Vec<(usize, String)> = archive
+        .rows("alerts")
+        .enumerate()
+        .filter(|(_, row)| row.event_type() == "aml.alert_raised")
+        .map(|(position, row)| (position, alert_id(&row.payload()).to_owned()))
+        .collect();
+    assert_eq!(merged.len(), planted_flags.len() + WHOLE_DAY.len());
+    for (position, id) in &merged {
+        if id.starts_with("txn:") {
+            assert!(*position < boundary, "{id} precedes score's natural EOF");
+        } else {
+            assert!(*position > boundary, "{id} follows score's natural EOF");
+        }
+    }
+
+    let cases = archive.facts("open_case", "aml.case_opened");
+    let opened: Vec<(u64, &str)> = cases
         .iter()
         .map(|case| {
             (
-                txn_id(case),
                 case["case_number"].as_u64().expect("case number"),
+                alert_id(case),
             )
         })
         .collect();
-    opened.sort();
+    let expected_ids: Vec<String> = planted_flags
+        .iter()
+        .map(|txn| format!("txn:{txn}"))
+        .chain(WHOLE_DAY.iter().map(|(id, _)| (*id).to_owned()))
+        .collect();
     assert_eq!(
         opened,
-        planted_flags
+        expected_ids
             .iter()
             .zip(1..)
-            .map(|(txn, number)| (*txn, number))
-            .collect::<Vec<_>>()
+            .map(|(id, number)| (number, id.as_str()))
+            .collect::<Vec<_>>(),
+        "per-transaction cases open first, whole-day cases after them"
     );
-    for case in cases {
-        assert_eq!(reasons(case), flagged[&txn_id(case)]);
+    let raised: BTreeMap<&str, &serde_json::Value> = flagged
+        .iter()
+        .chain(&whole_day)
+        .map(|alert| (alert_id(alert), alert))
+        .collect();
+    for case in &cases {
+        let alert = raised[alert_id(case)];
+        assert_eq!(reasons(case), reasons(alert));
+        assert_eq!(case["rules_version"], alert["rules_version"]);
     }
 
     let risk_calls = line_count(&dir.path().join("risk-calls.jsonl"));
     let case_calls = line_count(&dir.path().join("case-calls.jsonl"));
-    assert_eq!(risk_calls, 240);
-    assert_eq!(case_calls, planted_flags.len());
+    assert_eq!(risk_calls, fixture_rows().len());
+    assert_eq!(case_calls, expected_ids.len());
 
     let replay = Arc::new(VendorStats::default());
     run(&config, &journal_root, Some(&baseline), replay.clone());

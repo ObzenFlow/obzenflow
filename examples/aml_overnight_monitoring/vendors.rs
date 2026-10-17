@@ -5,7 +5,7 @@
 use super::case_system::{
     CaseRequest, CaseSystemError, CaseSystemPort, SimulatedCaseSystem, CASE_SYSTEM,
 };
-use super::domain::{AlertRaised, CaseOpened, TransactionCleared};
+use super::domain::{AlertRaised, AlertSubject, CaseOpened, TransactionCleared};
 use super::ledger::LedgerError;
 use super::risk_engine::{
     RiskEngineError, RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine, RISK_ENGINE,
@@ -100,12 +100,12 @@ impl Effect for ScoreTransaction {
             RiskVerdict::Flagged {
                 reasons,
                 rules_version,
-            } => ScoreOutcome::Flagged(AlertRaised {
-                txn_id: self.request.txn_id,
-                account: self.request.payer.clone(),
+            } => ScoreOutcome::Flagged(AlertRaised::new(
+                AlertSubject::Transaction(self.request.txn_id),
+                self.request.payer.clone(),
                 reasons,
                 rules_version,
-            }),
+            )),
         })
     }
 
@@ -163,7 +163,7 @@ impl Effect for OpenCase {
             .map_err(case_system_failed)?;
         Ok(CaseOpened {
             case_number,
-            txn_id: self.request.txn_id,
+            alert_id: self.request.alert_id.clone(),
             account: self.request.account.clone(),
             reasons: self.request.reasons.clone(),
             rules_version: self.request.rules_version.clone(),
@@ -192,7 +192,7 @@ fn score_key(request: &ScoreRequest) -> IdempotencyKey {
 }
 
 fn case_key(request: &CaseRequest) -> IdempotencyKey {
-    IdempotencyKey(format!("aml-case:{}", request.txn_id))
+    IdempotencyKey(format!("aml-case:{}", request.alert_id))
 }
 
 fn engine_failed(error: RiskEngineError) -> EffectError {
@@ -304,12 +304,12 @@ fn construction_failed(error: LedgerError) -> EffectPortResolutionError {
 #[cfg(test)]
 mod tests {
     use super::super::domain::{
-        AccountKey, PaymentFormat, ReasonCode, Reasons, RulesVersion, TxnId,
+        AccountKey, AlertId, PaymentFormat, ReasonCode, Reasons, RulesVersion, TxnId,
     };
     use super::*;
 
     #[test]
-    fn keys_are_business_keys_named_by_the_transaction() {
+    fn keys_are_business_keys_named_by_the_transaction_or_the_alert() {
         let score = ScoreRequest {
             txn_id: TxnId(2817341),
             timestamp: "2022/09/05 10:15".to_owned(),
@@ -329,7 +329,7 @@ mod tests {
             history: None,
         };
         let case = CaseRequest {
-            txn_id: TxnId(2817341),
+            alert_id: AlertId("txn:2817341".to_owned()),
             account: score.payer.clone(),
             reasons: Reasons {
                 first: ReasonCode("format_switch".to_owned()),
@@ -337,7 +337,15 @@ mod tests {
             },
             rules_version: RulesVersion("sim-2026.10".to_owned()),
         };
+        let day_case = CaseRequest {
+            alert_id: AlertId("day:2022/09/05:70/8000A1B2C".to_owned()),
+            ..case.clone()
+        };
         assert_eq!(score_key(&score).0, "aml-score:2817341");
-        assert_eq!(case_key(&case).0, "aml-case:2817341");
+        assert_eq!(case_key(&case).0, "aml-case:txn:2817341");
+        assert_eq!(
+            case_key(&day_case).0,
+            "aml-case:day:2022/09/05:70/8000A1B2C"
+        );
     }
 }

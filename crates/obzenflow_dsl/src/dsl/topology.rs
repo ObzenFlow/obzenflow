@@ -137,8 +137,46 @@ pub(crate) fn validate_authored(
                 return Err(format!("join '{name}' requires explicit (catalog, stream) |> {name} topology; its catalog declaration does not create an edge"));
             }
         }
+        if let Some(first) = members[name].and_then(|stage| stage.first_producer_name()) {
+            known(first)?;
+            validate_first_producer(connections, name, first)?;
+        }
     }
     Ok(())
+}
+
+fn validate_first_producer(
+    connections: &[AuthoredConnection],
+    merge: &str,
+    first: &str,
+) -> Result<(), String> {
+    let mut producers: Vec<&str> = Vec::new();
+    for connection in connections {
+        if let AuthoredConnection::Edge {
+            from,
+            to,
+            kind: EdgeKind::Forward,
+        } = connection
+        {
+            if to == merge && !producers.contains(&from.as_str()) {
+                producers.push(from);
+            }
+        }
+    }
+    if !producers.contains(&first) {
+        return Err(format!("merge '{merge}' reads '{first}' first, but topology does not wire '{first} |> {merge}'; its first declaration does not create an edge"));
+    }
+    let others: Vec<String> = producers
+        .into_iter()
+        .filter(|producer| *producer != first)
+        .map(|producer| format!("'{producer}'"))
+        .collect();
+    let wired = match others.as_slice() {
+        [_] => return Ok(()),
+        [] => "none".to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    Err(format!("merge '{merge}' uses concat, so topology wires exactly one producer after '{first}'; it wires {wired}"))
 }
 
 /// Flatten only after validation. Shared catalog edges from distinct tuples

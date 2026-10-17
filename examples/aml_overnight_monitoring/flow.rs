@@ -2,22 +2,26 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::console;
 use super::domain::{
-    AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, ProfiledTransaction,
-    ScoreUnavailable, Transaction, TransactionCleared,
+    AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, ProfiledTransaction,
+    ScoreUnavailable, Transaction, TransactionCleared, UsdRates,
 };
-use super::stages::{AccountProfile, OpenCaseHandler, ScoreHandler};
+use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, ScoreHandler};
 use super::vendors::{
     OpenCase, ScoreTransaction, VendorBindings, VendorBindingsError, VendorStats,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{
-    effectful_transform, flow, join, sink, source, FlowBuildError, FlowDefinition,
+    effectful_transform, flow, join, merge, sink, source, stateful, FlowBuildError, FlowDefinition,
 };
 use obzenflow::journal::disk_journals;
-use obzenflow::stages::sinks::{CsvProjection, CsvSink};
+use obzenflow::stages::merges;
+use obzenflow::stages::sinks::{ConsoleSink, CsvProjection, CsvSink};
 use obzenflow::stages::sources::{CsvDecoder, CsvSource};
+use obzenflow::stages::stateful;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -32,6 +36,15 @@ pub struct AmlApp {
     pub case_ledger: PathBuf,
     pub cleared_register: PathBuf,
     pub case_register: PathBuf,
+    pub rules: AmlRules,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmlRules {
+    pub fan_out_counterparties: NonZeroUsize,
+    pub fan_in_counterparties: NonZeroUsize,
+    pub usd_rates: UsdRates,
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +88,7 @@ struct CaseRow;
 #[derive(Serialize)]
 struct CaseRecord {
     case_number: u64,
-    txn_id: u64,
+    alert_id: String,
     bank: String,
     account: String,
     reasons: String,
@@ -89,7 +102,7 @@ impl CsvProjection for CaseRow {
     fn project(&self, case: CaseOpened) -> Result<CaseRecord, HandlerError> {
         Ok(CaseRecord {
             case_number: case.case_number.0,
-            txn_id: case.txn_id.0,
+            alert_id: case.alert_id.0,
             reasons: case
                 .reasons
                 .iter()
@@ -149,6 +162,18 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
         } = VendorBindings::simulated(&app.risk_ledger, &app.case_ledger, stats.clone())
             .map_err(bindings_failed)?;
         let score = ScoreHandler;
+        let daily_profile = DailyProfile::new(
+            app.rules.fan_out_counterparties,
+            app.rules.fan_in_counterparties,
+        );
+        let usd_rates = app.rules.usd_rates.clone();
+        let day_totals = stateful::reduce(
+            DayTotals::default(),
+            move |totals: &mut DayTotals, transaction: &Transaction| {
+                totals.add(transaction, &usd_rates)
+            },
+        )
+        .emit_on_eof();
         let open_case = OpenCaseHandler;
         register_dir(&app.cleared_register).map_err(resources_failed)?;
         let cleared_register = CsvSink::builder(ClearedRow)
@@ -161,7 +186,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             .path(&app.case_register)
             .columns([
                 "case_number",
-                "txn_id",
+                "alert_id",
                 "bank",
                 "account",
                 "reasons",
@@ -169,6 +194,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             ])
             .build()
             .map_err(resources_failed)?;
+        let totals_report = ConsoleSink::new(console::format_totals);
 
         Ok(flow! {
             name: "aml_overnight_monitoring",
@@ -186,20 +212,29 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                     => score
                 );
                 cleared         = sink!(TransactionCleared => cleared_register);
+                daily_profile   = stateful!(Transaction -> AlertRaised => daily_profile);
+                day_totals      = stateful!(Transaction -> DayTotals => day_totals);
+                alerts          = merge!(first score: AlertRaised => merges::concat);
                 open_case       = effectful_transform!(
                     AlertRaised -> { CaseOpened, CaseUnavailable }
                     uses OpenCase via case_system
                     => open_case
                 );
                 case_register   = sink!(CaseOpened => case_register);
+                totals_report   = sink!(DayTotals => totals_report, delivery: idempotent);
             },
 
             topology: {
                 (account_history, transactions) |> profile;
+                transactions |> daily_profile;
+                transactions |> day_totals;
                 profile |> score;
                 score |> cleared;
-                score |> open_case;
+                score |> alerts;
+                daily_profile |> alerts;
+                alerts |> open_case;
                 open_case |> case_register;
+                day_totals |> totals_report;
             }
         })
     })
