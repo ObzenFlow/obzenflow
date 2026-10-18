@@ -99,7 +99,6 @@ pub enum MergeEvent {
     FirstPhaseLeftOpen,
     /// The held subscription ended.
     ReceivedEOF,
-    BeginDrain,
     DrainComplete,
     FinalizationCompleted,
     TerminationSettled,
@@ -135,6 +134,19 @@ pub enum MergeAction {
     Cleanup,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    FirstPhase,
+    Held,
+}
+
+pub(crate) struct PendingRow {
+    pub(crate) side: Side,
+    pub(crate) parent: DeliveredRecord<ChainPayload>,
+    pub(crate) upstream: Option<StageId>,
+    pub(crate) outputs: VecDeque<PendingOutput>,
+}
+
 /// Everything merge actions and dispatch need.
 pub struct MergeContext {
     pub(crate) stage_id: StageId,
@@ -163,16 +175,13 @@ pub struct MergeContext {
     pub(crate) backpressure_writer: BackpressureWriter,
     pub(crate) backpressure_readers: HashMap<StageId, BackpressureReader>,
     pub(crate) output_contract: StageOutputContract,
-    pub(crate) pending_outputs: VecDeque<PendingOutput>,
-    pub(crate) pending_parent: Option<DeliveredRecord<ChainPayload>>,
-    pub(crate) pending_ack_upstream: Option<StageId>,
+    pub(crate) pending: Option<PendingRow>,
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
     pub(crate) backpressure_stall: StallEpisode,
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
     pub(crate) terminal_eof_kind: Option<EofKind>,
     pub(crate) buffered_eof: Option<ChainEvent>,
-    pub(crate) drain_without_held_inputs: bool,
     pub(crate) pending_promotion: Option<ReaderGeneration>,
     pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 }

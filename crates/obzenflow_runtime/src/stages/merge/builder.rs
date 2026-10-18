@@ -152,16 +152,13 @@ impl SupervisorBuilder for MergeBuilder {
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             output_contract: self.resources.output_contract.clone(),
-            pending_outputs: std::collections::VecDeque::new(),
-            pending_parent: None,
-            pending_ack_upstream: None,
+            pending: None,
             backpressure_pulse:
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
             backpressure_stall: Default::default(),
             heartbeat,
             terminal_eof_kind: None,
             buffered_eof: None,
-            drain_without_held_inputs: false,
             pending_promotion: None,
             catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
                 crate::stages::common::supervision::flow_context_factory::make_flow_context(

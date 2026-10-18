@@ -17,8 +17,6 @@ pub trait MergeHandleExt {
 
     fn ready(&self) -> impl std::future::Future<Output = Result<(), HandleError>> + Send;
 
-    fn begin_drain(&self) -> impl std::future::Future<Output = Result<(), HandleError>> + Send;
-
     fn is_terminal(&self) -> bool;
 }
 
@@ -29,10 +27,6 @@ impl MergeHandleExt for MergeHandle {
 
     async fn ready(&self) -> Result<(), HandleError> {
         self.send_event(MergeEvent::Ready).await
-    }
-
-    async fn begin_drain(&self) -> Result<(), HandleError> {
-        self.send_event(MergeEvent::BeginDrain).await
     }
 
     fn is_terminal(&self) -> bool {

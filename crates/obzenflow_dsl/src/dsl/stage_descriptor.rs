@@ -3262,7 +3262,6 @@ fn translate_stage_event_to_merge(event: StageEvent) -> Result<MergeEvent, Strin
     match event {
         StageEvent::Initialize => Ok(MergeEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(MergeEvent::Ready),
-        StageEvent::BeginDrain => Ok(MergeEvent::BeginDrain),
         StageEvent::ForceShutdown => Ok(MergeEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!("Unsupported stage event for merge: {event:?}")),
     }
