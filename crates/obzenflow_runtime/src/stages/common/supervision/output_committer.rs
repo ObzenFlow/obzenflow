@@ -227,6 +227,7 @@ impl PhysicalDataReservation {
 fn reserve_direct_data_rows(
     writer: Option<&BackpressureWriter>,
     rows: u64,
+    scope: MiddlewareExecutionScope,
 ) -> Result<Option<PhysicalDataReservation>, CommitError> {
     if rows == 0 {
         return Ok(None);
@@ -239,15 +240,18 @@ fn reserve_direct_data_rows(
             if claim.requires_track_accounting() {
                 return Ok(Some(PhysicalDataReservation::DirectTracked {
                     claim,
-                    reservation: writer.reserve_tracked(rows),
+                    reservation: writer.reserve_reconstructed(rows),
                 }));
             }
             return Ok(Some(PhysicalDataReservation::Direct(claim)));
         }
     }
-    Ok(Some(PhysicalDataReservation::Legacy(
-        writer.reserve_tracked(rows),
-    )))
+    let reservation = if scope.is_deterministic_replay() {
+        writer.reserve_reconstructed(rows)
+    } else {
+        writer.reserve_tracked(rows)
+    };
+    Ok(Some(PhysicalDataReservation::Legacy(reservation)))
 }
 
 /// Per-commit behaviour that is not implied by which handles are present.
@@ -444,6 +448,7 @@ impl OutputCommitter<'_> {
         let backpressure_reservation = reserve_direct_data_rows(
             self.backpressure_writer,
             u64::from(event.consumes_data_credit()),
+            self.observer_scope,
         )?;
 
         let capture = self.observation_capture(vec![(
@@ -686,7 +691,7 @@ impl OutputCommitter<'_> {
             .filter(|event| event.consumes_data_credit())
             .count() as u64;
         let backpressure_reservation =
-            reserve_direct_data_rows(self.backpressure_writer, data_count)?;
+            reserve_direct_data_rows(self.backpressure_writer, data_count, self.observer_scope)?;
 
         let member_count = metadata.len();
         let written = match crate::supervised_base::publication::append_group_inline(

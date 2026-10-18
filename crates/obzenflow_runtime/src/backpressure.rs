@@ -154,6 +154,7 @@ struct StageState {
     effective_writer: AtomicU64,
     writer_seq: AtomicU64,
     reserved: AtomicU64,
+    reconstructed_through: AtomicU64,
     wait_nanos_total: AtomicU64,
     credit_waker: CreditWaker,
     downstream_edges: Vec<Arc<EdgeState>>,
@@ -256,6 +257,7 @@ impl BackpressureRegistry {
                     effective_writer: AtomicU64::new(0),
                     writer_seq: AtomicU64::new(0),
                     reserved: AtomicU64::new(0),
+                    reconstructed_through: AtomicU64::new(0),
                     wait_nanos_total: AtomicU64::new(0),
                     credit_waker,
                     downstream_edges,
@@ -475,6 +477,7 @@ impl BackpressureWriter {
             return None;
         }
         let effective_writer = state.effective_writer.load(Ordering::Acquire);
+        let reconstructed_through = state.reconstructed_through.load(Ordering::Acquire);
         let first_look = episode.clocks.is_empty();
         let mut every_short_edge_renewed = !first_look;
         let mut clocks = Vec::with_capacity(episode.clocks.len().max(1));
@@ -491,16 +494,23 @@ impl BackpressureWriter {
                 continue;
             }
             let renewals = edge.hold_renewals.load(Ordering::Acquire);
+            let reading_recorded_backlog = reader_seq < reconstructed_through;
             let clock = match episode
                 .clocks
                 .iter()
                 .find(|clock| clock.downstream == edge.downstream)
             {
-                Some(clock) if clock.renewals_seen != renewals => EdgeClock {
-                    since: now,
-                    renewals_seen: renewals,
-                    ..*clock
-                },
+                Some(clock)
+                    if clock.renewals_seen != renewals
+                        || (reading_recorded_backlog && clock.reader_seq_seen != reader_seq) =>
+                {
+                    EdgeClock {
+                        since: now,
+                        renewals_seen: renewals,
+                        reader_seq_seen: reader_seq,
+                        ..*clock
+                    }
+                }
                 Some(clock) => {
                     every_short_edge_renewed = false;
                     *clock
@@ -511,6 +521,7 @@ impl BackpressureWriter {
                         downstream: edge.downstream,
                         since: now,
                         renewals_seen: renewals,
+                        reader_seq_seen: reader_seq,
                     }
                 }
             };
@@ -603,8 +614,6 @@ impl BackpressureWriter {
     }
 
     /// Track-mode reservation: accounting advances, never blocks.
-    /// Reconstruction-scoped commits use this so the resume handoff computes
-    /// true lag from catch-up-era sequences (FLOWIP-115e).
     pub fn reserve_tracked(&self, n: u64) -> BackpressureReservation {
         let Some(state) = &self.state else {
             return BackpressureReservation::noop();
@@ -621,6 +630,19 @@ impl BackpressureWriter {
             remaining: n,
             committed_or_released: false,
         }
+    }
+
+    /// Reservation for a reconstruction-scoped commit. It never blocks, and it
+    /// marks the end of the recorded backlog a resume hands to live work.
+    pub fn reserve_reconstructed(&self, n: u64) -> BackpressureReservation {
+        let reservation = self.reserve_tracked(n);
+        if let Some(state) = &reservation.state {
+            let through = state.effective_writer.load(Ordering::Acquire);
+            state
+                .reconstructed_through
+                .fetch_max(through, Ordering::AcqRel);
+        }
+        reservation
     }
 
     pub fn reserve(&self, n: u64) -> Option<BackpressureReservation> {
@@ -727,6 +749,7 @@ struct EdgeClock {
     downstream: StageId,
     since: tokio::time::Instant,
     renewals_seen: u64,
+    reader_seq_seen: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1308,6 +1331,7 @@ mod direct_fact_tests {
             effective_writer: AtomicU64::new(0),
             writer_seq: AtomicU64::new(0),
             reserved: AtomicU64::new(0),
+            reconstructed_through: AtomicU64::new(0),
             wait_nanos_total: AtomicU64::new(0),
             credit_waker,
             downstream_edges: vec![edge.clone()],
@@ -1359,6 +1383,7 @@ mod direct_fact_tests {
             effective_writer: AtomicU64::new(0),
             writer_seq: AtomicU64::new(0),
             reserved: AtomicU64::new(0),
+            reconstructed_through: AtomicU64::new(0),
             wait_nanos_total: AtomicU64::new(0),
             credit_waker,
             downstream_edges: vec![enforced.clone(), tracked.clone()],
@@ -1776,6 +1801,7 @@ mod stall_clock_tests {
             effective_writer: AtomicU64::new(0),
             writer_seq: AtomicU64::new(0),
             reserved: AtomicU64::new(0),
+            reconstructed_through: AtomicU64::new(0),
             wait_nanos_total: AtomicU64::new(0),
             credit_waker: CreditWaker::new(),
             downstream_edges: downstream.clone(),
@@ -1935,5 +1961,66 @@ mod stall_clock_tests {
             stalled_on(w.writer.look(&mut episode, 2, at(t0, 30))),
             Some((trickling, Duration::from_secs(30)))
         );
+    }
+
+    #[test]
+    fn a_reader_working_through_the_recorded_backlog_restarts_the_clock() {
+        let w = writer(&[(2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        w.writer.reserve_reconstructed(1000).commit(1000);
+        let reader = w.readers[0].edge_ids().unwrap().1;
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, t0)), None);
+        for secs in (20..=200).step_by(20) {
+            w.readers[0].ack_consumed(50);
+            assert_eq!(
+                stalled_on(w.writer.look(&mut episode, 1, at(t0, secs))),
+                None
+            );
+        }
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 229))),
+            None
+        );
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 230))),
+            Some((reader, Duration::from_secs(30)))
+        );
+    }
+
+    #[test]
+    fn past_the_recorded_backlog_consumption_leaves_the_clock_running() {
+        let w = writer(&[(2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        w.writer.reserve_reconstructed(2).commit(2);
+        w.readers[0].ack_consumed(2);
+        fill(&w.writer, 2);
+        let trickling = w.readers[0].edge_ids().unwrap().1;
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 2, t0)), None);
+        w.readers[0].ack_consumed(1);
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 2, at(t0, 20))), None);
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 2, at(t0, 30))),
+            Some((trickling, Duration::from_secs(30)))
+        );
+    }
+
+    #[test]
+    fn a_writer_behind_a_reader_working_through_its_backlog_relays() {
+        let w = writer(&[(2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        w.writer.reserve_reconstructed(100).commit(100);
+        let relays = |verdict: Option<StallVerdict>| match verdict.expect("blocked writer") {
+            StallVerdict::Wait { relay, .. } => relay,
+            StallVerdict::Stalled { .. } => panic!("no stall expected"),
+        };
+        let mut episode = StallEpisode::default();
+        assert!(!relays(w.writer.look(&mut episode, 1, t0)));
+        assert!(!relays(w.writer.look(&mut episode, 1, at(t0, 1))));
+        assert_eq!(w.input.hold_renewals.load(Ordering::Acquire), 0);
+        w.readers[0].ack_consumed(10);
+        assert!(relays(w.writer.look(&mut episode, 1, at(t0, 2))));
+        assert_eq!(w.input.hold_renewals.load(Ordering::Acquire), 1);
     }
 }
