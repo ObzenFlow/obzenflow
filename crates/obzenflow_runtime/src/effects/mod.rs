@@ -112,7 +112,7 @@ pub(crate) use history::current_cursor_history;
 pub(crate) use history::{
     merge_cursor_histories, EffectCursorCoordinator, EffectCursorHistory, EffectHistorySelection,
 };
-pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};
+pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryScan, EffectHistoryStore};
 pub use identity::{
     deterministic_effect_record_event_id, deterministic_effect_record_event_time,
     deterministic_event_id, deterministic_event_time, deterministic_payload_event_id,

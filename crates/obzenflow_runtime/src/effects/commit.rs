@@ -621,9 +621,10 @@ pub(super) async fn append_domain_effect_success_facts(
 // that feeds replay). A read-before-write duplicate check is deliberately avoided
 // here because it would add a TOCTOU window without removing one. Load-bearing
 // ordering invariant: every live append on resume is preceded by
-// `EffectHistory::load` (the transform, stateful, and sink FSMs load effect history
-// before processing); if a future stage appended live before loading history, this
-// fail-loud backstop would no longer cover it.
+// `EffectHistory::load` (only stages with an effect runtime append, and their
+// transform and stateful FSMs read their history before processing); if a future
+// stage appended live before loading history, this fail-loud backstop would no
+// longer cover it.
 pub(super) async fn append_effect_record(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     event: ChainEvent,

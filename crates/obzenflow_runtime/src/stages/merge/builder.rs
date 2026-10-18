@@ -88,18 +88,18 @@ impl SupervisorBuilder for MergeBuilder {
             &self.resources.runtime_execution,
         );
 
-        let mut batch_subscription_factory = self
+        let mut first_phase_subscription_factory = self
             .resources
             .upstream_subscription_factory
-            .rebind(&self.journals_of(&self.config.batch_producers));
-        batch_subscription_factory.reader_selection = ReaderSelectionPolicy::CanonicalMerge;
-        batch_subscription_factory.recorded = None;
-        let mut live_subscription_factory = self
+            .rebind(&self.journals_of(&self.config.first_phase));
+        first_phase_subscription_factory.reader_selection = ReaderSelectionPolicy::CanonicalMerge;
+        first_phase_subscription_factory.recorded = None;
+        let mut held_subscription_factory = self
             .resources
             .upstream_subscription_factory
-            .rebind(&self.journals_of(&self.config.live_producers));
-        if self.config.live_producers.len() < 2 {
-            live_subscription_factory.recorded = None;
+            .rebind(&self.journals_of(&self.config.held));
+        if self.config.held.len() < 2 {
+            held_subscription_factory.recorded = None;
         }
 
         let publications = crate::supervised_base::publication::PublicationScope::new();
@@ -140,28 +140,25 @@ impl SupervisorBuilder for MergeBuilder {
             instrumentation: instrumentation.clone(),
             control_strategy: self.control_strategy.clone(),
             processing_context: ProcessingContext::default(),
-            batch_subscription_factory,
-            live_subscription_factory,
-            batch_subscription: None,
-            live_subscription: None,
-            batch_contract_state: Vec::new(),
-            batch_last_contract_check: None,
-            live_contract_state: Vec::new(),
-            live_last_contract_check: None,
-            live_producers: self.config.live_producers.clone(),
+            first_phase_subscription_factory,
+            held_subscription_factory,
+            first_phase_subscription: None,
+            held_subscription: None,
+            first_phase_contract_state: Vec::new(),
+            first_phase_last_contract_check: None,
+            held_contract_state: Vec::new(),
+            held_last_contract_check: None,
+            held_producers: self.config.held.clone(),
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             output_contract: self.resources.output_contract.clone(),
-            pending_outputs: std::collections::VecDeque::new(),
-            pending_parent: None,
-            pending_ack_upstream: None,
+            pending: None,
             backpressure_pulse:
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
             backpressure_stall: Default::default(),
             heartbeat,
             terminal_eof_kind: None,
             buffered_eof: None,
-            drain_without_held_inputs: false,
             pending_promotion: None,
             catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
                 crate::stages::common::supervision::flow_context_factory::make_flow_context(

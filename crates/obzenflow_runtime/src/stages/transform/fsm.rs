@@ -953,8 +953,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
                         ))
                     })?;
                     let history =
-                        handler
-                            .load_effect_history(archive, &stage)
+                        EffectHistory::load(archive, &stage, handler.effect_history_scan())
                             .await
                             .map_err(|e| {
                                 obzenflow_fsm::FsmError::HandlerError(format!(

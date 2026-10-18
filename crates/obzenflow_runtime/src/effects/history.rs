@@ -11,22 +11,16 @@ use std::collections::{BTreeMap, HashSet};
 
 type GroupedJournalEvents = HashMap<String, Vec<(usize, Option<JournalGroupMember>, ChainEvent)>>;
 
-enum HistoryScan {
-    Cursors,
+/// What a stage reads from its archived journal before it starts.
+#[derive(Debug)]
+pub enum EffectHistoryScan {
+    /// A stage without an effect runtime serves no recorded effect and reads nothing.
+    Skip,
+    /// A stage with an effect runtime reads its recorded effects and actions,
+    /// excluding rows of its pass-through type.
     Actions {
         pass_through: Option<EventDescriptor>,
     },
-}
-
-impl HistoryScan {
-    fn actions(&self) -> Option<super::actions::ActionScan> {
-        match self {
-            Self::Cursors => None,
-            Self::Actions { pass_through } => Some(super::actions::ActionScan::passing_through(
-                pass_through.clone(),
-            )),
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -204,32 +198,34 @@ impl EffectCursorHistory {
 }
 
 impl EffectHistory {
-    /// Load the cursor histories of a stage without an effect runtime from
-    /// `archive` and the ancestors it merges with, oldest first.
+    /// Load a stage's history as `scan` declares, from `archive` and the
+    /// ancestors it merges with, oldest first. A skipped scan reads no journal
+    /// and returns an empty history in the archive's recorded namespace.
     pub async fn load(
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
+        scan: EffectHistoryScan,
     ) -> Result<Self, EffectError> {
-        Self::load_lineage(archive, stage, &HistoryScan::Cursors).await
-    }
-
-    /// Load the history of a stage with an effect runtime, its recorded actions
-    /// joined across the lineage and excluding rows of its pass-through type.
-    pub async fn load_with_actions(
-        archive: &Arc<dyn ReplayArchive>,
-        stage: &StageKey,
-        pass_through: Option<&EventDescriptor>,
-    ) -> Result<Self, EffectError> {
-        let scan = HistoryScan::Actions {
-            pass_through: pass_through.cloned(),
-        };
-        Self::load_lineage(archive, stage, &scan).await
+        match scan {
+            EffectHistoryScan::Skip => Ok(Self::from_cursor_histories(
+                RecordedFlowId::from(
+                    archive
+                        .recorded_flow_id()
+                        .unwrap_or(archive.archive_flow_id())
+                        .to_string(),
+                ),
+                Vec::new(),
+            )),
+            EffectHistoryScan::Actions { pass_through } => {
+                Self::load_lineage(archive, stage, pass_through.as_ref()).await
+            }
+        }
     }
 
     async fn load_lineage(
         archive: &Arc<dyn ReplayArchive>,
         stage: &StageKey,
-        scan: &HistoryScan,
+        pass_through: Option<&EventDescriptor>,
     ) -> Result<Self, EffectError> {
         let mut joined: Option<Self> = None;
         for ancestor in archive.ancestors().iter().rev() {
@@ -239,13 +235,13 @@ impl EffectHistory {
             ) {
                 continue;
             }
-            let older = Self::load_archive(ancestor, stage.as_str(), scan).await?;
+            let older = Self::load_archive(ancestor, stage.as_str(), pass_through).await?;
             joined = Some(match joined {
                 Some(oldest) => oldest.joined_with(&older, stage)?,
                 None => older,
             });
         }
-        let head = Self::load_archive(archive, stage.as_str(), scan).await?;
+        let head = Self::load_archive(archive, stage.as_str(), pass_through).await?;
         match joined {
             Some(ancestors) => ancestors.joined_with(&head, stage),
             None => Ok(head),
@@ -371,7 +367,7 @@ impl EffectHistory {
     async fn load_archive(
         archive: &Arc<dyn ReplayArchive>,
         stage_key: &str,
-        scan: &HistoryScan,
+        pass_through: Option<&EventDescriptor>,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
         let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
@@ -384,16 +380,14 @@ impl EffectHistory {
         let mut attempt_positions = HashMap::new();
         let mut attempt_events = HashMap::new();
         let mut position = 0_usize;
-        let mut actions = scan.actions();
+        let mut actions = super::actions::ActionScan::passing_through(pass_through.cloned());
 
         while let Some(envelope) = reader
             .next()
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
-            if let Some(actions) = actions.as_mut() {
-                actions.observe(&envelope.authored())?;
-            }
+            actions.observe(&envelope.authored())?;
             if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
                 causal
                     .entry(effect.cursor.clone())
@@ -549,7 +543,7 @@ impl EffectHistory {
         history.attempt_events = Arc::new(attempt_events);
         validate_group_grammar(&history, &grouped_events)?;
         history.grouped_events = Arc::new(grouped_events);
-        let actions = actions.unwrap_or_default().finish(
+        let actions = actions.finish(
             |cursor| {
                 history.index.contains_key(cursor)
                     || history.attempts.contains_key(cursor)
@@ -569,7 +563,23 @@ impl EffectHistory {
         recorded_flow_id: impl Into<RecordedFlowId>,
         records: Vec<EffectRecord>,
     ) -> Result<Self, EffectError> {
-        Self::from_records_with_policy(recorded_flow_id, records, true)
+        let mut history = Self::from_records_with_policy(recorded_flow_id, records, true)?;
+        let mut seen = std::collections::HashSet::new();
+        let ordered = history
+            .records
+            .iter()
+            .filter(|record| {
+                history.index.contains_key(&record.cursor) && seen.insert(record.cursor.clone())
+            })
+            .map(|record| {
+                super::RecordedAction::recorded(
+                    record.cursor.clone(),
+                    &record.descriptor.effect_type,
+                )
+            })
+            .collect();
+        history.actions = Arc::new(super::RecordedActions::new(ordered, HashMap::new()));
+        Ok(history)
     }
 
     #[cfg(test)]
@@ -671,19 +681,6 @@ impl EffectHistory {
         }
 
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
-        let mut ordered = Vec::<super::RecordedAction>::new();
-        for record in &records {
-            if index.contains_key(&record.cursor)
-                && !ordered
-                    .iter()
-                    .any(|action| action.cursor() == Some(&record.cursor))
-            {
-                ordered.push(super::RecordedAction::recorded(
-                    record.cursor.clone(),
-                    &record.descriptor.effect_type,
-                ));
-            }
-        }
 
         Ok(Self {
             causal: Arc::new(HashMap::new()),
@@ -701,7 +698,7 @@ impl EffectHistory {
             grouped_events: Arc::new(HashMap::new()),
             attempt_positions: Arc::new(HashMap::new()),
             attempt_events: Arc::new(HashMap::new()),
-            actions: Arc::new(super::RecordedActions::new(ordered, HashMap::new())),
+            actions: Arc::new(super::RecordedActions::default()),
         })
     }
 

@@ -267,6 +267,10 @@ name = "flash_sale_allocation"
 path = "examples/flash_sale_allocation/main.rs"
 
 [[example]]
+name = "aml_overnight_monitoring"
+path = "examples/aml_overnight_monitoring/main.rs"
+
+[[example]]
 name = "one_shot_inference_demo"
 path = "examples/one_shot_inference_demo/main.rs"
 required-features = ["ai"]

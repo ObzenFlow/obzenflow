@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FSM for merge stages. A `then_live` merge reads its batch producers first and
-//! polls its live producers only after every batch producer authored natural EOF.
+//! FSM for merge stages. A merge reads its first-phase producers and polls its
+//! held producers only after every first-phase producer authored natural EOF:
+//! a `then_live` merge's batch producers before its live ones, and a `concat`
+//! merge's first producer before its other one.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -39,11 +41,11 @@ pub enum MergeState {
     Initializing,
     Initialized,
     Starting,
-    /// Reads only the batch producers; the live producers wait in their
+    /// Reads only the first-phase producers; the held producers wait in their
     /// journals and their edges are renewed as held.
-    Batch,
-    /// Every batch producer authored natural EOF; reads the live producers.
-    Live,
+    FirstPhase,
+    /// Every first-phase producer authored natural EOF; reads the held producers.
+    LastPhase,
     Draining,
     Finalizing,
     Drained,
@@ -71,7 +73,7 @@ impl MergeState {
         match self {
             Self::Initializing => Phase::Initializing,
             Self::Initialized => Phase::Initialized,
-            Self::Batch | Self::Live => Phase::Active,
+            Self::FirstPhase | Self::LastPhase => Phase::Active,
             Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
@@ -90,14 +92,13 @@ pub enum MergeEvent {
     InitializationCompleted,
     Ready,
     ActivationCompleted,
-    /// Every batch producer authored natural EOF.
-    BatchCompleted,
-    /// Every batch producer ended, not all naturally; the merge drains without
-    /// reading its live producers.
-    BatchLeftOpen,
-    /// The live subscription ended.
+    /// Every first-phase producer authored natural EOF.
+    FirstPhaseCompleted,
+    /// Every first-phase producer ended, not all naturally; the merge drains
+    /// without reading its held producers.
+    FirstPhaseLeftOpen,
+    /// The held subscription ended.
     ReceivedEOF,
-    BeginDrain,
     DrainComplete,
     FinalizationCompleted,
     TerminationSettled,
@@ -133,6 +134,19 @@ pub enum MergeAction {
     Cleanup,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    FirstPhase,
+    Held,
+}
+
+pub(crate) struct PendingRow {
+    pub(crate) side: Side,
+    pub(crate) parent: DeliveredRecord<ChainPayload>,
+    pub(crate) upstream: Option<StageId>,
+    pub(crate) outputs: VecDeque<PendingOutput>,
+}
+
 /// Everything merge actions and dispatch need.
 pub struct MergeContext {
     pub(crate) stage_id: StageId,
@@ -148,29 +162,26 @@ pub struct MergeContext {
     pub(crate) control_strategy: Arc<dyn SignalGate>,
     pub(crate) processing_context: ProcessingContext,
 
-    pub(crate) batch_subscription_factory: BoundSubscriptionFactory,
-    pub(crate) live_subscription_factory: BoundSubscriptionFactory,
-    pub(crate) batch_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    pub(crate) live_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    pub(crate) batch_contract_state: Vec<ReaderProgress>,
-    pub(crate) batch_last_contract_check: Option<tokio::time::Instant>,
-    pub(crate) live_contract_state: Vec<ReaderProgress>,
-    pub(crate) live_last_contract_check: Option<tokio::time::Instant>,
-    pub(crate) live_producers: Vec<StageId>,
+    pub(crate) first_phase_subscription_factory: BoundSubscriptionFactory,
+    pub(crate) held_subscription_factory: BoundSubscriptionFactory,
+    pub(crate) first_phase_subscription: Option<UpstreamSubscription<ChainEvent>>,
+    pub(crate) held_subscription: Option<UpstreamSubscription<ChainEvent>>,
+    pub(crate) first_phase_contract_state: Vec<ReaderProgress>,
+    pub(crate) first_phase_last_contract_check: Option<tokio::time::Instant>,
+    pub(crate) held_contract_state: Vec<ReaderProgress>,
+    pub(crate) held_last_contract_check: Option<tokio::time::Instant>,
+    pub(crate) held_producers: Vec<StageId>,
 
     pub(crate) backpressure_writer: BackpressureWriter,
     pub(crate) backpressure_readers: HashMap<StageId, BackpressureReader>,
     pub(crate) output_contract: StageOutputContract,
-    pub(crate) pending_outputs: VecDeque<PendingOutput>,
-    pub(crate) pending_parent: Option<DeliveredRecord<ChainPayload>>,
-    pub(crate) pending_ack_upstream: Option<StageId>,
+    pub(crate) pending: Option<PendingRow>,
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
     pub(crate) backpressure_stall: StallEpisode,
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
     pub(crate) terminal_eof_kind: Option<EofKind>,
     pub(crate) buffered_eof: Option<ChainEvent>,
-    pub(crate) drain_without_held_inputs: bool,
     pub(crate) pending_promotion: Option<ReaderGeneration>,
     pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
 }
@@ -201,14 +212,14 @@ impl FsmAction for MergeAction {
             MergeAction::AllocateResources => {
                 let writer_id = WriterId::from(ctx.stage_id);
                 ctx.writer_id = Some(writer_id);
-                ctx.batch_contract_state = ctx
-                    .batch_subscription_factory
+                ctx.first_phase_contract_state = ctx
+                    .first_phase_subscription_factory
                     .upstream_stage_ids()
                     .into_iter()
                     .map(ReaderProgress::new)
                     .collect();
-                ctx.live_contract_state = ctx
-                    .live_subscription_factory
+                ctx.held_contract_state = ctx
+                    .held_subscription_factory
                     .upstream_stage_ids()
                     .into_iter()
                     .map(ReaderProgress::new)
@@ -222,28 +233,28 @@ impl FsmAction for MergeAction {
                     include_delivery_contract: false,
                     cycle_guard_config: None,
                 };
-                let batch = ctx
-                    .batch_subscription_factory
+                let first_phase = ctx
+                    .first_phase_subscription_factory
                     .build_with_contracts(wiring(ctx))
                     .await
                     .map_err(|error| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to create the merge's batch subscription: {error}"
+                            "Failed to create the merge's first-phase subscription: {error}"
                         ))
                     })?
                     .with_contract_flow_context(ctx.flow_context());
-                let live = ctx
-                    .live_subscription_factory
+                let held = ctx
+                    .held_subscription_factory
                     .build_with_contracts(wiring(ctx))
                     .await
                     .map_err(|error| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to create the merge's live subscription: {error}"
+                            "Failed to create the merge's held subscription: {error}"
                         ))
                     })?
                     .with_contract_flow_context(ctx.flow_context());
-                ctx.batch_subscription = Some(batch);
-                ctx.live_subscription = Some(live);
+                ctx.first_phase_subscription = Some(first_phase);
+                ctx.held_subscription = Some(held);
                 Ok(())
             }
             MergeAction::PublishRunning => {
@@ -326,8 +337,8 @@ impl FsmAction for MergeAction {
                 .await
             }
             MergeAction::Cleanup => {
-                ctx.batch_subscription.take();
-                ctx.live_subscription.take();
+                ctx.first_phase_subscription.take();
+                ctx.held_subscription.take();
                 if let Some(heartbeat) = ctx.heartbeat.take() {
                     heartbeat.cancel();
                 }

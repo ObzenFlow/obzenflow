@@ -16,13 +16,23 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainPayload, JournalRecord};
-use obzenflow_core::TypedPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
+use obzenflow_core::journal::archive::certification::StageOrders;
+use obzenflow_core::journal::archive::manifest::RunManifestDirectFactAdmission;
+use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
+use obzenflow_core::journal::factory::CurrentRunLocator;
+use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
+use obzenflow_core::source::RecordedSourceFrontier;
+use obzenflow_core::{FlowId, JournalWriterId, ReaderGeneration, StageId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, FlowDefinition};
+use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
+use obzenflow_runtime::bootstrap::{
+    install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
+};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
 };
@@ -36,9 +46,10 @@ use obzenflow_runtime::stages::SourceError;
 use replay_testkit::ReattachingSource;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -650,5 +661,147 @@ async fn resuming_through_a_replay_of_a_torn_resume_reuses_ancestor_effects() ->
         .clone();
     assert_eq!(resume["resumed_from"], json!(std::fs::canonicalize(&r1)?));
     assert_eq!(resume["merged_from"], json!([std::fs::canonicalize(&r0)?]));
+    Ok(())
+}
+
+struct HistoryReads {
+    inner: DiskReplayArchive,
+    opened: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ReplayArchive for HistoryReads {
+    async fn open_source_reader(
+        &self,
+        stage_key: &str,
+        expected_type: StageType,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+        self.inner
+            .open_source_reader(stage_key, expected_type)
+            .await
+    }
+
+    async fn open_effect_history(
+        &self,
+        stage_key: &str,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+        self.opened
+            .lock()
+            .expect("history reads lock")
+            .push(stage_key.to_string());
+        self.inner.open_effect_history(stage_key).await
+    }
+
+    fn source_data_journal_path(&self, stage_key: &str) -> Result<PathBuf, ReplayError> {
+        self.inner.source_data_journal_path(stage_key)
+    }
+
+    fn archive_flow_id(&self) -> &str {
+        self.inner.archive_flow_id()
+    }
+
+    fn recorded_flow_id(&self) -> Option<&str> {
+        self.inner.recorded_flow_id()
+    }
+
+    fn stage_orders(&self) -> StageOrders {
+        self.inner.stage_orders()
+    }
+
+    fn journal_stages(&self) -> HashMap<JournalWriterId, String> {
+        self.inner.journal_stages()
+    }
+
+    fn archived_stage_id(&self, stage_key: &str) -> Result<StageId, ReplayError> {
+        self.inner.archived_stage_id(stage_key)
+    }
+
+    fn archive_status(&self) -> ArchiveStatus {
+        self.inner.archive_status()
+    }
+
+    fn status_derivation(&self) -> StatusDerivation {
+        ReplayArchive::status_derivation(&self.inner)
+    }
+
+    fn allow_incomplete_archive(&self) -> bool {
+        self.inner.allow_incomplete_archive()
+    }
+
+    fn source_stage_keys(&self) -> Vec<String> {
+        self.inner.source_stage_keys()
+    }
+
+    fn recorded_source_eof(&self, stage_key: &str) -> Option<EofKind> {
+        self.inner.recorded_source_eof(stage_key)
+    }
+
+    fn recorded_source_frontier(&self, stage_key: &str) -> RecordedSourceFrontier {
+        self.inner.recorded_source_frontier(stage_key)
+    }
+
+    fn archive_path(&self) -> &Path {
+        self.inner.archive_path()
+    }
+
+    fn claim_continuation(
+        &self,
+        successor: FlowId,
+        location: &CurrentRunLocator,
+    ) -> Result<(), ReplayError> {
+        self.inner.claim_continuation(successor, location)
+    }
+
+    fn ancestors(&self) -> Vec<Arc<dyn ReplayArchive>> {
+        self.inner.ancestors()
+    }
+
+    fn manifest_capability(&self, name: &str) -> Option<u32> {
+        self.inner.manifest_capability(name)
+    }
+
+    fn bounded_direct_fact_admission(&self) -> &[RunManifestDirectFactAdmission] {
+        self.inner.bounded_direct_fact_admission()
+    }
+
+    fn max_recorded_generation(&self) -> ReaderGeneration {
+        self.inner.max_recorded_generation()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_reads_only_the_journals_of_stages_with_an_effect_runtime() -> Result<()> {
+    const RECORDED: u64 = 3;
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    let recorded = replay_testkit::latest_run_dir(&journal_base);
+    let archive = DiskReplayArchive::open(recorded.clone(), true).await?;
+    let opened = Arc::new(Mutex::new(Vec::new()));
+
+    let bootstrap = install_bootstrap_config(BootstrapConfig {
+        replay: Some(ReplayBootstrap {
+            archive_path: recorded,
+            allow_incomplete_archive: true,
+            allow_duplicate_sink_delivery: false,
+            verb: ReplayVerb::Replay,
+        }),
+        archive_evidence: Some(archive.evidence()),
+        replay_archive: Some(Arc::new(HistoryReads {
+            inner: archive,
+            opened: opened.clone(),
+        })),
+        ..Default::default()
+    });
+    let replay_calls = replay_to_completion(&journal_base).await?;
+    drop(bootstrap);
+
+    assert_eq!(replay_calls, 0, "a replay never executes an effect");
+    assert_eq!(
+        *opened.lock().expect("history reads lock"),
+        vec!["enrich".to_string()],
+        "only the effectful transform reads its archived journal; the sink reads none"
+    );
     Ok(())
 }

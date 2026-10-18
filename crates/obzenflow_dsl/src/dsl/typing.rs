@@ -1215,6 +1215,34 @@ pub fn merge_descriptor<T, S>(
 where
     T: TypedPayload + Send + Sync + 'static,
     S: obzenflow_runtime::stages::merges::MergeStrategy,
+    S::FirstClause: obzenflow_runtime::stages::merges::WithoutFirstClause,
+{
+    typed_merge_descriptor::<T>(name.into(), strategy.kind(), None, backpressure)
+}
+
+#[doc(hidden)]
+pub fn first_merge_descriptor<T, S>(
+    name: impl Into<String>,
+    first: &'static str,
+    strategy: S,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    S: obzenflow_runtime::stages::merges::MergeStrategy,
+    S::FirstClause: obzenflow_runtime::stages::merges::WithFirstClause,
+{
+    typed_merge_descriptor::<T>(name.into(), strategy.kind(), Some(first), backpressure)
+}
+
+fn typed_merge_descriptor<T>(
+    name: String,
+    strategy: obzenflow_runtime::stages::merges::MergeStrategyKind,
+    first: Option<&'static str>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    T: TypedPayload + Send + Sync + 'static,
 {
     let metadata = StageTypingMetadata::transform(
         TypeHint::exact_payload::<T>(),
@@ -1224,10 +1252,11 @@ where
     );
     let descriptor: Box<dyn StageDescriptor> =
         Box::new(crate::dsl::stage_descriptor::MergeDescriptor {
-            name: name.into(),
-            strategy: strategy.kind(),
-            batch_producers: Vec::new(),
-            live_producers: Vec::new(),
+            name,
+            strategy,
+            first,
+            first_phase: Vec::new(),
+            held: Vec::new(),
             backpressure,
         });
     wrap_typed_descriptor(descriptor, metadata)
@@ -1785,8 +1814,12 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.merge_strategy()
     }
 
-    fn set_merge_producers(&mut self, batch: Vec<StageId>, live: Vec<StageId>) {
-        self.inner.set_merge_producers(batch, live);
+    fn first_producer_name(&self) -> Option<&str> {
+        self.inner.first_producer_name()
+    }
+
+    fn set_merge_producers(&mut self, first_phase: Vec<StageId>, held: Vec<StageId>) {
+        self.inner.set_merge_producers(first_phase, held);
     }
 
     async fn create_handle(
@@ -2830,6 +2863,10 @@ pub fn derive_delivery_orders(
                 .count();
             let order = if topology.is_in_cycle(stage_id.to_topology_id()) {
                 DeliveryOrder::Unordered
+            } else if descriptor.merge_strategy()
+                == Some(obzenflow_runtime::stages::merges::MergeStrategyKind::Concat)
+            {
+                DeliveryOrder::Structural
             } else if live > 1 {
                 DeliveryOrder::Recorded
             } else if upstreams.len() - live > 1 {
@@ -3012,8 +3049,12 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.merge_strategy()
     }
 
-    fn set_merge_producers(&mut self, batch: Vec<StageId>, live: Vec<StageId>) {
-        self.inner.set_merge_producers(batch, live);
+    fn first_producer_name(&self) -> Option<&str> {
+        self.inner.first_producer_name()
+    }
+
+    fn set_merge_producers(&mut self, first_phase: Vec<StageId>, held: Vec<StageId>) {
+        self.inner.set_merge_producers(first_phase, held);
     }
 
     async fn create_handle(

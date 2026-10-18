@@ -7,6 +7,7 @@ use crate::dsl::composition::{FlowMember, IntoFlowMember};
 use crate::dsl::stage_descriptor::{StageDescriptor, BINDING_DERIVED_NAME_SENTINEL};
 use crate::dsl::then_live::{plan, Refusal, ThenLivePlan};
 use crate::dsl::topology::AuthoredConnection;
+use crate::dsl::FlowBuildError;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{StageId, TypedPayload};
@@ -69,8 +70,8 @@ fn topology_type(stage_type: StageType) -> obzenflow_topology::StageType {
     }
 }
 
-fn flow(members: Vec<(&str, Box<dyn StageDescriptor>)>, authored: Vec<AuthoredConnection>) -> Flow {
-    let members: HashMap<String, FlowMember> = members
+fn flow_members(members: Vec<(&str, Box<dyn StageDescriptor>)>) -> HashMap<String, FlowMember> {
+    members
         .into_iter()
         .map(|(binding, mut descriptor)| {
             if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
@@ -78,8 +79,23 @@ fn flow(members: Vec<(&str, Box<dyn StageDescriptor>)>, authored: Vec<AuthoredCo
             }
             (binding.to_string(), descriptor.into_flow_member())
         })
-        .collect();
-    let lowered = lower_composites(members, authored).unwrap_or_else(|error| panic!("{error}"));
+        .collect()
+}
+
+fn lowering_refusal(
+    members: Vec<(&str, Box<dyn StageDescriptor>)>,
+    authored: Vec<AuthoredConnection>,
+) -> String {
+    match lower_composites(flow_members(members), authored) {
+        Ok(_) => panic!("lowering should refuse this flow"),
+        Err(FlowBuildError::StageResourcesFailed(message)) => message,
+        Err(other) => panic!("unexpected refusal: {other}"),
+    }
+}
+
+fn flow(members: Vec<(&str, Box<dyn StageDescriptor>)>, authored: Vec<AuthoredConnection>) -> Flow {
+    let lowered =
+        lower_composites(flow_members(members), authored).unwrap_or_else(|error| panic!("{error}"));
     let mut descriptors = lowered.stages;
     let name_to_id: HashMap<String, StageId> = descriptors
         .keys()
@@ -783,4 +799,190 @@ fn a_merge_records_only_a_race_between_live_producers() {
     assert_eq!(order("one_each"), DeliveryOrder::Structural);
     assert_eq!(order("two_batch"), DeliveryOrder::Canonical);
     assert_eq!(order("two_live"), DeliveryOrder::Recorded);
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Alert {
+    key: String,
+}
+impl TypedPayload for Alert {
+    const EVENT_TYPE: &'static str = "test.concat.alert";
+}
+
+fn monitoring_members() -> Vec<(&'static str, Box<dyn StageDescriptor>)> {
+    vec![
+        ("transactions", batch_tx()),
+        ("score", crate::transform!(Entry -> Alert => placeholder!())),
+        (
+            "daily_profile",
+            crate::stateful!(Entry -> Alert => placeholder!()),
+        ),
+        ("audit", crate::transform!(Entry -> Alert => placeholder!())),
+        (
+            "alerts",
+            crate::merge!(first score: Alert => merges::concat),
+        ),
+    ]
+}
+
+fn monitoring() -> Flow {
+    flow(
+        monitoring_members(),
+        vec![
+            edge("transactions", "score"),
+            edge("transactions", "daily_profile"),
+            edge("transactions", "audit"),
+            edge("score", "alerts"),
+            edge("daily_profile", "alerts"),
+        ],
+    )
+}
+
+const MONITORING_EDGES: [(&str, &str); 5] = [
+    ("transactions", "score"),
+    ("transactions", "daily_profile"),
+    ("transactions", "audit"),
+    ("score", "alerts"),
+    ("daily_profile", "alerts"),
+];
+
+#[test]
+fn a_concat_merge_reads_its_first_producer_before_the_other() {
+    let flow = monitoring();
+    let plan = flow.plan().unwrap_or_else(|error| panic!("{error}"));
+    let producers: Vec<(&str, Vec<&str>, Vec<&str>)> = plan
+        .merge_producers
+        .iter()
+        .map(|(binding, first_phase, held)| {
+            (
+                binding.as_str(),
+                first_phase.iter().map(|id| flow.key(*id)).collect(),
+                held.iter().map(|id| flow.key(*id)).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        producers,
+        [("alerts", vec!["score"], vec!["daily_profile"])]
+    );
+}
+
+#[test]
+fn a_concat_merge_whose_first_producer_is_not_wired_is_refused() {
+    let refusal = lowering_refusal(
+        monitoring_members(),
+        vec![
+            edge("transactions", "score"),
+            edge("transactions", "daily_profile"),
+            edge("transactions", "audit"),
+            edge("daily_profile", "alerts"),
+            edge("audit", "alerts"),
+        ],
+    );
+    assert_eq!(
+        refusal,
+        "merge 'alerts' reads 'score' first, but topology does not wire 'score |> alerts'; its \
+         first declaration does not create an edge"
+    );
+}
+
+#[test]
+fn a_concat_merge_needs_exactly_one_other_producer() {
+    let wiring = |others: &[&str]| {
+        let mut authored = vec![
+            edge("transactions", "score"),
+            edge("transactions", "daily_profile"),
+            edge("transactions", "audit"),
+            edge("score", "alerts"),
+        ];
+        authored.extend(others.iter().map(|other| edge(other, "alerts")));
+        lowering_refusal(monitoring_members(), authored)
+    };
+    assert_eq!(
+        wiring(&["daily_profile", "audit"]),
+        "merge 'alerts' uses concat, so topology wires exactly one producer after 'score'; it \
+         wires 'daily_profile' and 'audit'"
+    );
+    assert_eq!(
+        wiring(&[]),
+        "merge 'alerts' uses concat, so topology wires exactly one producer after 'score'; it \
+         wires none"
+    );
+}
+
+#[test]
+fn a_concat_producer_with_a_live_source_is_refused() {
+    let flow = flow(
+        vec![
+            ("transactions", batch_tx()),
+            (
+                "alert_ingress",
+                crate::infinite_source!(Entry => placeholder!()),
+            ),
+            ("score", crate::transform!(Entry -> Alert => placeholder!())),
+            (
+                "live_alerts",
+                crate::transform!(Entry -> Alert => placeholder!()),
+            ),
+            (
+                "alerts",
+                crate::merge!(first score: Alert => merges::concat),
+            ),
+        ],
+        vec![
+            edge("transactions", "score"),
+            edge("alert_ingress", "live_alerts"),
+            edge("score", "alerts"),
+            edge("live_alerts", "alerts"),
+        ],
+    );
+    assert_eq!(
+        flow.refusal(),
+        "merge `alerts` uses concat, but its producer `live_alerts` has a live source \
+         (`alert_ingress`), so its phase would never end.\nUse `merges::then_live` to put live \
+         producers after batch ones."
+    );
+}
+
+#[test]
+fn a_concat_merge_whose_held_producer_shares_its_source_deadlocks_under_enforce() {
+    let refusal = monitoring()
+        .deadlock(&MONITORING_EDGES)
+        .expect_err("an enforced path from transactions to the held input deadlocks")
+        .to_string();
+    assert_eq!(
+        refusal,
+        "merge `alerts` would deadlock in its first phase under enforced backpressure.\n\
+         `transactions` must keep flowing for its first phase to finish, but it also feeds the \
+         held input `daily_profile` through enforced edges (transactions |> daily_profile |> \
+         alerts).\nOnce those windows fill, `transactions` blocks and never reaches end of \
+         input.\nSet one edge on that path to `runtime.backpressure.mode = \"track\"`,\nor feed \
+         the held input from a separate source."
+    );
+}
+
+#[test]
+fn a_tracked_edge_from_the_held_producer_admits_the_concat_hold() {
+    let tracked: Vec<(&str, &str)> = MONITORING_EDGES
+        .into_iter()
+        .filter(|edge| *edge != ("daily_profile", "alerts"))
+        .collect();
+    monitoring()
+        .deadlock(&tracked)
+        .expect("the tracked edge leaves room for the first phase");
+}
+
+#[test]
+fn a_concat_merge_records_structural_delivery() {
+    let flow = monitoring();
+    let orders = crate::dsl::typing::derive_delivery_orders(
+        &flow.topology,
+        &flow.descriptors,
+        &flow.name_to_id,
+        &HashSet::new(),
+    );
+    assert_eq!(
+        orders[&flow.name_to_id["alerts"]],
+        DeliveryOrder::Structural
+    );
 }

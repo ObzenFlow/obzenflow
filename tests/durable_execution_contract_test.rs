@@ -79,11 +79,14 @@ const PLAN: &str = "OBZENFLOW_134I_CONTRACT_PLAN";
 /// The store channel's third record fails to decode, before the first cut.
 const INVALID_ORDER: &str = "S-BAD";
 const FIRST_AFTER_INVALID: &str = "S-03";
-/// Held after its charge at the first cut, and again when S5b re-executes it.
+/// Held after its charge at the first cut, then re-executed by each resume of
+/// S4's archive.
 const FIRST_CUT: &str = "S-12";
-/// Held inside S4's resumed runs: once reconstruction completes in S5, and
-/// before it can in S5b, so the store channel cannot reach its end.
+/// Held inside S4's resumed run once its reconstruction completes (S5).
 const SECOND_CUT: &str = "S-18";
+/// The first order S4's other resumed run calls after re-executing S-12, held
+/// before that run's reconstruction completes (S5b).
+const TORN_CUT: &str = "S-13";
 const HELD_RECEIPT: &str = "W-01";
 const DECLINES: [(&str, &str); 3] = [
     ("S-05", "InsufficientFunds"),
@@ -617,6 +620,7 @@ fn durable_execution_contract_child() {
         Graph::ThenLive | Graph::ThenLiveEffect => {
             app.run_blocking(then_live::build_flow(scenario))
         }
+        Graph::Concat => app.run_blocking(concat::build_flow(scenario)),
         Graph::PaymentDemo => app
             .with_presentation(payment_demo::presentation())
             .run_blocking(payment_demo::build_flow(scenario)),
@@ -656,6 +660,7 @@ enum Graph {
     Payment,
     ThenLive,
     ThenLiveEffect,
+    Concat,
     PaymentDemo,
     TwoEffects,
     EmitOnly,
@@ -1464,8 +1469,22 @@ impl History {
         }
     }
 
+    /// Records `run`, which has exited and has no successor running yet. The
+    /// orders the gateway called without an outcome in an interrupted run were
+    /// in flight when it was cut.
     async fn record(&mut self, run: &Path, ended: Ended) -> &Archive {
-        self.runs.push((Archive::read(run).await, ended));
+        let archive = Archive::read(run).await;
+        if matches!(ended, Ended::Interrupted { .. }) {
+            let outcomes = archive.outcomes();
+            self.in_flight.extend(
+                self.scenario
+                    .calls()
+                    .into_iter()
+                    .map(|call| call.order_id)
+                    .filter(|order| !outcomes.contains_key(order)),
+            );
+        }
+        self.runs.push((archive, ended));
         &self.runs[self.runs.len() - 1].0
     }
 
@@ -1483,19 +1502,6 @@ impl History {
             Some(_) => http_ids().into_iter().chain(store_ids()).collect(),
             None => valid_ids(),
         }
-    }
-
-    /// Orders the gateway called without an outcome in `run` were in flight
-    /// when it was cut.
-    fn in_flight_at(&mut self, run: &Path) {
-        let outcomes = self.archive(run).outcomes();
-        let calls = self.scenario.calls();
-        self.in_flight.extend(
-            calls
-                .into_iter()
-                .map(|call| call.order_id)
-                .filter(|order| !outcomes.contains_key(order)),
-        );
     }
 
     /// I1 to I8 over every archive of this history. `control` is the natural
@@ -2000,7 +2006,6 @@ async fn durable_execution_contract() {
     // S2: SIGTERM at the cut, the hold then released; resume. S3: replay.
     let s2 = Scenario::fresh("s2");
     let mut stopped = History::new("S2", &s2);
-    stopped.in_flight.insert(FIRST_CUT.into());
     let child = Child::spawn(&s2, Vec::new(), Some(Hold::Gateway(FIRST_CUT.into())));
     let run = first_cut(&s2, &child, "S2").await;
     child.signal(Signal::Term);
@@ -2033,9 +2038,6 @@ async fn durable_execution_contract() {
     // completes; resume of the resume.
     let mut after_rebuild = History::new("S5", &s5);
     after_rebuild
-        .in_flight
-        .extend([FIRST_CUT.into(), SECOND_CUT.into()]);
-    after_rebuild
         .record(&killed_copy, Ended::Interrupted { killed: true })
         .await;
     let child = Child::spawn(
@@ -2060,9 +2062,6 @@ async fn durable_execution_contract() {
 
     let mut before_rebuild = History::new("S5b", &s4);
     before_rebuild
-        .in_flight
-        .extend([FIRST_CUT.into(), SECOND_CUT.into()]);
-    before_rebuild
         .record(&killed, Ended::Interrupted { killed: true })
         .await;
     let child = Child::spawn(
@@ -2070,7 +2069,7 @@ async fn durable_execution_contract() {
         resume(&killed),
         Some(Hold::ReceiptAndGateway {
             receipt: HELD_RECEIPT.into(),
-            gateway: SECOND_CUT.into(),
+            gateway: TORN_CUT.into(),
         }),
     );
     let torn = child.run().await;
@@ -2081,12 +2080,8 @@ async fn durable_execution_contract() {
                 .filter(|receipt| receipt.order_id == HELD_RECEIPT)
                 .count()
                 == 2
-            && s4
-                .calls()
-                .iter()
-                .filter(|call| call.order_id == FIRST_CUT)
-                .count()
-                == 2
+            && s4.calls().iter().any(|call| call.order_id == TORN_CUT)
+            && !archive.outcomes().contains_key(TORN_CUT)
     })
     .await;
     child.signal(Signal::Kill);
@@ -2259,7 +2254,6 @@ async fn durable_execution_contract_over_http() {
     history
         .record(&first, Ended::Interrupted { killed: true })
         .await;
-    history.in_flight_at(&first);
 
     // H2, lost response after commit: a held web order stalls the channel, a
     // sender gives up, then the hold is released and the server is killed
@@ -2292,7 +2286,6 @@ async fn durable_execution_contract_over_http() {
     history
         .record(&second, Ended::Interrupted { killed: true })
         .await;
-    history.in_flight_at(&second);
 
     // H3, after acknowledgement: the lost response resolves to its row, then
     // a new order's 202 arrives and the server is killed.
@@ -2313,7 +2306,6 @@ async fn durable_execution_contract_over_http() {
     history
         .record(&third, Ended::Interrupted { killed: true })
         .await;
-    history.in_flight_at(&third);
 
     // H4: the last resume refuses an invalid order, sends the rest and stops
     // once every outcome and receipt has committed.
@@ -2894,9 +2886,180 @@ mod then_live {
     }
 }
 
+mod concat {
+    use super::*;
+    use obzenflow::flow::merge;
+    use obzenflow::middleware::rate_limit;
+    use obzenflow::stages::merges;
+
+    const EARLY: [&str; 4] = ["e-1", "e-2", "e-3", "e-4"];
+    const LATE: [&str; 8] = ["l-1", "l-2", "l-3", "l-4", "l-5", "l-6", "l-7", "l-8"];
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Note {
+        note: String,
+    }
+    impl TypedPayload for Note {
+        const EVENT_TYPE: &'static str = "durable_contract.concat.note";
+    }
+
+    #[derive(Clone, Debug)]
+    struct NoteYaml;
+    impl YamlDecoder for NoteYaml {
+        type Output = Note;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<Note, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    fn input(scenario: &Scenario, producer: &str) -> PathBuf {
+        scenario.inputs.join(format!("{producer}.yaml"))
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::Concat);
+        for (producer, notes) in [("early", &EARLY[..]), ("late", &LATE[..])] {
+            let rows: String = notes
+                .iter()
+                .map(|note| format!("  - note: \"{note}\"\n"))
+                .collect();
+            std::fs::write(input(&scenario, producer), format!("notes:\n{rows}"))
+                .expect("write notes");
+        }
+        scenario
+    }
+
+    fn yaml(path: PathBuf) -> YamlSource<NoteYaml> {
+        YamlSource::builder(NoteYaml)
+            .path(path)
+            .selection(YamlSelection::SequenceAt("/notes".into()))
+            .batch_size(1)
+            .build()
+            .expect("the notes channel is configured")
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        let early_input = yaml(input(scenario, "early"));
+        let late_input = yaml(input(scenario, "late"));
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let collected = DiscardSink::<Note>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_concat",
+                journals: disk_journals(journals),
+
+                stages: {
+                    early = source!(Note => early_input with rate_limit(2.0));
+                    late = source!(Note => late_input with rate_limit(2.0));
+                    merged = merge!(first early: Note => merges::concat);
+                    collected = sink!(Note => collected);
+                },
+
+                topology: {
+                    early |> merged;
+                    late |> merged;
+                    merged |> collected;
+                }
+            })
+        })
+    }
+
+    fn merged(archive: &Archive) -> Vec<String> {
+        archive
+            .facts::<Note>("merged")
+            .map(|(_, note)| note.note)
+            .collect()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Cut {
+        FirstPhase,
+        LastPhase,
+    }
+
+    impl Cut {
+        fn holds(self, archive: &Archive) -> bool {
+            let merged = merged(archive);
+            match self {
+                Self::FirstPhase => !merged.is_empty() && archive.eof("early").is_none(),
+                Self::LastPhase => {
+                    merged.iter().any(|note| note.starts_with("l-"))
+                        && archive.eof("late").is_none()
+                }
+            }
+        }
+    }
+
+    async fn row(name: &str, cut: Cut) {
+        let scenario = fresh(name);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive| cut.holds(archive)).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&resumed).await;
+        let expected: Vec<String> = EARLY
+            .iter()
+            .chain(&LATE)
+            .map(|note| (*note).into())
+            .collect();
+        assert_eq!(
+            merged(&archive),
+            expected,
+            "{name}: every note passes the merge once, early before late"
+        );
+        let boundary = archive
+            .rows("merged", RunJournalKind::Data)
+            .position(|row| {
+                matches!(&row.payload, ChainPayload::FlowControl(control)
+                    if control.eof_kind() == Some(EofKind::Natural))
+            })
+            .expect("the merge passes on the first producer's natural EOF");
+        let before: Vec<String> = archive
+            .rows("merged", RunJournalKind::Data)
+            .take(boundary)
+            .filter(|row| row.event_type() == Note::event_type_name())
+            .map(|row| {
+                row.payload()["note"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            before, EARLY,
+            "{name}: only early notes precede the boundary"
+        );
+
+        remove_input(&input(&scenario, "early"));
+        remove_input(&input(&scenario, "late"));
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_in_the_first_phase_resumes_both_phases_once() {
+        row("concat_first_phase", Cut::FirstPhase).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_in_the_last_phase_resumes_it_once() {
+        row("concat_last_phase", Cut::LastPhase).await;
+    }
+}
+
 mod payment_demo {
     use super::*;
-    use gateway_demo::domain::PaymentAuthorizationUnavailable;
+    use gateway_demo::domain::{PaymentAuthorizationUnavailable, TrafficPhase};
     use gateway_demo::fixtures;
     use gateway_demo::gateway::GatewayTransform;
     use obzenflow::application::{Banner, Presentation};
@@ -2907,11 +3070,11 @@ mod payment_demo {
     const UNAVAILABLE: &str = "unavailable";
     const WARMUP_ORDERS: usize = 8;
     const RECOVERY_ROUTES: [(&str, &str); 5] = [
-        ("web-recovery-0", AUTHORIZED),
-        ("store-recovery-3", DECLINED),
-        ("web-recovery-4", DECLINED),
-        ("store-recovery-5", AUTHORIZED),
-        ("web-recovery-6", AUTHORIZED),
+        ("web-10490", AUTHORIZED),
+        ("store-4481", DECLINED),
+        ("web-10492", DECLINED),
+        ("store-4482", AUTHORIZED),
+        ("web-10493", AUTHORIZED),
     ];
 
     pub(super) fn presentation() -> Presentation {
@@ -2928,20 +3091,20 @@ mod payment_demo {
         )
     }
 
-    fn routes(archive: &Archive) -> BTreeMap<String, &'static str> {
+    fn routes(archive: &Archive) -> BTreeMap<String, (TrafficPhase, &'static str)> {
         let stage = "authorize_payment";
         archive
             .facts::<PaymentAuthorized>(stage)
-            .map(|(_, fact)| (fact.order_id, AUTHORIZED))
+            .map(|(_, fact)| (fact.order_id, (fact.phase, AUTHORIZED)))
             .chain(
                 archive
                     .facts::<PaymentDeclined>(stage)
-                    .map(|(_, fact)| (fact.order_id, DECLINED)),
+                    .map(|(_, fact)| (fact.order_id, (fact.phase, DECLINED))),
             )
             .chain(
                 archive
                     .facts::<PaymentAuthorizationUnavailable>(stage)
-                    .map(|(_, fact)| (fact.order_id, UNAVAILABLE)),
+                    .map(|(_, fact)| (fact.order_id, (fact.phase, UNAVAILABLE))),
             )
             .collect()
     }
@@ -2979,14 +3142,10 @@ mod payment_demo {
             let routes = routes(archive);
             archive.eof("web_orders") == Some(EofKind::Natural)
                 && archive.eof("store_orders") == Some(EofKind::Natural)
+                && routes.len() == WARMUP_ORDERS
                 && routes
-                    .keys()
-                    .filter(|order| order.contains("-warmup-"))
-                    .count()
-                    == WARMUP_ORDERS
-                && !routes
-                    .keys()
-                    .any(|order| order.contains("-outage-") || order.contains("-recovery-"))
+                    .values()
+                    .all(|(phase, _)| *phase == TrafficPhase::Warmup)
         };
         until(&killed, name, outage_begun).await;
         child.signal(Signal::Kill);
@@ -3005,7 +3164,7 @@ mod payment_demo {
         let routes = routes(&archive);
         for (order, route) in RECOVERY_ROUTES {
             assert_eq!(
-                routes.get(order).copied(),
+                routes.get(order).map(|(_, routed)| *routed),
                 Some(route),
                 "{name}: {order} routes as in the uninterrupted demo"
             );

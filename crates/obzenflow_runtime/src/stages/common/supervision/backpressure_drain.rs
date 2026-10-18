@@ -299,7 +299,7 @@ pub(crate) async fn drain_one_pending_resolve(
             // resume handoff while no wait, ceiling, stall fact, or pulse exists
             // on this path. The scope is the one frozen at production time.
             if pending.scope.is_deterministic_replay() {
-                let reservation = backpressure_writer.reserve_tracked(1);
+                let reservation = backpressure_writer.reserve_reconstructed(1);
                 committer
                     .commit_reserved_prebuilt(
                         pending.event,

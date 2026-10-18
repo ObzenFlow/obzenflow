@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::sync::atomic::Ordering;
 
@@ -15,7 +16,7 @@ use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, FsmError, StateMachine, StateVariant, Transition};
 
-use super::fsm::{MergeAction, MergeContext, MergeEvent, MergeState};
+use super::fsm::{MergeAction, MergeContext, MergeEvent, MergeState, PendingRow, Side};
 use crate::messaging::{DeliveredRecord, PollResult, UpstreamSubscription};
 use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
@@ -27,7 +28,6 @@ use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
-use crate::stages::merges::MergeStrategyKind;
 use crate::supervised_base::base::{self, Registration, Supervisor};
 use crate::supervised_base::handler_supervised::SupervisorAction;
 use crate::supervised_base::{
@@ -36,18 +36,11 @@ use crate::supervised_base::{
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Side {
-    Batch,
-    Live,
-}
-
 pub(crate) struct MergeSupervisor {
     pub(crate) name: String,
     pub(crate) stage_id: StageId,
-    pub(crate) batch_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    pub(crate) live_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    pending_side: Option<Side>,
+    pub(crate) first_phase_subscription: Option<UpstreamSubscription<ChainEvent>>,
+    pub(crate) held_subscription: Option<UpstreamSubscription<ChainEvent>>,
 }
 
 impl MergeSupervisor {
@@ -55,16 +48,15 @@ impl MergeSupervisor {
         Self {
             name,
             stage_id,
-            batch_subscription: None,
-            live_subscription: None,
-            pending_side: None,
+            first_phase_subscription: None,
+            held_subscription: None,
         }
     }
 
     fn subscription(&mut self, side: Side) -> Option<&mut UpstreamSubscription<ChainEvent>> {
         match side {
-            Side::Batch => self.batch_subscription.as_mut(),
-            Side::Live => self.live_subscription.as_mut(),
+            Side::FirstPhase => self.first_phase_subscription.as_mut(),
+            Side::Held => self.held_subscription.as_mut(),
         }
     }
 }
@@ -150,39 +142,30 @@ impl Supervisor for MergeSupervisor {
             }
 
             state MergeState::Starting {
-                on MergeEvent::ActivationCompleted => |_state: &MergeState, _event: &MergeEvent, ctx: &mut MergeContext| {
-                    let next_state = match ctx.strategy {
-                        MergeStrategyKind::ThenLive => MergeState::Batch,
-                    };
-                    Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
+                on MergeEvent::ActivationCompleted => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
+                    Box::pin(async move { Ok(Transition { next_state: MergeState::FirstPhase, actions: vec![] }) })
                 };
                 on MergeEvent::Error => merge_error_arm!();
             }
 
-            state MergeState::Batch {
-                on MergeEvent::BatchCompleted => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
-                    Box::pin(async move { Ok(Transition { next_state: MergeState::Live, actions: vec![] }) })
+            state MergeState::FirstPhase {
+                on MergeEvent::FirstPhaseCompleted => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
+                    Box::pin(async move { Ok(Transition { next_state: MergeState::LastPhase, actions: vec![] }) })
                 };
-                on MergeEvent::BatchLeftOpen => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
+                on MergeEvent::FirstPhaseLeftOpen => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
                     Box::pin(async move { Ok(Transition { next_state: MergeState::Draining, actions: vec![] }) })
                 };
                 on MergeEvent::Error => merge_error_arm!();
             }
 
-            state MergeState::Live {
+            state MergeState::LastPhase {
                 on MergeEvent::ReceivedEOF => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
-                    Box::pin(async move { Ok(Transition { next_state: MergeState::Draining, actions: vec![] }) })
-                };
-                on MergeEvent::BeginDrain => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
                     Box::pin(async move { Ok(Transition { next_state: MergeState::Draining, actions: vec![] }) })
                 };
                 on MergeEvent::Error => merge_error_arm!();
             }
 
             state MergeState::Draining {
-                on MergeEvent::ReceivedEOF => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
-                    Box::pin(async move { Ok(Transition { next_state: MergeState::Draining, actions: vec![] }) })
-                };
                 on MergeEvent::DrainComplete => |_state: &MergeState, _event: &MergeEvent, _ctx: &mut MergeContext| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -229,17 +212,15 @@ impl Supervisor for MergeSupervisor {
             state MergeState::Cancelled {}
 
             unhandled => |state: &MergeState, event: &MergeEvent, _ctx: &mut MergeContext| {
-                let ignored = matches!(
-                    event,
-                    MergeEvent::Initialize | MergeEvent::Ready | MergeEvent::BeginDrain
-                ) || matches!(
-                    state,
-                    MergeState::Failing(_)
-                        | MergeState::Cancelling(_)
-                        | MergeState::Failed(_)
-                        | MergeState::Cancelled(_)
-                        | MergeState::Drained
-                );
+                let ignored = matches!(event, MergeEvent::Initialize | MergeEvent::Ready)
+                    || matches!(
+                        state,
+                        MergeState::Failing(_)
+                            | MergeState::Cancelling(_)
+                            | MergeState::Failed(_)
+                            | MergeState::Cancelled(_)
+                            | MergeState::Drained
+                    );
                 let state_name = state.variant_name().to_string();
                 let event_name = obzenflow_fsm::EventVariant::variant_name(event).to_string();
                 Box::pin(async move {
@@ -315,9 +296,9 @@ impl HandlerSupervised for MergeSupervisor {
         ctx: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, BoxError> {
         match state {
-            MergeState::Batch => dispatch_batch(self, state, ctx).await,
-            MergeState::Live => dispatch_live(self, state, ctx).await,
-            MergeState::Draining => dispatch_draining(self, state, ctx).await,
+            MergeState::FirstPhase => dispatch_first_phase(self, state, ctx).await,
+            MergeState::LastPhase => dispatch_last_phase(self, state, ctx).await,
+            MergeState::Draining => dispatch_draining(self, ctx).await,
             MergeState::Drained | MergeState::Failed(_) | MergeState::Cancelled(_) => {
                 Ok(EventLoopDirective::Terminate)
             }
@@ -336,8 +317,7 @@ impl ExternalEventPolicy for MergeSupervisor {
     }
 
     fn defer_external_event(state: &Self::State, event: &Self::Event) -> bool {
-        matches!(state, MergeState::Initializing)
-            && matches!(event, MergeEvent::Ready | MergeEvent::BeginDrain)
+        matches!(state, MergeState::Initializing) && matches!(event, MergeEvent::Ready)
     }
 
     fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event> {
@@ -355,41 +335,49 @@ impl ExternalEventPolicy for MergeSupervisor {
 }
 
 fn ensure_subscriptions(sup: &mut MergeSupervisor, ctx: &mut MergeContext) {
-    if sup.batch_subscription.is_none() {
-        sup.batch_subscription = ctx.batch_subscription.take();
+    if sup.first_phase_subscription.is_none() {
+        sup.first_phase_subscription = ctx.first_phase_subscription.take();
     }
-    if sup.live_subscription.is_none() {
-        sup.live_subscription = ctx.live_subscription.take();
+    if sup.held_subscription.is_none() {
+        sup.held_subscription = ctx.held_subscription.take();
     }
-    if let (Some(generation), Some(live)) =
-        (ctx.pending_promotion.take(), sup.live_subscription.as_mut())
+    if let (Some(generation), Some(held)) =
+        (ctx.pending_promotion.take(), sup.held_subscription.as_mut())
     {
-        live.promote_held_readers(generation);
+        held.promote_held_readers(generation);
     }
-    if let (Some(batch), Some(live)) = (
-        sup.batch_subscription.as_ref(),
-        sup.live_subscription.as_mut(),
+    if let (Some(first_phase), Some(held)) = (
+        sup.first_phase_subscription.as_ref(),
+        sup.held_subscription.as_mut(),
     ) {
-        if live.records_order() {
-            live.set_selection_base(batch.delivered_total());
+        if held.records_order() {
+            held.set_selection_base(first_phase.delivered_total());
         }
     }
 }
 
-fn renew_live_holds(ctx: &MergeContext) {
-    for producer in &ctx.live_producers {
+fn renew_held_edges(ctx: &MergeContext) {
+    for producer in &ctx.held_producers {
         if let Some(reader) = ctx.backpressure_readers.get(producer) {
             reader.renew_hold();
         }
     }
 }
 
+enum FlushOutcome {
+    Committed,
+    BackedOff,
+}
+
 async fn flush_pending_outputs(
     sup: &mut MergeSupervisor,
     ctx: &mut MergeContext,
-) -> Result<bool, BoxError> {
+) -> Result<FlushOutcome, BoxError> {
+    let Some(mut row) = ctx.pending.take() else {
+        return Ok(FlushOutcome::Committed);
+    };
     let flow_context = ctx.flow_context();
-    while let Some(pending) = ctx.pending_outputs.pop_front() {
+    while let Some(pending) = row.outputs.pop_front() {
         match drain_one_pending(
             pending,
             &flow_context,
@@ -398,36 +386,36 @@ async fn flush_pending_outputs(
                 .as_ref()
                 .map(|heartbeat| heartbeat.state.clone()),
             &ctx.data_journal,
-            ctx.pending_parent.as_ref(),
+            Some(&row.parent),
             &ctx.instrumentation,
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            &mut ctx.pending_outputs,
+            &mut row.outputs,
         )
         .await?
         {
             DrainOutcome::Committed { was_data } => {
                 if was_data {
-                    if let Some(subscription) =
-                        sup.pending_side.and_then(|side| sup.subscription(side))
-                    {
+                    if let Some(subscription) = sup.subscription(row.side) {
                         subscription.track_output_event();
                     }
                 }
             }
-            DrainOutcome::BackedOff => return Ok(false),
+            DrainOutcome::BackedOff => {
+                ctx.pending = Some(row);
+                return Ok(FlushOutcome::BackedOff);
+            }
         }
     }
-    if let Some(upstream) = ctx.pending_ack_upstream.take() {
-        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-            reader.ack_consumed(1);
-        }
+    if let Some(reader) = row
+        .upstream
+        .and_then(|upstream| ctx.backpressure_readers.get(&upstream))
+    {
+        reader.ack_consumed(1);
     }
-    ctx.pending_parent = None;
-    sup.pending_side = None;
-    Ok(true)
+    Ok(FlushOutcome::Committed)
 }
 
 fn merged_output(ctx: &MergeContext, event: &ChainEvent) -> Result<ChainEvent, BoxError> {
@@ -472,14 +460,16 @@ fn queue_row(
     ctx.instrumentation
         .events_processed_total
         .fetch_add(1, Ordering::Relaxed);
-    ctx.pending_outputs.push_back(PendingOutput {
-        causal: crate::supervised_base::publication::capture(),
-        event: output,
-        scope,
+    ctx.pending = Some(PendingRow {
+        side,
+        parent: envelope,
+        upstream,
+        outputs: VecDeque::from([PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
+            event: output,
+            scope,
+        }]),
     });
-    ctx.pending_ack_upstream = upstream;
-    ctx.pending_parent = Some(envelope);
-    sup.pending_side = Some(side);
     Ok(())
 }
 
@@ -487,15 +477,18 @@ async fn flip(
     sup: &MergeSupervisor,
     ctx: &mut MergeContext,
     target: obzenflow_core::ReaderGeneration,
-    batch_phase: bool,
+    side: Side,
 ) -> CatchUpDisposition {
-    let caught_up = |side: Option<&UpstreamSubscription<ChainEvent>>| {
-        side.is_some_and(|subscription| subscription.all_readers_caught_up(target))
+    let caught_up = |subscription: Option<&UpstreamSubscription<ChainEvent>>| {
+        subscription.is_some_and(|subscription| subscription.all_readers_caught_up(target))
     };
-    let all = caught_up(sup.batch_subscription.as_ref())
-        && (batch_phase || caught_up(sup.live_subscription.as_ref()));
+    let first_phase_caught_up = caught_up(sup.first_phase_subscription.as_ref());
+    let all = match side {
+        Side::FirstPhase => first_phase_caught_up,
+        Side::Held => first_phase_caught_up && caught_up(sup.held_subscription.as_ref()),
+    };
     let disposition = ctx.catch_up.frontier_reached(target, all).await;
-    if let (true, CatchUpDisposition::Crossed(crossed)) = (batch_phase, &disposition) {
+    if let (Side::FirstPhase, CatchUpDisposition::Crossed(crossed)) = (side, &disposition) {
         ctx.pending_promotion = Some(*crossed);
     }
     disposition
@@ -506,37 +499,40 @@ fn max_generation(sup: &MergeSupervisor) -> obzenflow_core::ReaderGeneration {
         side.map(|subscription| subscription.max_reader_generation())
             .unwrap_or_default()
     };
-    side_max(sup.batch_subscription.as_ref()).max(side_max(sup.live_subscription.as_ref()))
+    side_max(sup.first_phase_subscription.as_ref()).max(side_max(sup.held_subscription.as_ref()))
 }
 
-enum EofStep {
-    Continue,
+enum PollStep {
+    Idle,
+    Progressed,
     SideEnded(EofKind),
+    Directive(EventLoopDirective<MergeEvent>),
 }
 
 async fn handle_control(
     sup: &mut MergeSupervisor,
     ctx: &mut MergeContext,
     side: Side,
-    batch_phase: bool,
     envelope: &DeliveredRecord<ChainPayload>,
-) -> Result<Result<EofStep, EventLoopDirective<MergeEvent>>, BoxError> {
+) -> Result<PollStep, BoxError> {
     let ChainPayload::FlowControl(signal) = &envelope.payload else {
-        return Ok(Ok(EofStep::Continue));
+        return Ok(PollStep::Progressed);
     };
     if let FlowControlPayload::CatchUpComplete {
         generation: announced,
         ..
     } = signal
     {
-        return Ok(Err(match flip(sup, ctx, *announced, batch_phase).await {
-            CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
-                EventLoopDirective::Continue
-            }
-            CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
-                EventLoopDirective::Transition(MergeEvent::Error(fatal.detail))
-            }
-        }));
+        return Ok(PollStep::Directive(
+            match flip(sup, ctx, *announced, side).await {
+                CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
+                    EventLoopDirective::Continue
+                }
+                CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
+                    EventLoopDirective::Transition(MergeEvent::Error(fatal.detail))
+                }
+            },
+        ));
     }
 
     let subscription = sup
@@ -545,18 +541,18 @@ async fn handle_control(
     let upstream_stage = subscription.last_delivered_upstream_stage();
     let last_eof_outcome = subscription.last_eof_outcome().cloned();
     let reader_count = match side {
-        Side::Batch => ctx.batch_contract_state.len(),
-        Side::Live => ctx.live_contract_state.len(),
+        Side::FirstPhase => ctx.first_phase_contract_state.len(),
+        Side::Held => ctx.held_contract_state.len(),
     };
 
     if envelope.is_eof() {
         let target = max_generation(sup);
         if target != obzenflow_core::ReaderGeneration(0) {
-            match flip(sup, ctx, target, batch_phase).await {
+            match flip(sup, ctx, target, side).await {
                 CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
-                    return Ok(Err(EventLoopDirective::Transition(MergeEvent::Error(
-                        fatal.detail,
-                    ))));
+                    return Ok(PollStep::Directive(EventLoopDirective::Transition(
+                        MergeEvent::Error(fatal.detail),
+                    )));
                 }
                 CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {}
             }
@@ -602,17 +598,15 @@ async fn handle_control(
         .await?;
     }
     if !envelope.is_eof() {
-        return Ok(Ok(EofStep::Continue));
+        return Ok(PollStep::Progressed);
     }
     if let Some(subscription) = sup.subscription(side) {
         subscription.take_last_eof_outcome();
     }
-    Ok(Ok(
-        match last_eof_outcome.filter(|outcome| outcome.is_final) {
-            Some(outcome) => EofStep::SideEnded(outcome.worst_kind.unwrap_or(EofKind::Natural)),
-            None => EofStep::Continue,
-        },
-    ))
+    Ok(match last_eof_outcome.filter(|outcome| outcome.is_final) {
+        Some(outcome) => PollStep::SideEnded(outcome.worst_kind.unwrap_or(EofKind::Natural)),
+        None => PollStep::Progressed,
+    })
 }
 
 async fn contract_tick(
@@ -621,15 +615,15 @@ async fn contract_tick(
     side: Side,
 ) -> Result<(), BoxError> {
     let (subscription, state, last) = match side {
-        Side::Batch => (
-            sup.batch_subscription.as_mut(),
-            &mut ctx.batch_contract_state,
-            &mut ctx.batch_last_contract_check,
+        Side::FirstPhase => (
+            sup.first_phase_subscription.as_mut(),
+            &mut ctx.first_phase_contract_state,
+            &mut ctx.first_phase_last_contract_check,
         ),
-        Side::Live => (
-            sup.live_subscription.as_mut(),
-            &mut ctx.live_contract_state,
-            &mut ctx.live_last_contract_check,
+        Side::Held => (
+            sup.held_subscription.as_mut(),
+            &mut ctx.held_contract_state,
+            &mut ctx.held_last_contract_check,
         ),
     };
     if let Some(subscription) = subscription {
@@ -647,18 +641,17 @@ async fn poll_side(
     state: &MergeState,
     ctx: &mut MergeContext,
     side: Side,
-    batch_phase: bool,
-) -> Result<Result<Option<EofStep>, EventLoopDirective<MergeEvent>>, BoxError> {
+) -> Result<PollStep, BoxError> {
     let poll = {
         let (subscription, contract_state) = match side {
-            Side::Batch => (
-                sup.batch_subscription.as_mut(),
-                &mut ctx.batch_contract_state,
+            Side::FirstPhase => (
+                sup.first_phase_subscription.as_mut(),
+                &mut ctx.first_phase_contract_state,
             ),
-            Side::Live => (sup.live_subscription.as_mut(), &mut ctx.live_contract_state),
+            Side::Held => (sup.held_subscription.as_mut(), &mut ctx.held_contract_state),
         };
         let Some(subscription) = subscription else {
-            return Ok(Ok(None));
+            return Ok(PollStep::Idle);
         };
         subscription
             .poll_next_with_state(state.variant_name(), Some(&mut contract_state[..]))
@@ -675,18 +668,18 @@ async fn poll_side(
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
             let step = if envelope.is_control() {
-                match handle_control(sup, ctx, side, batch_phase, &envelope).await? {
-                    Ok(step) => step,
-                    Err(directive) => return Ok(Err(directive)),
-                }
+                handle_control(sup, ctx, side, &envelope).await?
             } else if envelope.consumes_data_credit() {
                 queue_row(sup, ctx, side, envelope)?;
-                EofStep::Continue
+                PollStep::Progressed
             } else {
-                EofStep::Continue
+                PollStep::Progressed
             };
+            if let PollStep::Directive(_) = step {
+                return Ok(step);
+            }
             contract_tick(sup, ctx, side).await?;
-            Ok(Ok(Some(step)))
+            Ok(step)
         }
         PollResult::CursorAdvanced {
             upstream,
@@ -697,55 +690,62 @@ async fn poll_side(
                 upstream,
                 completed_data_rows,
             );
-            Ok(Ok(Some(EofStep::Continue)))
+            Ok(PollStep::Progressed)
         }
         PollResult::NoEvents => {
             contract_tick(sup, ctx, side).await?;
-            Ok(Ok(None))
+            Ok(PollStep::Idle)
         }
-        PollResult::Error(error) => Ok(Err(EventLoopDirective::Transition(MergeEvent::Error(
-            format!("Merge subscription error: {error}"),
-        )))),
+        PollResult::Error(error) => Ok(PollStep::Directive(EventLoopDirective::Transition(
+            MergeEvent::Error(format!("Merge subscription error: {error}")),
+        ))),
     }
 }
 
-async fn dispatch_batch(
+async fn dispatch_first_phase(
     sup: &mut MergeSupervisor,
     state: &MergeState,
     ctx: &mut MergeContext,
 ) -> Result<EventLoopDirective<MergeEvent>, BoxError> {
     ensure_subscriptions(sup, ctx);
-    renew_live_holds(ctx);
+    renew_held_edges(ctx);
     ctx.instrumentation
         .event_loops_total
         .fetch_add(1, Ordering::Relaxed);
-    if !flush_pending_outputs(sup, ctx).await? {
+    if let FlushOutcome::BackedOff = flush_pending_outputs(sup, ctx).await? {
         return Ok(EventLoopDirective::Continue);
     }
-    match poll_side(sup, state, ctx, Side::Batch, true).await? {
-        Err(directive) => Ok(directive),
-        Ok(Some(EofStep::SideEnded(kind))) => {
-            if kind == EofKind::Natural {
-                tracing::info!(stage_name = %ctx.stage_name, "Merge batch completed; going live");
-                Ok(EventLoopDirective::Transition(MergeEvent::BatchCompleted))
-            } else {
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Merge batch left open; draining without live producers"
-                );
-                ctx.drain_without_held_inputs = true;
-                Ok(EventLoopDirective::Transition(MergeEvent::BatchLeftOpen))
-            }
+    match poll_side(sup, state, ctx, Side::FirstPhase).await? {
+        PollStep::Directive(directive) => Ok(directive),
+        PollStep::SideEnded(EofKind::Natural) => {
+            tracing::info!(
+                stage_name = %ctx.stage_name,
+                strategy = ?ctx.strategy,
+                "Merge first phase completed; reading held producers"
+            );
+            Ok(EventLoopDirective::Transition(
+                MergeEvent::FirstPhaseCompleted,
+            ))
         }
-        Ok(Some(EofStep::Continue)) => Ok(EventLoopDirective::Continue),
-        Ok(None) => {
+        PollStep::SideEnded(_) => {
+            tracing::info!(
+                stage_name = %ctx.stage_name,
+                strategy = ?ctx.strategy,
+                "Merge first phase left open; draining without held producers"
+            );
+            Ok(EventLoopDirective::Transition(
+                MergeEvent::FirstPhaseLeftOpen,
+            ))
+        }
+        PollStep::Progressed => Ok(EventLoopDirective::Continue),
+        PollStep::Idle => {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             Ok(EventLoopDirective::Continue)
         }
     }
 }
 
-async fn dispatch_live(
+async fn dispatch_last_phase(
     sup: &mut MergeSupervisor,
     state: &MergeState,
     ctx: &mut MergeContext,
@@ -754,16 +754,14 @@ async fn dispatch_live(
     ctx.instrumentation
         .event_loops_total
         .fetch_add(1, Ordering::Relaxed);
-    if !flush_pending_outputs(sup, ctx).await? {
+    if let FlushOutcome::BackedOff = flush_pending_outputs(sup, ctx).await? {
         return Ok(EventLoopDirective::Continue);
     }
-    match poll_side(sup, state, ctx, Side::Live, false).await? {
-        Err(directive) => Ok(directive),
-        Ok(Some(EofStep::SideEnded(_))) => {
-            Ok(EventLoopDirective::Transition(MergeEvent::ReceivedEOF))
-        }
-        Ok(Some(EofStep::Continue)) => Ok(EventLoopDirective::Continue),
-        Ok(None) => {
+    match poll_side(sup, state, ctx, Side::Held).await? {
+        PollStep::Directive(directive) => Ok(directive),
+        PollStep::SideEnded(_) => Ok(EventLoopDirective::Transition(MergeEvent::ReceivedEOF)),
+        PollStep::Progressed => Ok(EventLoopDirective::Continue),
+        PollStep::Idle => {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             Ok(EventLoopDirective::Continue)
         }
@@ -772,29 +770,14 @@ async fn dispatch_live(
 
 async fn dispatch_draining(
     sup: &mut MergeSupervisor,
-    state: &MergeState,
     ctx: &mut MergeContext,
 ) -> Result<EventLoopDirective<MergeEvent>, BoxError> {
     ensure_subscriptions(sup, ctx);
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat.state.mark_draining();
     }
-    if !flush_pending_outputs(sup, ctx).await? {
+    if let FlushOutcome::BackedOff = flush_pending_outputs(sup, ctx).await? {
         return Ok(EventLoopDirective::Continue);
     }
-    let live_ended = sup
-        .live_subscription
-        .as_ref()
-        .is_none_or(|subscription| subscription.all_readers_eof());
-    if ctx.drain_without_held_inputs || live_ended {
-        return Ok(EventLoopDirective::Transition(MergeEvent::DrainComplete));
-    }
-    match poll_side(sup, state, ctx, Side::Live, false).await? {
-        Err(directive) => Ok(directive),
-        Ok(Some(_)) => Ok(EventLoopDirective::Continue),
-        Ok(None) => {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            Ok(EventLoopDirective::Continue)
-        }
-    }
+    Ok(EventLoopDirective::Transition(MergeEvent::DrainComplete))
 }

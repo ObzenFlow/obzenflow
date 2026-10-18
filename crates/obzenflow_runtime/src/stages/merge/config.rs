@@ -17,12 +17,12 @@ pub struct MergeConfig {
     pub flow_name: String,
     /// The framework strategy the supervisor interprets.
     pub strategy: MergeStrategyKind,
-    /// Producers whose roots are all finite, read through the canonical merge
-    /// in the batch phase.
-    pub batch_producers: Vec<StageId>,
-    /// Producers with a live root, held until every batch producer has authored
-    /// natural EOF.
-    pub live_producers: Vec<StageId>,
+    /// Producers read in the first phase, through the canonical merge: a
+    /// `then_live` merge's batch producers, or a `concat` merge's first one.
+    pub first_phase: Vec<StageId>,
+    /// Producers held until every first-phase producer has authored natural
+    /// EOF: a `then_live` merge's live producers, or a `concat` merge's other one.
+    pub held: Vec<StageId>,
     pub control_strategy: Option<Arc<dyn SignalGate>>,
 }
 
@@ -32,16 +32,16 @@ impl MergeConfig {
         stage_name: impl Into<String>,
         flow_name: impl Into<String>,
         strategy: MergeStrategyKind,
-        batch_producers: Vec<StageId>,
-        live_producers: Vec<StageId>,
+        first_phase: Vec<StageId>,
+        held: Vec<StageId>,
     ) -> Self {
         Self {
             stage_id,
             stage_name: stage_name.into(),
             flow_name: flow_name.into(),
             strategy,
-            batch_producers,
-            live_producers,
+            first_phase,
+            held,
             control_strategy: None,
         }
     }

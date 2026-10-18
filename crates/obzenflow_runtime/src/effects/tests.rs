@@ -4831,6 +4831,98 @@ fn incomplete_outcome_group_torn_tail_is_dropped_as_absent() {
 }
 
 #[test]
+fn archive_records_leave_recorded_actions_to_the_journal_scan() {
+    let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
+    let records = (0..2_000_u64)
+        .map(|input| EffectRecord {
+            observation:
+                obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
+            cursor: EffectCursor::new("flow", "stage", input, 0_u32),
+            descriptor_hash: "hash".into(),
+            descriptor: descriptor.clone(),
+            outcome: EffectOutcomePayload::Succeeded {
+                output: json!({ "input": input }),
+            },
+            origin: None,
+        })
+        .collect();
+
+    let history = EffectHistory::from_records_with_policy("flow".to_string(), records, false)
+        .expect("complete groups index");
+
+    assert!(history
+        .find_group(&EffectCursor::new("flow", "stage", 1_999_u64, 0_u32))
+        .is_some());
+    assert!(history.actions().actions().is_empty());
+}
+
+#[test]
+fn a_test_history_records_one_action_per_committed_cursor_in_record_order() {
+    let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
+    let fact = |input: u64, ordinal: u32, count: u32| EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
+        cursor: EffectCursor::new("flow", "stage", input, 0_u32),
+        descriptor_hash: "hash".into(),
+        descriptor: descriptor.clone(),
+        outcome: EffectOutcomePayload::SucceededFact {
+            payload_schema_version: std::num::NonZeroU32::MIN,
+            event_kind: EventKind::Fact,
+
+            event_type: "fx.out".into(),
+            output: json!({ "input": input, "ordinal": ordinal }),
+            outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
+            outcome_fact_count: OutcomeFactCount::new(count),
+        },
+        origin: None,
+    };
+    let mut records = Vec::new();
+    let mut expected = Vec::new();
+    for input in 0..3_000_u64 {
+        let count = if input % 3 == 0 { 2 } else { 1 };
+        records.extend((0..count).map(|ordinal| fact(input, ordinal, count)));
+        expected.push(EffectCursor::new("flow", "stage", input, 0_u32));
+    }
+    records.extend([fact(3_000, 0, 3), fact(3_000, 1, 3)]);
+
+    let history = EffectHistory::from_records("flow".to_string(), records)
+        .expect("a torn final group is dropped, not an error");
+
+    let recorded: Vec<EffectCursor> = history
+        .actions()
+        .actions()
+        .iter()
+        .filter_map(|action| action.cursor().cloned())
+        .collect();
+    assert_eq!(recorded, expected);
+}
+
+#[tokio::test]
+async fn a_skipped_history_scan_opens_no_journal() {
+    let archive: Arc<dyn obzenflow_core::journal::archive::ReplayArchive> =
+        Arc::new(ScopeMatrixArchive);
+
+    let history = EffectHistory::load(
+        &archive,
+        &StageKey::from("audit_sink"),
+        EffectHistoryScan::Skip,
+    )
+    .await
+    .expect("a skipped scan reads nothing that could fail");
+
+    assert_eq!(history.recorded_flow_id().as_str(), "scope-matrix-archive");
+    assert!(history
+        .find_group(&EffectCursor::new(
+            "scope-matrix-archive",
+            "audit_sink",
+            0_u64,
+            0_u32
+        ))
+        .is_none());
+    assert!(history.actions().actions().is_empty());
+}
+
+#[test]
 fn incomplete_outcome_group_on_completed_archive_fails_loud() {
     // FLOWIP-120q: the same incomplete group that a torn-tail-tolerant load drops
     // (above) must fail loud under the strict policy a `Completed` archive uses,

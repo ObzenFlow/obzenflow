@@ -6,15 +6,12 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use crate::effects::{
-    EffectBoundary, EffectError, EffectHistory, EffectInvocationContext, Effects,
-};
+use crate::effects::{EffectBoundary, EffectHistoryScan, EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::journal::archive::ReplayArchive;
-use obzenflow_core::{ChainEvent, EventDescriptor, StageKey, WriterId};
+use obzenflow_core::{ChainEvent, EventDescriptor, WriterId};
 use std::fmt;
 use std::sync::Arc;
 
@@ -127,12 +124,8 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
         "1"
     }
 
-    async fn load_effect_history(
-        &self,
-        archive: &Arc<dyn ReplayArchive>,
-        stage: &StageKey,
-    ) -> Result<EffectHistory, EffectError> {
-        EffectHistory::load(archive, stage).await
+    fn effect_history_scan(&self) -> EffectHistoryScan {
+        EffectHistoryScan::Skip
     }
 
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
@@ -330,13 +323,10 @@ impl<H> UnifiedTransformHandler for EffectfulTransformHandlerAdapter<H>
 where
     H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    async fn load_effect_history(
-        &self,
-        archive: &Arc<dyn ReplayArchive>,
-        stage: &StageKey,
-    ) -> Result<EffectHistory, EffectError> {
-        EffectHistory::load_with_actions(archive, stage, self.pass_through_descriptor.as_ref())
-            .await
+    fn effect_history_scan(&self) -> EffectHistoryScan {
+        EffectHistoryScan::Actions {
+            pass_through: self.pass_through_descriptor.clone(),
+        }
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {

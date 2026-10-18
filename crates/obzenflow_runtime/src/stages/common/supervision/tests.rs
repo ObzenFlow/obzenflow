@@ -2,12 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::backpressure_drain::{drain_one_pending, DrainOutcome};
+use super::backpressure_drain::{drain_one_pending, DrainOutcome, PendingOutput};
 use super::control_resolution::{
     resolve_control_event, resolve_forward_control_event, ControlAction, ControlResolution,
 };
 use super::flow_context_factory::make_flow_context;
-use crate::backpressure::{BackpressurePlan, BackpressureRegistry, BackpressureWriter};
+use crate::backpressure::{
+    BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
+};
 use crate::feed_plan::{FactVisibility, PayloadTypeDescriptor, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::messaging::upstream_subscription::EofOutcome;
@@ -2048,5 +2050,172 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     assert!(
         stall.is_open(),
         "the stall clock starts at the first live-scoped block, not the handoff"
+    );
+}
+
+struct RecordedBacklogHandoff {
+    stage: StageId,
+    writer: BackpressureWriter,
+    reader: BackpressureReader,
+    flow_context: obzenflow_core::event::provenance::FlowContext,
+    data_journal: Arc<dyn Journal<ChainEvent>>,
+    instrumentation: Arc<StageInstrumentation>,
+    pulse: BackpressureActivityPulse,
+    stall: crate::backpressure::StallEpisode,
+    pending_outputs: VecDeque<PendingOutput>,
+    output_contract: StageOutputContract,
+}
+
+impl RecordedBacklogHandoff {
+    async fn new(recorded: u64) -> Self {
+        let mut builder = TopologyBuilder::new();
+        let stage_top = builder.add_stage(Some("s".to_string()));
+        let downstream_top = builder.add_stage(Some("d".to_string()));
+        let topology = builder.build_unchecked().expect("topology");
+        let stage = StageId::from_topology_id(stage_top);
+        let downstream = StageId::from_topology_id(downstream_top);
+        let plan = BackpressurePlan::disabled().with_stage_enforced(
+            stage,
+            NonZeroU64::new(2).expect("window"),
+            Duration::from_secs(30),
+        );
+        let registry = BackpressureRegistry::new(&topology, &plan);
+        let mut handoff = Self {
+            stage,
+            writer: registry.writer(stage),
+            reader: registry.reader(stage, downstream),
+            flow_context: make_flow_context(
+                "flow",
+                "flow_id",
+                "stage",
+                stage,
+                obzenflow_core::event::context::StageType::Transform,
+            ),
+            data_journal: Arc::new(NoopJournal::new(JournalOwner::stage(stage))),
+            instrumentation: Arc::new(StageInstrumentation::new()),
+            pulse: BackpressureActivityPulse::new(),
+            stall: crate::backpressure::StallEpisode::default(),
+            pending_outputs: VecDeque::new(),
+            output_contract: output_contract_for_event_type("x"),
+        };
+        for n in 0..recorded {
+            handoff.pending_outputs.push_back(Self::output(
+                stage,
+                n,
+                MiddlewareExecutionScope::ResumeHandler,
+            ));
+            let outcome = handoff.drain().await.expect("catch-up drain commits");
+            assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
+        }
+        handoff
+    }
+
+    fn output(stage: StageId, n: u64, scope: MiddlewareExecutionScope) -> PendingOutput {
+        PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
+            event: ChainEventFactory::data_event(
+                WriterId::from(stage),
+                "x",
+                std::num::NonZeroU32::MIN,
+                json!({ "n": n }),
+            ),
+            scope,
+        }
+    }
+
+    async fn drain(&mut self) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        let pending = self.pending_outputs.pop_front().expect("a queued output");
+        drain_one_pending(
+            pending,
+            &self.flow_context,
+            self.stage,
+            None,
+            &self.data_journal,
+            None,
+            &self.instrumentation,
+            &self.writer,
+            &mut self.pulse,
+            &mut self.stall,
+            Some(&self.output_contract),
+            &mut self.pending_outputs,
+        )
+        .await
+    }
+
+    async fn drain_live(
+        &mut self,
+    ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        if self.pending_outputs.is_empty() {
+            self.pending_outputs.push_back(Self::output(
+                self.stage,
+                u64::MAX,
+                MiddlewareExecutionScope::LiveHandler,
+            ));
+        }
+        self.drain().await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn resume_handoff_waits_while_the_reader_works_through_the_backlog() {
+    if BackpressureWriter::is_bypass_enabled() {
+        return;
+    }
+
+    let mut handoff = RecordedBacklogHandoff::new(40).await;
+    let started = tokio::time::Instant::now();
+    let mut next_ack = started + Duration::from_secs(20);
+    let outcome = loop {
+        let outcome = handoff
+            .drain_live()
+            .await
+            .expect("the writer waits while its reader makes progress");
+        if outcome != DrainOutcome::BackedOff {
+            break outcome;
+        }
+        if tokio::time::Instant::now() >= next_ack {
+            handoff.reader.ack_consumed(5);
+            next_ack += Duration::from_secs(20);
+        }
+    };
+
+    assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
+    assert!(
+        started.elapsed() >= Duration::from_secs(160),
+        "the first live output waited for the whole recorded backlog"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn resume_handoff_stalls_one_ceiling_after_the_reader_stops() {
+    if BackpressureWriter::is_bypass_enabled() {
+        return;
+    }
+
+    let mut handoff = RecordedBacklogHandoff::new(40).await;
+    let started = tokio::time::Instant::now();
+    let mut next_ack = started + Duration::from_secs(20);
+    let mut acks = 0;
+    let error = loop {
+        match handoff.drain_live().await {
+            Ok(DrainOutcome::BackedOff) => {}
+            Ok(outcome) => panic!("the reader stopped inside its backlog, yet {outcome:?}"),
+            Err(error) => break error,
+        }
+        if acks < 3 && tokio::time::Instant::now() >= next_ack {
+            handoff.reader.ack_consumed(5);
+            acks += 1;
+            next_ack += Duration::from_secs(20);
+        }
+    };
+
+    assert!(
+        error.to_string().starts_with("backpressure.stalled"),
+        "{error}"
+    );
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_secs(90)..Duration::from_secs(91)).contains(&waited),
+        "the stall comes one ceiling after the last ack, not after the first miss: {waited:?}"
     );
 }

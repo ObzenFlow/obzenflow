@@ -552,8 +552,15 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         None
     }
 
-    /// Install a merge's batch and live producers, classified by the flow build.
-    fn set_merge_producers(&mut self, _batch: Vec<StageId>, _live: Vec<StageId>) {}
+    /// The binding a merge's `first` clause names, `None` for every other
+    /// stage and for merges declared without one.
+    fn first_producer_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Install the producers a merge reads in its first phase and the producers
+    /// it holds until then, classified by the flow build.
+    fn set_merge_producers(&mut self, _first_phase: Vec<StageId>, _held: Vec<StageId>) {}
 
     /// Create the handle for this stage with the flow's shared control-plane
     /// aggregation carrier.
@@ -3158,8 +3165,9 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
 pub(crate) struct MergeDescriptor {
     pub(crate) name: String,
     pub(crate) strategy: MergeStrategyKind,
-    pub(crate) batch_producers: Vec<StageId>,
-    pub(crate) live_producers: Vec<StageId>,
+    pub(crate) first: Option<&'static str>,
+    pub(crate) first_phase: Vec<StageId>,
+    pub(crate) held: Vec<StageId>,
     pub(crate) backpressure: Option<BackpressureClause>,
 }
 
@@ -3193,9 +3201,13 @@ impl StageDescriptor for MergeDescriptor {
         Some(self.strategy)
     }
 
-    fn set_merge_producers(&mut self, batch: Vec<StageId>, live: Vec<StageId>) {
-        self.batch_producers = batch;
-        self.live_producers = live;
+    fn first_producer_name(&self) -> Option<&str> {
+        self.first
+    }
+
+    fn set_merge_producers(&mut self, first_phase: Vec<StageId>, held: Vec<StageId>) {
+        self.first_phase = first_phase;
+        self.held = held;
     }
 
     fn is_deterministic_input_orderer(&self) -> bool {
@@ -3222,8 +3234,8 @@ impl StageDescriptor for MergeDescriptor {
             &config.name,
             &config.flow_name,
             self.strategy,
-            self.batch_producers,
-            self.live_producers,
+            self.first_phase,
+            self.held,
         );
         merge_config.control_strategy = Some(control_strategy.clone());
         let upstream_journals = resources.upstream_journals.clone();
@@ -3250,7 +3262,6 @@ fn translate_stage_event_to_merge(event: StageEvent) -> Result<MergeEvent, Strin
     match event {
         StageEvent::Initialize => Ok(MergeEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(MergeEvent::Ready),
-        StageEvent::BeginDrain => Ok(MergeEvent::BeginDrain),
         StageEvent::ForceShutdown => Ok(MergeEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!("Unsupported stage event for merge: {event:?}")),
     }
@@ -3263,7 +3274,7 @@ fn check_merge_state(state: &MergeState) -> crate::stage_handle_adapter::StageSt
         MergeState::Initializing => StageStatus::Initializing,
         MergeState::Initialized => StageStatus::Ready,
         MergeState::Starting => StageStatus::Starting,
-        MergeState::Batch | MergeState::Live => StageStatus::Running,
+        MergeState::FirstPhase | MergeState::LastPhase => StageStatus::Running,
         MergeState::Draining => StageStatus::Draining,
         MergeState::Finalizing => StageStatus::Finalizing,
         MergeState::Drained => StageStatus::Drained,
