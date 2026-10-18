@@ -4,28 +4,17 @@ Score every transaction of one day through a risk engine whose rules the flow ne
 reads, open a case for each flagged transaction, and resume a killed run without
 scoring a transaction or opening a case twice.
 
-```text
-account_history --+
-                  +--> profile --> score --TransactionCleared--> cleared
-transactions -----+                  |
-                                     `--AlertRaised--> open_case --CaseOpened--> case_register
-```
-
-`profile` pairs each transaction with its paying account's history. `score` sends the
-pair to the simulated risk engine and records its verdict, cleared or flagged, with the
-rules version it came from and, for a flag, every rule that fired. `open_case` sends
-each alert to the simulated case system. Both systems run in process behind the named
-effect ports `risk_engine` and `case_system`, and neither is built until its first live
-call, so a strict replay never builds them. The engine's rules live in
-[risk_engine.rs](risk_engine.rs). They are illustrative, not an AML model, and the
+The engine's [rules](risk_engine.rs) are illustrative, not an AML model, and the
 dataset's laundering label never reaches the engine. The example makes no compliance
 claim.
 
 ## Run the fixture
 
-Run from the repository root. The checked-in fixture is a synthetic day of 240
+Run from the repository root. The checked-in fixture is a synthetic day of 279
 transactions, planted so every rule fires, one transaction trips two rules, and some
-accounts have no history. It needs no download and no extra Cargo feature:
+accounts have no history. It was written for this example, contains no AMLworld rows,
+and is covered by the repository's MIT or Apache-2.0 licence. It needs no download and
+no extra Cargo feature:
 
 ```sh
 rm -f target/aml-risk-calls.jsonl target/aml-case-calls.jsonl
@@ -34,14 +23,7 @@ cargo run -p obzenflow --example aml_overnight_monitoring
 
 Cleared transactions go to `target/aml-cleared.csv` and cases to `target/aml-cases.csv`.
 Each simulated system appends every call it receives to its own ledger,
-`target/aml-risk-calls.jsonl` or `target/aml-case-calls.jsonl`, and answers a repeated
-key with its first answer, logged as `replayed`. A first call's line holds the
-system's answer:
-
-```json
-{"key":"aml-score:2800117","result":"scored","flow_id":"flow_…","verdict":"flagged","reasons":["format_switch","thin_history_large_transfer"],"rules_version":"sim-2026.10"}
-{"key":"aml-case:2800117","result":"opened","flow_id":"flow_…","case_number":6}
-```
+`target/aml-risk-calls.jsonl` or `target/aml-case-calls.jsonl`.
 
 A ledger holds the calls of one fresh run and the resumes that continue it, so remove
 both ledgers before each fresh run and never before a resume. Replay a run without
@@ -60,19 +42,17 @@ jq -nr -f examples/aml_overnight_monitoring/ledger-check.jq \
   <archive>/run_manifest.json target/aml-case-calls.jsonl target/aml-risk-calls.jsonl
 ```
 
-It refuses a call from a run outside the lineage, a ledger with no call from the run
-that started it, a key decided twice, and more repeats than the lineage has resumes.
-
 ## AMLworld at scale
 
 [AMLworld](https://arxiv.org/abs/2306.16424) is IBM's synthetic transaction dataset.
 Download `HI-Small_Trans.csv` from
 [IBM's Kaggle listing](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml),
-which needs a free Kaggle account, into `data/`. IBM publishes it under the Community
-Data License Agreement, Sharing, version 1.0. Then prepare one day once, before the first
-run. The command writes the day's transactions, each numbered by its row in the original
-file, and one history row for each account that paid on an earlier day. It needs a POSIX
-`awk`, so on Windows run it under WSL:
+which needs a free Kaggle account, into `data/`. IBM publishes it under the
+[Community Data License Agreement, Sharing, version 1.0](https://cdla.dev/sharing-1-0/).
+Git ignores `data/`, so neither the download nor the prepared day is committed; publishing
+either would carry that licence's notice and attribution terms. Then prepare one day
+once, before the first run. The command needs a POSIX `awk`, so on Windows run it
+under WSL:
 
 ```sh
 awk -F, -v day=2022/09/05 -v txns=data/aml-2022-09-05.csv -v history=data/aml-history-2022-09-05.csv '
@@ -99,9 +79,8 @@ awk -F, -v day=2022/09/05 -v txns=data/aml-2022-09-05.csv -v history=data/aml-hi
   }' data/HI-Small_Trans.csv
 ```
 
-A resume checks that its input files are the ones the killed run read, by inode, size
-and timestamps, so running the prep again makes a new input even when its output is
-identical.
+Do not run the prep again between a kill and its resume. The resume refuses rewritten
+input files, even when their contents are identical.
 
 The walkthrough uses two terminals and the `obzenflow` CLI. First an uninterrupted
 control run. Once it completes, move its ledgers aside as its evidence and check them:
@@ -120,9 +99,7 @@ jq -nr -f examples/aml_overnight_monitoring/ledger-check.jq \
 ```
 
 Then start the run to kill with the same two commands. When `show` reports about half
-the transactions scored, SIGKILL the first terminal's process and inspect the archive. It
-holds the verdicts and cases committed so far, and a transactions source that has not
-reached the end of its file:
+the transactions scored, SIGKILL the first terminal's process and inspect the archive:
 
 ```sh
 kill -9 <pid>
@@ -142,10 +119,6 @@ jq -nr -f examples/aml_overnight_monitoring/ledger-check.jq \
   target/aml-case-calls.jsonl target/aml-risk-calls.jsonl
 ```
 
-Each repeat count is 0 or 1, because a kill can cut off at most one call per system and
-the resume makes it again with the same key. The resumed history ends with the same verdict
-for every transaction and the same cases as the control. In the resumed run, `show`
-marks the verdicts rebuilt from the killed run's journal and leaves the rest unmarked.
 Finally, replay the resumed run and verify it, after which neither ledger has grown:
 
 ```sh

@@ -12,9 +12,8 @@ pub fn format_totals(totals: &DayTotals) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Day totals: {} transactions, {:.2} US dollars paid, {} unpriced, {} labelled as \
-         laundering. By format, {by_format}.",
-        totals.transactions, totals.paid_usd, totals.unpriced, totals.labelled_laundering
+        "Day totals: {} transactions, {} labelled as laundering. By format, {by_format}.",
+        totals.transactions, totals.labelled_laundering
     )
 }
 
@@ -28,15 +27,12 @@ mod tests {
     fn totals_read_as_one_line() {
         let totals = DayTotals {
             transactions: 3,
-            paid_usd: 318.0,
-            unpriced: 1,
             by_format: BTreeMap::from([(PaymentFormat::Ach, 2), (PaymentFormat::CreditCard, 1)]),
             labelled_laundering: 1,
         };
         assert_eq!(
             format_totals(&totals),
-            "Day totals: 3 transactions, 318.00 US dollars paid, 1 unpriced, 1 labelled as \
-             laundering. By format, ACH 2, Credit Card 1."
+            "Day totals: 3 transactions, 1 labelled as laundering. By format, ACH 2, Credit Card 1."
         );
     }
 }

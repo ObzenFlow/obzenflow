@@ -316,32 +316,16 @@ impl TypedPayload for CaseUnavailable {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct UsdRates(pub BTreeMap<String, f64>);
-
-impl UsdRates {
-    pub fn usd(&self, amount: f64, currency: &str) -> Option<f64> {
-        self.0.get(currency).map(|rate| amount * rate)
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DayTotals {
     pub transactions: u64,
-    pub paid_usd: f64,
-    pub unpriced: u64,
     pub by_format: BTreeMap<PaymentFormat, u64>,
     pub labelled_laundering: u64,
 }
 
 impl DayTotals {
-    pub fn add(&mut self, transaction: &Transaction, usd_rates: &UsdRates) {
+    pub fn add(&mut self, transaction: &Transaction) {
         self.transactions += 1;
-        match usd_rates.usd(transaction.amount_paid, &transaction.payment_currency) {
-            Some(usd) => self.paid_usd += usd,
-            None => self.unpriced += 1,
-        }
         *self
             .by_format
             .entry(transaction.payment_format)
@@ -495,32 +479,13 @@ mod tests {
     }
 
     #[test]
-    fn day_totals_count_unpriced_payments_instead_of_failing() {
-        let rates = UsdRates(BTreeMap::from([
-            ("US Dollar".to_owned(), 1.0),
-            ("Euro".to_owned(), 1.09),
-        ]));
+    fn day_totals_count_every_transaction_in_any_currency() {
         let mut totals = DayTotals::default();
-        totals.add(
-            &transaction(PaymentFormat::Ach, 100.0, "US Dollar", false),
-            &rates,
-        );
-        totals.add(
-            &transaction(PaymentFormat::Wire, 200.0, "Euro", true),
-            &rates,
-        );
-        totals.add(
-            &transaction(PaymentFormat::Ach, 50.0, "Doubloon", false),
-            &rates,
-        );
+        totals.add(&transaction(PaymentFormat::Ach, 100.0, "US Dollar", false));
+        totals.add(&transaction(PaymentFormat::Wire, 200.0, "Euro", true));
+        totals.add(&transaction(PaymentFormat::Ach, 50.0, "Doubloon", false));
 
         assert_eq!(totals.transactions, 3);
-        assert!(
-            (totals.paid_usd - 318.0).abs() < 1e-9,
-            "{}",
-            totals.paid_usd
-        );
-        assert_eq!(totals.unpriced, 1);
         assert_eq!(
             totals.by_format,
             BTreeMap::from([(PaymentFormat::Ach, 2), (PaymentFormat::Wire, 1)])

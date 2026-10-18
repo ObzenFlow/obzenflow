@@ -5,7 +5,7 @@
 use super::console;
 use super::domain::{
     AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, ProfiledTransaction,
-    ScoreUnavailable, Transaction, TransactionCleared, UsdRates,
+    ScoreUnavailable, Transaction, TransactionCleared,
 };
 use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, ScoreHandler};
 use super::vendors::{
@@ -44,7 +44,6 @@ pub struct AmlApp {
 pub struct AmlRules {
     pub fan_out_counterparties: NonZeroUsize,
     pub fan_in_counterparties: NonZeroUsize,
-    pub usd_rates: UsdRates,
 }
 
 #[derive(Clone, Debug)]
@@ -166,14 +165,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             app.rules.fan_out_counterparties,
             app.rules.fan_in_counterparties,
         );
-        let usd_rates = app.rules.usd_rates.clone();
-        let day_totals = stateful::reduce(
-            DayTotals::default(),
-            move |totals: &mut DayTotals, transaction: &Transaction| {
-                totals.add(transaction, &usd_rates)
-            },
-        )
-        .emit_on_eof();
+        let day_totals = stateful::reduce(DayTotals::default(), DayTotals::add).emit_on_eof();
         let open_case = OpenCaseHandler;
         register_dir(&app.cleared_register).map_err(resources_failed)?;
         let cleared_register = CsvSink::builder(ClearedRow)

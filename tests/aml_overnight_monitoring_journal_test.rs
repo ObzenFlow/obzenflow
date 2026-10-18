@@ -312,7 +312,18 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
     let transactions = archive.facts("transactions", "aml.transaction").len();
     assert_eq!(transactions, fixture_rows().len());
     assert_eq!(totals["transactions"].as_u64(), Some(transactions as u64));
-    assert_eq!(totals["unpriced"].as_u64(), Some(0));
+    let mut fields = totals
+        .as_object()
+        .expect("day totals are an object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["by_format", "labelled_laundering", "transactions"],
+        "the totals hold counts only and convert no currency"
+    );
     assert_eq!(
         totals["by_format"]
             .as_object()
