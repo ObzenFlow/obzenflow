@@ -225,14 +225,16 @@ fn unavailable_reason(error: &EffectError, system: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::domain::{AlertId, PaymentFormat, TxnId};
+    use super::super::domain::{AlertId, PaymentFormat, TxnId, AMLWORLD_TIME};
     use super::*;
+    use chrono::NaiveDateTime;
     use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 
     fn payment(txn_id: u64, timestamp: &str, from: &str, to: &str) -> Transaction {
         Transaction {
             txn_id: TxnId(txn_id),
-            timestamp: timestamp.to_owned(),
+            timestamp: NaiveDateTime::parse_from_str(timestamp, AMLWORLD_TIME)
+                .expect("an AMLworld timestamp"),
             from_bank: "48".to_owned(),
             from_account: from.to_owned(),
             to_bank: "48".to_owned(),

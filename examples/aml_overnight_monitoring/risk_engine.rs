@@ -4,7 +4,7 @@
 
 use super::domain::{
     AccountHistory, AccountKey, PaymentFormat, ProfiledTransaction, ReasonCode, Reasons,
-    RulesVersion, TxnId,
+    RulesVersion, TxnId, AMLWORLD_TIME,
 };
 use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ impl ScoreRequest {
         let transaction = &profiled.transaction;
         Self {
             txn_id: transaction.txn_id,
-            timestamp: transaction.timestamp.clone(),
+            timestamp: transaction.timestamp.format(AMLWORLD_TIME).to_string(),
             payer: transaction.payer(),
             payee: transaction.payee(),
             amount_paid: transaction.amount_paid,
@@ -210,7 +210,8 @@ mod tests {
     fn transaction(txn_id: u64, format: PaymentFormat, amount: f64, currency: &str) -> Transaction {
         Transaction {
             txn_id: TxnId(txn_id),
-            timestamp: "2022/09/05 10:15".to_owned(),
+            timestamp: chrono::NaiveDateTime::parse_from_str("2022/09/05 10:15", AMLWORLD_TIME)
+                .expect("an AMLworld timestamp"),
             from_bank: "70".to_owned(),
             from_account: "8000A1B2C".to_owned(),
             to_bank: "12".to_owned(),

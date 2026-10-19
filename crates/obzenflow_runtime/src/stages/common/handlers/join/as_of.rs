@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Point-in-time joins against a versioned catalogue.
+//! Point-in-time joins against a versioned catalog.
 
 use super::traits::{sealed, ErasedJoinInvocation, JoinBinding, UnifiedJoinHandler};
 use super::typed::{installed_writer_id, lower_join_outputs, ReferenceProjectionEntry};
@@ -19,20 +19,20 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::hash::Hash;
 
-/// The catalogue version in force at a stream row's time, or why there was none.
+/// The catalog version in force at a stream row's time, or why there was none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AsOf<R> {
     /// The version whose effective time is the latest at or before the row's time.
     Found(R),
     /// The key has versions, and the row comes before the first of them.
     BeforeFirstVersion,
-    /// The catalogue holds no version of the key.
+    /// The catalog holds no version of the key.
     NoVersions,
 }
 
 type Versions<T, R> = BTreeMap<T, ReferenceProjectionEntry<R>>;
 
-/// Read-only typed access to every version of every key in the catalogue.
+/// Read-only typed access to every version of every key in the catalog.
 ///
 /// A `Found` selection privately records the selected version's durable
 /// contribution evidence, which the adapter attaches to every fact the
@@ -78,7 +78,7 @@ where
 
 /// Typed point-in-time join whose associated types witness the `join!` arrow.
 ///
-/// Bind an implementation with [`AsOfJoin::new`]. The join loads every catalogue
+/// Bind an implementation with [`AsOfJoin::new`]. The join loads every catalog
 /// version before it reads a stream row, and has no live mode. Point-in-time
 /// lookups belong to [`AsOfReferenceView`]; a latest-value join's view has none:
 ///
@@ -132,7 +132,7 @@ pub trait TypedAsOfJoinHandler: Send + Sync {
 
     fn initial_state(&self) -> Self::State;
 
-    /// The catalogue row's key and the time its version takes effect.
+    /// The catalog row's key and the time its version takes effect.
     fn admit_reference(
         &self,
         reference: &Self::Reference,
@@ -246,9 +246,9 @@ where
     ) -> HandlerError {
         let refused = match &self.stage_names {
             Some((join, catalog)) => {
-                format!("join `{join}` refused its catalogue `{catalog}` while hydrating")
+                format!("join `{join}` refused its catalog `{catalog}` while hydrating")
             }
-            None => "join refused its catalogue while hydrating".to_string(),
+            None => "join refused its catalog while hydrating".to_string(),
         };
         HandlerError::Fatal(StageFatal::new(
             StageFatalCode::Protocol,
@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_names_the_join_the_catalogue_the_key_and_the_time() {
+    fn the_refusal_names_the_join_the_catalog_the_key_and_the_time() {
         let mut adapter = adapter(crate::stages::join::left_as_of(
             |rate: &FxRate| rate.currency.clone(),
             |rate: &FxRate| rate.effective_at,
@@ -732,7 +732,7 @@ mod tests {
         };
         assert_eq!(
             fatal.detail,
-            "join `price` refused its catalogue `fx_rates` while hydrating: two versions of \
+            "join `price` refused its catalog `fx_rates` while hydrating: two versions of \
              \"EUR\" take effect at 2022-09-05T14:00:00, so a row as of that time has no single \
              version. Keep one version per key and effective time, then start a fresh run."
         );

@@ -4,8 +4,8 @@
 
 use super::console;
 use super::domain::{
-    AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, ProfiledTransaction,
-    ScoreUnavailable, Transaction, TransactionCleared,
+    AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, FxRate, PricedTransaction,
+    ProfiledTransaction, ScoreUnavailable, Transaction, TransactionCleared,
 };
 use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, ScoreHandler};
 use super::vendors::{
@@ -16,6 +16,7 @@ use obzenflow::flow::{
     effectful_transform, flow, join, merge, sink, source, stateful, FlowBuildError, FlowDefinition,
 };
 use obzenflow::journal::disk_journals;
+use obzenflow::stages::joins;
 use obzenflow::stages::merges;
 use obzenflow::stages::sinks::{ConsoleSink, CsvProjection, CsvSink};
 use obzenflow::stages::sources::{CsvDecoder, CsvSource};
@@ -32,6 +33,7 @@ pub const DEMO_JOURNAL_ROOT: &str = "target/aml-overnight-monitoring-logs";
 pub struct AmlApp {
     pub account_history: PathBuf,
     pub transactions: PathBuf,
+    pub fx_rates: PathBuf,
     pub risk_ledger: PathBuf,
     pub case_ledger: PathBuf,
     pub cleared_register: PathBuf,
@@ -58,6 +60,13 @@ struct TransactionCsv;
 
 impl CsvDecoder for TransactionCsv {
     type Output = Transaction;
+}
+
+#[derive(Clone, Debug)]
+struct RateCsv;
+
+impl CsvDecoder for RateCsv {
+    type Output = FxRate;
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +163,18 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             .path(&app.transactions)
             .build()
             .map_err(resources_failed)?;
+        let rates_feed = CsvSource::builder(RateCsv)
+            .path(&app.fx_rates)
+            .build()
+            .map_err(resources_failed)?;
         let profile = AccountProfile;
+        let price = joins::left_as_of(
+            |rate: &FxRate| rate.currency.clone(),
+            |rate: &FxRate| rate.effective_at,
+            |payment: &Transaction| payment.payment_currency.clone(),
+            |payment: &Transaction| payment.timestamp,
+            PricedTransaction::at,
+        );
         let VendorBindings {
             risk_engine,
             case_system,
@@ -195,8 +215,12 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             stages: {
                 account_history = source!(AccountHistory => history_feed);
                 transactions    = source!(Transaction => transactions_feed);
+                fx_rates        = source!(FxRate => rates_feed);
                 profile         = join!(
                     catalog account_history: AccountHistory, Transaction -> ProfiledTransaction => profile
+                );
+                price           = join!(
+                    catalog fx_rates: FxRate, Transaction -> PricedTransaction => price
                 );
                 score           = effectful_transform!(
                     ProfiledTransaction -> { TransactionCleared, AlertRaised, ScoreUnavailable }
@@ -205,7 +229,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 );
                 cleared         = sink!(TransactionCleared => cleared_register);
                 daily_profile   = stateful!(Transaction -> AlertRaised => daily_profile);
-                day_totals      = stateful!(Transaction -> DayTotals => day_totals);
+                day_totals      = stateful!(PricedTransaction -> DayTotals => day_totals);
                 alerts          = merge!(first score: AlertRaised => merges::concat);
                 open_case       = effectful_transform!(
                     AlertRaised -> { CaseOpened, CaseUnavailable }
@@ -218,8 +242,9 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
 
             topology: {
                 (account_history, transactions) |> profile;
+                (fx_rates, transactions) |> price;
                 transactions |> daily_profile;
-                transactions |> day_totals;
+                price |> day_totals;
                 profile |> score;
                 score |> cleared;
                 score |> alerts;

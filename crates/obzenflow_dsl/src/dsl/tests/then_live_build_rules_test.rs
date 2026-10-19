@@ -495,7 +495,7 @@ fn a_then_live_join_as_a_catalog_is_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `enriched_orders` uses inner_then_live, but its catalogue `sku_full_dim` is a \
+        "join `enriched_orders` uses inner_then_live, but its catalog `sku_full_dim` is a \
          then-live join, whose batch and live rows cannot be told apart yet."
     );
 }
@@ -515,9 +515,9 @@ fn a_catalog_with_no_batch_source_is_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `posted` uses inner_then_live, but its catalogue `live_accounts` has no batch \
-         source, so it would never leave its first phase.\nUse inner_live for a catalogue that \
-         is live from the start."
+        "join `posted` uses inner_then_live, but its catalog `live_accounts` has no batch \
+         source, so it would never leave its first phase.\nUse inner_live for a catalog that is \
+         live from the start."
     );
 }
 
@@ -565,7 +565,7 @@ fn a_stateful_stage_between_the_frontier_and_the_catalog_is_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `posted` uses inner_then_live, but its catalogue mixes batch and live sources in \
+        "join `posted` uses inner_then_live, but its catalog mixes batch and live sources in \
          `account_book`, a stateful stage, so the batch phase cannot tell when every batch row \
          has arrived.\nMerge batch and live rows with `merge!(Account => merges::then_live)`, \
          and keep stateful work on paths that are all batch or all live."
@@ -614,7 +614,7 @@ fn a_frontier_stage_with_two_paths_to_the_catalog_is_refused() {
     assert_eq!(
         flow.refusal(),
         "join `posted` uses inner_then_live, but batch rows from `accounts_clean` reach its \
-         catalogue by two paths (`by_region`, `by_tier`).\nMerge those branches before they meet \
+         catalog by two paths (`by_region`, `by_tier`).\nMerge those branches before they meet \
          live sources."
     );
 }
@@ -689,7 +689,7 @@ fn batch_and_live_sources_meeting_inside_a_cycle_are_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `posted` uses inner_then_live, but its catalogue's batch and live sources meet \
+        "join `posted` uses inner_then_live, but its catalog's batch and live sources meet \
          inside a cycle (`all_accounts <| reconcile`).\nMerge batch and live rows outside the \
          cycle."
     );
@@ -1022,8 +1022,8 @@ fn a_point_in_time_join_whose_catalog_has_a_live_source_is_refused() {
     let flow = priced_over(vec![("spot_feed", live_accounts())]);
     assert_eq!(
         flow.refusal(),
-        "join `price` uses as_of, but its catalogue `rates` has a live source (`spot_feed`), so \
-         its versions could arrive after the rows they price.\nFeed the catalogue from a finite \
+        "join `price` uses as_of, but its catalog `rates` has a live source (`spot_feed`), so \
+         its versions could arrive after the rows they price.\nFeed the catalog from a finite \
          source, or use a latest-value join for live rates."
     );
 }
@@ -1088,9 +1088,9 @@ fn a_latest_value_join_that_hydrates_a_live_catalog_is_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `enrich` hydrates its catalogue `accounts` to the end before reading a row, but \
+        "join `enrich` hydrates its catalog `accounts` to the end before reading a row, but \
          `accounts` has a live source (`new_accounts`), so hydration would never end.\nUse \
-         `.live()`, or `.then_live()` when the catalogue also has a finite source."
+         `.live()`, or `.then_live()` when the catalog also has a finite source."
     );
 }
 

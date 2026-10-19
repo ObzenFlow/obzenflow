@@ -5,7 +5,10 @@
 #[path = "../examples/aml_overnight_monitoring/support.rs"]
 pub mod support;
 
-use obzenflow::application::{verify_run_dirs, FlowApplication, LogLevel, VerifyOptions};
+use chrono::NaiveDateTime;
+use obzenflow::application::{
+    verify_run_dirs, FlowApplication, LogLevel, VerifyOptions, VerifyOutcome,
+};
 use obzenflow::journal::read::{
     open_disk_run, ChainPayload, FlowControlPayload, RunJournalKind, RunRecordData,
 };
@@ -16,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use support::domain::{AMLWORLD_TIME, REPORTING_CURRENCY};
 use support::vendors::VendorStats;
 
 const PLANTED: [(u64, &[&str]); 13] = [
@@ -44,8 +48,56 @@ const WHOLE_DAY: [(&str, &[&str]); 4] = [
 const ENGINE_RULES: &str = "sim-2026.10";
 const WHOLE_DAY_RULES: &str = "aml-daily-profile-v1";
 
+const BEFORE_THE_FIRST_YUAN_RATE: [u64; 3] = [2800007, 2800020, 2800045];
+const BOOKED_AS_A_RATE_TAKES_EFFECT: (u64, &str) = (2800011, "2022-09-05T01:00:00");
+const CORRECTED_RATE: (&str, &str) = (
+    "Euro,2022-09-05T13:00:00,0.9916\n",
+    "Euro,2022-09-05T13:00:00,0.9930\n",
+);
+
 fn example_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/aml_overnight_monitoring")
+}
+
+fn shipped_rates() -> PathBuf {
+    example_dir().join("fixtures/simulated-treasury-rates.csv")
+}
+
+struct Rate {
+    currency: String,
+    effective_at: NaiveDateTime,
+    usd_per_unit: f64,
+}
+
+fn rates() -> Vec<Rate> {
+    std::fs::read_to_string(shipped_rates())
+        .expect("rates are readable")
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let row: Vec<&str> = line.split(',').collect();
+            Rate {
+                currency: row[0].to_owned(),
+                effective_at: row[1].parse().expect("effective_at column"),
+                usd_per_unit: row[2].parse().expect("usd_per_unit column"),
+            }
+        })
+        .collect()
+}
+
+fn rate_in_force<'a>(rates: &'a [Rate], currency: &str, booked: NaiveDateTime) -> Option<&'a Rate> {
+    rates
+        .iter()
+        .filter(|rate| rate.currency == currency && rate.effective_at <= booked)
+        .max_by_key(|rate| rate.effective_at)
+}
+
+fn booked_at(row: &[String]) -> NaiveDateTime {
+    NaiveDateTime::parse_from_str(&row[1], AMLWORLD_TIME).expect("timestamp column")
+}
+
+fn iso(time: NaiveDateTime) -> String {
+    time.format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 fn fixture_rows() -> Vec<Vec<String>> {
@@ -64,7 +116,7 @@ fn fixture_txn_ids() -> BTreeSet<u64> {
         .collect()
 }
 
-fn fixture_config(dir: &Path) -> PathBuf {
+fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
     let example = example_dir();
     let mut config: toml::Table = std::fs::read_to_string(example.join("obzenflow.toml"))
         .expect("shipped configuration is readable")
@@ -92,6 +144,7 @@ fn fixture_config(dir: &Path) -> PathBuf {
             example.join("fixtures/account-history.csv"),
         ),
         ("transactions", example.join("fixtures/transactions.csv")),
+        ("fx_rates", fx_rates.to_path_buf()),
         ("risk_ledger", dir.join("risk-calls.jsonl")),
         ("case_ledger", dir.join("case-calls.jsonl")),
         ("cleared_register", dir.join("cleared.csv")),
@@ -239,10 +292,24 @@ fn line_count(path: &Path) -> usize {
         .count()
 }
 
+fn divergences(baseline: &Path, candidate: &Path) -> BTreeMap<String, u64> {
+    let outcome =
+        verify_run_dirs(baseline, candidate, &VerifyOptions::default()).expect("verification runs");
+    let VerifyOutcome::Completed { report, .. } = outcome else {
+        panic!("verification completes")
+    };
+    report
+        .stages
+        .iter()
+        .map(|(stage, stage_report)| (stage.clone(), stage_report.divergence_count))
+        .filter(|(_, count)| *count > 0)
+        .collect()
+}
+
 #[test]
 fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_system() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = fixture_config(dir.path());
+    let config = fixture_config(dir.path(), &shipped_rates());
     let journal_root = dir.path().join("journals");
 
     let live = Arc::new(VendorStats::default());
@@ -321,8 +388,74 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
     fields.sort();
     assert_eq!(
         fields,
-        ["by_format", "labelled_laundering", "transactions"],
-        "the totals hold counts only and convert no currency"
+        [
+            "by_format",
+            "labelled_laundering",
+            "paid_usd",
+            "transactions",
+            "unpriced"
+        ]
+    );
+
+    let rates = rates();
+    let rows = fixture_rows();
+    let booked: BTreeMap<u64, &Vec<String>> = rows
+        .iter()
+        .map(|row| (row[0].parse().expect("txn_id column"), row))
+        .collect();
+    let priced = archive.facts("price", "aml.transaction_priced");
+    assert_eq!(
+        priced.len(),
+        transactions,
+        "one priced fact per transaction"
+    );
+    let mut paid_usd = 0.0;
+    let mut unpriced = Vec::new();
+    let mut effective = BTreeMap::new();
+    for fact in &priced {
+        let transaction = &fact["transaction"];
+        let txn = transaction["txn_id"].as_u64().expect("txn_id");
+        let row = booked[&txn];
+        let amount: f64 = row[8].parse().expect("amount_paid column");
+        assert_eq!(
+            transaction["amount_paid"].as_f64(),
+            Some(amount),
+            "{txn} keeps its booked amount"
+        );
+        assert_eq!(transaction["timestamp"], row[1].as_str());
+        let currency = row[9].as_str();
+        match rate_in_force(&rates, currency, booked_at(row)) {
+            Some(rate) => {
+                assert_eq!(
+                    fact["rate"]["effective_at"],
+                    iso(rate.effective_at).as_str(),
+                    "{txn} takes the latest rate at or before its booking time"
+                );
+                assert_eq!(
+                    fact["rate"]["usd_per_unit"].as_f64(),
+                    Some(rate.usd_per_unit)
+                );
+                effective.insert(txn, iso(rate.effective_at));
+                paid_usd += amount * rate.usd_per_unit;
+            }
+            None => {
+                assert!(fact["rate"].is_null(), "{txn} has no rate in force");
+                if currency == REPORTING_CURRENCY {
+                    paid_usd += amount;
+                } else {
+                    unpriced.push(txn);
+                }
+            }
+        }
+    }
+    assert_eq!(unpriced, BEFORE_THE_FIRST_YUAN_RATE);
+    let (on_the_hour, its_rate) = BOOKED_AS_A_RATE_TAKES_EFFECT;
+    assert_eq!(effective[&on_the_hour], its_rate);
+    assert_eq!(totals["unpriced"].as_u64(), Some(unpriced.len() as u64));
+    let total = totals["paid_usd"].as_f64().expect("paid_usd");
+    assert!(
+        (total - paid_usd).abs() < 1e-6,
+        "{total} US dollars against {paid_usd} priced from the fixtures"
     );
     assert_eq!(
         totals["by_format"]
@@ -418,4 +551,58 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
     let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
         .expect("verification runs");
     assert_eq!(outcome.exit_code(), 0);
+}
+
+#[test]
+fn a_corrected_rate_in_a_fresh_run_diverges_only_where_it_priced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal_root = dir.path().join("journals");
+    let first = dir.path().join("first");
+    let corrected = dir.path().join("corrected");
+    std::fs::create_dir_all(&first).expect("first run directory");
+    std::fs::create_dir_all(&corrected).expect("corrected run directory");
+
+    run(
+        &fixture_config(&first, &shipped_rates()),
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let baseline = runs(&journal_root).pop().expect("the first run's archive");
+
+    let (original, replacement) = CORRECTED_RATE;
+    let shipped = std::fs::read_to_string(shipped_rates()).expect("rates are readable");
+    assert!(shipped.contains(original));
+    let corrected_rates = corrected.join("rates.csv");
+    std::fs::write(&corrected_rates, shipped.replace(original, replacement))
+        .expect("corrected rates are written");
+    run(
+        &fixture_config(&corrected, &corrected_rates),
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let fresh = runs(&journal_root)
+        .pop()
+        .expect("the corrected run's archive");
+    assert_ne!(fresh, baseline);
+
+    let rates = rates();
+    let priced_from_it = fixture_rows()
+        .iter()
+        .filter(|row| {
+            rate_in_force(&rates, &row[9], booked_at(row)).is_some_and(|rate| {
+                original.starts_with(&format!("{},{},", rate.currency, iso(rate.effective_at)))
+            })
+        })
+        .count() as u64;
+    assert!(priced_from_it > 0, "the corrected rate prices a payment");
+    assert_eq!(
+        divergences(&baseline, &fresh),
+        BTreeMap::from([
+            ("day_totals".to_owned(), 1),
+            ("fx_rates".to_owned(), 1),
+            ("price".to_owned(), priced_from_it),
+        ])
+    );
 }

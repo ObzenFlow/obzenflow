@@ -47,7 +47,7 @@ impl AuthoredConnection {
 }
 
 /// Only lowering can construct this value. Stage descriptors, physical edges,
-/// and the validated catalogue identities move into the builder together.
+/// and the validated catalog identities move into the builder together.
 pub struct LoweredFlow {
     pub(crate) stages: HashMap<String, Box<dyn StageDescriptor>>,
     pub(crate) connections: Vec<(String, String, EdgeKind)>,
@@ -92,7 +92,7 @@ pub(crate) fn validate_authored(
                     && members[to.as_str()]
                         .is_some_and(|stage| stage.stage_type() == StageType::Join)
                 {
-                    return Err(format!("join '{to}' requires every forward input to use (catalogue, stream) |> {to}; plain edge '{from} |> {to}' is not allowed"));
+                    return Err(format!("join '{to}' requires every forward input to use (catalog, stream) |> {to}; plain edge '{from} |> {to}' is not allowed"));
                 }
             }
             AuthoredConnection::Join {
@@ -108,13 +108,13 @@ pub(crate) fn validate_authored(
                     .ok_or_else(|| format!("tuple target '{join}' is not a declared join"))?;
                 let expected = descriptor
                     .reference_stage_name()
-                    .ok_or_else(|| format!("join '{join}' has no catalogue binding witness"))?;
+                    .ok_or_else(|| format!("join '{join}' has no catalog binding witness"))?;
                 if catalog != expected {
-                    return Err(format!("join '{join}' declares catalogue '{expected}', but tuple catalogue is '{catalog}'; use ({expected}, stream) |> {join}"));
+                    return Err(format!("join '{join}' declares catalog '{expected}', but tuple catalog is '{catalog}'; use ({expected}, stream) |> {join}"));
                 }
                 if catalog == stream && members[catalog.as_str()].is_some() {
                     return Err(format!(
-                        "join '{join}' cannot use producer '{catalog}' for both catalogue and stream"
+                        "join '{join}' cannot use producer '{catalog}' for both catalog and stream"
                     ));
                 }
                 if !tuples.insert((catalog, stream, join)) {
@@ -134,7 +134,7 @@ pub(crate) fn validate_authored(
                 known(catalog)?;
             }
             if !wired.contains(name) {
-                return Err(format!("join '{name}' requires explicit (catalogue, stream) |> {name} topology; its catalogue declaration does not create an edge"));
+                return Err(format!("join '{name}' requires explicit (catalog, stream) |> {name} topology; its catalog declaration does not create an edge"));
             }
         }
         if let Some(first) = members[name].and_then(|stage| stage.first_producer_name()) {
@@ -179,7 +179,7 @@ fn validate_first_producer(
     Err(format!("merge '{merge}' uses concat, so topology wires exactly one producer after '{first}'; it wires {wired}"))
 }
 
-/// Flatten only after validation. Shared catalogue edges from distinct tuples
+/// Flatten only after validation. Shared catalog edges from distinct tuples
 /// coalesce at their first authored occurrence; no other edges are deduplicated.
 pub(crate) fn role_edges(connections: Vec<AuthoredConnection>) -> Vec<RoleEdge> {
     let mut catalogs = HashSet::new();

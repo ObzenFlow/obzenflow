@@ -10,7 +10,7 @@
 //! By default (`JoinReferenceMode::FiniteEof`), joins follow a hydrate-then-enrich model:
 //! reference loads to EOF before stream processing begins. In `JoinReferenceMode::Live`,
 //! the join processes stream events continuously while the reference side can keep
-//! receiving updates. `JoinReferenceMode::FiniteThenLive` hydrates the batch catalogue,
+//! receiving updates. `JoinReferenceMode::FiniteThenLive` hydrates the batch catalog,
 //! enriches the batch stream, then runs live over every input.
 //!
 //! # Key Features
@@ -19,7 +19,7 @@
 //! - Per-source EOF handling
 //! - 3 join strategies: InnerJoin, LeftJoin, StrictJoin
 //! - Type-safe key extraction via closures
-//! - In-memory HashMap catalogues (<1GB per side)
+//! - In-memory HashMap catalogs (<1GB per side)
 //!
 //! # Architecture
 //! Joins are implemented as a dedicated stage type with custom FSM, not built on
@@ -94,7 +94,7 @@ where
         .build(join_fn)
 }
 
-/// Construct an inner join that hydrates the batch catalogue, enriches the batch
+/// Construct an inner join that hydrates the batch catalog, enriches the batch
 /// stream, then runs live over every input.
 pub fn inner_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
@@ -160,7 +160,7 @@ where
         .build(join_fn)
 }
 
-/// Construct a left join that hydrates the batch catalogue, enriches the batch
+/// Construct a left join that hydrates the batch catalog, enriches the batch
 /// stream, then runs live over every input.
 pub fn left_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
@@ -183,9 +183,9 @@ where
         .build(join_fn)
 }
 
-/// Construct a point-in-time left join over a versioned catalogue.
+/// Construct a point-in-time left join over a versioned catalog.
 ///
-/// The catalogue keeps every version of each key, by the time it took effect,
+/// The catalog keeps every version of each key, by the time it took effect,
 /// and loads them all before the first stream row. Each stream row is joined
 /// with the version of its key whose effective time is the latest at or before
 /// the row's `as_of` time, and the join function receives that selection as an
@@ -402,7 +402,7 @@ where
         .build(join_fn)
 }
 
-/// Construct a strict join that hydrates the batch catalogue, enriches the batch
+/// Construct a strict join that hydrates the batch catalog, enriches the batch
 /// stream, then runs live over every input.
 pub fn strict_then_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,

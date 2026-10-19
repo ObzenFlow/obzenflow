@@ -130,7 +130,7 @@ impl<Input> SinkInputMatchesArrow<Input> for Input {}
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "this join handler does not witness its arrow contract",
-    label = "the handler's `Reference` does not match the catalogue fact type",
+    label = "the handler's `Reference` does not match the catalog fact type",
     note = "implement TypedJoinHandler or TypedAsOfJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)"
 )]
 pub trait JoinReferenceMatchesArrow<ArrowReference>: proof_sealed::Equal<ArrowReference> {}

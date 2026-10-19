@@ -59,7 +59,7 @@ pub enum JoinState<H> {
     /// Resources allocated, ready to start processing
     Initialized,
 
-    /// Hydrating: Building reference catalogue from reference events
+    /// Hydrating: Building reference catalog from reference events
     /// During this state:
     /// - ONLY reads from reference subscription
     /// - Stream events queue in journal/subscription (natural backpressure)
@@ -70,14 +70,14 @@ pub enum JoinState<H> {
     ///
     /// During this state:
     /// - Reads from both reference and stream subscriptions
-    /// - Reference updates can arrive at any time and update catalogues
-    /// - Stream events are enriched against the current catalogue snapshot
+    /// - Reference updates can arrive at any time and update catalogs
+    /// - Stream events are enriched against the current catalog snapshot
     Live,
 
-    /// Enriching: Reference catalogue complete, actively enriching stream events
+    /// Enriching: Reference catalog complete, actively enriching stream events
     /// During this state:
     /// - ONLY reads from stream subscription
-    /// - Reference catalogue is complete and ready for lookups
+    /// - Reference catalog is complete and ready for lookups
     /// - Transitions to Draining when stream EOF received
     Enriching,
 
@@ -355,7 +355,7 @@ pub enum JoinAction<H> {
     /// Journal the phase this transition entered.
     RecordPhase(JoinPhaseFact),
 
-    /// Hydrate reference catalogue from reference event
+    /// Hydrate reference catalog from reference event
     HydrateCatalog,
 
     /// Enrich stream event with reference data
@@ -428,7 +428,7 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
     pub handler: Option<Arc<H>>,
 
-    /// Handler state (catalogues, buffers)
+    /// Handler state (catalogs, buffers)
     pub handler_state: H::State,
 
     /// This join's stage ID

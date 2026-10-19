@@ -59,7 +59,7 @@ pub trait UnifiedJoinHandler: sealed::Sealed + Send + Sync {
     /// Installed once by the runtime before the handler is shared.
     fn install_writer_id(&mut self, _writer_id: WriterId) {}
 
-    /// Installed once by the flow build with the join's and its catalogue's stage names.
+    /// Installed once by the flow build with the join's and its catalog's stage names.
     fn install_stage_names(&mut self, _join: &str, _catalog: &str) {}
 
     fn initial_state(&self) -> Self::State;

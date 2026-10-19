@@ -90,15 +90,15 @@ fn invalid_join_authoring_is_rejected_before_flattening() {
         ),
         (
             vec![Connection::join("stream", "catalog", "joined")],
-            "declares catalogue 'catalog'",
+            "declares catalog 'catalog'",
         ),
         (
             vec![Connection::join("other", "stream", "joined")],
-            "declares catalogue 'catalog'",
+            "declares catalog 'catalog'",
         ),
         (
             vec![Connection::join("catalog", "catalog", "joined")],
-            "both catalogue and stream",
+            "both catalog and stream",
         ),
         (
             vec![

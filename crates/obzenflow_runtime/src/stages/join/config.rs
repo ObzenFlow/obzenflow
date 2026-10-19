@@ -26,7 +26,7 @@ pub enum JoinReferenceMode {
     /// Live mode: consume reference updates and stream events concurrently (no reference EOF gate).
     Live,
 
-    /// Hydrate the batch catalogue, then enrich the batch stream, then run live over
+    /// Hydrate the batch catalog, then enrich the batch stream, then run live over
     /// every input. Each phase ends only on the natural EOFs of its witnesses.
     FiniteThenLive,
 }
@@ -47,7 +47,7 @@ impl JoinReferenceMode {
     }
 }
 
-/// Whether a join's catalogue keeps the latest value of each key or every version.
+/// Whether a join's catalog keeps the latest value of each key or every version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinCatalogKind {
     /// One value per key; a later row replaces an earlier one.
@@ -68,7 +68,7 @@ pub struct PhaseWitness {
 /// computed by the flow build.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PhaseWitnesses {
-    /// Stages whose natural EOFs, arriving on the catalogue, end hydration.
+    /// Stages whose natural EOFs, arriving on the catalog, end hydration.
     pub catalog: Vec<PhaseWitness>,
     /// Stages whose natural EOFs, arriving on the stream, end the batch. Empty
     /// when the join has no batch stream input, so hydration leads to `Live`.

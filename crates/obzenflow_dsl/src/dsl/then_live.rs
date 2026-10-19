@@ -429,14 +429,14 @@ fn live_catalog(
         .join(", ");
     match shape.catalog {
         JoinCatalogKind::Versioned => Refusal(format!(
-            "join `{name}` uses as_of, but its catalogue `{catalog_name}` has {has} ({sources}), \
-             so its versions could arrive after the rows they price.\nFeed the catalogue from a \
+            "join `{name}` uses as_of, but its catalog `{catalog_name}` has {has} ({sources}), \
+             so its versions could arrive after the rows they price.\nFeed the catalog from a \
              finite source, or use a latest-value join for live rates."
         )),
         JoinCatalogKind::LatestValue => Refusal(format!(
-            "join `{name}` hydrates its catalogue `{catalog_name}` to the end before reading a \
+            "join `{name}` hydrates its catalog `{catalog_name}` to the end before reading a \
              row, but `{catalog_name}` has {has} ({sources}), so hydration would never \
-             end.\nUse `.live()`, or `.then_live()` when the catalogue also has a finite source."
+             end.\nUse `.live()`, or `.then_live()` when the catalog also has a finite source."
         )),
     }
 }
@@ -534,16 +534,16 @@ fn then_live_join(
 
     if graph.is_then_live_join(catalog) {
         return Err(Refusal(format!(
-            "join `{name}` uses {uses}, but its catalogue `{catalog_name}` is a then-live join, \
+            "join `{name}` uses {uses}, but its catalog `{catalog_name}` is a then-live join, \
              whose batch and live rows cannot be told apart yet."
         )));
     }
     let catalog_roots = graph.roots(catalog);
     if catalog_roots.finite.is_empty() {
         return Err(Refusal(format!(
-            "join `{name}` uses {uses}, but its catalogue `{catalog_name}` has no batch source, \
-             so it would never leave its first phase.\nUse {} for a catalogue that is live from \
-             the start.",
+            "join `{name}` uses {uses}, but its catalog `{catalog_name}` has no batch source, so \
+             it would never leave its first phase.\nUse {} for a catalog that is live from the \
+             start.",
             variants.live
         )));
     }
@@ -671,7 +671,7 @@ fn catalog_frontier(
         for (to, kind) in graph.outbound.get(&from).into_iter().flatten() {
             if *kind == EdgeKind::Backward && span.contains(to) {
                 return Err(Refusal(format!(
-                    "join `{name}` uses {uses}, but its catalogue's batch and live sources meet \
+                    "join `{name}` uses {uses}, but its catalog's batch and live sources meet \
                      inside a cycle (`{} <| {}`).\nMerge batch and live rows outside the cycle.",
                     graph.name(*to),
                     graph.name(from),
@@ -688,8 +688,8 @@ fn catalog_frontier(
         if !matches!(stage_type, Some(StageType::Transform | StageType::Merge)) {
             let kind = stage_kind(stage_type);
             return Err(Refusal(format!(
-                "join `{name}` uses {uses}, but its catalogue mixes batch and live sources in \
-                 `{}`, a {kind} stage, so the batch phase cannot tell when every batch row has \
+                "join `{name}` uses {uses}, but its catalog mixes batch and live sources in `{}`, \
+                 a {kind} stage, so the batch phase cannot tell when every batch row has \
                  arrived.\nMerge batch and live rows with `merge!({catalog_type} => \
                  merges::then_live)`, and keep {kind} work on paths that are all batch or all \
                  live.",
@@ -703,7 +703,7 @@ fn catalog_frontier(
         if paths_to(graph, *stage, catalog, &span, &mut memo) > 1 {
             let (left, right) = first_fork(graph, *stage, catalog, &span, &mut memo);
             return Err(Refusal(format!(
-                "join `{name}` uses {uses}, but batch rows from `{}` reach its catalogue by two \
+                "join `{name}` uses {uses}, but batch rows from `{}` reach its catalog by two \
                  paths (`{}`, `{}`).\nMerge those branches before they meet live sources.",
                 graph.name(*stage),
                 graph.name(left),

@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 type LeftAsOfJoinBuild<C, S, E, K, T, CatalogKeyFn, EffectiveAtFn, StreamKeyFn, AsOfFn, J> =
     AsOfJoin<LeftAsOfJoin<C, S, E, K, T, CatalogKeyFn, EffectiveAtFn, StreamKeyFn, AsOfFn, J>>;
 
-/// Builder state for a point-in-time join with its catalogue key and effective time set.
+/// Builder state for a point-in-time join with its catalog key and effective time set.
 pub struct LeftJoinBuilderDslWithEffectiveAt<C, S, E, K, T, CatalogKeyFn, EffectiveAtFn> {
     pub(super) catalog_key_fn: CatalogKeyFn,
     pub(super) effective_at_fn: EffectiveAtFn,

@@ -34,7 +34,7 @@
 //!
 //! The decoration matrix covers binding-derived and explicit names plus each
 //! family's applicable contract, uniform middleware `with`, backpressure, effect,
-//! emit-interval, delivery, and catalogue clauses. Async-source poll timeout is
+//! emit-interval, delivery, and catalog clauses. Async-source poll timeout is
 //! configured on the handler and exposed through its `poll_timeout()` method;
 //! it is not a stage-macro clause or positional tuple.
 //!
@@ -5745,11 +5745,11 @@ macro_rules! infinite_source {
     ($($tokens:tt)*) => { $crate::__obzenflow_attachment_syntax!(@before __obzenflow_infinite_source_attachment_contract, [], $($tokens)*) };
 }
 
-/// Declares a typed join whose catalogue fact type comes first.
+/// Declares a typed join whose catalog fact type comes first.
 ///
 /// The handler is a built-in join, a `TypedJoinHandler`, or a point-in-time
 /// join, which an author-written `TypedAsOfJoinHandler` becomes through
-/// `AsOfJoin::new`. A handler whose catalogue type differs from the arrow's does
+/// `AsOfJoin::new`. A handler whose catalog type differs from the arrow's does
 /// not compile:
 ///
 /// ```compile_fail,E0277

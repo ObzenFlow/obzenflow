@@ -38,7 +38,7 @@ impl<E> JoinStrategyValueOutput<E> {
     }
 }
 
-/// Strategy trait that only defines how to match stream events against a catalogue
+/// Strategy trait that only defines how to match stream events against a catalog
 pub trait JoinStrategy {
     type CatalogType: TypedPayload + Clone + Send + Sync;
     type StreamType: TypedPayload + Clone + Send + Sync;

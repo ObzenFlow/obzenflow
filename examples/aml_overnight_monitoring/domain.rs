@@ -2,13 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use chrono::NaiveDateTime;
 use obzenflow::schema::TypedPayload;
+use obzenflow::stages::joins::AsOf;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+
+pub const AMLWORLD_TIME: &str = "%Y/%m/%d %H:%M";
+
+pub const REPORTING_CURRENCY: &str = "US Dollar";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -31,13 +37,8 @@ pub struct AccountKey {
 pub struct Day(pub String);
 
 impl Day {
-    pub fn of(timestamp: &str) -> Self {
-        Self(
-            timestamp
-                .split_once(' ')
-                .map_or(timestamp, |(day, _)| day)
-                .to_owned(),
-        )
+    pub fn of(timestamp: NaiveDateTime) -> Self {
+        Self(timestamp.format("%Y/%m/%d").to_string())
     }
 }
 
@@ -112,7 +113,8 @@ impl TypedPayload for AccountHistory {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transaction {
     pub txn_id: TxnId,
-    pub timestamp: String,
+    #[serde(with = "amlworld_time")]
+    pub timestamp: NaiveDateTime,
     pub from_bank: String,
     pub from_account: String,
     pub to_bank: String,
@@ -142,12 +144,54 @@ impl Transaction {
     }
 
     pub fn day(&self) -> Day {
-        Day::of(&self.timestamp)
+        Day::of(self.timestamp)
     }
 }
 
 impl TypedPayload for Transaction {
     const EVENT_TYPE: &'static str = "aml.transaction";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FxRate {
+    pub currency: String,
+    pub effective_at: NaiveDateTime,
+    pub usd_per_unit: f64,
+}
+
+impl TypedPayload for FxRate {
+    const EVENT_TYPE: &'static str = "aml.fx_rate";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PricedTransaction {
+    pub transaction: Transaction,
+    pub rate: Option<FxRate>,
+}
+
+impl PricedTransaction {
+    pub fn at(rate: AsOf<FxRate>, transaction: Transaction) -> Self {
+        let rate = match rate {
+            AsOf::Found(rate) => Some(rate),
+            AsOf::BeforeFirstVersion | AsOf::NoVersions => None,
+        };
+        Self { transaction, rate }
+    }
+
+    pub fn paid_usd(&self) -> Option<f64> {
+        let paid = self.transaction.amount_paid;
+        match &self.rate {
+            Some(rate) => Some(paid * rate.usd_per_unit),
+            None if self.transaction.payment_currency == REPORTING_CURRENCY => Some(paid),
+            None => None,
+        }
+    }
+}
+
+impl TypedPayload for PricedTransaction {
+    const EVENT_TYPE: &'static str = "aml.transaction_priced";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -319,13 +363,20 @@ impl TypedPayload for CaseUnavailable {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DayTotals {
     pub transactions: u64,
+    pub paid_usd: f64,
+    pub unpriced: u64,
     pub by_format: BTreeMap<PaymentFormat, u64>,
     pub labelled_laundering: u64,
 }
 
 impl DayTotals {
-    pub fn add(&mut self, transaction: &Transaction) {
+    pub fn add(&mut self, priced: &PricedTransaction) {
+        let transaction = &priced.transaction;
         self.transactions += 1;
+        match priced.paid_usd() {
+            Some(usd) => self.paid_usd += usd,
+            None => self.unpriced += 1,
+        }
         *self
             .by_format
             .entry(transaction.payment_format)
@@ -339,6 +390,27 @@ impl DayTotals {
 impl TypedPayload for DayTotals {
     const EVENT_TYPE: &'static str = "aml.day_totals";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+mod amlworld_time {
+    use super::AMLWORLD_TIME;
+    use chrono::NaiveDateTime;
+    use serde::{de, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        timestamp: &NaiveDateTime,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&timestamp.format(AMLWORLD_TIME))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<NaiveDateTime, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        NaiveDateTime::parse_from_str(&text, AMLWORLD_TIME)
+            .map_err(|_| de::Error::custom(format!("timestamp '{text}' is not YYYY/MM/DD HH:MM")))
+    }
 }
 
 fn laundering_label<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
@@ -433,6 +505,18 @@ mod tests {
         }
     }
 
+    fn booked(text: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(text, AMLWORLD_TIME).expect("an AMLworld timestamp")
+    }
+
+    fn rate(currency: &str, usd_per_unit: f64) -> FxRate {
+        FxRate {
+            currency: currency.to_owned(),
+            effective_at: booked("2022/09/05 10:00"),
+            usd_per_unit,
+        }
+    }
+
     fn transaction(
         format: PaymentFormat,
         amount: f64,
@@ -441,7 +525,7 @@ mod tests {
     ) -> Transaction {
         Transaction {
             txn_id: TxnId(2800001),
-            timestamp: "2022/09/05 10:15".to_owned(),
+            timestamp: booked("2022/09/05 10:15"),
             from_bank: "48".to_owned(),
             from_account: "81F0A0001".to_owned(),
             to_bank: "48".to_owned(),
@@ -467,7 +551,7 @@ mod tests {
         assert_eq!(flagged.alert_id, AlertId("txn:2817341".to_owned()));
 
         let day = AlertRaised::new(
-            AlertSubject::Day(Day::of("2022/09/05 23:55")),
+            AlertSubject::Day(Day::of(booked("2022/09/05 23:55"))),
             payer,
             reasons("fan_out"),
             RulesVersion("aml-daily-profile-v1".to_owned()),
@@ -479,13 +563,41 @@ mod tests {
     }
 
     #[test]
-    fn day_totals_count_every_transaction_in_any_currency() {
+    fn timestamps_keep_the_amlworld_spelling_in_the_journal() {
+        let booked = transaction(PaymentFormat::Ach, 100.0, "US Dollar", false);
+        let json = serde_json::to_value(&booked).expect("a transaction serializes");
+        assert_eq!(json["timestamp"], "2022/09/05 10:15");
+        let read: Transaction = serde_json::from_value(json).expect("and reads back");
+        assert_eq!(read, booked);
+    }
+
+    #[test]
+    fn day_totals_price_each_payment_at_its_rate_and_count_the_unpriced() {
         let mut totals = DayTotals::default();
-        totals.add(&transaction(PaymentFormat::Ach, 100.0, "US Dollar", false));
-        totals.add(&transaction(PaymentFormat::Wire, 200.0, "Euro", true));
-        totals.add(&transaction(PaymentFormat::Ach, 50.0, "Doubloon", false));
+        for priced in [
+            PricedTransaction {
+                transaction: transaction(PaymentFormat::Ach, 100.0, "US Dollar", false),
+                rate: None,
+            },
+            PricedTransaction {
+                transaction: transaction(PaymentFormat::Wire, 200.0, "Euro", true),
+                rate: Some(rate("Euro", 1.09)),
+            },
+            PricedTransaction {
+                transaction: transaction(PaymentFormat::Ach, 50.0, "Yuan", false),
+                rate: None,
+            },
+        ] {
+            totals.add(&priced);
+        }
 
         assert_eq!(totals.transactions, 3);
+        assert!(
+            (totals.paid_usd - 318.0).abs() < 1e-9,
+            "{}",
+            totals.paid_usd
+        );
+        assert_eq!(totals.unpriced, 1);
         assert_eq!(
             totals.by_format,
             BTreeMap::from([(PaymentFormat::Ach, 2), (PaymentFormat::Wire, 1)])

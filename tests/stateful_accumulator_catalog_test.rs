@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Product-catalogue regression for first-class stateful accumulators.
+//! Product-catalog regression for first-class stateful accumulators.
 
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::stateful::{

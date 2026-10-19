@@ -86,7 +86,7 @@ pub fn format_summary(summary: &CatalogAnalyticsSummary) -> String {
             "   Avg Margin %: {margin_pct:.1}%\n{separator}\n",
             "\n💡 Join Strategy Summary:\n",
             "   ✅ InnerJoin (SKU→Product→Category): All orders matched\n",
-            "   🛡️  StrictJoin (Payment Validation): Only catalogued payments crossed the boundary\n",
+            "   🛡️  StrictJoin (Payment Validation): Only cataloged payments crossed the boundary\n",
             "   ✨ LeftJoin (Promotions): {}/{} orders had promos\n",
             "\n   Note: LeftJoin preserved all orders, even without promotions!\n",
             "   Note: An invalid payment makes StrictJoin emit Poison after its exact committed prefix"

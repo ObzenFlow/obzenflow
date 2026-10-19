@@ -1604,20 +1604,20 @@ where
                     "DSL: Got resources for stage"
                 );
 
-                // A join consumes the catalogue first. Reorder only connected
+                // A join consumes the catalog first. Reorder only connected
                 // resources; looking up a disconnected journal would invent wiring.
                 if let Some(ref_stage_id) = descriptor.reference_stage_id() {
                     let position = resources.upstream_journals.iter()
                         .position(|(id, _)| *id == ref_stage_id)
                         .ok_or_else(|| FlowBuildError::StageResourcesFailed(format!(
-                            "join '{name}' has no connected catalogue journal for {ref_stage_id:?}"
+                            "join '{name}' has no connected catalog journal for {ref_stage_id:?}"
                         )))?;
                     let catalog = resources.upstream_journals.remove(position);
                     resources.upstream_journals.insert(0, catalog);
                     let position = resources.upstream_stages.iter()
                         .position(|id| *id == ref_stage_id)
                         .ok_or_else(|| FlowBuildError::StageResourcesFailed(format!(
-                            "join '{name}' has no connected catalogue stage {ref_stage_id:?}"
+                            "join '{name}' has no connected catalog stage {ref_stage_id:?}"
                         )))?;
                     resources.upstream_stages.remove(position);
                     resources.upstream_stages.insert(0, ref_stage_id);

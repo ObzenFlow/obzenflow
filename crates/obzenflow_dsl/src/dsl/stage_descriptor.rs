@@ -434,7 +434,7 @@ pub enum PolicyGuardSurface {
     Sink,
 }
 
-/// A join's mode, its catalogue's kind and the built-in variant its handler names.
+/// A join's mode, its catalog's kind and the built-in variant its handler names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JoinShape {
     pub mode: JoinReferenceMode,
@@ -3068,7 +3068,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
         let reference_mode = self.handler.reference_mode();
         let reference_batch_cap = self.handler.reference_batch_cap();
 
-        // Explicit topology validation orders the catalogue first, then streams.
+        // Explicit topology validation orders the catalog first, then streams.
         let reference_source_id = self.reference_stage_id;
 
         let stream_sources: Vec<StageId> = resources
@@ -3113,7 +3113,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
         }
 
         // The runtime builder preserves the planned subscription metadata when
-        // binding the catalogue and stream journal subsets.
+        // binding the catalog and stream journal subsets.
         let handle = JoinBuilder::new(
             handler,
             join_config,

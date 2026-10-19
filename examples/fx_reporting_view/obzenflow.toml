@@ -1,4 +1,0 @@
-[app]
-rates = "examples/fx_reporting_view/fixtures/simulated-treasury-rates.csv"
-transactions = "examples/fx_reporting_view/fixtures/transactions.csv"
-report = "target/fx-reporting-view.csv"

@@ -188,12 +188,9 @@ fn a_second_version_at_one_key_and_time_fails_the_join_before_it_reads_a_payment
             rate("EUR", at(14, 0), 1.0040),
         ],
     );
-    assert!(
-        !completed,
-        "the join refuses its catalogue and the run fails"
-    );
+    assert!(!completed, "the join refuses its catalog and the run fails");
 
-    let diagnostic = "join `price` refused its catalogue `fx_rates` while hydrating: two \
+    let diagnostic = "join `price` refused its catalog `fx_rates` while hydrating: two \
                       versions of \"EUR\" take effect at 2022-09-05T14:00:00, so a row as of \
                       that time has no single version. Keep one version per key and effective \
                       time, then start a fresh run.";
@@ -217,7 +214,7 @@ fn a_second_version_at_one_key_and_time_fails_the_join_before_it_reads_a_payment
 }
 
 #[test]
-fn a_catalogue_with_one_version_per_key_and_time_prices_the_payment() {
+fn a_catalog_with_one_version_per_key_and_time_prices_the_payment() {
     let dir = tempfile::tempdir().expect("tempdir");
     let completed = run(
         dir.path(),

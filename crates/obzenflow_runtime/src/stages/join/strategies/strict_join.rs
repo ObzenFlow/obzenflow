@@ -68,7 +68,7 @@ where
         }
     }
 
-    /// Set the catalogue key extractor directly (for DSL use without with_reference)
+    /// Set the catalog key extractor directly (for DSL use without with_reference)
     pub fn catalog_key<K, F>(self, key_fn: F) -> StrictJoinBuilderDslWithCatalogKey<C, S, E, K, F>
     where
         K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
@@ -81,7 +81,7 @@ where
     }
 }
 
-/// Builder state for DSL usage with catalogue key set (no reference ID needed)
+/// Builder state for DSL usage with catalog key set (no reference ID needed)
 pub struct StrictJoinBuilderDslWithCatalogKey<C, S, E, K, CatalogKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     _phantom: PhantomData<(C, S, E, K)>,
@@ -136,7 +136,7 @@ where
         self
     }
 
-    /// Hydrate the batch catalogue, then enrich the batch stream, then go live.
+    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self
@@ -171,7 +171,7 @@ where
     S: TypedPayload + Clone + Send + Sync,
     E: TypedPayload + Clone + Send + Sync,
 {
-    /// Set the catalogue key extractor (extracts key from events being stored in catalogue)
+    /// Set the catalog key extractor (extracts key from events being stored in catalog)
     pub fn catalog_key<K, F>(self, key_fn: F) -> StrictJoinBuilderWithCatalogKey<C, S, E, K, F>
     where
         K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
@@ -185,7 +185,7 @@ where
     }
 }
 
-/// Builder state with catalogue key set
+/// Builder state with catalog key set
 pub struct StrictJoinBuilderWithCatalogKey<C, S, E, K, CatalogKeyFn> {
     reference_stage_id: StageId,
     catalog_key_fn: CatalogKeyFn,
@@ -200,7 +200,7 @@ where
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
 {
-    /// Set the stream key extractor (extracts key from streaming events to lookup in catalogue)
+    /// Set the stream key extractor (extracts key from streaming events to lookup in catalog)
     pub fn stream_key<F>(self, key_fn: F) -> StrictJoinBuilderWithKeys<C, S, E, K, CatalogKeyFn, F>
     where
         F: Fn(&S) -> K + Send + Sync + Clone,
@@ -240,7 +240,7 @@ where
         self
     }
 
-    /// Hydrate the batch catalogue, then enrich the batch stream, then go live.
+    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self
@@ -303,7 +303,7 @@ where
             }
             None => {
                 tracing::error!(
-                    "StrictJoin: Data integrity violation - stream key {:?} has no catalogue match",
+                    "StrictJoin: Data integrity violation - stream key {:?} has no catalog match",
                     stream_key
                 );
 

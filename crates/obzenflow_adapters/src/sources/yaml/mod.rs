@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn selections_emit_records_in_document_order() {
         #[derive(Clone)]
-        struct Catalogue;
+        struct Catalog;
 
         #[derive(Debug, PartialEq, Serialize, Deserialize)]
         struct Companies {
@@ -484,10 +484,10 @@ mod tests {
         }
 
         impl TypedPayload for Companies {
-            const EVENT_TYPE: &'static str = "test.yaml_catalogue";
+            const EVENT_TYPE: &'static str = "test.yaml_catalog";
         }
 
-        impl YamlDecoder for Catalogue {
+        impl YamlDecoder for Catalog {
             type Output = Companies;
 
             fn decode(&self, record: YamlRecord<'_>) -> Result<Companies, YamlDecodeError> {
@@ -495,9 +495,9 @@ mod tests {
             }
         }
 
-        let catalogue = file("companies: [a, b]\naggregators: [c]\n");
-        let mut whole = YamlSource::builder(Catalogue)
-            .path(catalogue.path())
+        let catalog = file("companies: [a, b]\naggregators: [c]\n");
+        let mut whole = YamlSource::builder(Catalog)
+            .path(catalog.path())
             .build()
             .unwrap()
             .open(context())
