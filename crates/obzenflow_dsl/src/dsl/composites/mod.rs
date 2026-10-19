@@ -81,7 +81,7 @@ fn build_error(message: String) -> FlowBuildError {
 }
 
 /// Resolve outputs against the downstream input contract, using the authored
-/// catalog or stream role when the downstream is a join.
+/// catalogue or stream role when the downstream is a join.
 fn downstream_input_hint(
     stages: &HashMap<String, Box<dyn StageDescriptor>>,
     downstream: &str,
@@ -315,7 +315,7 @@ pub fn lower_composites(
     for edge in &external_edges {
         if edge.role == Some(JoinRole::Stream) && join_catalogs.get(&edge.to) == Some(&edge.from) {
             return Err(build_error(format!(
-                "join '{}' resolves catalog and stream to the same producer '{}'",
+                "join '{}' resolves catalogue and stream to the same producer '{}'",
                 edge.to, edge.from
             )));
         }

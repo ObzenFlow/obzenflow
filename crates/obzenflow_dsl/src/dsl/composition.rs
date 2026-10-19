@@ -221,7 +221,7 @@ impl CompositeBuildContext {
         }
     }
 
-    /// An explicit catalog-first pair for a private join member. Catalog
+    /// An explicit catalogue-first pair for a private join member. Catalogue
     /// declarations on member descriptors are identity witnesses, not edges.
     pub fn join(&mut self, catalog: &str, stream: &str, join: &str) -> &mut Self {
         self.joins.push(super::topology::AuthoredConnection::join(
@@ -839,7 +839,7 @@ impl CompositeBuildContext {
         }
 
         // Validate private binding identities before qualification. An outer
-        // stage with the same name can never satisfy a private catalog witness.
+        // stage with the same name can never satisfy a private catalogue witness.
         use super::topology::{role_edges, validate_authored, AuthoredConnection, JoinRole};
         let bindings = self
             .members

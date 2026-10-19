@@ -7,6 +7,7 @@
 //! SQL Equivalent: SELECT * FROM stream LEFT JOIN reference ON ...
 
 use super::common::{JoinStrategy, JoinStrategyValueOutput, JoinWithStrategy};
+use super::left_as_of_join::LeftJoinBuilderDslWithEffectiveAt;
 use crate::stages::common::stage_handle::StageHandle;
 use crate::stages::join::config::JoinReferenceMode;
 use obzenflow_core::StageId;
@@ -36,7 +37,6 @@ impl<C, S, E> LeftJoinBuilder<C, S, E>
 where
     C: TypedPayload + Clone + Send + Sync + 'static,
     S: TypedPayload + Clone + Send + Sync + 'static,
-    E: TypedPayload + Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
         Self::default()
@@ -65,7 +65,7 @@ where
         }
     }
 
-    /// Set the catalog key extractor directly (for DSL use without with_reference)
+    /// Set the catalogue key extractor directly (for DSL use without with_reference)
     pub fn catalog_key<K, F>(self, key_fn: F) -> LeftJoinBuilderDslWithCatalogKey<C, S, E, K, F>
     where
         K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
@@ -78,7 +78,7 @@ where
     }
 }
 
-/// Builder state for DSL usage with catalog key set (no reference ID needed)
+/// Builder state for DSL usage with catalogue key set (no reference ID needed)
 pub struct LeftJoinBuilderDslWithCatalogKey<C, S, E, K, CatalogKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     _phantom: PhantomData<(C, S, E, K)>,
@@ -88,7 +88,6 @@ impl<C, S, E, K, CatalogKeyFn> LeftJoinBuilderDslWithCatalogKey<C, S, E, K, Cata
 where
     C: TypedPayload + Clone + Send + Sync,
     S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
 {
@@ -101,6 +100,23 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
             reference_mode: JoinReferenceMode::FiniteEof,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the time each catalogue row's version takes effect, making this a
+    /// point-in-time join over every version of each key.
+    pub fn effective_at<T, F>(
+        self,
+        effective_at_fn: F,
+    ) -> LeftJoinBuilderDslWithEffectiveAt<C, S, E, K, T, CatalogKeyFn, F>
+    where
+        T: Ord + Copy + Send + Sync + std::fmt::Debug + 'static,
+        F: Fn(&C) -> T + Send + Sync + Clone,
+    {
+        LeftJoinBuilderDslWithEffectiveAt {
+            catalog_key_fn: self.catalog_key_fn,
+            effective_at_fn,
             _phantom: PhantomData,
         }
     }
@@ -119,7 +135,6 @@ impl<C, S, E, K, CatalogKeyFn, StreamKeyFn>
 where
     C: TypedPayload + Clone + Send + Sync,
     S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone,
@@ -130,7 +145,7 @@ where
         self
     }
 
-    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
+    /// Hydrate the batch catalogue, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self
@@ -138,6 +153,7 @@ where
 
     pub fn build<J>(self, join_fn: J) -> LeftJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
+        E: TypedPayload + Clone + Send + Sync,
         J: Fn(Option<C>, S) -> E + Send + Sync + Clone,
     {
         JoinWithStrategy {
@@ -165,7 +181,7 @@ where
     S: TypedPayload + Clone + Send + Sync,
     E: TypedPayload + Clone + Send + Sync,
 {
-    /// Set the catalog key extractor (extracts key from events being stored in catalog)
+    /// Set the catalogue key extractor (extracts key from events being stored in catalogue)
     pub fn catalog_key<K, F>(self, key_fn: F) -> LeftJoinBuilderWithCatalogKey<C, S, E, K, F>
     where
         K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
@@ -179,7 +195,7 @@ where
     }
 }
 
-/// Builder state with catalog key set
+/// Builder state with catalogue key set
 pub struct LeftJoinBuilderWithCatalogKey<C, S, E, K, CatalogKeyFn> {
     reference_stage_id: StageId,
     catalog_key_fn: CatalogKeyFn,
@@ -194,7 +210,7 @@ where
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
 {
-    /// Set the stream key extractor (extracts key from streaming events to lookup in catalog)
+    /// Set the stream key extractor (extracts key from streaming events to lookup in catalogue)
     pub fn stream_key<F>(self, key_fn: F) -> LeftJoinBuilderWithKeys<C, S, E, K, CatalogKeyFn, F>
     where
         F: Fn(&S) -> K + Send + Sync + Clone,
@@ -231,14 +247,14 @@ where
     /// Set the join function and build the handler
     ///
     /// Note: For LeftJoin, the output type E should be able to represent
-    /// both enriched events (with catalog data) and unenriched events
+    /// both enriched events (with catalogue data) and unenriched events
     /// (stream only). Consider using an Option or enum in your output type.
     pub fn live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::Live;
         self
     }
 
-    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
+    /// Hydrate the batch catalogue, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self

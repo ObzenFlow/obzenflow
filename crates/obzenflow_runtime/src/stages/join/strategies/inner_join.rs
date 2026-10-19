@@ -65,7 +65,7 @@ where
         }
     }
 
-    /// Set the catalog key extractor directly (for DSL use without with_reference)
+    /// Set the catalogue key extractor directly (for DSL use without with_reference)
     pub fn catalog_key<K, F>(self, key_fn: F) -> InnerJoinBuilderDslWithCatalogKey<C, S, E, K, F>
     where
         K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
@@ -78,7 +78,7 @@ where
     }
 }
 
-/// Builder state for DSL usage with catalog key set (no reference ID needed)
+/// Builder state for DSL usage with catalogue key set (no reference ID needed)
 pub struct InnerJoinBuilderDslWithCatalogKey<C, S, E, K, CatalogKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     _phantom: PhantomData<(C, S, E, K)>,
@@ -133,7 +133,7 @@ where
         self
     }
 
-    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
+    /// Hydrate the batch catalogue, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self
@@ -168,7 +168,7 @@ where
     S: TypedPayload + Clone + Send + Sync,
     E: TypedPayload + Clone + Send + Sync,
 {
-    /// Set the catalog key extractor (extracts key from events being stored in catalog)
+    /// Set the catalogue key extractor (extracts key from events being stored in catalogue)
     pub fn catalog_key<K, F>(self, key_fn: F) -> InnerJoinBuilderWithCatalogKey<C, S, E, K, F>
     where
         K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
@@ -182,7 +182,7 @@ where
     }
 }
 
-/// Builder state with catalog key set
+/// Builder state with catalogue key set
 pub struct InnerJoinBuilderWithCatalogKey<C, S, E, K, CatalogKeyFn> {
     reference_stage_id: StageId,
     catalog_key_fn: CatalogKeyFn,
@@ -197,7 +197,7 @@ where
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
 {
-    /// Set the stream key extractor (extracts key from streaming events to lookup in catalog)
+    /// Set the stream key extractor (extracts key from streaming events to lookup in catalogue)
     pub fn stream_key<F>(self, key_fn: F) -> InnerJoinBuilderWithKeys<C, S, E, K, CatalogKeyFn, F>
     where
         F: Fn(&S) -> K + Send + Sync + Clone,
@@ -238,7 +238,7 @@ where
         self
     }
 
-    /// Hydrate the batch catalog, then enrich the batch stream, then go live.
+    /// Hydrate the batch catalogue, then enrich the batch stream, then go live.
     pub fn then_live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::FiniteThenLive;
         self
@@ -270,7 +270,7 @@ where
 /// Inner Join - drops stream events with no matching reference
 ///
 /// The strategy doesn't know or care about reference stage IDs.
-/// It just builds a catalog and matches stream events against it.
+/// It just builds a catalogue and matches stream events against it.
 #[derive(Clone)]
 pub struct InnerJoinStrategy<C, S, E, K, J> {
     pub(crate) join_fn: J,

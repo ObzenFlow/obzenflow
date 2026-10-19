@@ -943,11 +943,11 @@ async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
         ),
         (
             invalid!((stream, catalog) |> joined;),
-            "declares catalog 'catalog'",
+            "declares catalogue 'catalog'",
         ),
         (
             invalid!((other, stream) |> joined;),
-            "declares catalog 'catalog'",
+            "declares catalogue 'catalog'",
         ),
         (
             invalid!((catalog, stream) |> joined; (catalog, stream) |> joined;),
@@ -955,7 +955,7 @@ async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
         ),
         (
             invalid!((catalog, catalog) |> joined;),
-            "both catalog and stream",
+            "both catalogue and stream",
         ),
         (
             invalid!((catalog, missing) |> joined;),

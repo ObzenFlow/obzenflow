@@ -35,7 +35,10 @@ pub use common::{
 };
 
 // Public join authoring is the typed witness surface.
-pub use common::handlers::{JoinReferenceView, TypedJoinHandler, TypedTransformHandler};
+pub use common::handlers::{
+    AsOf, AsOfJoin, AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
+    TypedTransformHandler,
+};
 
 // Re-export resources builder
 pub use crate::typing::{SourceTyping, TransformTyping};

@@ -172,6 +172,33 @@ impl joins::TypedJoinHandler for Pure {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PointInTime;
+
+impl joins::TypedAsOfJoinHandler for PointInTime {
+    type State = ();
+    type ReferenceKey = u64;
+    type EffectiveTime = u64;
+    type Reference = Fact;
+    type Stream = Fact;
+    type Output = Fact;
+    fn initial_state(&self) {}
+    fn admit_reference(&self, reference: &Fact) -> Result<(u64, u64), HandlerError> {
+        Ok((reference.0, reference.0))
+    }
+    fn process_stream(
+        &self,
+        _state: &mut (),
+        references: &mut joins::AsOfReferenceView<'_, u64, u64, Fact>,
+        stream: Fact,
+    ) -> Result<Vec<Fact>, HandlerError> {
+        match references.select_as_of(&stream.0, &stream.0) {
+            joins::AsOf::Found(version) => Ok(vec![version]),
+            joins::AsOf::BeforeFirstVersion | joins::AsOf::NoVersions => Ok(vec![stream]),
+        }
+    }
+}
+
 #[async_trait]
 impl sinks::InlineSink for Pure {
     type Input = Fact;
@@ -315,6 +342,16 @@ fn renamed_facade_macros_and_constructors_compile() {
         |_reference: Fact, fact: Fact| fact,
     );
     let _ = joins::JoinReferenceMode::FiniteThenLive;
+    let priced = joins::left_as_of(
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |fact: &Fact| fact.0,
+        |_version: joins::AsOf<Fact>, fact: Fact| fact,
+    );
+    let _ = join!(catalog input: Fact, Fact -> Fact => priced);
+    let point_in_time = joins::AsOfJoin::new(PointInTime);
+    let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => point_in_time);
     let _ = source!(Fact => Pure);
     let _ = async_source!(Fact => Pure);
     let _ = infinite_source!(Fact => Pure);

@@ -495,7 +495,7 @@ fn a_then_live_join_as_a_catalog_is_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `enriched_orders` uses inner_then_live, but its catalog `sku_full_dim` is a \
+        "join `enriched_orders` uses inner_then_live, but its catalogue `sku_full_dim` is a \
          then-live join, whose batch and live rows cannot be told apart yet."
     );
 }
@@ -515,9 +515,9 @@ fn a_catalog_with_no_batch_source_is_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `posted` uses inner_then_live, but its catalog `live_accounts` has no batch \
-         source, so it would never leave its first phase.\nUse inner_live for a catalog that is \
-         live from the start."
+        "join `posted` uses inner_then_live, but its catalogue `live_accounts` has no batch \
+         source, so it would never leave its first phase.\nUse inner_live for a catalogue that \
+         is live from the start."
     );
 }
 
@@ -565,7 +565,7 @@ fn a_stateful_stage_between_the_frontier_and_the_catalog_is_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `posted` uses inner_then_live, but its catalog mixes batch and live sources in \
+        "join `posted` uses inner_then_live, but its catalogue mixes batch and live sources in \
          `account_book`, a stateful stage, so the batch phase cannot tell when every batch row \
          has arrived.\nMerge batch and live rows with `merge!(Account => merges::then_live)`, \
          and keep stateful work on paths that are all batch or all live."
@@ -614,7 +614,7 @@ fn a_frontier_stage_with_two_paths_to_the_catalog_is_refused() {
     assert_eq!(
         flow.refusal(),
         "join `posted` uses inner_then_live, but batch rows from `accounts_clean` reach its \
-         catalog by two paths (`by_region`, `by_tier`).\nMerge those branches before they meet \
+         catalogue by two paths (`by_region`, `by_tier`).\nMerge those branches before they meet \
          live sources."
     );
 }
@@ -689,7 +689,7 @@ fn batch_and_live_sources_meeting_inside_a_cycle_are_refused() {
     );
     assert_eq!(
         flow.refusal(),
-        "join `posted` uses inner_then_live, but its catalog's batch and live sources meet \
+        "join `posted` uses inner_then_live, but its catalogue's batch and live sources meet \
          inside a cycle (`all_accounts <| reconcile`).\nMerge batch and live rows outside the \
          cycle."
     );
@@ -985,4 +985,145 @@ fn a_concat_merge_records_structural_delivery() {
         orders[&flow.name_to_id["alerts"]],
         DeliveryOrder::Structural
     );
+}
+
+fn as_of_join() -> Box<dyn StageDescriptor> {
+    let handler = obzenflow_runtime::stages::join::left_as_of(
+        |account: &Account| account.key.clone(),
+        |account: &Account| account.key.len(),
+        |entry: &Entry| entry.key.clone(),
+        |entry: &Entry| entry.key.len(),
+        |_account: obzenflow_runtime::stages::join::AsOf<Account>, entry: Entry| Posted {
+            key: entry.key,
+        },
+    );
+    crate::join!(catalog rates: Account, Entry -> Posted => handler)
+}
+
+fn priced_over(catalog_sources: Vec<(&'static str, Box<dyn StageDescriptor>)>) -> Flow {
+    let mut members = vec![
+        (
+            "rates",
+            crate::transform!(Account -> Account => placeholder!()),
+        ),
+        ("payments", batch_tx()),
+        ("price", as_of_join()),
+    ];
+    let mut authored = vec![join("rates", "payments", "price")];
+    for (name, source) in catalog_sources {
+        members.push((name, source));
+        authored.push(edge(name, "rates"));
+    }
+    flow(members, authored)
+}
+
+#[test]
+fn a_point_in_time_join_whose_catalog_has_a_live_source_is_refused() {
+    let flow = priced_over(vec![("spot_feed", live_accounts())]);
+    assert_eq!(
+        flow.refusal(),
+        "join `price` uses as_of, but its catalogue `rates` has a live source (`spot_feed`), so \
+         its versions could arrive after the rows they price.\nFeed the catalogue from a finite \
+         source, or use a latest-value join for live rates."
+    );
+}
+
+#[test]
+fn a_catalog_that_merges_a_file_with_a_feed_is_refused_naming_the_feed() {
+    let flow = priced_over(vec![
+        ("rates_file", batch_accounts()),
+        ("spot_feed", live_accounts()),
+    ]);
+    let refusal = flow.refusal();
+    assert!(
+        refusal.contains("has a live source (`spot_feed`)"),
+        "{refusal}"
+    );
+    assert!(!refusal.contains("rates_file"), "{refusal}");
+}
+
+#[test]
+fn every_live_source_of_the_catalog_is_named() {
+    let flow = priced_over(vec![
+        ("spot_feed", live_accounts()),
+        ("forward_feed", live_accounts()),
+    ]);
+    let refusal = flow.refusal();
+    assert!(
+        refusal.contains("has live sources (`forward_feed`, `spot_feed`)"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn a_point_in_time_join_with_a_live_stream_and_a_finite_catalog_builds() {
+    let flow = flow(
+        vec![
+            ("rates", batch_accounts()),
+            ("payments", live_tx()),
+            ("price", as_of_join()),
+        ],
+        vec![join("rates", "payments", "price")],
+    );
+    flow.plan()
+        .expect("a finite catalog loads before a live stream is read");
+}
+
+#[test]
+fn a_latest_value_join_that_hydrates_a_live_catalog_is_refused() {
+    let flow = flow(
+        vec![
+            (
+                "accounts",
+                crate::transform!(Account -> Account => placeholder!()),
+            ),
+            ("new_accounts", live_accounts()),
+            ("entries", batch_tx()),
+            ("enrich", join_with!(inner, accounts: Account, Entry)),
+        ],
+        vec![
+            edge("new_accounts", "accounts"),
+            join("accounts", "entries", "enrich"),
+        ],
+    );
+    assert_eq!(
+        flow.refusal(),
+        "join `enrich` hydrates its catalogue `accounts` to the end before reading a row, but \
+         `accounts` has a live source (`new_accounts`), so hydration would never end.\nUse \
+         `.live()`, or `.then_live()` when the catalogue also has a finite source."
+    );
+}
+
+#[test]
+fn a_live_or_then_live_join_over_a_live_catalog_still_builds() {
+    for (ctor, members) in [
+        (
+            "inner_live",
+            join_with!(inner_live, accounts: Account, Entry),
+        ),
+        (
+            "inner_then_live",
+            join_with!(inner_then_live, accounts: Account, Entry),
+        ),
+    ] {
+        let flow = flow(
+            vec![
+                (
+                    "accounts",
+                    crate::transform!(Account -> Account => placeholder!()),
+                ),
+                ("batch_accounts", batch_accounts()),
+                ("new_accounts", live_accounts()),
+                ("entries", live_tx()),
+                ("enrich", members),
+            ],
+            vec![
+                edge("batch_accounts", "accounts"),
+                edge("new_accounts", "accounts"),
+                join("accounts", "entries", "enrich"),
+            ],
+        );
+        flow.plan()
+            .unwrap_or_else(|refusal| panic!("{ctor}: {refusal}"));
+    }
 }

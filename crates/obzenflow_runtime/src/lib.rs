@@ -41,7 +41,7 @@ pub mod __private {
     // Public macros resolve through this narrow hygiene surface without
     // re-exporting Core itself as an alternate authoring gateway.
     pub use crate::stages::common::handlers::join::{
-        ErasedJoinInvocation, TypedJoinHandlerAdapter, UnifiedJoinHandler,
+        ErasedJoinInvocation, JoinBinding, TypedJoinHandlerAdapter, UnifiedJoinHandler,
     };
     pub use crate::stages::common::handlers::sink::SinkWriterAdapter;
     pub use crate::stages::common::handlers::source::typed::{

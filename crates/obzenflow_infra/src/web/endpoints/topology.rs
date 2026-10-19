@@ -818,7 +818,7 @@ mod tests {
 
         // No `join_metadata` on the join stage: the canonical
         // `derive_edge_typings` rule omits typing on join inputs when
-        // catalog/stream classification is unavailable.
+        // catalogue/stream classification is unavailable.
         let stages: Vec<StageInfo> = topology
             .stages()
             .cloned()

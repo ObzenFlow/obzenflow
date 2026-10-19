@@ -6,7 +6,9 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, StageKey};
-use obzenflow_runtime::stages::join::{JoinReferenceMode, PhaseWitness, PhaseWitnesses};
+use obzenflow_runtime::stages::join::{
+    JoinCatalogKind, JoinReferenceMode, PhaseWitness, PhaseWitnesses,
+};
 use obzenflow_runtime::stages::merges::MergeStrategyKind;
 use obzenflow_topology::{EdgeKind, Topology};
 
@@ -387,7 +389,11 @@ pub(crate) fn plan(
                 plan.witnesses.push((binding.clone(), witnesses));
             }
             JoinReferenceMode::FiniteEof => {
-                let ending: Vec<StageId> = graph.roots(catalog).all().collect();
+                let catalog_roots = graph.roots(catalog);
+                if catalog_roots.has_live() {
+                    return Err(live_catalog(&graph, id, shape, catalog, &catalog_roots));
+                }
+                let ending: Vec<StageId> = catalog_roots.all().collect();
                 plan.holds.push(Hold {
                     holder: id,
                     state: HoldState::Hydrating,
@@ -399,6 +405,40 @@ pub(crate) fn plan(
         }
     }
     Ok(plan)
+}
+
+fn live_catalog(
+    graph: &Graph<'_>,
+    join: StageId,
+    shape: JoinShape,
+    catalog: StageId,
+    roots: &Roots,
+) -> Refusal {
+    let name = graph.name(join);
+    let catalog_name = graph.name(catalog);
+    let live = graph.sorted(roots.live.iter().copied());
+    let has = if live.len() == 1 {
+        "a live source"
+    } else {
+        "live sources"
+    };
+    let sources = live
+        .iter()
+        .map(|id| format!("`{}`", graph.name(*id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match shape.catalog {
+        JoinCatalogKind::Versioned => Refusal(format!(
+            "join `{name}` uses as_of, but its catalogue `{catalog_name}` has {has} ({sources}), \
+             so its versions could arrive after the rows they price.\nFeed the catalogue from a \
+             finite source, or use a latest-value join for live rates."
+        )),
+        JoinCatalogKind::LatestValue => Refusal(format!(
+            "join `{name}` hydrates its catalogue `{catalog_name}` to the end before reading a \
+             row, but `{catalog_name}` has {has} ({sources}), so hydration would never \
+             end.\nUse `.live()`, or `.then_live()` when the catalogue also has a finite source."
+        )),
+    }
 }
 
 fn merge_producers(
@@ -494,16 +534,16 @@ fn then_live_join(
 
     if graph.is_then_live_join(catalog) {
         return Err(Refusal(format!(
-            "join `{name}` uses {uses}, but its catalog `{catalog_name}` is a then-live join, \
+            "join `{name}` uses {uses}, but its catalogue `{catalog_name}` is a then-live join, \
              whose batch and live rows cannot be told apart yet."
         )));
     }
     let catalog_roots = graph.roots(catalog);
     if catalog_roots.finite.is_empty() {
         return Err(Refusal(format!(
-            "join `{name}` uses {uses}, but its catalog `{catalog_name}` has no batch source, so \
-             it would never leave its first phase.\nUse {} for a catalog that is live from the \
-             start.",
+            "join `{name}` uses {uses}, but its catalogue `{catalog_name}` has no batch source, \
+             so it would never leave its first phase.\nUse {} for a catalogue that is live from \
+             the start.",
             variants.live
         )));
     }
@@ -631,7 +671,7 @@ fn catalog_frontier(
         for (to, kind) in graph.outbound.get(&from).into_iter().flatten() {
             if *kind == EdgeKind::Backward && span.contains(to) {
                 return Err(Refusal(format!(
-                    "join `{name}` uses {uses}, but its catalog's batch and live sources meet \
+                    "join `{name}` uses {uses}, but its catalogue's batch and live sources meet \
                      inside a cycle (`{} <| {}`).\nMerge batch and live rows outside the cycle.",
                     graph.name(*to),
                     graph.name(from),
@@ -648,8 +688,8 @@ fn catalog_frontier(
         if !matches!(stage_type, Some(StageType::Transform | StageType::Merge)) {
             let kind = stage_kind(stage_type);
             return Err(Refusal(format!(
-                "join `{name}` uses {uses}, but its catalog mixes batch and live sources in `{}`, \
-                 a {kind} stage, so the batch phase cannot tell when every batch row has \
+                "join `{name}` uses {uses}, but its catalogue mixes batch and live sources in \
+                 `{}`, a {kind} stage, so the batch phase cannot tell when every batch row has \
                  arrived.\nMerge batch and live rows with `merge!({catalog_type} => \
                  merges::then_live)`, and keep {kind} work on paths that are all batch or all \
                  live.",
@@ -663,7 +703,7 @@ fn catalog_frontier(
         if paths_to(graph, *stage, catalog, &span, &mut memo) > 1 {
             let (left, right) = first_fork(graph, *stage, catalog, &span, &mut memo);
             return Err(Refusal(format!(
-                "join `{name}` uses {uses}, but batch rows from `{}` reach its catalog by two \
+                "join `{name}` uses {uses}, but batch rows from `{}` reach its catalogue by two \
                  paths (`{}`, `{}`).\nMerge those branches before they meet live sources.",
                 graph.name(*stage),
                 graph.name(left),

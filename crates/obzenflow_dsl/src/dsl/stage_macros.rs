@@ -34,13 +34,13 @@
 //!
 //! The decoration matrix covers binding-derived and explicit names plus each
 //! family's applicable contract, uniform middleware `with`, backpressure, effect,
-//! emit-interval, delivery, and catalog clauses. Async-source poll timeout is
+//! emit-interval, delivery, and catalogue clauses. Async-source poll timeout is
 //! configured on the handler and exposed through its `poll_timeout()` method;
 //! it is not a stage-macro clause or positional tuple.
 //!
 //! The pre-FLOWIP-114c untyped forms (`source!(handler)`,
 //! `transform!(handler)`, `sink!(handler)`, etc.) and the mixed-leg join arms
-//! (`join!(catalog Ref: mixed, ...)`) were removed in the PR that operationalised
+//! (`join!(catalog Ref: mixed, ...)`) were removed in the PR that operationalized
 //! FLOWIP-114c. Authoring patterns that previously reached for an untyped
 //! handler to demux events at runtime are now expressed as joins (two typed
 //! inputs) or per-branch alignment transforms (homogeneous fan-in on an
@@ -5745,6 +5745,74 @@ macro_rules! infinite_source {
     ($($tokens:tt)*) => { $crate::__obzenflow_attachment_syntax!(@before __obzenflow_infinite_source_attachment_contract, [], $($tokens)*) };
 }
 
+/// Declares a typed join whose catalogue fact type comes first.
+///
+/// The handler is a built-in join, a `TypedJoinHandler`, or a point-in-time
+/// join, which an author-written `TypedAsOfJoinHandler` becomes through
+/// `AsOfJoin::new`. A handler whose catalogue type differs from the arrow's does
+/// not compile:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_core::TypedPayload;
+/// # use serde::{Deserialize, Serialize};
+/// use obzenflow_runtime::stages::join::{left_as_of, AsOf};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct FxRate { currency: String, effective_at: u64 }
+/// # impl TypedPayload for FxRate { const EVENT_TYPE: &'static str = "docs.join.fx_rate"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Payment { currency: String, booked_at: u64 }
+/// # impl TypedPayload for Payment { const EVENT_TYPE: &'static str = "docs.join.payment"; }
+///
+/// let price = left_as_of(
+///     |rate: &FxRate| rate.currency.clone(),
+///     |rate: &FxRate| rate.effective_at,
+///     |payment: &Payment| payment.currency.clone(),
+///     |payment: &Payment| payment.booked_at,
+///     |_rate: AsOf<FxRate>, payment: Payment| payment,
+/// );
+/// let _ = obzenflow_dsl::join!(catalog rates: Payment, Payment -> Payment => price);
+/// ```
+///
+/// An author-written point-in-time handler is bound with `AsOfJoin::new`:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_core::TypedPayload;
+/// # use serde::{Deserialize, Serialize};
+/// use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// use obzenflow_runtime::stages::join::{AsOfReferenceView, TypedAsOfJoinHandler};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Rate { currency: String, effective_at: u64 }
+/// # impl TypedPayload for Rate { const EVENT_TYPE: &'static str = "docs.join.rate"; }
+///
+/// #[derive(Clone, Debug)]
+/// struct Price;
+///
+/// impl TypedAsOfJoinHandler for Price {
+///     type State = ();
+///     type ReferenceKey = String;
+///     type EffectiveTime = u64;
+///     type Reference = Rate;
+///     type Stream = Rate;
+///     type Output = Rate;
+///
+///     fn initial_state(&self) {}
+///
+///     fn admit_reference(&self, rate: &Rate) -> Result<(String, u64), HandlerError> {
+///         Ok((rate.currency.clone(), rate.effective_at))
+///     }
+///
+///     fn process_stream(
+///         &self,
+///         _state: &mut (),
+///         _references: &mut AsOfReferenceView<'_, String, u64, Rate>,
+///         row: Rate,
+///     ) -> Result<Vec<Rate>, HandlerError> {
+///         Ok(vec![row])
+///     }
+/// }
+///
+/// let _ = obzenflow_dsl::join!(catalog rates: Rate, Rate -> Rate => Price);
+/// ```
 #[macro_export]
 macro_rules! join {
     ($($tokens:tt)*) => { $crate::__obzenflow_attachment_syntax!(@before __obzenflow_join_attachment_contract, [], $($tokens)*) };

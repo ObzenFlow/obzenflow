@@ -399,9 +399,11 @@ pub(super) async fn dispatch_hydrating<
                                 "Join handler error during reference hydration"
                             );
                             ctx.instrumentation.record_error(err.kind());
-                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                                "Join handler hydration error: {err:?}"
-                            ))));
+                            let message = match err.as_fatal() {
+                                Some(fatal) => fatal.detail.clone(),
+                                None => format!("Join handler hydration error: {err:?}"),
+                            };
+                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(message)));
                         }
                     }
 

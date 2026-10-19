@@ -1608,6 +1608,7 @@ version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
  "crc32fast",
  "criterion",

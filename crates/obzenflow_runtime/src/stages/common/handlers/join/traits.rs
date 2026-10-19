@@ -5,10 +5,12 @@
 //! Sealed erased join interface used only by the stage supervisor.
 
 use crate::stages::common::handler_error::HandlerError;
-use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
+use crate::stages::join::config::{
+    JoinCatalogKind, JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP,
+};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{ChainEvent, OneFactStageOutput, StageId, TypedPayload, WriterId};
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -57,6 +59,9 @@ pub trait UnifiedJoinHandler: sealed::Sealed + Send + Sync {
     /// Installed once by the runtime before the handler is shared.
     fn install_writer_id(&mut self, _writer_id: WriterId) {}
 
+    /// Installed once by the flow build with the join's and its catalogue's stage names.
+    fn install_stage_names(&mut self, _join: &str, _catalog: &str) {}
+
     fn initial_state(&self) -> Self::State;
 
     fn process_reference(
@@ -81,6 +86,10 @@ pub trait UnifiedJoinHandler: sealed::Sealed + Send + Sync {
         JoinReferenceMode::FiniteEof
     }
 
+    fn catalog_kind(&self) -> JoinCatalogKind {
+        JoinCatalogKind::LatestValue
+    }
+
     #[doc(hidden)]
     fn strategy_label(&self) -> Option<&'static str> {
         None
@@ -103,4 +112,20 @@ pub trait UnifiedJoinHandler: sealed::Sealed + Send + Sync {
         state: &Self::State,
         parent: Option<&ChainEvent>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+}
+
+/// A handler that `join!` accepts, with the facts its arrow must witness.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this join handler does not witness its arrow contract",
+    label = "this handler implements neither join contract",
+    note = "implement TypedJoinHandler, or implement TypedAsOfJoinHandler and bind it with AsOfJoin::new"
+)]
+pub trait JoinBinding: Clone + std::fmt::Debug + Send + Sync + 'static {
+    type Reference: TypedPayload + Clone + Send + Sync + 'static;
+    type Stream: TypedPayload + Send + Sync + 'static;
+    type Output: OneFactStageOutput + Send + Sync + 'static;
+    type Adapter: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static;
+
+    fn into_adapter(self) -> Self::Adapter;
 }
