@@ -306,10 +306,12 @@ mod tests {
     use super::super::domain::{
         AccountKey, AlertId, PaymentFormat, ReasonCode, Reasons, RulesVersion, TxnId,
     };
+    use super::super::money::{Currency, Money};
     use super::*;
 
     #[test]
     fn keys_are_business_keys_named_by_the_transaction_or_the_alert() {
+        let amount = Money::parse(Currency::UsDollar, "120.00").expect("a booked amount");
         let score = ScoreRequest {
             txn_id: TxnId(2817341),
             timestamp: "2022/09/05 10:15".to_owned(),
@@ -321,10 +323,8 @@ mod tests {
                 bank: "12".to_owned(),
                 account: "8000D3E4F".to_owned(),
             },
-            amount_paid: 120.0,
-            payment_currency: "US Dollar".to_owned(),
-            amount_received: 120.0,
-            receiving_currency: "US Dollar".to_owned(),
+            paid: amount,
+            received: amount,
             payment_format: PaymentFormat::Cheque,
             history: None,
         };

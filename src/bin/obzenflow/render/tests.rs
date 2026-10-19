@@ -1616,6 +1616,47 @@ fn clocks_name_journals_from_earlier_runs_in_the_lineage() {
 }
 
 #[test]
+fn replayed_facts_name_their_original_author_by_the_stage_that_owns_the_journal() {
+    let mut renderer = renderer();
+    let mut replayed = fact(1, 100, &[], json!({}));
+    let mut unrelated = fact(1, 101, &[], json!({}));
+    for (record, writer) in [(&mut replayed, 91), (&mut unrelated, 92)] {
+        let RunRecordData::Chain(row) = &mut record.record else {
+            unreachable!()
+        };
+        row.envelope.provenance.event.writer_id =
+            serde_json::from_value(json!({"type": "Stage", "id": id(writer)})).unwrap();
+    }
+    let RunRecordData::Chain(row) = &mut replayed.record else {
+        unreachable!()
+    };
+    row.envelope.provenance.event.replay_context = Some(
+        serde_json::from_value(json!({
+            "original_event_id": id(100),
+            "original_flow_id": format!("flow_{}", id(90)),
+            "original_stage_id": id(91),
+        }))
+        .unwrap(),
+    );
+    let replayed_writer = writer_id(&replayed);
+    let unrelated_writer = writer_id(&unrelated);
+    let mut output = Vec::new();
+    renderer.record(&mut output, replayed).unwrap();
+    renderer.record(&mut output, unrelated).unwrap();
+    renderer.flush_pending(&mut output).unwrap();
+    assert_eq!(
+        renderer.context.writer_name(&replayed_writer),
+        "thermometer [replay]"
+    );
+    assert_eq!(
+        renderer.context.writer_name(&unrelated_writer),
+        unrelated_writer
+    );
+    let live = fact(2, 102, &[100], json!({}));
+    assert_eq!(renderer.context.writer_name(&writer_id(&live)), "classify");
+}
+
+#[test]
 fn compact_clock_rows_follow_output_equations_without_truncating_counts() {
     let mut renderer = renderer();
     renderer.width = 60;

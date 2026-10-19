@@ -7,10 +7,12 @@ use super::domain::{
     RulesVersion, TxnId, AMLWORLD_TIME,
 };
 use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
+use super::money::{Currency, Money, UsdCents, UsdPerUnit};
 use async_trait::async_trait;
 use obzenflow::effects::{EffectPortSlot, IdempotencyKey};
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -24,10 +26,8 @@ pub struct ScoreRequest {
     pub timestamp: String,
     pub payer: AccountKey,
     pub payee: AccountKey,
-    pub amount_paid: f64,
-    pub payment_currency: String,
-    pub amount_received: f64,
-    pub receiving_currency: String,
+    pub paid: Money,
+    pub received: Money,
     pub payment_format: PaymentFormat,
     pub history: Option<AccountHistory>,
 }
@@ -40,10 +40,8 @@ impl ScoreRequest {
             timestamp: transaction.timestamp.format(AMLWORLD_TIME).to_string(),
             payer: transaction.payer(),
             payee: transaction.payee(),
-            amount_paid: transaction.amount_paid,
-            payment_currency: transaction.payment_currency.clone(),
-            amount_received: transaction.amount_received,
-            receiving_currency: transaction.receiving_currency.clone(),
+            paid: transaction.paid,
+            received: transaction.received,
             payment_format: transaction.payment_format,
             history: profiled.history.clone(),
         }
@@ -113,8 +111,12 @@ impl RiskEnginePort for SimulatedRiskEngine {
 
 struct Rule {
     code: &'static str,
-    fires: fn(&ScoreRequest, f64) -> bool,
+    fires: fn(&ScoreRequest, Option<UsdCents>) -> bool,
 }
+
+const TEN_THOUSAND: UsdCents = UsdCents::whole_dollars(10_000);
+const TWENTY_THOUSAND: UsdCents = UsdCents::whole_dollars(20_000);
+const FIFTY_THOUSAND: UsdCents = UsdCents::whole_dollars(50_000);
 
 const RULES: [Rule; 4] = [
     Rule {
@@ -136,7 +138,10 @@ const RULES: [Rule; 4] = [
 ];
 
 pub fn decide(request: &ScoreRequest) -> RiskVerdict {
-    let usd = usd(request.amount_paid, &request.payment_currency);
+    let usd = request
+        .paid
+        .to_usd_half_up(engine_rate(request.paid.currency()))
+        .ok();
     let fired = RULES
         .iter()
         .filter(|rule| (rule.fires)(request, usd))
@@ -152,45 +157,57 @@ pub fn decide(request: &ScoreRequest) -> RiskVerdict {
     }
 }
 
-fn usd(amount: f64, currency: &str) -> f64 {
-    let rate = match currency {
-        "Yuan" => 0.14,
-        "Yen" => 0.0071,
-        "Rupee" => 0.012,
-        "Bitcoin" => 19_500.0,
-        "Swiss Franc" => 1.02,
-        "UK Pound" => 1.15,
-        "Ruble" => 0.017,
-        "Canadian Dollar" => 0.75,
-        "Australian Dollar" => 0.67,
-        "Shekel" => 0.29,
-        "Brazil Real" => 0.19,
-        "Mexican Peso" => 0.05,
-        "Saudi Riyal" => 0.27,
-        _ => 1.0,
-    };
-    amount * rate
+const fn quoted(mantissa: u64, decimals: u8) -> UsdPerUnit {
+    match NonZeroU64::new(mantissa) {
+        Some(mantissa) => UsdPerUnit::quoted(mantissa, decimals),
+        None => panic!("the engine quotes every rate above zero"),
+    }
 }
 
-fn first_payment_large_cash(request: &ScoreRequest, usd: f64) -> bool {
-    request.history.is_none() && request.payment_format == PaymentFormat::Cash && usd >= 10_000.0
+fn engine_rate(currency: Currency) -> UsdPerUnit {
+    match currency {
+        Currency::UsDollar | Currency::Euro => const { quoted(1, 0) },
+        Currency::Yuan => const { quoted(14, 2) },
+        Currency::Yen => const { quoted(71, 4) },
+        Currency::Rupee => const { quoted(12, 3) },
+        Currency::Bitcoin => const { quoted(19_500, 0) },
+        Currency::SwissFranc => const { quoted(102, 2) },
+        Currency::UkPound => const { quoted(115, 2) },
+        Currency::Ruble => const { quoted(17, 3) },
+        Currency::CanadianDollar => const { quoted(75, 2) },
+        Currency::AustralianDollar => const { quoted(67, 2) },
+        Currency::Shekel => const { quoted(29, 2) },
+        Currency::BrazilReal => const { quoted(19, 2) },
+        Currency::MexicanPeso => const { quoted(5, 2) },
+        Currency::SaudiRiyal => const { quoted(27, 2) },
+    }
 }
 
-fn format_switch(request: &ScoreRequest, usd: f64) -> bool {
+fn at_least(usd: Option<UsdCents>, threshold: UsdCents) -> bool {
+    usd.is_none_or(|usd| usd >= threshold)
+}
+
+fn first_payment_large_cash(request: &ScoreRequest, usd: Option<UsdCents>) -> bool {
+    request.history.is_none()
+        && request.payment_format == PaymentFormat::Cash
+        && at_least(usd, TEN_THOUSAND)
+}
+
+fn format_switch(request: &ScoreRequest, usd: Option<UsdCents>) -> bool {
     request
         .history
         .as_ref()
         .is_some_and(|history| !history.formats.contains(&request.payment_format))
-        && usd >= 20_000.0
+        && at_least(usd, TWENTY_THOUSAND)
 }
 
-fn fan_out_large_payment(request: &ScoreRequest, usd: f64) -> bool {
+fn fan_out_large_payment(request: &ScoreRequest, usd: Option<UsdCents>) -> bool {
     request.history.as_ref().is_some_and(|history| {
         history.counterparties >= 20 && history.counterparties * 10 >= history.payments * 9
-    }) && usd >= 10_000.0
+    }) && at_least(usd, TEN_THOUSAND)
 }
 
-fn thin_history_large_transfer(request: &ScoreRequest, usd: f64) -> bool {
+fn thin_history_large_transfer(request: &ScoreRequest, usd: Option<UsdCents>) -> bool {
     request
         .history
         .as_ref()
@@ -199,7 +216,7 @@ fn thin_history_large_transfer(request: &ScoreRequest, usd: f64) -> bool {
             request.payment_format,
             PaymentFormat::Wire | PaymentFormat::Bitcoin
         )
-        && usd >= 50_000.0
+        && at_least(usd, FIFTY_THOUSAND)
 }
 
 #[cfg(test)]
@@ -207,7 +224,13 @@ mod tests {
     use super::super::domain::Transaction;
     use super::*;
 
-    fn transaction(txn_id: u64, format: PaymentFormat, amount: f64, currency: &str) -> Transaction {
+    fn transaction(
+        txn_id: u64,
+        format: PaymentFormat,
+        currency: Currency,
+        amount: &str,
+    ) -> Transaction {
+        let amount = Money::parse(currency, amount).expect("a booked amount");
         Transaction {
             txn_id: TxnId(txn_id),
             timestamp: chrono::NaiveDateTime::parse_from_str("2022/09/05 10:15", AMLWORLD_TIME)
@@ -216,10 +239,8 @@ mod tests {
             from_account: "8000A1B2C".to_owned(),
             to_bank: "12".to_owned(),
             to_account: "8000D3E4F".to_owned(),
-            amount_received: amount,
-            receiving_currency: currency.to_owned(),
-            amount_paid: amount,
-            payment_currency: currency.to_owned(),
+            received: amount,
+            paid: amount,
             payment_format: format,
             is_laundering: true,
         }
@@ -266,7 +287,7 @@ mod tests {
     #[test]
     fn the_request_never_carries_the_laundering_label() {
         let request = request(
-            transaction(1, PaymentFormat::Cheque, 120.0, "US Dollar"),
+            transaction(1, PaymentFormat::Cheque, Currency::UsDollar, "120.00"),
             None,
         );
         let json = serde_json::to_string(&request).expect("request serializes");
@@ -278,42 +299,42 @@ mod tests {
         let cases = [
             (
                 request(
-                    transaction(1, PaymentFormat::Cash, 15_000.0, "US Dollar"),
+                    transaction(1, PaymentFormat::Cash, Currency::UsDollar, "15000.00"),
                     None,
                 ),
                 vec!["first_payment_large_cash"],
             ),
             (
                 request(
-                    transaction(2, PaymentFormat::Cash, 9_999.0, "US Dollar"),
+                    transaction(2, PaymentFormat::Cash, Currency::UsDollar, "9999.00"),
                     None,
                 ),
                 vec![],
             ),
             (
                 request(
-                    transaction(3, PaymentFormat::Cash, 2_000_000.0, "Yen"),
+                    transaction(3, PaymentFormat::Cash, Currency::Yen, "2000000.00"),
                     Some(history(4, 2, &[PaymentFormat::Cash])),
                 ),
                 vec![],
             ),
             (
                 request(
-                    transaction(4, PaymentFormat::CreditCard, 25_000.0, "US Dollar"),
+                    transaction(4, PaymentFormat::CreditCard, Currency::UsDollar, "25000.00"),
                     Some(history(30, 6, &[PaymentFormat::Ach, PaymentFormat::Cheque])),
                 ),
                 vec!["format_switch"],
             ),
             (
                 request(
-                    transaction(5, PaymentFormat::Ach, 12_000.0, "US Dollar"),
+                    transaction(5, PaymentFormat::Ach, Currency::UsDollar, "12000.00"),
                     Some(history(40, 38, &[PaymentFormat::Ach])),
                 ),
                 vec!["fan_out_large_payment"],
             ),
             (
                 request(
-                    transaction(6, PaymentFormat::Wire, 80_000.0, "US Dollar"),
+                    transaction(6, PaymentFormat::Wire, Currency::UsDollar, "80000.00"),
                     Some(history(2, 2, &[PaymentFormat::Wire])),
                 ),
                 vec!["thin_history_large_transfer"],
@@ -333,7 +354,7 @@ mod tests {
     #[test]
     fn a_flag_lists_every_rule_that_fired_in_the_engine_order() {
         let verdict = decide(&request(
-            transaction(7, PaymentFormat::Wire, 60_000.0, "US Dollar"),
+            transaction(7, PaymentFormat::Wire, Currency::UsDollar, "60000.00"),
             Some(history(1, 1, &[PaymentFormat::Cheque])),
         ));
         assert_eq!(
@@ -347,7 +368,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("risk.jsonl");
         let flagged = request(
-            transaction(8, PaymentFormat::Wire, 60_000.0, "US Dollar"),
+            transaction(8, PaymentFormat::Wire, Currency::UsDollar, "60000.00"),
             Some(history(1, 1, &[PaymentFormat::Cheque])),
         );
         let engine = SimulatedRiskEngine::open(&path).expect("ledger opens");
@@ -390,7 +411,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("risk.jsonl");
         let flagged = request(
-            transaction(9, PaymentFormat::Wire, 60_000.0, "US Dollar"),
+            transaction(9, PaymentFormat::Wire, Currency::UsDollar, "60000.00"),
             Some(history(1, 1, &[PaymentFormat::Cheque])),
         );
         let first = SimulatedRiskEngine::open(&path)
@@ -400,7 +421,7 @@ mod tests {
             .expect("first call");
 
         let changed = request(
-            transaction(9, PaymentFormat::Cheque, 10.0, "US Dollar"),
+            transaction(9, PaymentFormat::Cheque, Currency::UsDollar, "10.00"),
             Some(history(1, 1, &[PaymentFormat::Cheque])),
         );
         let resumed = FlowId::new();

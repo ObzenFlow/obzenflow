@@ -13,6 +13,7 @@ mod console;
 mod domain;
 mod flow;
 mod ledger;
+mod money;
 mod risk_engine;
 mod stages;
 mod vendors;

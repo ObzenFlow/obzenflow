@@ -5,15 +5,19 @@
 use super::case_system::CaseRequest;
 use super::domain::{
     AccountHistory, AccountKey, AlertRaised, AlertSubject, CaseOpened, CaseUnavailable, Day,
-    ProfiledTransaction, ReasonCode, Reasons, RulesVersion, ScoreUnavailable, Transaction,
-    TransactionCleared,
+    FxRate, PricedTransaction, ProfiledTransaction, ReasonCode, Reasons, RulesVersion,
+    ScoreUnavailable, Transaction, TransactionCleared,
 };
+use super::money::Currency;
 use super::risk_engine::ScoreRequest;
 use super::vendors::{OpenCase, ScoreTransaction, CASE_SYSTEM_SOURCE, RISK_ENGINE_SOURCE};
 use async_trait::async_trait;
+use chrono::NaiveDateTime;
 use obzenflow::effects::{EffectError, Effects, StageCompletion};
 use obzenflow::error::HandlerError;
-use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
+use obzenflow::stages::joins::{
+    AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
+};
 use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
 use obzenflow::stages::transforms::EffectfulTransformHandler;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +52,41 @@ impl TypedJoinHandler for AccountProfile {
             transaction,
             history,
         }])
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PriceInUsd;
+
+impl TypedAsOfJoinHandler for PriceInUsd {
+    type State = ();
+    type ReferenceKey = Currency;
+    type EffectiveTime = NaiveDateTime;
+    type Reference = FxRate;
+    type Stream = Transaction;
+    type Output = PricedTransaction;
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn admit_reference(&self, rate: &FxRate) -> Result<(Currency, NaiveDateTime), HandlerError> {
+        Ok((rate.currency, rate.effective_at))
+    }
+
+    fn process_stream(
+        &self,
+        _: &mut Self::State,
+        rates: &mut AsOfReferenceView<'_, Currency, NaiveDateTime, FxRate>,
+        transaction: Transaction,
+    ) -> Result<Vec<PricedTransaction>, HandlerError> {
+        let txn_id = transaction.txn_id;
+        let rate = rates.select_as_of(&transaction.paid.currency(), &transaction.timestamp);
+        PricedTransaction::at(rate, transaction)
+            .map(|priced| vec![priced])
+            .map_err(|error| {
+                HandlerError::Validation(format!(
+                    "payment {txn_id} cannot be priced in whole US cents: {error}"
+                ))
+            })
     }
 }
 
@@ -226,11 +265,12 @@ fn unavailable_reason(error: &EffectError, system: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::domain::{AlertId, PaymentFormat, TxnId, AMLWORLD_TIME};
+    use super::super::money::Money;
     use super::*;
-    use chrono::NaiveDateTime;
     use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 
     fn payment(txn_id: u64, timestamp: &str, from: &str, to: &str) -> Transaction {
+        let amount = Money::parse(Currency::UsDollar, "250.00").expect("a booked amount");
         Transaction {
             txn_id: TxnId(txn_id),
             timestamp: NaiveDateTime::parse_from_str(timestamp, AMLWORLD_TIME)
@@ -239,10 +279,8 @@ mod tests {
             from_account: from.to_owned(),
             to_bank: "48".to_owned(),
             to_account: to.to_owned(),
-            amount_received: 250.0,
-            receiving_currency: "US Dollar".to_owned(),
-            amount_paid: 250.0,
-            payment_currency: "US Dollar".to_owned(),
+            received: amount,
+            paid: amount,
             payment_format: PaymentFormat::Ach,
             is_laundering: false,
         }

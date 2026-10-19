@@ -5,9 +5,9 @@
 use super::console;
 use super::domain::{
     AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, FxRate, PricedTransaction,
-    ProfiledTransaction, ScoreUnavailable, Transaction, TransactionCleared,
+    ProfiledTransaction, ScoreUnavailable, Transaction, TransactionCleared, TransactionRow,
 };
-use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, ScoreHandler};
+use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, PriceInUsd, ScoreHandler};
 use super::vendors::{
     OpenCase, ScoreTransaction, VendorBindings, VendorBindingsError, VendorStats,
 };
@@ -16,10 +16,10 @@ use obzenflow::flow::{
     effectful_transform, flow, join, merge, sink, source, stateful, FlowBuildError, FlowDefinition,
 };
 use obzenflow::journal::disk_journals;
-use obzenflow::stages::joins;
+use obzenflow::stages::joins::AsOfJoin;
 use obzenflow::stages::merges;
 use obzenflow::stages::sinks::{ConsoleSink, CsvProjection, CsvSink};
-use obzenflow::stages::sources::{CsvDecoder, CsvSource};
+use obzenflow::stages::sources::{CsvDecodeError, CsvDecoder, CsvRecord, CsvSource};
 use obzenflow::stages::stateful;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
@@ -60,6 +60,11 @@ struct TransactionCsv;
 
 impl CsvDecoder for TransactionCsv {
     type Output = Transaction;
+
+    fn decode(&self, record: CsvRecord<'_>) -> Result<Transaction, CsvDecodeError> {
+        let row: TransactionRow = record.deserialize()?;
+        Transaction::try_from(row).map_err(CsvDecodeError::invalid_value)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -168,13 +173,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             .build()
             .map_err(resources_failed)?;
         let profile = AccountProfile;
-        let price = joins::left_as_of(
-            |rate: &FxRate| rate.currency.clone(),
-            |rate: &FxRate| rate.effective_at,
-            |payment: &Transaction| payment.payment_currency.clone(),
-            |payment: &Transaction| payment.timestamp,
-            PricedTransaction::at,
-        );
+        let price = AsOfJoin::new(PriceInUsd);
         let VendorBindings {
             risk_engine,
             case_system,

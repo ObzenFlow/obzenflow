@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use support::domain::{AMLWORLD_TIME, REPORTING_CURRENCY};
+use support::domain::AMLWORLD_TIME;
 use support::vendors::VendorStats;
 
 const PLANTED: [(u64, &[&str]); 13] = [
@@ -48,6 +48,7 @@ const WHOLE_DAY: [(&str, &[&str]); 4] = [
 const ENGINE_RULES: &str = "sim-2026.10";
 const WHOLE_DAY_RULES: &str = "aml-daily-profile-v1";
 
+const REPORTING_CURRENCY: &str = "US Dollar";
 const BEFORE_THE_FIRST_YUAN_RATE: [u64; 3] = [2800007, 2800020, 2800045];
 const BOOKED_AS_A_RATE_TAKES_EFFECT: (u64, &str) = (2800011, "2022-09-05T01:00:00");
 const CORRECTED_RATE: (&str, &str) = (
@@ -66,7 +67,7 @@ fn shipped_rates() -> PathBuf {
 struct Rate {
     currency: String,
     effective_at: NaiveDateTime,
-    usd_per_unit: f64,
+    usd_per_unit: String,
 }
 
 fn rates() -> Vec<Rate> {
@@ -79,10 +80,41 @@ fn rates() -> Vec<Rate> {
             Rate {
                 currency: row[0].to_owned(),
                 effective_at: row[1].parse().expect("effective_at column"),
-                usd_per_unit: row[2].parse().expect("usd_per_unit column"),
+                usd_per_unit: row[2].to_owned(),
             }
         })
         .collect()
+}
+
+fn decimal(text: &str) -> (u128, u32) {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let places = u32::try_from(fraction.len()).expect("few decimal places");
+    let units = format!("{whole}{fraction}")
+        .parse()
+        .expect("a plain decimal");
+    (units, places)
+}
+
+fn decimal_value(text: &str) -> (u128, u32) {
+    let (units, places) = decimal(text);
+    (units * 10u128.pow(8 - places), 8)
+}
+
+fn booked_cents(amount: &str) -> u128 {
+    let (units, places) = decimal(amount);
+    units * 10u128.pow(2 - places)
+}
+
+fn cents_half_up(amount: &str, rate: &str) -> u128 {
+    let (amount, amount_places) = decimal(amount);
+    let (rate, rate_places) = decimal(rate);
+    let divisor = 10u128.pow(amount_places + rate_places - 2);
+    let product = amount * rate;
+    product / divisor + u128::from(product % divisor * 2 >= divisor)
+}
+
+fn usd(cents: u128) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
 }
 
 fn rate_in_force<'a>(rates: &'a [Rate], currency: &str, booked: NaiveDateTime) -> Option<&'a Rate> {
@@ -409,42 +441,52 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
         transactions,
         "one priced fact per transaction"
     );
-    let mut paid_usd = 0.0;
+    let mut paid_cents = 0;
     let mut unpriced = Vec::new();
     let mut effective = BTreeMap::new();
     for fact in &priced {
         let transaction = &fact["transaction"];
         let txn = transaction["txn_id"].as_u64().expect("txn_id");
         let row = booked[&txn];
-        let amount: f64 = row[8].parse().expect("amount_paid column");
+        let paid = &transaction["paid"];
+        assert_eq!(paid["currency"], row[9].as_str());
         assert_eq!(
-            transaction["amount_paid"].as_f64(),
-            Some(amount),
+            decimal_value(paid["amount"].as_str().expect("an exact amount")),
+            decimal_value(&row[8]),
             "{txn} keeps its booked amount"
         );
         assert_eq!(transaction["timestamp"], row[1].as_str());
-        let currency = row[9].as_str();
-        match rate_in_force(&rates, currency, booked_at(row)) {
+        let value = &fact["value"];
+        if row[9] == REPORTING_CURRENCY {
+            let cents = booked_cents(&row[8]);
+            assert_eq!(value["as_booked"], usd(cents).as_str(), "{txn}");
+            paid_cents += cents;
+            continue;
+        }
+        match rate_in_force(&rates, &row[9], booked_at(row)) {
             Some(rate) => {
+                let converted = &value["converted"];
                 assert_eq!(
-                    fact["rate"]["effective_at"],
+                    converted["rate"]["effective_at"],
                     iso(rate.effective_at).as_str(),
                     "{txn} takes the latest rate at or before its booking time"
                 );
                 assert_eq!(
-                    fact["rate"]["usd_per_unit"].as_f64(),
-                    Some(rate.usd_per_unit)
+                    converted["rate"]["usd_per_unit"],
+                    rate.usd_per_unit.as_str()
+                );
+                let cents = cents_half_up(&row[8], &rate.usd_per_unit);
+                assert_eq!(
+                    converted["usd"],
+                    usd(cents).as_str(),
+                    "{txn} rounds once, half up, to the cent"
                 );
                 effective.insert(txn, iso(rate.effective_at));
-                paid_usd += amount * rate.usd_per_unit;
+                paid_cents += cents;
             }
             None => {
-                assert!(fact["rate"].is_null(), "{txn} has no rate in force");
-                if currency == REPORTING_CURRENCY {
-                    paid_usd += amount;
-                } else {
-                    unpriced.push(txn);
-                }
+                assert_eq!(*value, "unpriced", "{txn} has no rate in force");
+                unpriced.push(txn);
             }
         }
     }
@@ -452,10 +494,10 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
     let (on_the_hour, its_rate) = BOOKED_AS_A_RATE_TAKES_EFFECT;
     assert_eq!(effective[&on_the_hour], its_rate);
     assert_eq!(totals["unpriced"].as_u64(), Some(unpriced.len() as u64));
-    let total = totals["paid_usd"].as_f64().expect("paid_usd");
-    assert!(
-        (total - paid_usd).abs() < 1e-6,
-        "{total} US dollars against {paid_usd} priced from the fixtures"
+    assert_eq!(
+        totals["paid_usd"],
+        usd(paid_cents).as_str(),
+        "the day's total is the sum of the rounded payments"
     );
     assert_eq!(
         totals["by_format"]

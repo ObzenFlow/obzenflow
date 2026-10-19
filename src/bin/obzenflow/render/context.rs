@@ -65,6 +65,7 @@ pub(super) struct Context {
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
     pub journals: BTreeMap<obzenflow_core::JournalId, JournalContext>,
     ancestor_names: BTreeMap<obzenflow_core::JournalId, String>,
+    replayed_authors: BTreeMap<String, String>,
     journal_numbers: BTreeMap<obzenflow_core::JournalId, usize>,
     journal_label_updates: BTreeSet<obzenflow_core::JournalId>,
     references: BTreeMap<String, Reference>,
@@ -127,6 +128,7 @@ impl Context {
                 .collect(),
             journals: journal_contexts,
             ancestor_names: BTreeMap::new(),
+            replayed_authors: BTreeMap::new(),
             journal_numbers,
             journal_label_updates,
             references: BTreeMap::new(),
@@ -137,6 +139,7 @@ impl Context {
     }
 
     pub fn remember(&mut self, record: &RunRecord) {
+        self.remember_replayed_author(record);
         if let Entry::Vacant(entry) = self.journals.entry(record.journal.id) {
             // An earlier clock may have referenced this journal before its
             // metadata arrived. Resolve its legend name without renumbering.
@@ -212,11 +215,28 @@ impl Context {
             .collect()
     }
 
+    fn remember_replayed_author(&mut self, record: &RunRecord) {
+        let (RunRecordData::Chain(row), Some(owner)) = (&record.record, &record.journal.stage)
+        else {
+            return;
+        };
+        let Some(replay) = &row.envelope.provenance.event.replay_context else {
+            return;
+        };
+        let writer = record_writer_id(record);
+        if writer == replay.original_stage_id.into() {
+            self.replayed_authors
+                .entry(writer.to_string())
+                .or_insert_with(|| format!("{} [replay]", owner.key));
+        }
+    }
+
     pub fn writer_name<'a>(&'a self, writer: &'a str) -> &'a str {
         self.stages
             .iter()
             .find(|stage| stage.writer == writer)
             .map(|stage| stage.key.as_str())
+            .or_else(|| self.replayed_authors.get(writer).map(String::as_str))
             .or_else(|| {
                 self.supervisors
                     .get(writer)

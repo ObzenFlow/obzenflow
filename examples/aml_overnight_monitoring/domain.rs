@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::money::{Currency, Money, MoneyError, UsdCents, UsdPerUnit, UsdTotal};
 use chrono::NaiveDateTime;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::joins::AsOf;
@@ -13,8 +14,6 @@ use std::fmt;
 use std::str::FromStr;
 
 pub const AMLWORLD_TIME: &str = "%Y/%m/%d %H:%M";
-
-pub const REPORTING_CURRENCY: &str = "US Dollar";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -119,13 +118,50 @@ pub struct Transaction {
     pub from_account: String,
     pub to_bank: String,
     pub to_account: String,
-    pub amount_received: f64,
-    pub receiving_currency: String,
-    pub amount_paid: f64,
-    pub payment_currency: String,
+    pub received: Money,
+    pub paid: Money,
     pub payment_format: PaymentFormat,
     #[serde(deserialize_with = "laundering_label")]
     pub is_laundering: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransactionRow {
+    txn_id: TxnId,
+    #[serde(with = "amlworld_time")]
+    timestamp: NaiveDateTime,
+    from_bank: String,
+    from_account: String,
+    to_bank: String,
+    to_account: String,
+    amount_received: String,
+    receiving_currency: Currency,
+    amount_paid: String,
+    payment_currency: Currency,
+    payment_format: PaymentFormat,
+    #[serde(deserialize_with = "laundering_label")]
+    is_laundering: bool,
+}
+
+impl TryFrom<TransactionRow> for Transaction {
+    type Error = &'static str;
+
+    fn try_from(row: TransactionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            txn_id: row.txn_id,
+            timestamp: row.timestamp,
+            from_bank: row.from_bank,
+            from_account: row.from_account,
+            to_bank: row.to_bank,
+            to_account: row.to_account,
+            received: Money::parse(row.receiving_currency, &row.amount_received)
+                .map_err(|_| "amount_received")?,
+            paid: Money::parse(row.payment_currency, &row.amount_paid)
+                .map_err(|_| "amount_paid")?,
+            payment_format: row.payment_format,
+            is_laundering: row.is_laundering,
+        })
+    }
 }
 
 impl Transaction {
@@ -155,9 +191,9 @@ impl TypedPayload for Transaction {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FxRate {
-    pub currency: String,
+    pub currency: Currency,
     pub effective_at: NaiveDateTime,
-    pub usd_per_unit: f64,
+    pub usd_per_unit: UsdPerUnit,
 }
 
 impl TypedPayload for FxRate {
@@ -165,28 +201,49 @@ impl TypedPayload for FxRate {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateInForce {
+    pub effective_at: NaiveDateTime,
+    pub usd_per_unit: UsdPerUnit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsdValue {
+    AsBooked(UsdCents),
+    Converted { rate: RateInForce, usd: UsdCents },
+    Unpriced,
+}
+
+impl UsdValue {
+    pub fn cents(self) -> Option<UsdCents> {
+        match self {
+            Self::AsBooked(usd) | Self::Converted { usd, .. } => Some(usd),
+            Self::Unpriced => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PricedTransaction {
     pub transaction: Transaction,
-    pub rate: Option<FxRate>,
+    pub value: UsdValue,
 }
 
 impl PricedTransaction {
-    pub fn at(rate: AsOf<FxRate>, transaction: Transaction) -> Self {
-        let rate = match rate {
-            AsOf::Found(rate) => Some(rate),
-            AsOf::BeforeFirstVersion | AsOf::NoVersions => None,
+    pub fn at(rate: AsOf<FxRate>, transaction: Transaction) -> Result<Self, MoneyError> {
+        let value = match (transaction.paid.as_usd(), rate) {
+            (Some(usd), _) => UsdValue::AsBooked(usd),
+            (None, AsOf::Found(rate)) => UsdValue::Converted {
+                usd: transaction.paid.to_usd_half_up(rate.usd_per_unit)?,
+                rate: RateInForce {
+                    effective_at: rate.effective_at,
+                    usd_per_unit: rate.usd_per_unit,
+                },
+            },
+            (None, AsOf::BeforeFirstVersion | AsOf::NoVersions) => UsdValue::Unpriced,
         };
-        Self { transaction, rate }
-    }
-
-    pub fn paid_usd(&self) -> Option<f64> {
-        let paid = self.transaction.amount_paid;
-        match &self.rate {
-            Some(rate) => Some(paid * rate.usd_per_unit),
-            None if self.transaction.payment_currency == REPORTING_CURRENCY => Some(paid),
-            None => None,
-        }
+        Ok(Self { transaction, value })
     }
 }
 
@@ -363,7 +420,7 @@ impl TypedPayload for CaseUnavailable {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DayTotals {
     pub transactions: u64,
-    pub paid_usd: f64,
+    pub paid_usd: UsdTotal,
     pub unpriced: u64,
     pub by_format: BTreeMap<PaymentFormat, u64>,
     pub labelled_laundering: u64,
@@ -373,8 +430,8 @@ impl DayTotals {
     pub fn add(&mut self, priced: &PricedTransaction) {
         let transaction = &priced.transaction;
         self.transactions += 1;
-        match priced.paid_usd() {
-            Some(usd) => self.paid_usd += usd,
+        match priced.value.cents() {
+            Some(usd) => self.paid_usd = self.paid_usd.plus(usd),
             None => self.unpriced += 1,
         }
         *self
@@ -509,20 +566,21 @@ mod tests {
         NaiveDateTime::parse_from_str(text, AMLWORLD_TIME).expect("an AMLworld timestamp")
     }
 
-    fn rate(currency: &str, usd_per_unit: f64) -> FxRate {
+    fn rate(currency: Currency, usd_per_unit: &str) -> FxRate {
         FxRate {
-            currency: currency.to_owned(),
+            currency,
             effective_at: booked("2022/09/05 10:00"),
-            usd_per_unit,
+            usd_per_unit: UsdPerUnit::parse(usd_per_unit).expect("a quoted rate"),
         }
     }
 
     fn transaction(
         format: PaymentFormat,
-        amount: f64,
-        currency: &str,
+        currency: Currency,
+        amount: &str,
         laundering: bool,
     ) -> Transaction {
+        let booked_amount = Money::parse(currency, amount).expect("a booked amount");
         Transaction {
             txn_id: TxnId(2800001),
             timestamp: booked("2022/09/05 10:15"),
@@ -530,12 +588,27 @@ mod tests {
             from_account: "81F0A0001".to_owned(),
             to_bank: "48".to_owned(),
             to_account: "81F0B0001".to_owned(),
-            amount_received: amount,
-            receiving_currency: currency.to_owned(),
-            amount_paid: amount,
-            payment_currency: currency.to_owned(),
+            received: booked_amount,
+            paid: booked_amount,
             payment_format: format,
             is_laundering: laundering,
+        }
+    }
+
+    fn row(amount_paid: &str) -> TransactionRow {
+        TransactionRow {
+            txn_id: TxnId(2800001),
+            timestamp: booked("2022/09/05 10:15"),
+            from_bank: "48".to_owned(),
+            from_account: "81F0A0001".to_owned(),
+            to_bank: "12".to_owned(),
+            to_account: "80890E60D".to_owned(),
+            amount_received: "1633.36".to_owned(),
+            receiving_currency: Currency::UkPound,
+            amount_paid: amount_paid.to_owned(),
+            payment_currency: Currency::UsDollar,
+            payment_format: PaymentFormat::Cash,
+            is_laundering: false,
         }
     }
 
@@ -563,40 +636,54 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_keep_the_amlworld_spelling_in_the_journal() {
-        let booked = transaction(PaymentFormat::Ach, 100.0, "US Dollar", false);
+    fn timestamps_and_amounts_keep_their_booked_spelling_in_the_journal() {
+        let booked = transaction(PaymentFormat::Ach, Currency::UsDollar, "100.00", false);
         let json = serde_json::to_value(&booked).expect("a transaction serializes");
         assert_eq!(json["timestamp"], "2022/09/05 10:15");
+        assert_eq!(
+            json["paid"],
+            serde_json::json!({"amount": "100.00", "currency": "US Dollar"})
+        );
         let read: Transaction = serde_json::from_value(json).expect("and reads back");
         assert_eq!(read, booked);
     }
 
     #[test]
-    fn day_totals_price_each_payment_at_its_rate_and_count_the_unpriced() {
+    fn a_row_becomes_a_transaction_only_when_every_amount_is_exact() {
+        let transaction = Transaction::try_from(row("250.00")).expect("a valid row");
+        assert_eq!(
+            transaction.paid.as_usd(),
+            Some(UsdCents::whole_dollars(250))
+        );
+        assert_eq!(transaction.received.currency(), Currency::UkPound);
+        assert_eq!(
+            Transaction::try_from(row("250.005")).map(|_| ()),
+            Err("amount_paid")
+        );
+    }
+
+    #[test]
+    fn day_totals_add_each_payments_cents_and_count_the_unpriced() {
         let mut totals = DayTotals::default();
-        for priced in [
-            PricedTransaction {
-                transaction: transaction(PaymentFormat::Ach, 100.0, "US Dollar", false),
-                rate: None,
-            },
-            PricedTransaction {
-                transaction: transaction(PaymentFormat::Wire, 200.0, "Euro", true),
-                rate: Some(rate("Euro", 1.09)),
-            },
-            PricedTransaction {
-                transaction: transaction(PaymentFormat::Ach, 50.0, "Yuan", false),
-                rate: None,
-            },
+        for (rate, transaction) in [
+            (
+                AsOf::NoVersions,
+                transaction(PaymentFormat::Ach, Currency::UsDollar, "100.00", false),
+            ),
+            (
+                AsOf::Found(rate(Currency::Euro, "1.09")),
+                transaction(PaymentFormat::Wire, Currency::Euro, "200.00", true),
+            ),
+            (
+                AsOf::BeforeFirstVersion,
+                transaction(PaymentFormat::Ach, Currency::Yuan, "50.00", false),
+            ),
         ] {
-            totals.add(&priced);
+            totals.add(&PricedTransaction::at(rate, transaction).expect("a priced payment"));
         }
 
         assert_eq!(totals.transactions, 3);
-        assert!(
-            (totals.paid_usd - 318.0).abs() < 1e-9,
-            "{}",
-            totals.paid_usd
-        );
+        assert_eq!(totals.paid_usd.to_string(), "318.00");
         assert_eq!(totals.unpriced, 1);
         assert_eq!(
             totals.by_format,
