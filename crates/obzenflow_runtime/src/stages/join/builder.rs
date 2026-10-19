@@ -20,9 +20,10 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 use super::config::JoinConfig;
-use super::fsm::{JoinContext, JoinResources, JoinState};
+use super::fsm::{JoinContext, JoinPlan, JoinResources, JoinState, LiveReads};
 use super::handle::JoinHandle;
 use super::supervisor::JoinSupervisor;
+use crate::stages::common::supervision::catch_up::CatchUpContext;
 
 /// Error type for join builder
 #[derive(Debug, thiserror::Error)]
@@ -87,7 +88,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Jo
 impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
     for JoinBuilder<H>
 {
-    type Handle = JoinHandle<H>;
+    type Handle = JoinHandle;
     type Error = BuilderError;
 
     async fn build(self) -> Result<Self::Handle, Self::Error> {
@@ -96,10 +97,6 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             ObserverTarget::Join,
             self.config.observer_bindings,
         )?;
-
-        // Create channels for supervisor communication
-        let (event_sender, event_receiver, state_watcher) =
-            ChannelBuilder::new().build(JoinState::<H>::Created);
 
         // Create instrumentation if not provided
         let instrumentation = self
@@ -147,6 +144,21 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 None
             }
         };
+        let reads = if recorded.is_some() {
+            LiveReads::Recorded
+        } else if deterministic_fan_in {
+            LiveReads::Canonical
+        } else {
+            LiveReads::Preference
+        };
+        let plan = JoinPlan::new(
+            self.config.reference_mode,
+            self.config.phase_witnesses.as_ref(),
+            reads,
+        );
+
+        let (event_sender, event_receiver, state_watcher) =
+            ChannelBuilder::new().build(JoinState::Created(plan));
 
         let publications = crate::supervised_base::publication::PublicationScope::new();
         let heartbeat_config = self.heartbeat_config.clone();
@@ -201,10 +213,6 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             reference_last_contract_check: None,
             stream_contract_state: Vec::new(),
             stream_last_contract_check: None,
-            buffered_eof: None,
-            final_stream_eof: None,
-            terminal_eof_kind: None,
-            drain_parent: None,
             reference_high_water_clock: VectorClock::new(),
             instrumentation: instrumentation.clone(),
             control_strategy: self.control_strategy.clone(),
@@ -212,15 +220,12 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 crate::stages::common::control_strategies::ProcessingContext::default(),
             reference_subscription_factory,
             stream_subscription_factory,
-            reference_mode: self.config.reference_mode,
             witness_keys: super::phase::witness_keys(
                 self.config.phase_witnesses.as_ref(),
                 self.resources.runtime_execution.archive_for_io(),
             ),
             phase_witnesses: self.config.phase_witnesses.clone(),
-            witnessed_eofs: std::collections::HashMap::new(),
-            drain_without_held_inputs: false,
-            pending_promotion: None,
+            archived_phases: Vec::new(),
             reference_batch_cap: self.config.reference_batch_cap,
             reference_since_last_stream: 0,
             events_since_last_heartbeat: 0,
@@ -230,16 +235,14 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             backpressure_readers: self.resources.backpressure_readers.clone(),
             pending_outputs: std::collections::VecDeque::new(),
             pending_parent: None,
-            pending_transition: None,
             pending_subscription_ack: None,
             backpressure_pulse:
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
             backpressure_stall: Default::default(),
             heartbeat,
-            deterministic_fan_in,
             recorded,
             recorded_order: None,
-            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+            catch_up: CatchUpContext::producing(
                 crate::stages::common::supervision::flow_context_factory::make_flow_context(
                     &self.config.flow_name,
                     &self.resources.flow_id.to_string(),
@@ -280,7 +283,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)
-            .spawn_handler_supervised(supervisor_with_events, JoinState::<H>::Created, context);
+            .spawn_handler_supervised(supervisor_with_events, JoinState::Created(plan), context);
 
         // Build and return handle
         HandleBuilder::new()

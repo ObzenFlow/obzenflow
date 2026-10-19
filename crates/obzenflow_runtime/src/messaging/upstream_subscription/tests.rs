@@ -4146,7 +4146,9 @@ async fn catch_up_watermark_advances_reader_generation_at_delivery_only() {
     let second = expect_delivery(&mut subscription).await;
     assert_eq!(second.event_type(), "b1");
     assert!(
-        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        !subscription
+            .reader_frontier()
+            .caught_up(ReaderGeneration(1)),
         "a merely held watermark must not advance its reader"
     );
     assert_eq!(
@@ -4281,7 +4283,9 @@ async fn watermark_generation_skip_fails_closed() {
         "the rejected delivery stamps nothing"
     );
     assert!(
-        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        !subscription
+            .reader_frontier()
+            .caught_up(ReaderGeneration(1)),
         "the reader's generation must not advance on a rejected boundary"
     );
 }
@@ -4300,7 +4304,7 @@ async fn forwarded_watermark_stage_key_mismatch_fails_closed() {
 }
 
 #[tokio::test]
-async fn all_readers_caught_up_counts_eof_as_crossed() {
+async fn the_reader_frontier_counts_eof_as_crossed() {
     let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
         canonical_pair("upstream_a", "upstream_b").await;
 
@@ -4310,7 +4314,9 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
     journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
 
     assert!(
-        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        !subscription
+            .reader_frontier()
+            .caught_up(ReaderGeneration(1)),
         "no reader has crossed before any delivery"
     );
 
@@ -4318,19 +4324,30 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
     let first = expect_delivery(&mut subscription).await;
     assert_eq!(first.event_type(), vocabulary::stream::CATCH_UP_COMPLETED);
     assert!(
-        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        !subscription
+            .reader_frontier()
+            .caught_up(ReaderGeneration(1)),
         "B has neither crossed nor delivered its EOF"
+    );
+    assert_eq!(
+        subscription.reader_frontier().highest(),
+        ReaderGeneration(1),
+        "A's crossing raises the highest generation"
     );
 
     // b1 (generation 0) beats A's held EOF (generation 1).
     let second = expect_delivery(&mut subscription).await;
     assert_eq!(second.event_type(), "b1");
-    assert!(!subscription.all_readers_caught_up(ReaderGeneration(1)));
+    assert!(!subscription
+        .reader_frontier()
+        .caught_up(ReaderGeneration(1)));
 
     // B's delivered EOF counts as vacuously crossed (F17).
     let third = expect_delivery(&mut subscription).await;
     assert_eq!(third.event_type(), vocabulary::stream::EOF_DECLARED);
-    assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
+    assert!(subscription
+        .reader_frontier()
+        .caught_up(ReaderGeneration(1)));
 
     // EOF crossing is per-reader, never global: a pair where only B sealed
     // and A never crossed stays below the target.
@@ -4345,7 +4362,7 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
     let second = expect_delivery(&mut lagging).await;
     assert_eq!(second.event_type(), vocabulary::stream::EOF_DECLARED);
     assert!(
-        !lagging.all_readers_caught_up(ReaderGeneration(1)),
+        !lagging.reader_frontier().caught_up(ReaderGeneration(1)),
         "only B is EOF-exhausted; A has not crossed"
     );
 }
@@ -4375,8 +4392,12 @@ async fn resume_of_resume_watermarks_stack() {
         assert_eq!(subscription.last_delivered_generation(), Some(generation));
     }
 
-    assert!(subscription.all_readers_caught_up(ReaderGeneration(2)));
-    assert!(!subscription.all_readers_caught_up(ReaderGeneration(3)));
+    assert!(subscription
+        .reader_frontier()
+        .caught_up(ReaderGeneration(2)));
+    assert!(!subscription
+        .reader_frontier()
+        .caught_up(ReaderGeneration(3)));
 }
 
 async fn recorded_pair_with(
@@ -4740,7 +4761,9 @@ async fn recorded_resume_follows_then_records_with_the_pre_crossing_wait() {
         vocabulary::stream::CATCH_UP_COMPLETED
     );
     assert_eq!(expect_delivery(&mut subscription).await.event_type(), "a2");
-    assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
+    assert!(subscription
+        .reader_frontier()
+        .caught_up(ReaderGeneration(1)));
     assert!(subscription.merge_wait().is_none());
 
     journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());

@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
 use obzenflow_core::id::StageId;
 use obzenflow_core::journal::JournalReader;
@@ -104,6 +104,47 @@ pub async fn read_stage_envelopes_appended(
         .as_str()
         .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
     read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(stage_journal)).await
+}
+
+pub fn stage_writer(run_dir: &Path, stage_key: &str) -> WriterId {
+    let stage_id: StageId = archive_manifest(run_dir)["stages"][stage_key]["stage_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest should contain the stage id for '{stage_key}'"))
+        .parse()
+        .unwrap_or_else(|error| panic!("the stage id for '{stage_key}' parses: {error}"));
+    WriterId::from(stage_id)
+}
+
+pub async fn assert_eof_carries_the_ending_clock(run_dir: &Path, stage_key: &str) {
+    let stage = stage_writer(run_dir, stage_key);
+    let eofs: Vec<(WriterId, Option<VectorClock>)> =
+        read_stage_envelopes_appended(run_dir, stage_key)
+            .await
+            .iter()
+            .filter_map(|record| match &record.payload {
+                ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    writer_id,
+                    vector_clock,
+                    ..
+                }) => Some((
+                    writer_id.unwrap_or(record.envelope.provenance.event.writer_id),
+                    vector_clock.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+    let own = eofs
+        .iter()
+        .position(|(writer, _)| *writer == stage)
+        .unwrap_or_else(|| panic!("'{stage_key}' authors its own EOF: {eofs:?}"));
+    let ending = own
+        .checked_sub(1)
+        .map(|index| &eofs[index])
+        .unwrap_or_else(|| panic!("an input EOF ended the reading of '{stage_key}': {eofs:?}"));
+    assert_eq!(
+        eofs[own].1, ending.1,
+        "the EOF of '{stage_key}' carries the clock of the EOF that ended its reading"
+    );
 }
 
 /// Observe committed records without opening a writer or recovering its tail.

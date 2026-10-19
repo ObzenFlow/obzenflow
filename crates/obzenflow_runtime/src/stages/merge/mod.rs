@@ -10,6 +10,8 @@ pub mod config;
 pub mod fsm;
 pub mod handle;
 pub(crate) mod supervisor;
+#[cfg(test)]
+mod transition_tests;
 
 pub use builder::MergeBuilder;
 pub use config::MergeConfig;

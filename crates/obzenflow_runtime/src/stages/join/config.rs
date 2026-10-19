@@ -73,6 +73,17 @@ pub struct PhaseWitnesses {
     /// Stages whose natural EOFs, arriving on the stream, end the batch. Empty
     /// when the join has no batch stream input, so hydration leads to `Live`.
     pub batch_stream: Vec<PhaseWitness>,
+    /// Whether any stream input has a live source. Without one, the batch's
+    /// natural end ends the join.
+    pub live_stream: LiveStream,
+}
+
+/// Whether any of a then-live join's stream inputs has a live source.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LiveStream {
+    #[default]
+    Present,
+    Absent,
 }
 
 /// Configuration for a join stage

@@ -39,7 +39,7 @@ HOST = {"cpu": "AMD EPYC 7763 64-Core Processor", "logical_cpus": 4, "os": "x86_
 
 class MeasurementTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / "target", prefix="criterion-report-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="criterion-report-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
@@ -125,7 +125,7 @@ class MeasurementTests(unittest.TestCase):
 
 class PerformanceReportTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / "target", prefix="performance-report-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="performance-report-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.performance = self.root / "performance"

@@ -281,14 +281,6 @@ pub(super) async fn dispatch_accumulating<
                                 envelope.event_type()
                             )))
                         }
-                        ControlAction::Skip => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event_type(),
-                                "Skipping control event (dangerous!)"
-                            );
-                            EventLoopDirective::Continue
-                        }
                     }
                 }
                 payload if payload.consumes_data_credit() => {
@@ -1017,7 +1009,7 @@ async fn catch_up_directive<
     parent: Option<&obzenflow_core::event::JournalRecord<ChainPayload>>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     match disposition {
-        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
+        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed => {
             Ok(EventLoopDirective::Continue)
         }
         CatchUpDisposition::Failed(fatal) => Ok(EventLoopDirective::Transition(

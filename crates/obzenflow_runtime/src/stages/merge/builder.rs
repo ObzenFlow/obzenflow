@@ -142,12 +142,8 @@ impl SupervisorBuilder for MergeBuilder {
             processing_context: ProcessingContext::default(),
             first_phase_subscription_factory,
             held_subscription_factory,
-            first_phase_subscription: None,
-            held_subscription: None,
-            first_phase_contract_state: Vec::new(),
-            first_phase_last_contract_check: None,
-            held_contract_state: Vec::new(),
-            held_last_contract_check: None,
+            first_phase: Default::default(),
+            held: Default::default(),
             held_producers: self.config.held.clone(),
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
@@ -157,10 +153,7 @@ impl SupervisorBuilder for MergeBuilder {
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
             backpressure_stall: Default::default(),
             heartbeat,
-            terminal_eof_kind: None,
-            buffered_eof: None,
-            pending_promotion: None,
-            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+            catch_up: crate::stages::common::supervision::catch_up::CatchUpContext::producing(
                 crate::stages::common::supervision::flow_context_factory::make_flow_context(
                     &self.config.flow_name,
                     &self.resources.flow_id.to_string(),

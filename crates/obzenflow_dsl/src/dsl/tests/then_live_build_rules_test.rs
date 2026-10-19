@@ -12,6 +12,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_runtime::id_conversions::StageIdExt;
+use obzenflow_runtime::stages::join::LiveStream;
 use obzenflow_runtime::stages::merges;
 use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo, Topology};
 use serde::{Deserialize, Serialize};
@@ -240,6 +241,7 @@ fn the_piggy_bank_plans_its_witnesses_and_merge_producers() {
     };
     assert_eq!(keys(&witnesses.catalog), ["batch_accounts"]);
     assert_eq!(keys(&witnesses.batch_stream), ["batch_tx"]);
+    assert_eq!(witnesses.live_stream, LiveStream::Present);
     assert_eq!(
         witnesses.catalog[0].stage_id,
         flow.name_to_id["batch_accounts"]
@@ -289,6 +291,37 @@ fn a_join_with_no_batch_stream_input_has_an_empty_batch_phase() {
     );
     let plan = flow.plan().unwrap_or_else(|error| panic!("{error}"));
     assert!(plan.witnesses[0].1.batch_stream.is_empty());
+}
+
+#[test]
+fn a_join_whose_stream_is_all_batch_has_an_empty_live_phase() {
+    let flow = flow(
+        vec![
+            ("batch_accounts", batch_accounts()),
+            ("live_accounts", live_accounts()),
+            ("batch_tx", batch_tx()),
+            ("accounts", crate::merge!(Account => merges::then_live)),
+            (
+                "posted",
+                join_with!(inner_then_live, accounts: Account, Entry),
+            ),
+        ],
+        vec![
+            edge("batch_accounts", "accounts"),
+            edge("live_accounts", "accounts"),
+            join("accounts", "batch_tx", "posted"),
+        ],
+    );
+    let plan = flow.plan().unwrap_or_else(|error| panic!("{error}"));
+    let (binding, witnesses) = &plan.witnesses[0];
+    assert_eq!(binding, "posted");
+    let batch_stream: Vec<_> = witnesses
+        .batch_stream
+        .iter()
+        .map(|witness| witness.stage_key.as_str())
+        .collect();
+    assert_eq!(batch_stream, ["batch_tx"]);
+    assert_eq!(witnesses.live_stream, LiveStream::Absent);
 }
 
 #[test]

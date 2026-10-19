@@ -48,6 +48,44 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReaderFrontier {
+    least_open: Option<ReaderGeneration>,
+    highest: ReaderGeneration,
+}
+
+impl ReaderFrontier {
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        least_open: Option<ReaderGeneration>,
+        highest: ReaderGeneration,
+    ) -> Self {
+        Self {
+            least_open,
+            highest,
+        }
+    }
+
+    pub(crate) fn caught_up(self, target: ReaderGeneration) -> bool {
+        self.least_open.is_none_or(|least| least >= target)
+    }
+
+    pub(crate) fn highest(self) -> ReaderGeneration {
+        self.highest
+    }
+
+    pub(crate) fn and(self, other: Self) -> Self {
+        let least_open = match (self.least_open, other.least_open) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
+        Self {
+            least_open,
+            highest: self.highest.max(other.highest),
+        }
+    }
+}
+
 /// Ownership transfer for mandatory receipt accounting during publication.
 /// The suspended caller regains these values only after observing settlement.
 pub(crate) struct ReceiptSettlement {
@@ -687,25 +725,15 @@ where
         self.last_delivered_generation
     }
 
-    /// The caught-up frontier aggregate (FLOWIP-120n F10): true once every
-    /// reader has crossed to `target` or is EOF-exhausted. An EOF-exhausted
-    /// reader counts as vacuously crossed, authored EOF being strictly
-    /// stronger than the catch-up boundary (F17), which is what lets a stage
-    /// below a finite source author its own watermark.
-    pub fn all_readers_caught_up(&self, target: ReaderGeneration) -> bool {
-        (0..self.readers.len()).all(|index| {
-            self.effective_generation(index) >= target || self.state.is_reader_eof(index)
+    pub(crate) fn reader_frontier(&self) -> ReaderFrontier {
+        (0..self.readers.len()).fold(ReaderFrontier::default(), |frontier, index| {
+            let generation = self.effective_generation(index);
+            let open = (!self.state.is_reader_eof(index)).then_some(generation);
+            frontier.and(ReaderFrontier {
+                least_open: open,
+                highest: generation,
+            })
         })
-    }
-
-    /// The highest generation any reader has crossed (FLOWIP-120n F17): the
-    /// flip target when an authored EOF, not a watermark, completes the
-    /// frontier. `ReaderGeneration(0)` when no watermark has delivered.
-    pub fn max_reader_generation(&self) -> ReaderGeneration {
-        (0..self.generation_by_reader.len())
-            .map(|index| self.effective_generation(index))
-            .max()
-            .unwrap_or_default()
     }
 
     pub(crate) fn effective_generation(&self, index: usize) -> ReaderGeneration {

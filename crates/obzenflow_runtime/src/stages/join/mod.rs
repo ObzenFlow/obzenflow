@@ -33,13 +33,18 @@ pub mod handle;
 pub(crate) mod phase;
 pub mod strategies;
 pub mod supervisor;
+#[cfg(test)]
+mod transition_tests;
+pub(crate) mod transitions;
 
 // Public API - only expose builder, handle, and essential types
 pub use crate::stages::common::handlers::{
     AsOf, AsOfJoin, AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
 };
 pub use builder::JoinBuilder;
-pub use config::{JoinCatalogKind, JoinConfig, JoinReferenceMode, PhaseWitness, PhaseWitnesses};
+pub use config::{
+    JoinCatalogKind, JoinConfig, JoinReferenceMode, LiveStream, PhaseWitness, PhaseWitnesses,
+};
 pub use fsm::{JoinEvent, JoinState};
 pub use handle::JoinHandle;
 

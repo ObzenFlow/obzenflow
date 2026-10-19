@@ -4,11 +4,10 @@
 
 use crate::effects::{ActionDeparture, EffectHistory};
 use crate::execution::RuntimeExecution;
+use crate::messaging::upstream_subscription::ReaderFrontier;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handler_error::StageFatal;
-use crate::stages::join::phase::{check_crossing_phase, PhaseReads};
-use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::journal::Journal;
@@ -21,7 +20,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub(crate) enum CatchUpDisposition {
     Consumed,
-    Crossed(ReaderGeneration),
+    Crossed,
     Failed(StageFatal),
     Refused(StageFatal),
 }
@@ -33,6 +32,14 @@ pub(crate) enum CatchUpState {
     Live { crossed: ReaderGeneration },
     Refused { fatal: StageFatal },
     Failed { fatal: StageFatal },
+}
+
+impl Default for CatchUpState {
+    fn default() -> Self {
+        Self::Rebuilding {
+            crossed: ReaderGeneration(0),
+        }
+    }
 }
 
 impl CatchUpState {
@@ -62,10 +69,7 @@ impl StateVariant for CatchUpState {
 pub(crate) enum CatchUpEvent {
     FrontierReached {
         generation: ReaderGeneration,
-    },
-    JoinFrontierReached {
-        generation: ReaderGeneration,
-        reads: PhaseReads,
+        frontier: ReaderFrontier,
     },
     InputsEnded,
     RecordedCrossingReached {
@@ -86,7 +90,6 @@ impl EventVariant for CatchUpEvent {
     fn variant_name(&self) -> &str {
         match self {
             Self::FrontierReached { .. } => "FrontierReached",
-            Self::JoinFrontierReached { .. } => "JoinFrontierReached",
             Self::InputsEnded => "InputsEnded",
             Self::RecordedCrossingReached { .. } => "RecordedCrossingReached",
             Self::RecordedActionsExhausted => "RecordedActionsExhausted",
@@ -118,7 +121,6 @@ pub(crate) struct MarkerWriter {
 enum Recorded {
     Nothing,
     Actions(Arc<EffectHistory>),
-    JoinPhases(Vec<JoinPhaseFact>),
 }
 
 pub(crate) struct CatchUpContext {
@@ -131,7 +133,74 @@ pub(crate) struct CatchUpContext {
 
 impl FsmContext for CatchUpContext {}
 
+pub(crate) struct FrontierStep {
+    pub(crate) next: CatchUpState,
+    pub(crate) actions: Vec<CatchUpAction>,
+    pub(crate) crossed_into: Option<ReaderGeneration>,
+}
+
+pub(crate) fn frontier_step(
+    state: &CatchUpState,
+    generation: ReaderGeneration,
+    frontier: ReaderFrontier,
+    ctx: &CatchUpContext,
+) -> FrontierStep {
+    match state {
+        CatchUpState::Rebuilding { crossed }
+            if generation > *crossed && frontier.caught_up(generation) =>
+        {
+            let Transition {
+                next_state,
+                actions,
+            } = ctx.frontier(*crossed, generation);
+            let crossed_into = next_state.crossed().filter(|reached| reached > crossed);
+            FrontierStep {
+                next: next_state,
+                actions,
+                crossed_into,
+            }
+        }
+        _ => FrontierStep {
+            next: state.clone(),
+            actions: Vec::new(),
+            crossed_into: None,
+        },
+    }
+}
+
 impl CatchUpContext {
+    pub(crate) fn producing(
+        flow_context: FlowContext,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        instrumentation: Arc<StageInstrumentation>,
+        execution: RuntimeExecution,
+    ) -> Self {
+        let stage_id = flow_context.stage_id;
+        let stage_key = StageKey::from(flow_context.stage_name.clone());
+        let writer = MarkerWriter {
+            writer_id: WriterId::from(stage_id),
+            data_journal,
+            instrumentation,
+            flow_context,
+        };
+        Self::new(stage_id, stage_key, Some(writer), execution)
+    }
+
+    fn new(
+        stage_id: StageId,
+        stage_key: StageKey,
+        writer: Option<MarkerWriter>,
+        execution: RuntimeExecution,
+    ) -> Self {
+        Self {
+            stage_id,
+            stage_key,
+            writer,
+            execution,
+            recorded: Recorded::Nothing,
+        }
+    }
+
     fn resume_generation(&self) -> Option<ReaderGeneration> {
         self.execution
             .resume_control()
@@ -144,25 +213,6 @@ impl CatchUpContext {
         };
         let expected = history.actions().next_unreproduced()?;
         Some(ActionDeparture::skipped(self.stage_key.clone(), None, expected).stage_fatal())
-    }
-
-    fn phase_divergence(
-        &self,
-        generation: ReaderGeneration,
-        reads: PhaseReads,
-    ) -> Option<StageFatal> {
-        let Recorded::JoinPhases(archived) = &self.recorded else {
-            return None;
-        };
-        check_crossing_phase(self.stage_key.as_str(), archived, generation, reads)
-            .err()
-            .map(|detail| {
-                StageFatal::new(
-                    StageFatalCode::Replay,
-                    StageFatalReason::ReplayDivergence,
-                    detail,
-                )
-            })
     }
 
     fn failure(&self, error: FsmError) -> StageFatal {
@@ -284,18 +334,20 @@ fn step(
 ) -> Transition<CatchUpState, CatchUpAction> {
     let resume = ctx.resume_generation();
     match (state, event) {
-        (CatchUpState::Rebuilding { crossed }, CatchUpEvent::FrontierReached { generation })
-            if generation > crossed =>
-        {
-            ctx.frontier(*crossed, *generation)
-        }
         (
-            CatchUpState::Rebuilding { crossed },
-            CatchUpEvent::JoinFrontierReached { generation, reads },
-        ) if generation > crossed => match ctx.phase_divergence(*generation, *reads) {
-            Some(fatal) => to(CatchUpState::Failed { fatal }),
-            None => ctx.frontier(*crossed, *generation),
-        },
+            _,
+            CatchUpEvent::FrontierReached {
+                generation,
+                frontier,
+            },
+        ) => {
+            let FrontierStep { next, actions, .. } =
+                frontier_step(state, *generation, *frontier, ctx);
+            Transition {
+                next_state: next,
+                actions,
+            }
+        }
         (
             CatchUpState::Rebuilding { crossed },
             CatchUpEvent::RecordedCrossingReached { generation },
@@ -437,7 +489,6 @@ fn machine(initial: CatchUpState) -> CatchUpMachine {
         unhandled => refuse_unhandled;
         state CatchUpState::Rebuilding {
             on CatchUpEvent::FrontierReached => transition;
-            on CatchUpEvent::JoinFrontierReached => transition;
             on CatchUpEvent::InputsEnded => transition;
             on CatchUpEvent::RecordedCrossingReached => transition;
             on CatchUpEvent::RecordedActionsExhausted => transition;
@@ -449,7 +500,6 @@ fn machine(initial: CatchUpState) -> CatchUpMachine {
         }
         state CatchUpState::Live {
             on CatchUpEvent::FrontierReached => transition;
-            on CatchUpEvent::JoinFrontierReached => transition;
             on CatchUpEvent::InputsEnded => transition;
             on CatchUpEvent::RecordedActionsExhausted => transition;
             on CatchUpEvent::UnsettledDelivery => transition;
@@ -472,15 +522,12 @@ impl CatchUpHandle {
         instrumentation: Arc<StageInstrumentation>,
         execution: RuntimeExecution,
     ) -> Self {
-        let stage_id = flow_context.stage_id;
-        let stage_key = StageKey::from(flow_context.stage_name.clone());
-        let writer = MarkerWriter {
-            writer_id: WriterId::from(stage_id),
+        Self::with_context(CatchUpContext::producing(
+            flow_context,
             data_journal,
             instrumentation,
-            flow_context,
-        };
-        Self::new(stage_id, stage_key, Some(writer), execution)
+            execution,
+        ))
     }
 
     pub(crate) fn terminal(
@@ -488,35 +535,18 @@ impl CatchUpHandle {
         stage_key: StageKey,
         execution: RuntimeExecution,
     ) -> Self {
-        Self::new(stage_id, stage_key, None, execution)
+        Self::with_context(CatchUpContext::new(stage_id, stage_key, None, execution))
     }
 
-    fn new(
-        stage_id: StageId,
-        stage_key: StageKey,
-        writer: Option<MarkerWriter>,
-        execution: RuntimeExecution,
-    ) -> Self {
+    fn with_context(context: CatchUpContext) -> Self {
         Self(Arc::new(tokio::sync::Mutex::new(CatchUp {
-            machine: machine(CatchUpState::Rebuilding {
-                crossed: ReaderGeneration(0),
-            }),
-            context: CatchUpContext {
-                stage_id,
-                stage_key,
-                writer,
-                execution,
-                recorded: Recorded::Nothing,
-            },
+            machine: machine(CatchUpState::default()),
+            context,
         })))
     }
 
     pub(crate) async fn install_history(&self, history: Arc<EffectHistory>) {
         self.0.lock().await.context.recorded = Recorded::Actions(history);
-    }
-
-    pub(crate) async fn install_join_phases(&self, phases: Vec<JoinPhaseFact>) {
-        self.0.lock().await.context.recorded = Recorded::JoinPhases(phases);
     }
 
     pub(crate) async fn send(&self, event: CatchUpEvent) -> CatchUpDisposition {
@@ -533,36 +563,14 @@ impl CatchUpHandle {
         match machine.state() {
             CatchUpState::Refused { fatal } => CatchUpDisposition::Refused(fatal.clone()),
             CatchUpState::Failed { fatal } => CatchUpDisposition::Failed(fatal.clone()),
-            state => match state.crossed() {
-                Some(crossed) if Some(crossed) != before => CatchUpDisposition::Crossed(crossed),
-                _ => CatchUpDisposition::Consumed,
-            },
+            state if state.crossed() != before => CatchUpDisposition::Crossed,
+            _ => CatchUpDisposition::Consumed,
         }
     }
 
-    pub(crate) async fn frontier_reached(
-        &self,
-        generation: ReaderGeneration,
-        all_inputs_caught_up: bool,
-    ) -> CatchUpDisposition {
-        if !all_inputs_caught_up {
-            return CatchUpDisposition::Consumed;
-        }
-        self.send(CatchUpEvent::FrontierReached { generation })
-            .await
-    }
-
-    pub(crate) async fn join_frontier_reached(
-        &self,
-        generation: ReaderGeneration,
-        all_inputs_caught_up: bool,
-        reads: PhaseReads,
-    ) -> CatchUpDisposition {
-        if !all_inputs_caught_up {
-            return CatchUpDisposition::Consumed;
-        }
-        self.send(CatchUpEvent::JoinFrontierReached { generation, reads })
-            .await
+    #[cfg(test)]
+    pub(crate) async fn crossed(&self) -> Option<ReaderGeneration> {
+        self.0.lock().await.machine.state().crossed()
     }
 
     pub(crate) async fn watermark_delivered(
@@ -570,36 +578,34 @@ impl CatchUpHandle {
         subscription: &UpstreamSubscription<ChainEvent>,
         generation: ReaderGeneration,
     ) -> CatchUpDisposition {
-        self.frontier_reached(generation, subscription.all_readers_caught_up(generation))
-            .await
+        self.send(CatchUpEvent::FrontierReached {
+            generation,
+            frontier: subscription.reader_frontier(),
+        })
+        .await
     }
 
     pub(crate) async fn eof_delivered(
         &self,
         subscription: &UpstreamSubscription<ChainEvent>,
     ) -> CatchUpDisposition {
-        let generation = subscription.max_reader_generation();
-        if generation == ReaderGeneration(0) {
-            return CatchUpDisposition::Consumed;
-        }
-        self.frontier_reached(generation, subscription.all_readers_caught_up(generation))
-            .await
+        let frontier = subscription.reader_frontier();
+        self.send(CatchUpEvent::FrontierReached {
+            generation: frontier.highest(),
+            frontier,
+        })
+        .await
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-    use crate::effects::{ActionRow, RecordedAction};
     use async_trait::async_trait;
-    use obzenflow_core::event::payloads::effect_payload::{
-        EffectCursor, EffectOrdinal, EffectType,
-    };
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-    use obzenflow_core::event::{ChainPayload, StageFatalReason};
+    use obzenflow_core::event::ChainPayload;
     use obzenflow_core::journal::JournalReader;
     use obzenflow_core::{EventId, JournalError, JournalId, JournalRecord};
-    use std::collections::HashMap;
     use std::sync::Mutex;
 
     struct EmptyReader {
@@ -619,13 +625,20 @@ mod tests {
         }
     }
 
-    struct RecordingJournal {
+    pub(crate) struct RecordingJournal {
         id: JournalId,
         events: Mutex<Vec<JournalRecord<ChainPayload>>>,
     }
 
     impl RecordingJournal {
-        fn markers(&self) -> Vec<u64> {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                id: JournalId::new(),
+                events: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(crate) fn markers(&self) -> Vec<u64> {
             self.events
                 .lock()
                 .expect("recording journal lock")
@@ -692,6 +705,53 @@ mod tests {
         }
     }
 
+    pub(crate) fn context(
+        stage_id: StageId,
+        stage_key: &str,
+        execution: RuntimeExecution,
+        journal: Option<Arc<RecordingJournal>>,
+    ) -> CatchUpContext {
+        let writer = journal.map(|journal| {
+            let data_journal: Arc<dyn Journal<ChainEvent>> = journal;
+            MarkerWriter {
+                writer_id: WriterId::from(stage_id),
+                data_journal,
+                instrumentation: Arc::new(StageInstrumentation::new()),
+                flow_context: super::super::flow_context_factory::make_flow_context(
+                    "flow",
+                    "flow_k",
+                    stage_key,
+                    stage_id,
+                    obzenflow_core::event::context::StageType::Transform,
+                ),
+            }
+        });
+        CatchUpContext::new(stage_id, StageKey::from(stage_key), writer, execution)
+    }
+
+    pub(crate) fn caught_up_through(generation: u64) -> ReaderFrontier {
+        ReaderFrontier::for_tests(None, ReaderGeneration(generation))
+    }
+
+    pub(crate) fn open_at(least_open: u64, highest: u64) -> ReaderFrontier {
+        ReaderFrontier::for_tests(
+            Some(ReaderGeneration(least_open)),
+            ReaderGeneration(highest),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{caught_up_through, context, open_at, RecordingJournal};
+    use super::*;
+    use crate::effects::{ActionRow, RecordedAction};
+    use obzenflow_core::event::payloads::effect_payload::{
+        EffectCursor, EffectOrdinal, EffectType,
+    };
+    use obzenflow_core::event::StageFatalReason;
+    use std::collections::HashMap;
+
     struct Stage {
         id: StageId,
         journal: Arc<RecordingJournal>,
@@ -701,29 +761,13 @@ mod tests {
 
     fn stage(execution: RuntimeExecution, authors_markers: bool) -> Stage {
         let id = StageId::new();
-        let journal = Arc::new(RecordingJournal {
-            id: JournalId::new(),
-            events: Mutex::new(Vec::new()),
-        });
-        let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-        let writer = authors_markers.then(|| MarkerWriter {
-            writer_id: WriterId::from(id),
-            data_journal,
-            instrumentation: Arc::new(StageInstrumentation::new()),
-            flow_context: super::super::flow_context_factory::make_flow_context(
-                "flash_sale",
-                "flow_k",
-                "allocate_stock",
-                id,
-                obzenflow_core::event::context::StageType::Transform,
-            ),
-        });
-        let catch_up = CatchUpHandle::new(
+        let journal = RecordingJournal::new();
+        let catch_up = CatchUpHandle::with_context(context(
             id,
-            StageKey::from("allocate_stock"),
-            writer,
+            "allocate_stock",
             execution.clone(),
-        );
+            authors_markers.then(|| journal.clone()),
+        ));
         Stage {
             id,
             journal,
@@ -762,8 +806,11 @@ mod tests {
             .await;
     }
 
-    async fn with_join_phases(stage: &Stage, phases: Vec<JoinPhaseFact>) {
-        stage.catch_up.install_join_phases(phases).await;
+    fn reached(generation: u64, frontier: ReaderFrontier) -> CatchUpEvent {
+        CatchUpEvent::FrontierReached {
+            generation: ReaderGeneration(generation),
+            frontier,
+        }
     }
 
     fn unsettled(edges_redelivering: usize) -> CatchUpEvent {
@@ -774,33 +821,20 @@ mod tests {
     async fn a_frontier_crossing_authors_each_generation_once_and_goes_live() {
         let stage = stage(resumed(3), true);
         assert!(matches!(
-            stage
-                .catch_up
-                .frontier_reached(ReaderGeneration(1), false)
-                .await,
+            stage.catch_up.send(reached(1, open_at(0, 1))).await,
             CatchUpDisposition::Consumed
         ));
-        let first = stage
-            .catch_up
-            .frontier_reached(ReaderGeneration(1), true)
-            .await;
-        assert!(
-            matches!(first, CatchUpDisposition::Crossed(ReaderGeneration(1))),
-            "{first:?}"
-        );
+        let first = stage.catch_up.send(reached(1, caught_up_through(1))).await;
+        assert!(matches!(first, CatchUpDisposition::Crossed), "{first:?}");
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(1)));
         assert!(!live(&stage));
         assert!(matches!(
-            stage
-                .catch_up
-                .frontier_reached(ReaderGeneration(3), true)
-                .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(3))
+            stage.catch_up.send(reached(3, caught_up_through(3))).await,
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(3)));
         assert!(matches!(
-            stage
-                .catch_up
-                .frontier_reached(ReaderGeneration(3), true)
-                .await,
+            stage.catch_up.send(reached(3, caught_up_through(3))).await,
             CatchUpDisposition::Consumed
         ));
         assert_eq!(stage.journal.markers(), vec![1, 2, 3]);
@@ -808,16 +842,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unreached_frontier_holds_the_stage_and_writes_nothing() {
+        let stage = stage(resumed(2), true);
+        for event in [reached(1, open_at(0, 1)), reached(2, open_at(1, 2))] {
+            assert!(matches!(
+                stage.catch_up.send(event).await,
+                CatchUpDisposition::Consumed
+            ));
+        }
+        assert!(stage.journal.markers().is_empty());
+        assert!(!live(&stage));
+    }
+
+    #[tokio::test]
+    async fn a_live_stage_ignores_later_frontiers() {
+        let stage = stage(resumed(1), true);
+        assert!(matches!(
+            stage.catch_up.send(reached(1, caught_up_through(1))).await,
+            CatchUpDisposition::Crossed
+        ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(1)));
+        assert!(live(&stage));
+        assert!(matches!(
+            stage.catch_up.send(reached(2, caught_up_through(2))).await,
+            CatchUpDisposition::Consumed
+        ));
+        assert_eq!(stage.journal.markers(), vec![1]);
+    }
+
+    #[test]
+    fn a_stage_transition_and_the_machine_cross_alike() {
+        let journal = RecordingJournal::new();
+        let ctx = context(StageId::new(), "posted", resumed(2), Some(journal));
+        let rebuilding = CatchUpState::default();
+
+        let unreached = frontier_step(&rebuilding, ReaderGeneration(1), open_at(0, 1), &ctx);
+        assert_eq!(unreached.next, rebuilding);
+        assert!(unreached.actions.is_empty());
+        assert_eq!(unreached.crossed_into, None);
+
+        let stepped = frontier_step(&rebuilding, ReaderGeneration(2), caught_up_through(2), &ctx);
+        let machine = step(&rebuilding, &reached(2, caught_up_through(2)), &ctx);
+        assert_eq!(stepped.next, machine.next_state);
+        assert_eq!(stepped.actions, machine.actions);
+        assert_eq!(stepped.crossed_into, Some(ReaderGeneration(2)));
+        assert_eq!(
+            stepped.next,
+            CatchUpState::Live {
+                crossed: ReaderGeneration(2)
+            }
+        );
+        assert_eq!(
+            stepped.actions,
+            vec![
+                CatchUpAction::AuthorWatermarks {
+                    after: ReaderGeneration(0),
+                    through: ReaderGeneration(2),
+                },
+                CatchUpAction::RecordBoundary {
+                    generation: ReaderGeneration(2),
+                },
+            ]
+        );
+
+        let repeated = frontier_step(
+            &stepped.next,
+            ReaderGeneration(2),
+            caught_up_through(2),
+            &ctx,
+        );
+        assert_eq!(repeated.next, stepped.next);
+        assert!(repeated.actions.is_empty());
+        assert_eq!(repeated.crossed_into, None);
+    }
+
+    #[tokio::test]
     async fn a_crossing_below_the_resume_generation_skips_the_archived_action_check() {
         let stage = stage(resumed(3), true);
         with_actions(&stage, vec![effect(4)]).await;
         assert!(matches!(
-            stage
-                .catch_up
-                .frontier_reached(ReaderGeneration(2), true)
-                .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(2))
+            stage.catch_up.send(reached(2, caught_up_through(2))).await,
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(2)));
         assert_eq!(stage.journal.markers(), vec![1, 2]);
         assert!(!live(&stage));
     }
@@ -825,9 +932,7 @@ mod tests {
     #[tokio::test]
     async fn every_crossing_into_live_work_refuses_while_archived_actions_remain() {
         for event in [
-            CatchUpEvent::FrontierReached {
-                generation: ReaderGeneration(1),
-            },
+            reached(1, caught_up_through(1)),
             CatchUpEvent::RecordedActionsExhausted,
             unsettled(0),
         ] {
@@ -868,21 +973,21 @@ mod tests {
                     generation: ReaderGeneration(1),
                 })
                 .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(1))
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(1)));
         assert!(!live(&stage));
         assert!(matches!(
             stage
                 .catch_up
                 .send(CatchUpEvent::RecordedActionsExhausted)
                 .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(2))
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(2)));
         assert!(live(&stage));
         for repeat in [
-            CatchUpEvent::FrontierReached {
-                generation: ReaderGeneration(2),
-            },
+            reached(2, caught_up_through(2)),
             CatchUpEvent::RecordedActionsExhausted,
             CatchUpEvent::InputsEnded,
         ] {
@@ -904,63 +1009,15 @@ mod tests {
         assert!(!live(&stage));
         assert!(matches!(
             stage.catch_up.send(unsettled(0)).await,
-            CatchUpDisposition::Crossed(ReaderGeneration(1))
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(1)));
         assert!(live(&stage));
         assert!(matches!(
             stage.catch_up.send(unsettled(0)).await,
             CatchUpDisposition::Consumed
         ));
         assert!(stage.journal.markers().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_join_crossing_fails_when_its_archive_entered_a_later_phase() {
-        let stage = stage(resumed(2), true);
-        with_join_phases(
-            &stage,
-            vec![JoinPhaseFact::LiveEntered {
-                generation: 0,
-                ended_by: Vec::new(),
-            }],
-        )
-        .await;
-        match stage
-            .catch_up
-            .join_frontier_reached(ReaderGeneration(1), true, PhaseReads::Stream)
-            .await
-        {
-            CatchUpDisposition::Failed(fatal) => {
-                assert_eq!(fatal.reason, StageFatalReason::ReplayDivergence);
-                assert!(
-                    fatal
-                        .detail
-                        .contains("its archive had already entered live"),
-                    "{}",
-                    fatal.detail
-                );
-            }
-            other => panic!("a join behind its archived phase must fail: {other:?}"),
-        }
-        assert!(stage.journal.markers().is_empty());
-
-        let caught_up = self::stage(resumed(2), true);
-        with_join_phases(
-            &caught_up,
-            vec![JoinPhaseFact::LiveEntered {
-                generation: 0,
-                ended_by: Vec::new(),
-            }],
-        )
-        .await;
-        assert!(matches!(
-            caught_up
-                .catch_up
-                .join_frontier_reached(ReaderGeneration(1), true, PhaseReads::Both)
-                .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(1))
-        ));
-        assert_eq!(caught_up.journal.markers(), vec![1]);
     }
 
     #[tokio::test]
@@ -990,8 +1047,9 @@ mod tests {
                 .catch_up
                 .send(CatchUpEvent::RecordedActionsExhausted)
                 .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(1))
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(crossed.catch_up.crossed().await, Some(ReaderGeneration(1)));
         assert!(matches!(
             crossed
                 .catch_up
@@ -1048,8 +1106,9 @@ mod tests {
                     generation: ReaderGeneration(3),
                 })
                 .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(3))
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(3)));
         assert_eq!(stage.journal.markers(), vec![2, 3]);
         assert!(!live(&stage));
         assert!(matches!(
@@ -1066,12 +1125,10 @@ mod tests {
             true,
         );
         assert!(matches!(
-            stage
-                .catch_up
-                .frontier_reached(ReaderGeneration(2), true)
-                .await,
-            CatchUpDisposition::Crossed(ReaderGeneration(2))
+            stage.catch_up.send(reached(2, caught_up_through(2))).await,
+            CatchUpDisposition::Crossed
         ));
+        assert_eq!(stage.catch_up.crossed().await, Some(ReaderGeneration(2)));
         assert!(matches!(
             stage
                 .catch_up

@@ -87,25 +87,13 @@ impl SignalGate for CompositeStrategy {
 }
 
 /// Combine two actions using precedence rules
-///
-/// Precedence (most to least restrictive):
-/// 1. Pause - Must wait for time-based conditions
-/// 2. SuppressSignal - Dangerous, only if explicitly needed
-/// 3. Continue - Default when all strategies agree
 fn combine_actions(current: SignalDecision, new: SignalDecision) -> SignalDecision {
     use SignalDecision::*;
 
     match (current, new) {
-        // Pause always wins - can't do anything while waiting
-        (Pause(d1), Pause(d2)) => Pause(d1.max(d2)), // Take longer delay
-        (Pause(d), _) | (_, Pause(d)) => Pause(d),
-
-        // SuppressSignal only wins over Continue
-        (SuppressSignal, Continue) | (Continue, SuppressSignal) => SuppressSignal,
-
-        // Both Continue or both SuppressSignal
+        (Pause(d1), Pause(d2)) => Pause(d1.max(d2)),
+        (Pause(d), Continue) | (Continue, Pause(d)) => Pause(d),
         (Continue, Continue) => Continue,
-        (SuppressSignal, SuppressSignal) => SuppressSignal,
     }
 }
 
@@ -118,17 +106,14 @@ mod tests {
     fn test_action_precedence() {
         use SignalDecision::*;
 
-        // Pause beats everything
         assert_eq!(
             combine_actions(Pause(Duration::from_secs(5)), Continue),
             Pause(Duration::from_secs(5))
         );
         assert_eq!(
-            combine_actions(SuppressSignal, Pause(Duration::from_secs(3))),
+            combine_actions(Continue, Pause(Duration::from_secs(3))),
             Pause(Duration::from_secs(3))
         );
-
-        // Longer delay wins
         assert_eq!(
             combine_actions(
                 Pause(Duration::from_secs(5)),
@@ -136,8 +121,6 @@ mod tests {
             ),
             Pause(Duration::from_secs(10))
         );
-
-        // SuppressSignal only beats Continue
-        assert_eq!(combine_actions(SuppressSignal, Continue), SuppressSignal);
+        assert_eq!(combine_actions(Continue, Continue), Continue);
     }
 }

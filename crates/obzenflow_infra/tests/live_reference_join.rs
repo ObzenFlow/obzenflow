@@ -470,7 +470,6 @@ async fn run_typed_join_case<H>(
     reference_eof_kind: Option<EofKind>,
     stream_data: bool,
     stream_eof_kind: Option<EofKind>,
-    direct_drain: bool,
 ) -> (Result<(), String>, bool, Vec<ChainEvent>, WriterId)
 where
     H: TypedJoinHandler<Reference = RefEvent, Stream = StreamEvent>
@@ -623,22 +622,6 @@ where
     .expect("terminal join supervisor");
     handle.initialize().await.expect("initialize terminal join");
     handle.ready().await.expect("ready terminal join");
-    if direct_drain {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if matches!(
-                    handle.current_state(),
-                    JoinState::Live | JoinState::Enriching
-                ) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("join reaches a state that accepts direct drain");
-        handle.begin_drain().await.expect("begin direct drain");
-    }
     let state_receiver = handle.state_receiver();
     let completion = handle
         .wait_for_completion()
@@ -659,7 +642,7 @@ where
 
 async fn run_terminal_finalizer_case(
     mode: JoinReferenceMode,
-    stream_eof_kind: Option<EofKind>,
+    stream_eof_kind: EofKind,
 ) -> (Vec<String>, Vec<ChainEvent>, WriterId) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let handler = TerminalOrderJoin {
@@ -667,15 +650,13 @@ async fn run_terminal_finalizer_case(
         calls: calls.clone(),
     };
     let reference_eof_kind = (mode == JoinReferenceMode::FiniteEof).then_some(EofKind::Natural);
-    let direct_drain = stream_eof_kind.is_none();
     let (completion, failed, events, writer_id) = run_typed_join_case(
         mode,
         handler,
         true,
         reference_eof_kind,
         true,
-        stream_eof_kind,
-        direct_drain,
+        Some(stream_eof_kind),
     )
     .await;
     completion.expect("terminal join completion");
@@ -688,7 +669,7 @@ async fn run_terminal_finalizer_case(
 async fn typed_terminal_hooks_follow_the_mode_and_eof_matrix() {
     for mode in [JoinReferenceMode::FiniteEof, JoinReferenceMode::Live] {
         for kind in [EofKind::Natural, EofKind::Poison] {
-            let (calls, events, join_writer) = run_terminal_finalizer_case(mode, Some(kind)).await;
+            let (calls, events, join_writer) = run_terminal_finalizer_case(mode, kind).await;
             assert_eq!(calls, vec!["hook", "drain"], "mode={mode:?}, kind={kind:?}");
             let steps = events
                 .iter()
@@ -714,7 +695,7 @@ async fn typed_terminal_hooks_follow_the_mode_and_eof_matrix() {
         }
 
         let (calls, events, _join_writer) =
-            run_terminal_finalizer_case(mode, Some(EofKind::Truncated)).await;
+            run_terminal_finalizer_case(mode, EofKind::Truncated).await;
         assert!(
             calls.is_empty(),
             "Truncated suppresses hook and drain in {mode:?}"
@@ -722,19 +703,6 @@ async fn typed_terminal_hooks_follow_the_mode_and_eof_matrix() {
         assert!(events
             .iter()
             .all(|event| TerminalStep::from_event(event).is_none()));
-
-        let (calls, events, _join_writer) = run_terminal_finalizer_case(mode, None).await;
-        assert_eq!(
-            calls,
-            vec!["drain"],
-            "direct drain has no EOF hook in {mode:?}"
-        );
-        let steps = events
-            .iter()
-            .filter_map(TerminalStep::from_event)
-            .map(|step| step.step)
-            .collect::<Vec<_>>();
-        assert_eq!(steps, vec!["drain"]);
     }
 }
 
@@ -854,7 +822,6 @@ async fn typed_join_errors_follow_the_locked_mode_matrix() {
             reference_eof,
             true,
             Some(EofKind::Natural),
-            false,
         )
         .await;
         match mode {
@@ -896,7 +863,6 @@ async fn typed_join_errors_follow_the_locked_mode_matrix() {
                 reference_eof,
                 true,
                 Some(EofKind::Natural),
-                false,
             )
             .await;
             assert!(failed, "Fatal from {position:?} must fail a {mode:?} join");

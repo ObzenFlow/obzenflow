@@ -264,6 +264,7 @@ async fn a_concat_merge_passes_on_its_first_producer_before_the_other() -> Resul
         "{merged:?}"
     );
     assert_eq!(merged.last(), Some(&natural_by("merged")), "{merged:?}");
+    replay_testkit::assert_eof_carries_the_ending_clock(&run, "merged").await;
 
     let manifest = replay_testkit::archive_manifest(&run);
     assert_eq!(

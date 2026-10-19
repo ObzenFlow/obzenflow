@@ -2,20 +2,18 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, JoinPhaseFact};
-use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
-use obzenflow_core::{ReaderGeneration, StageId, StageKey, WriterId};
+use obzenflow_core::{ReaderGeneration, StageId, StageKey};
 
-use crate::messaging::DeliveredRecord;
-use crate::stages::common::handlers::UnifiedJoinHandler;
-
-use super::config::{JoinReferenceMode, PhaseWitnesses};
-use super::fsm::{HoldCompletion, JoinResources, JoinSubscriptionSide};
+use super::config::{PhaseWitness, PhaseWitnesses};
+use super::fsm::HoldCompletion;
+use crate::stages::common::input_facts::EofRead;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoldOutcome {
@@ -25,42 +23,26 @@ pub(crate) enum HoldOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PhaseReads {
-    Reference,
-    Stream,
-    Both,
+pub(crate) enum CrossingPhase {
+    Hydrating,
+    Enriching,
+    Live,
 }
 
-impl PhaseReads {
-    pub(crate) fn reads_reference(self) -> bool {
-        matches!(self, Self::Reference | Self::Both)
-    }
-
-    pub(crate) fn reads_stream(self) -> bool {
-        matches!(self, Self::Stream | Self::Both)
-    }
-
-    pub(crate) fn held(self) -> Option<JoinSubscriptionSide> {
-        match self {
-            Self::Reference => Some(JoinSubscriptionSide::Stream),
-            Self::Stream => Some(JoinSubscriptionSide::Reference),
-            Self::Both => None,
-        }
-    }
-
+impl CrossingPhase {
     fn rank(self) -> u8 {
         match self {
-            Self::Reference => 0,
-            Self::Stream => 1,
-            Self::Both => 2,
+            Self::Hydrating => 0,
+            Self::Enriching => 1,
+            Self::Live => 2,
         }
     }
 
     fn phase_name(self) -> &'static str {
         match self {
-            Self::Reference => "hydrating",
-            Self::Stream => "the batch",
-            Self::Both => "live",
+            Self::Hydrating => "hydrating",
+            Self::Enriching => "the batch",
+            Self::Live => "live",
         }
     }
 }
@@ -84,7 +66,7 @@ pub(crate) fn check_crossing_phase(
     stage_name: &str,
     archived: &[JoinPhaseFact],
     target: ReaderGeneration,
-    reads: PhaseReads,
+    phase: CrossingPhase,
 ) -> Result<(), String> {
     let reached = archived
         .iter()
@@ -92,60 +74,48 @@ pub(crate) fn check_crossing_phase(
         .map(fact_rank)
         .max()
         .unwrap_or(0);
-    if reached > reads.rank() {
+    if reached > phase.rank() {
         return Err(format!(
             "join '{stage_name}' crossed into generation {} while {}, but its archive had \
              already entered {}; the resumed batch diverged from the recorded one \
              (FLOWIP-084q B1)",
             target.0,
-            reads.phase_name(),
+            phase.phase_name(),
             rank_name(reached),
         ));
     }
     Ok(())
 }
 
-fn eof_author(envelope: &DeliveredRecord<ChainPayload>) -> Option<(StageId, EofKind)> {
-    let event = envelope.authored();
-    let ChainPayload::FlowControl(FlowControlPayload::Eof {
-        kind, writer_id, ..
-    }) = &event.payload
-    else {
-        return None;
+pub(crate) fn observe_hold(
+    witnessed: &Arc<BTreeMap<StageKey, EofKind>>,
+    witnesses: Option<&[PhaseWitness]>,
+    witness_keys: &HashMap<StageId, StageKey>,
+    eof: &EofRead,
+) -> (Arc<BTreeMap<StageKey, EofKind>>, HoldOutcome) {
+    let side_final = eof
+        .ends_reads
+        .then(|| eof.side_worst.unwrap_or(EofKind::Natural));
+    let completion = |ended_by| HoldCompletion {
+        generation: eof.generation.0,
+        ended_by,
     };
-    match writer_id.unwrap_or(event.writer_id) {
-        WriterId::Stage(stage) => Some((stage, *kind)),
-        _ => None,
-    }
-}
-
-pub(crate) fn observe_hold_eof<H: UnifiedJoinHandler>(
-    ctx: &mut JoinResources<H>,
-    side: JoinSubscriptionSide,
-    envelope: &DeliveredRecord<ChainPayload>,
-    side_final: Option<(EofKind, StageKey)>,
-    generation: ReaderGeneration,
-) -> HoldOutcome {
-    let witnesses = ctx.phase_witnesses.as_ref().map(|witnesses| match side {
-        JoinSubscriptionSide::Reference => witnesses.catalog.clone(),
-        JoinSubscriptionSide::Stream => witnesses.batch_stream.clone(),
-    });
 
     let Some(witnesses) = witnesses else {
-        return match side_final {
+        let outcome = match side_final {
             None => HoldOutcome::Holding,
-            Some((EofKind::Natural, author)) => HoldOutcome::Completed(HoldCompletion {
-                generation: generation.0,
-                ended_by: vec![author],
-            }),
+            Some(EofKind::Natural) => {
+                HoldOutcome::Completed(completion(eof.ended_by.clone().into_iter().collect()))
+            }
             Some(_) => HoldOutcome::LeftOpen,
         };
+        return (witnessed.clone(), outcome);
     };
 
-    if let Some((author, kind)) = eof_author(envelope) {
-        if let Some(key) = ctx.witness_keys.get(&author) {
-            let seen = ctx
-                .witnessed_eofs
+    let mut witnessed = witnessed.clone();
+    if let Some((author, kind)) = eof.author() {
+        if let Some(key) = witness_keys.get(&author) {
+            let seen = Arc::make_mut(&mut witnessed)
                 .entry(key.clone())
                 .or_insert(EofKind::Natural);
             *seen = seen.worst(kind);
@@ -154,20 +124,20 @@ pub(crate) fn observe_hold_eof<H: UnifiedJoinHandler>(
 
     let completed = witnesses
         .iter()
-        .all(|witness| ctx.witnessed_eofs.get(&witness.stage_key) == Some(&EofKind::Natural));
-    if completed {
-        HoldOutcome::Completed(HoldCompletion {
-            generation: generation.0,
-            ended_by: witnesses
-                .into_iter()
-                .map(|witness| witness.stage_key)
+        .all(|witness| witnessed.get(&witness.stage_key) == Some(&EofKind::Natural));
+    let outcome = if completed {
+        HoldOutcome::Completed(completion(
+            witnesses
+                .iter()
+                .map(|witness| witness.stage_key.clone())
                 .collect(),
-        })
+        ))
     } else if side_final.is_some() {
         HoldOutcome::LeftOpen
     } else {
         HoldOutcome::Holding
-    }
+    };
+    (witnessed, outcome)
 }
 
 pub(crate) fn witness_keys(
@@ -230,10 +200,6 @@ async fn read_archived_phases(
     Ok(phases)
 }
 
-pub(crate) fn enriching_holds_catalog(mode: JoinReferenceMode) -> bool {
-    mode == JoinReferenceMode::FiniteThenLive
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,27 +221,37 @@ mod tests {
     #[test]
     fn a_crossing_in_the_phase_the_archive_reached_passes() {
         let archived = [fact(1, 0)];
-        assert!(
-            check_crossing_phase("posted", &archived, ReaderGeneration(1), PhaseReads::Stream)
-                .is_ok()
-        );
+        assert!(check_crossing_phase(
+            "posted",
+            &archived,
+            ReaderGeneration(1),
+            CrossingPhase::Enriching
+        )
+        .is_ok());
     }
 
     #[test]
     fn a_crossing_in_an_earlier_phase_than_the_archive_reached_fails_closed() {
         let archived = [fact(1, 0), fact(2, 0)];
-        let error =
-            check_crossing_phase("posted", &archived, ReaderGeneration(1), PhaseReads::Stream)
-                .unwrap_err();
+        let error = check_crossing_phase(
+            "posted",
+            &archived,
+            ReaderGeneration(1),
+            CrossingPhase::Enriching,
+        )
+        .unwrap_err();
         assert!(error.contains("already entered live"), "{error}");
     }
 
     #[test]
     fn phases_entered_after_the_boundary_do_not_count() {
         let archived = [fact(1, 0), fact(2, 1)];
-        assert!(
-            check_crossing_phase("posted", &archived, ReaderGeneration(1), PhaseReads::Stream)
-                .is_ok()
-        );
+        assert!(check_crossing_phase(
+            "posted",
+            &archived,
+            ReaderGeneration(1),
+            CrossingPhase::Enriching
+        )
+        .is_ok());
     }
 }

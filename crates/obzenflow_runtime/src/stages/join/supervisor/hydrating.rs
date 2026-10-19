@@ -5,14 +5,9 @@
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ControlAction,
-};
 use crate::supervised_base::EventLoopDirective;
-use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainPayload;
-use obzenflow_core::StageKey;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -22,15 +17,14 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{
     JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
 };
-use crate::stages::join::phase::{observe_hold_eof, HoldOutcome, PhaseReads};
 
 pub(super) async fn dispatch_hydrating<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    state: &JoinState<H>,
+    state: &JoinState,
     ctx: &mut JoinResources<H>,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<EventLoopDirective<JoinEvent>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
     common::renew_held_inputs(ctx, JoinSubscriptionSide::Stream);
 
@@ -44,15 +38,8 @@ pub(super) async fn dispatch_hydrating<
         "Hydrating - checking reference subscription"
     );
 
-    match common::flush_pending_outputs(sup, ctx).await? {
-        FlushOutcome::Blocked => return Ok(EventLoopDirective::Continue),
-        FlushOutcome::DrainCompleteReady => {
-            tracing::warn!(
-                stage_name = %ctx.stage_name,
-                "Join hydrating observed DrainComplete-ready pending transition; ignoring"
-            );
-        }
-        FlushOutcome::Drained => {}
+    if let FlushOutcome::Blocked = common::flush_pending_outputs(sup, ctx).await? {
+        return Ok(EventLoopDirective::Continue);
     }
 
     let Some(subscription) = sup.reference_subscription.as_mut() else {
@@ -84,133 +71,12 @@ pub(super) async fn dispatch_hydrating<
             common::observe_reference_envelope(ctx, &envelope);
 
             let directive = match &envelope.payload {
-                ChainPayload::FlowControl(signal) => {
-                    // FLOWIP-120n: consume the catch-up watermark before the
-                    // generic control resolution; the join authors its own at
-                    // the flip.
-                    if let FlowControlPayload::CatchUpComplete {
-                        generation: announced,
-                        ..
-                    } = signal
+                ChainPayload::FlowControl(_) => {
+                    match common::read_control(ctx, subscription, None, None, true, envelope)
+                        .await?
                     {
-                        return Ok(common::consume_join_catch_up_watermark(
-                            sup.reference_subscription.as_ref(),
-                            sup.stream_subscription.as_ref(),
-                            ctx,
-                            *announced,
-                            PhaseReads::Reference,
-                        )
-                        .await);
-                    }
-
-                    // FLOWIP-120n F17: an authored EOF can be the delivery
-                    // that completes the caught-up frontier; no watermark
-                    // follows, so re-run the flip before normal EOF handling.
-                    if envelope.is_eof() {
-                        if let Some(directive) = common::flip_join_caught_up_on_eof(
-                            Some(&*subscription),
-                            sup.stream_subscription.as_ref(),
-                            ctx,
-                            PhaseReads::Reference,
-                        )
-                        .await
-                        {
-                            return Ok(directive);
-                        }
-                    }
-
-                    let contract_reader_count = ctx.reference_contract_state.len();
-                    let upstream_stage = subscription.last_delivered_upstream_stage();
-                    let last_eof_outcome = subscription.last_eof_outcome().cloned();
-                    // FLOWIP-095k: fold the reference side's terminal kind.
-                    if envelope.is_eof() {
-                        if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
-                            ctx.terminal_eof_kind = Some(
-                                ctx.terminal_eof_kind
-                                    .map_or(kind, |current| current.worst(kind)),
-                            );
-                        }
-                    }
-
-                    let resolution = resolve_control_event_awaiting_pauses(
-                        signal,
-                        &envelope,
-                        ctx.control_strategy.as_ref(),
-                        &mut ctx.processing_context,
-                        /* cycle_config */ None,
-                        /* cycle_guard */ None,
-                        last_eof_outcome.as_ref(),
-                        upstream_stage,
-                        contract_reader_count,
-                        /* drain_is_terminal */ false,
-                        &ctx.stage_name,
-                    )
-                    .await;
-
-                    match resolution {
-                        ControlAction::Forward | ControlAction::ForwardAndDrain => {
-                            common::forward_control_to_journal(ctx, &envelope).await?;
-
-                            if envelope.is_eof() {
-                                let _ = subscription.take_last_eof_outcome();
-                                let catalog_final = last_eof_outcome
-                                    .as_ref()
-                                    .filter(|outcome| outcome.is_final)
-                                    .map(|outcome| {
-                                        (
-                                            outcome.worst_kind.unwrap_or(EofKind::Natural),
-                                            StageKey::from(outcome.stage_name.clone()),
-                                        )
-                                    });
-                                let generation =
-                                    subscription.last_delivered_generation().unwrap_or_default();
-                                match observe_hold_eof(
-                                    ctx,
-                                    JoinSubscriptionSide::Reference,
-                                    &envelope,
-                                    catalog_final,
-                                    generation,
-                                ) {
-                                    HoldOutcome::Holding => EventLoopDirective::Continue,
-                                    HoldOutcome::Completed(completion) => {
-                                        tracing::info!(
-                                            stage_name = %ctx.stage_name,
-                                            ended_by = ?completion.ended_by,
-                                            "Join hydration completed on natural EOFs"
-                                        );
-                                        EventLoopDirective::Transition(JoinEvent::HoldCompleted(
-                                            completion,
-                                        ))
-                                    }
-                                    HoldOutcome::LeftOpen => {
-                                        tracing::info!(
-                                            stage_name = %ctx.stage_name,
-                                            "Join hydration left open; draining without held inputs"
-                                        );
-                                        ctx.drain_without_held_inputs = true;
-                                        EventLoopDirective::Transition(JoinEvent::HoldLeftOpen)
-                                    }
-                                }
-                            } else {
-                                EventLoopDirective::Continue
-                            }
-                        }
-                        ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event_type(),
-                                "Join received cycle-only control resolution without cycle config"
-                            );
-                            EventLoopDirective::Continue
-                        }
-                        ControlAction::Skip => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event_type(),
-                                "Skipping control event (dangerous!) during Hydrating"
-                            );
-                            EventLoopDirective::Continue
-                        }
+                        Some(fact) => EventLoopDirective::Transition(fact),
+                        None => EventLoopDirective::Continue,
                     }
                 }
                 payload if payload.consumes_data_credit() => {

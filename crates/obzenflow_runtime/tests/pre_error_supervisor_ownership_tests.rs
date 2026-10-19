@@ -128,7 +128,7 @@ fn every_join_side_and_lifecycle_path_guards_before_handler_dispatch() {
         ("finite reference hydration", JOIN_HYDRATING, 1),
         ("finite stream enrichment", JOIN_ENRICHING, 1),
         ("live reference and stream", JOIN_LIVE, 2),
-        ("draining reference and stream", JOIN_DRAINING, 2),
+        ("draining reference and stream", JOIN_DRAINING, 0),
     ] {
         assert_each_handler_call_has_an_immediately_preceding_guard(
             label,
@@ -168,6 +168,6 @@ fn every_join_dispatch_position_promotes_fatal_to_stage_failure() {
             "match handler.on_stream_eof(",
             "match handler.drain(",
         ],
-        6,
+        2,
     );
 }

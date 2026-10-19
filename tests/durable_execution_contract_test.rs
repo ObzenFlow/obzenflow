@@ -617,9 +617,10 @@ fn durable_execution_contract_child() {
             };
             app.run_blocking(build_flow(scenario, plan.hold, web))
         }
-        Graph::ThenLive | Graph::ThenLiveEffect => {
-            app.run_blocking(then_live::build_flow(scenario))
-        }
+        Graph::ThenLive
+        | Graph::ThenLiveEffect
+        | Graph::ThenLiveBatchStream
+        | Graph::ThenLiveTwoBatch => app.run_blocking(then_live::build_flow(scenario)),
         Graph::Concat => app.run_blocking(concat::build_flow(scenario)),
         Graph::AsOfLoading | Graph::AsOfPricing => app.run_blocking(as_of::build_flow(scenario)),
         Graph::PaymentDemo => app
@@ -661,6 +662,8 @@ enum Graph {
     Payment,
     ThenLive,
     ThenLiveEffect,
+    ThenLiveBatchStream,
+    ThenLiveTwoBatch,
     Concat,
     AsOfLoading,
     AsOfPricing,
@@ -2467,7 +2470,7 @@ mod then_live {
     use obzenflow::middleware::rate_limit;
     use obzenflow::stages::sources::ChannelSource;
     use obzenflow::stages::{joins, merges};
-    use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
+    use obzenflow_core::event::payloads::execution_payload::{JoinPhaseFact, StageLifecycleFact};
     use obzenflow_core::StageKey;
 
     const ACCOUNTS: [&str; 4] = ["a-1", "a-2", "a-3", "a-4"];
@@ -2531,6 +2534,18 @@ mod then_live {
         scenario.inputs.join("entries.yaml")
     }
 
+    fn slow_entries_input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("slow_entries.yaml")
+    }
+
+    fn write_entries<'a>(path: &Path, entries: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        let entries: String = entries
+            .into_iter()
+            .map(|(account, note)| format!("  - account_id: \"{account}\"\n    note: \"{note}\"\n"))
+            .collect();
+        std::fs::write(path, format!("entries:\n{entries}")).expect("write entries");
+    }
+
     fn fresh(name: &str, graph: Graph) -> Scenario {
         let scenario = Scenario::for_graph(name, graph);
         let accounts: String = ACCOUNTS
@@ -2539,12 +2554,32 @@ mod then_live {
             .collect();
         std::fs::write(accounts_input(&scenario), format!("accounts:\n{accounts}"))
             .expect("write accounts");
-        let entries: String = ENTRIES
-            .iter()
-            .map(|(account, note)| format!("  - account_id: \"{account}\"\n    note: \"{note}\"\n"))
-            .collect();
-        std::fs::write(entries_input(&scenario), format!("entries:\n{entries}"))
-            .expect("write entries");
+        write_entries(&entries_input(&scenario), ENTRIES);
+        scenario
+    }
+
+    const FAST_ENTRIES: usize = 60;
+    const SLOW_ENTRIES: usize = 10;
+
+    fn batch(prefix: &str, count: usize) -> Vec<(&'static str, String)> {
+        (1..=count)
+            .map(|n| (ACCOUNTS[n % ACCOUNTS.len()], format!("{prefix}-{n}")))
+            .collect()
+    }
+
+    fn fresh_two_batch(name: &str) -> Scenario {
+        let scenario = fresh(name, Graph::ThenLiveTwoBatch);
+        for (input, entries) in [
+            (entries_input(&scenario), batch("f", FAST_ENTRIES)),
+            (slow_entries_input(&scenario), batch("s", SLOW_ENTRIES)),
+        ] {
+            write_entries(
+                &input,
+                entries
+                    .iter()
+                    .map(|(account, note)| (*account, note.as_str())),
+            );
+        }
         scenario
     }
 
@@ -2641,6 +2676,8 @@ mod then_live {
         let live_tx_input = ChannelSource::new(live_tx_input);
         let journals = scenario.journals();
         let graph = scenario.graph;
+        let slow_tx_input = (graph == Graph::ThenLiveTwoBatch)
+            .then(|| yaml(EntryYaml, slow_entries_input(scenario), "/entries"));
         let vet = Vet {
             ledger: audit_ledger(scenario),
         };
@@ -2654,6 +2691,56 @@ mod then_live {
                 },
             );
             let ledger = DiscardSink::<Posted>::new();
+            if graph == Graph::ThenLiveBatchStream {
+                return Ok(flow! {
+                    name: "durable_execution_contract_then_live",
+                    journals: disk_journals(journals),
+
+                    stages: {
+                        batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
+                        batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
+                        live_accounts = async_infinite_source!(Account => live_accounts_input);
+                        accounts = merge!(Account => merges::then_live);
+                        posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                        ledger = sink!(Posted => ledger);
+                    },
+
+                    topology: {
+                        batch_accounts |> accounts;
+                        live_accounts |> accounts;
+                        (accounts, batch_tx) |> posted;
+                        posted |> ledger;
+                    }
+                });
+            }
+            if let Some(slow_tx_input) = slow_tx_input {
+                return Ok(flow! {
+                    name: "durable_execution_contract_then_live",
+                    journals: disk_journals(journals),
+
+                    stages: {
+                        batch_accounts = source!(Account => batch_accounts_input);
+                        batch_tx = source!(Entry => batch_tx_input);
+                        batch_tx_slow = source!(Entry => slow_tx_input with rate_limit(2.0));
+                        live_accounts = async_infinite_source!(Account => live_accounts_input);
+                        live_tx = async_infinite_source!(Entry => live_tx_input);
+                        accounts = merge!(Account => merges::then_live);
+                        transactions = merge!(Entry => merges::then_live);
+                        posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                        ledger = sink!(Posted => ledger);
+                    },
+
+                    topology: {
+                        batch_accounts |> accounts;
+                        live_accounts |> accounts;
+                        batch_tx |> transactions;
+                        batch_tx_slow |> transactions;
+                        live_tx |> transactions;
+                        (accounts, transactions) |> posted;
+                        posted |> ledger;
+                    }
+                });
+            }
             if graph == Graph::ThenLiveEffect {
                 return Ok(flow! {
                     name: "durable_execution_contract_then_live",
@@ -2886,6 +2973,159 @@ mod then_live {
             (0, 1),
         )
         .await;
+    }
+
+    fn passed_on(archive: &Archive, through: &str, producer: &str) -> Option<usize> {
+        let eof = archive
+            .rows(producer, RunJournalKind::Data)
+            .find(|row| row.is_eof())
+            .map(|row| *row.id())?;
+        archive
+            .rows(through, RunJournalKind::Data)
+            .position(|row| *row.id() == eof)
+    }
+
+    fn completed(archive: &Archive, stage: &str) -> bool {
+        archive.rows(stage, RunJournalKind::Data).any(|row| {
+            matches!(
+                row.payload,
+                ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                    StageLifecycleFact::Completed { .. }
+                ))
+            )
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_join_whose_stream_is_all_batch_resumes_to_a_drained_join() {
+        let name = "then_live_batch_stream";
+        let scenario = fresh(name, Graph::ThenLiveBatchStream);
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive| Cut::Enriching.holds(archive)).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        assert!(
+            Cut::Enriching.holds(&at_kill),
+            "{name}: the kill landed while enriching"
+        );
+
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let resumed = child.run().await;
+        until(&resumed, name, |archive| completed(archive, "posted")).await;
+        child.signal(Signal::Term);
+        assert!(
+            child.exit().await.success(),
+            "{name}: the resumed run stops"
+        );
+
+        let archive = Archive::read(&resumed).await;
+        let notes: Vec<String> = ENTRIES.iter().map(|(_, note)| (*note).into()).collect();
+        assert_eq!(
+            postings(&archive),
+            notes,
+            "{name}: each batch entry posts once"
+        );
+        assert_eq!(
+            phases(&archive),
+            [JoinPhaseFact::EnrichingEntered {
+                generation: 0,
+                ended_by: vec![StageKey::from("batch_accounts")],
+            }],
+            "{name}: the join has no live phase"
+        );
+
+        remove_input(&accounts_input(&scenario));
+        remove_input(&entries_input(&scenario));
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_producer_that_finished_before_the_kill_completes_the_merge_crossing() {
+        let name = "then_live_two_batch";
+        let scenario = fresh_two_batch(name);
+        let cut = |archive: &Archive| {
+            phases(archive).len() == 1
+                && archive.eof("batch_tx").is_some()
+                && archive.eof("batch_tx_slow").is_none()
+                && passed_on(archive, "transactions", "batch_tx").is_none()
+        };
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, cut).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        assert!(
+            cut(&Archive::read(&killed).await),
+            "{name}: the kill landed before the merge passed the fast producer's EOF on"
+        );
+
+        let child = Child::spawn(&scenario, resume(&killed), None);
+        let resumed = child.run().await;
+        until(&resumed, name, |archive| {
+            postings(archive).len() == FAST_ENTRIES + SLOW_ENTRIES && phases(archive).len() == 2
+        })
+        .await;
+        child.signal(Signal::Term);
+        assert!(
+            child.exit().await.success(),
+            "{name}: the resumed run stops"
+        );
+
+        let archive = Archive::read(&resumed).await;
+        let mut posted = postings(&archive);
+        posted.sort();
+        let mut notes: Vec<String> = batch("f", FAST_ENTRIES)
+            .into_iter()
+            .chain(batch("s", SLOW_ENTRIES))
+            .map(|(_, note)| note)
+            .collect();
+        notes.sort();
+        assert_eq!(posted, notes, "{name}: each batch entry posts once");
+        assert_eq!(
+            phases(&archive),
+            [
+                JoinPhaseFact::EnrichingEntered {
+                    generation: 0,
+                    ended_by: vec![StageKey::from("batch_accounts")],
+                },
+                JoinPhaseFact::LiveEntered {
+                    generation: 1,
+                    ended_by: vec![StageKey::from("batch_tx"), StageKey::from("batch_tx_slow")],
+                },
+            ],
+            "{name}: both phase facts, in the generations that made them"
+        );
+        let merged: Vec<&JournalRecord<ChainPayload>> =
+            archive.rows("transactions", RunJournalKind::Data).collect();
+        let at = passed_on(&archive, "transactions", "batch_tx")
+            .expect("the merge passes the fast producer's EOF on");
+        let before = at.checked_sub(1).map(|index| &merged[index].payload);
+        assert!(
+            matches!(
+                before,
+                Some(ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
+                    generation,
+                    ..
+                })) if generation.0 == 1
+            ),
+            "{name}: the merge's marker sits right before the EOF that completed its crossing, \
+             found {before:?}"
+        );
+
+        remove_input(&accounts_input(&scenario));
+        remove_input(&entries_input(&scenario));
+        remove_input(&slow_entries_input(&scenario));
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
     }
 }
 

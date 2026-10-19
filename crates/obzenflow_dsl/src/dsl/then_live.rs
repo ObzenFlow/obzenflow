@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, StageKey};
 use obzenflow_runtime::stages::join::{
-    JoinCatalogKind, JoinReferenceMode, PhaseWitness, PhaseWitnesses,
+    JoinCatalogKind, JoinReferenceMode, LiveStream, PhaseWitness, PhaseWitnesses,
 };
 use obzenflow_runtime::stages::merges::MergeStrategyKind;
 use obzenflow_topology::{EdgeKind, Topology};
@@ -645,6 +645,11 @@ fn then_live_join(
             .into_iter()
             .map(|id| graph.witness(id))
             .collect(),
+        live_stream: if classes.iter().all(|(_, c)| *c == StreamInput::Finite) {
+            LiveStream::Absent
+        } else {
+            LiveStream::Present
+        },
     })
 }
 

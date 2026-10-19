@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use obzenflow::flow::backpressure::enforced;
 use obzenflow::stages::sources::{ChannelSource, ValuesSource};
 use obzenflow::stages::{joins, merges};
-use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, JoinPhaseFact};
+use obzenflow_core::event::payloads::execution_payload::{
+    ExecutionPayload, JoinPhaseFact, StageLifecycleFact,
+};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{StageKey, TypedPayload};
@@ -349,6 +351,9 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
 
     let manifest = replay_testkit::archive_manifest(&run).to_string();
     assert_eq!(manifest.matches("\"Merge\"").count(), 2, "{manifest}");
+    for stage in ["accounts", "transactions", "posted"] {
+        replay_testkit::assert_eof_carries_the_ending_clock(&run, stage).await;
+    }
 
     FlowApplication::builder()
         .with_cli_args(vec![
@@ -598,6 +603,119 @@ async fn a_join_with_no_batch_stream_input_journals_only_live_entered() -> Resul
         })]
     );
     assert_eq!(data(&posted), ["live-1"]);
+    Ok(())
+}
+
+fn completed(records: &[JournalRecord<ChainPayload>]) -> bool {
+    records.iter().any(|record| {
+        matches!(
+            record.payload,
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                StageLifecycleFact::Completed { .. }
+            ))
+        )
+    })
+}
+
+#[tokio::test]
+async fn a_join_whose_stream_is_all_batch_drains_when_its_batch_ends() -> Result<()> {
+    let _guard = THEN_LIVE_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let (_accounts_tx, live_accounts) = mpsc::channel::<Account>(8);
+    let sink = Collect {
+        notes: Arc::default(),
+        arrived: Arc::default(),
+    };
+    let collector = sink.clone();
+    let journals = journal_base.clone();
+    let inputs = Mutex::new(Some(live_accounts));
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let live_accounts = inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("the flow is built once");
+        let batch_accounts_source = ValuesSource::new(vec![account("acct-1"), account("acct-2")]);
+        let live_accounts_source = ChannelSource::new(live_accounts);
+        let batch_tx_source = ValuesSource::new(batch_entries());
+        let post_entry = joins::inner_then_live(
+            |account: &Account| account.key.clone(),
+            |entry: &Entry| entry.key.clone(),
+            |_account: Account, entry: Entry| Posted {
+                key: entry.key,
+                note: entry.note,
+            },
+        );
+        let collector = collector.clone();
+        Ok(flow! {
+            name: "then_live_join_batch_stream_test",
+            journals: disk_journals(journals.clone()),
+
+            stages: {
+                batch_accounts = source!(Account => batch_accounts_source);
+                live_accounts = async_infinite_source!(Account => live_accounts_source);
+                batch_tx = source!(Entry => batch_tx_source);
+                accounts = merge!(Account => merges::then_live);
+                posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                collector = sink!(Posted => collector);
+            },
+
+            topology: {
+                batch_accounts |> accounts;
+                live_accounts |> accounts;
+                (accounts, batch_tx) |> posted;
+                posted |> collector;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow!("{error:?}"))?;
+    handle.start().await?;
+    wait_for_running(&handle).await?;
+    wait_for_postings(&sink, batch_entries().len()).await?;
+    let run = replay_testkit::latest_run_dir(&journal_base);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !completed(&replay_testkit::read_stage_envelopes_appended(&run, "posted").await) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("the join never completed before the stop"))?;
+
+    let before_stop = stage_rows(&run, "posted").await;
+    let phases: Vec<&Row> = before_stop
+        .iter()
+        .filter(|row| matches!(row, Row::Phase(_)))
+        .collect();
+    assert_eq!(
+        phases,
+        [&Row::Phase(JoinPhaseFact::EnrichingEntered {
+            generation: 0,
+            ended_by: vec![StageKey::from("batch_accounts")],
+        })]
+    );
+    assert_eq!(
+        data(&before_stop),
+        ["batch-1", "batch-2", "batch-3", "batch-4", "batch-5", "batch-6"]
+    );
+    assert_eq!(
+        before_stop.last(),
+        Some(&Row::Eof {
+            kind: EofKind::Natural
+        })
+    );
+
+    let state = handle.state_receiver();
+    stop(handle).await?;
+    assert_eq!(
+        *state.borrow(),
+        PipelineState::Cancelled {
+            reason: "user_stop".to_string()
+        }
+    );
+    assert_eq!(stage_rows(&run, "posted").await, before_stop);
     Ok(())
 }
 
