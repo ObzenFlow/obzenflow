@@ -18,7 +18,7 @@
 //! buffered in the channel when a run stops are lost, so a resumed run
 //! reattaches with [`AtMostOnce`].
 //!
-//! ## Construction catalogue
+//! ## Construction catalog
 //!
 //! | Integration | Entry point |
 //! |---|---|

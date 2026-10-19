@@ -223,7 +223,7 @@ fn stateful_macro_and_builder_keep_the_typed_erasure_boundary() {
 }
 
 #[test]
-fn first_class_accumulator_catalogue_cannot_be_collapsed_or_shrunk() {
+fn first_class_accumulator_catalog_cannot_be_collapsed_or_shrunk() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let accumulator_root =
         root.join("crates/obzenflow_runtime/src/stages/stateful/strategies/accumulators");
@@ -281,6 +281,6 @@ fn first_class_accumulator_catalogue_cannot_be_collapsed_or_shrunk() {
     );
     assert!(
         !accumulator_root.join("typed_facades.rs").exists(),
-        "the first-class catalogue must not be collapsed into typed_facades.rs"
+        "the first-class catalog must not be collapsed into typed_facades.rs"
     );
 }

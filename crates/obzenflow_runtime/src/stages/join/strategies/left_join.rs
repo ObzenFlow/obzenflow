@@ -7,6 +7,7 @@
 //! SQL Equivalent: SELECT * FROM stream LEFT JOIN reference ON ...
 
 use super::common::{JoinStrategy, JoinStrategyValueOutput, JoinWithStrategy};
+use super::left_as_of_join::LeftJoinBuilderDslWithEffectiveAt;
 use crate::stages::common::stage_handle::StageHandle;
 use crate::stages::join::config::JoinReferenceMode;
 use obzenflow_core::StageId;
@@ -36,7 +37,6 @@ impl<C, S, E> LeftJoinBuilder<C, S, E>
 where
     C: TypedPayload + Clone + Send + Sync + 'static,
     S: TypedPayload + Clone + Send + Sync + 'static,
-    E: TypedPayload + Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
         Self::default()
@@ -88,7 +88,6 @@ impl<C, S, E, K, CatalogKeyFn> LeftJoinBuilderDslWithCatalogKey<C, S, E, K, Cata
 where
     C: TypedPayload + Clone + Send + Sync,
     S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
 {
@@ -101,6 +100,23 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
             reference_mode: JoinReferenceMode::FiniteEof,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the time each catalog row's version takes effect, making this a
+    /// point-in-time join over every version of each key.
+    pub fn effective_at<T, F>(
+        self,
+        effective_at_fn: F,
+    ) -> LeftJoinBuilderDslWithEffectiveAt<C, S, E, K, T, CatalogKeyFn, F>
+    where
+        T: Ord + Copy + Send + Sync + std::fmt::Debug + 'static,
+        F: Fn(&C) -> T + Send + Sync + Clone,
+    {
+        LeftJoinBuilderDslWithEffectiveAt {
+            catalog_key_fn: self.catalog_key_fn,
+            effective_at_fn,
             _phantom: PhantomData,
         }
     }
@@ -119,7 +135,6 @@ impl<C, S, E, K, CatalogKeyFn, StreamKeyFn>
 where
     C: TypedPayload + Clone + Send + Sync,
     S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone,
@@ -138,6 +153,7 @@ where
 
     pub fn build<J>(self, join_fn: J) -> LeftJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
+        E: TypedPayload + Clone + Send + Sync,
         J: Fn(Option<C>, S) -> E + Send + Sync + Clone,
     {
         JoinWithStrategy {

@@ -11,9 +11,11 @@
 
 mod common;
 pub mod inner_join;
+pub mod left_as_of_join;
 pub mod left_join;
 pub mod strict_join;
 
 pub use inner_join::{InnerJoin, InnerJoinBuilder};
+pub use left_as_of_join::LeftAsOfJoin;
 pub use left_join::{LeftJoin, LeftJoinBuilder};
 pub use strict_join::{StrictJoin, StrictJoinBuilder};

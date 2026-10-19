@@ -4,7 +4,7 @@
 
 //! Typed join authoring and runtime erasure (FLOWIP-134f).
 
-use super::traits::{sealed, ErasedJoinInvocation, UnifiedJoinHandler};
+use super::traits::{sealed, ErasedJoinInvocation, JoinBinding, UnifiedJoinHandler};
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
 use async_trait::async_trait;
@@ -17,9 +17,67 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 #[derive(Clone, Debug)]
-struct ReferenceProjectionEntry<R> {
-    value: R,
-    activations: Vec<CompositeActivationContext>,
+pub(super) struct ReferenceProjectionEntry<R> {
+    pub(super) value: R,
+    pub(super) activations: Vec<CompositeActivationContext>,
+}
+
+pub(super) fn installed_writer_id(writer_id: Option<WriterId>) -> Result<WriterId, HandlerError> {
+    writer_id.ok_or_else(|| {
+        HandlerError::Fatal(StageFatal::new(
+            StageFatalCode::Configuration,
+            StageFatalReason::ConfigurationInvariant,
+            "typed join adapter invoked before runtime writer identity installation",
+        ))
+    })
+}
+
+pub(super) fn lower_join_outputs<O>(
+    writer_id: WriterId,
+    lineage: LineagePolicy,
+    outputs: Vec<O>,
+    parent: Option<&ChainEvent>,
+    selected_activations: Vec<CompositeActivationContext>,
+    framework_eof: Option<EofKind>,
+) -> Result<ErasedJoinInvocation, HandlerError>
+where
+    O: OneFactStageOutput,
+{
+    let mut events = Vec::with_capacity(outputs.len());
+
+    for output in outputs {
+        let mut facts = output.into_facts().map_err(|error| {
+            HandlerError::Other(format!("typed join output serialization failed: {error}"))
+        })?;
+        if facts.len() != 1 {
+            return Err(HandlerError::Fatal(StageFatal::new(
+                StageFatalCode::Protocol,
+                StageFatalReason::ProtocolInputIntegrity,
+                format!(
+                    "one_fact_stage_output: `{}` lowered to {} facts instead of exactly one",
+                    std::any::type_name::<O>(),
+                    facts.len(),
+                ),
+            )));
+        }
+        let fact = facts.pop().expect("length checked above");
+        let event = match parent {
+            Some(parent) => fact.into_derived_event(writer_id, parent, lineage),
+            None => fact.into_event(writer_id),
+        };
+        let event = event
+            .try_with_composite_activations(selected_activations.clone())
+            .map_err(|error| {
+                HandlerError::Fatal(StageFatal::new(
+                    StageFatalCode::Protocol,
+                    StageFatalReason::ProtocolInputIntegrity,
+                    format!("typed_join_contributions: {error}"),
+                ))
+            })?;
+        events.push(event);
+    }
+
+    Ok(ErasedJoinInvocation::new(events, framework_eof))
 }
 
 /// Read-only typed access to the current reference projection.
@@ -194,13 +252,7 @@ where
     }
 
     fn writer_id(&self) -> Result<WriterId, HandlerError> {
-        self.writer_id.ok_or_else(|| {
-            HandlerError::Fatal(StageFatal::new(
-                StageFatalCode::Configuration,
-                StageFatalReason::ConfigurationInvariant,
-                "typed join adapter invoked before runtime writer identity installation",
-            ))
-        })
+        installed_writer_id(self.writer_id)
     }
 
     fn lower_outputs<O>(
@@ -213,42 +265,29 @@ where
     where
         O: OneFactStageOutput,
     {
-        let writer_id = self.writer_id()?;
-        let mut events = Vec::with_capacity(outputs.len());
+        lower_join_outputs(
+            self.writer_id()?,
+            self.lineage,
+            outputs,
+            parent,
+            selected_activations,
+            framework_eof,
+        )
+    }
+}
 
-        for output in outputs {
-            let mut facts = output.into_facts().map_err(|error| {
-                HandlerError::Other(format!("typed join output serialization failed: {error}"))
-            })?;
-            if facts.len() != 1 {
-                return Err(HandlerError::Fatal(StageFatal::new(
-                    StageFatalCode::Protocol,
-                    StageFatalReason::ProtocolInputIntegrity,
-                    format!(
-                        "one_fact_stage_output: `{}` lowered to {} facts instead of exactly one",
-                        std::any::type_name::<O>(),
-                        facts.len(),
-                    ),
-                )));
-            }
-            let fact = facts.pop().expect("length checked above");
-            let event = match parent {
-                Some(parent) => fact.into_derived_event(writer_id, parent, self.lineage),
-                None => fact.into_event(writer_id),
-            };
-            let event = event
-                .try_with_composite_activations(selected_activations.clone())
-                .map_err(|error| {
-                    HandlerError::Fatal(StageFatal::new(
-                        StageFatalCode::Protocol,
-                        StageFatalReason::ProtocolInputIntegrity,
-                        format!("typed_join_contributions: {error}"),
-                    ))
-                })?;
-            events.push(event);
-        }
+#[diagnostic::do_not_recommend]
+impl<H> JoinBinding for H
+where
+    H: TypedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    type Reference = H::Reference;
+    type Stream = H::Stream;
+    type Output = H::Output;
+    type Adapter = TypedJoinHandlerAdapter<H>;
 
-        Ok(ErasedJoinInvocation::new(events, framework_eof))
+    fn into_adapter(self) -> Self::Adapter {
+        TypedJoinHandlerAdapter::new(self)
     }
 }
 

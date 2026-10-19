@@ -17,6 +17,9 @@ pub mod flow;
 #[path = "ledger.rs"]
 pub mod ledger;
 
+#[path = "money.rs"]
+pub mod money;
+
 #[path = "risk_engine.rs"]
 pub mod risk_engine;
 

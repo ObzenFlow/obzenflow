@@ -195,6 +195,7 @@ proc-macro2 = { workspace = true }
 syn = { workspace = true, features = ["full", "visit"] }
 toml = { workspace = true }
 csv = { workspace = true }
+chrono = { workspace = true }
 
 [features]
 cli = ["dep:clap", "dep:reqwest", "dep:tokio"]

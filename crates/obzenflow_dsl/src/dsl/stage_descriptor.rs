@@ -47,7 +47,10 @@ use obzenflow_runtime::{
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
-        join::{JoinBuilder, JoinConfig, JoinEvent, JoinReferenceMode, JoinState, PhaseWitnesses},
+        join::{
+            JoinBuilder, JoinCatalogKind, JoinConfig, JoinEvent, JoinReferenceMode, JoinState,
+            PhaseWitnesses,
+        },
         merge::{MergeBuilder, MergeConfig, MergeEvent, MergeState},
         merges::MergeStrategyKind,
         sink::journal_sink::{
@@ -431,10 +434,11 @@ pub enum PolicyGuardSurface {
     Sink,
 }
 
-/// A join's mode and the built-in variant its handler names.
+/// A join's mode, its catalog's kind and the built-in variant its handler names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JoinShape {
     pub mode: JoinReferenceMode,
+    pub catalog: JoinCatalogKind,
     /// `inner`, `left` or `strict`; `None` for an author-written join.
     pub label: Option<&'static str>,
 }
@@ -3001,6 +3005,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
     fn join_shape(&self) -> Option<JoinShape> {
         Some(JoinShape {
             mode: self.handler.reference_mode(),
+            catalog: self.handler.catalog_kind(),
             label: self.handler.strategy_label(),
         })
     }
@@ -3102,10 +3107,15 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
                 return Err("Join stage requires at least one upstream journal".into());
             };
 
+        let mut handler = self.handler;
+        if let Some(catalog) = self.reference_stage_var {
+            handler.install_stage_names(&config.name, catalog);
+        }
+
         // The runtime builder preserves the planned subscription metadata when
         // binding the catalog and stream journal subsets.
         let handle = JoinBuilder::new(
-            self.handler,
+            handler,
             join_config,
             resources,
             reference_journal,

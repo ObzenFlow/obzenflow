@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Sealed built-in contributions and the bounded effect composition catalogue.
+//! Sealed built-in contributions and the bounded effect composition catalog.
 
 use super::circuit_breaker::{circuit_breaker, CircuitBreaker, Retry};
 use super::rate_limiter::RateLimiter;

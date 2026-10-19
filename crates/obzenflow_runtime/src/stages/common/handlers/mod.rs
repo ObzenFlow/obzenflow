@@ -16,7 +16,9 @@ pub mod transform;
 // Re-export all handler traits for convenience
 pub use inference::InferenceHandler;
 pub(crate) use join::UnifiedJoinHandler;
-pub use join::{JoinReferenceView, TypedJoinHandler};
+pub use join::{
+    AsOf, AsOfJoin, AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
+};
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 #[doc(hidden)]

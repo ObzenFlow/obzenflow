@@ -6,7 +6,9 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, StageKey};
-use obzenflow_runtime::stages::join::{JoinReferenceMode, PhaseWitness, PhaseWitnesses};
+use obzenflow_runtime::stages::join::{
+    JoinCatalogKind, JoinReferenceMode, PhaseWitness, PhaseWitnesses,
+};
 use obzenflow_runtime::stages::merges::MergeStrategyKind;
 use obzenflow_topology::{EdgeKind, Topology};
 
@@ -387,7 +389,11 @@ pub(crate) fn plan(
                 plan.witnesses.push((binding.clone(), witnesses));
             }
             JoinReferenceMode::FiniteEof => {
-                let ending: Vec<StageId> = graph.roots(catalog).all().collect();
+                let catalog_roots = graph.roots(catalog);
+                if catalog_roots.has_live() {
+                    return Err(live_catalog(&graph, id, shape, catalog, &catalog_roots));
+                }
+                let ending: Vec<StageId> = catalog_roots.all().collect();
                 plan.holds.push(Hold {
                     holder: id,
                     state: HoldState::Hydrating,
@@ -399,6 +405,40 @@ pub(crate) fn plan(
         }
     }
     Ok(plan)
+}
+
+fn live_catalog(
+    graph: &Graph<'_>,
+    join: StageId,
+    shape: JoinShape,
+    catalog: StageId,
+    roots: &Roots,
+) -> Refusal {
+    let name = graph.name(join);
+    let catalog_name = graph.name(catalog);
+    let live = graph.sorted(roots.live.iter().copied());
+    let has = if live.len() == 1 {
+        "a live source"
+    } else {
+        "live sources"
+    };
+    let sources = live
+        .iter()
+        .map(|id| format!("`{}`", graph.name(*id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match shape.catalog {
+        JoinCatalogKind::Versioned => Refusal(format!(
+            "join `{name}` uses as_of, but its catalog `{catalog_name}` has {has} ({sources}), \
+             so its versions could arrive after the rows they price.\nFeed the catalog from a \
+             finite source, or use a latest-value join for live rates."
+        )),
+        JoinCatalogKind::LatestValue => Refusal(format!(
+            "join `{name}` hydrates its catalog `{catalog_name}` to the end before reading a \
+             row, but `{catalog_name}` has {has} ({sources}), so hydration would never \
+             end.\nUse `.live()`, or `.then_live()` when the catalog also has a finite source."
+        )),
+    }
 }
 
 fn merge_producers(

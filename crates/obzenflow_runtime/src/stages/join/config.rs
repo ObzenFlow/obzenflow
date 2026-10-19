@@ -47,6 +47,15 @@ impl JoinReferenceMode {
     }
 }
 
+/// Whether a join's catalog keeps the latest value of each key or every version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JoinCatalogKind {
+    /// One value per key; a later row replaces an earlier one.
+    LatestValue,
+    /// Every version of each key, by the time it took effect.
+    Versioned,
+}
+
 /// One stage whose natural EOF ends a then-live join's holding state, by its
 /// stable key and its stage ID in this run.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

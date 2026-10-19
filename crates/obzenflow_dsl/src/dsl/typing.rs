@@ -18,7 +18,7 @@ use obzenflow_core::journal::archive::DeliveryOrder;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
-    AdmitSource, TypedJoinHandlerAdapter, UnifiedAsyncFiniteSourceHandler,
+    AdmitSource, JoinBinding, TypedJoinHandlerAdapter, UnifiedAsyncFiniteSourceHandler,
     UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
 use obzenflow_runtime::feed_plan::{
@@ -131,7 +131,7 @@ impl<Input> SinkInputMatchesArrow<Input> for Input {}
 #[diagnostic::on_unimplemented(
     message = "this join handler does not witness its arrow contract",
     label = "the handler's `Reference` does not match the catalog fact type",
-    note = "implement TypedJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)"
+    note = "implement TypedJoinHandler or TypedAsOfJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)"
 )]
 pub trait JoinReferenceMatchesArrow<ArrowReference>: proof_sealed::Equal<ArrowReference> {}
 
@@ -144,7 +144,7 @@ impl<Reference> JoinReferenceMatchesArrow<Reference> for Reference {}
 #[diagnostic::on_unimplemented(
     message = "this join handler does not witness its arrow contract",
     label = "the handler's `Stream` does not match the stream fact type",
-    note = "implement TypedJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)"
+    note = "implement TypedJoinHandler or TypedAsOfJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)"
 )]
 pub trait JoinStreamMatchesArrow<ArrowStream>: proof_sealed::Equal<ArrowStream> {}
 
@@ -1138,7 +1138,7 @@ pub fn typed_join_descriptor<
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: TypedJoinHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H: JoinBinding,
     H::Reference: JoinReferenceMatchesArrow<ArrowReference>,
     H::Stream: JoinStreamMatchesArrow<ArrowStream>,
     ArrowReference: TypedPayload + Clone + Send + Sync + 'static,
@@ -1158,7 +1158,7 @@ where
         name: name.into(),
         reference_stage_id: StageId::new(),
         reference_stage_var: Some(reference_stage_var),
-        handler: TypedJoinHandlerAdapter::new(handler),
+        handler: handler.into_adapter(),
         observers,
         phase_witnesses: None,
     });

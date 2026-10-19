@@ -4,10 +4,10 @@
 
 use super::console;
 use super::domain::{
-    AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, ProfiledTransaction,
-    ScoreUnavailable, Transaction, TransactionCleared,
+    AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, FxRate, PricedTransaction,
+    ProfiledTransaction, ScoreUnavailable, Transaction, TransactionCleared, TransactionRow,
 };
-use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, ScoreHandler};
+use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, PriceInUsd, ScoreHandler};
 use super::vendors::{
     OpenCase, ScoreTransaction, VendorBindings, VendorBindingsError, VendorStats,
 };
@@ -16,9 +16,10 @@ use obzenflow::flow::{
     effectful_transform, flow, join, merge, sink, source, stateful, FlowBuildError, FlowDefinition,
 };
 use obzenflow::journal::disk_journals;
+use obzenflow::stages::joins::AsOfJoin;
 use obzenflow::stages::merges;
 use obzenflow::stages::sinks::{ConsoleSink, CsvProjection, CsvSink};
-use obzenflow::stages::sources::{CsvDecoder, CsvSource};
+use obzenflow::stages::sources::{CsvDecodeError, CsvDecoder, CsvRecord, CsvSource};
 use obzenflow::stages::stateful;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
@@ -32,6 +33,7 @@ pub const DEMO_JOURNAL_ROOT: &str = "target/aml-overnight-monitoring-logs";
 pub struct AmlApp {
     pub account_history: PathBuf,
     pub transactions: PathBuf,
+    pub fx_rates: PathBuf,
     pub risk_ledger: PathBuf,
     pub case_ledger: PathBuf,
     pub cleared_register: PathBuf,
@@ -58,6 +60,18 @@ struct TransactionCsv;
 
 impl CsvDecoder for TransactionCsv {
     type Output = Transaction;
+
+    fn decode(&self, record: CsvRecord<'_>) -> Result<Transaction, CsvDecodeError> {
+        let row: TransactionRow = record.deserialize()?;
+        Transaction::try_from(row).map_err(CsvDecodeError::invalid_value)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RateCsv;
+
+impl CsvDecoder for RateCsv {
+    type Output = FxRate;
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +168,12 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             .path(&app.transactions)
             .build()
             .map_err(resources_failed)?;
+        let rates_feed = CsvSource::builder(RateCsv)
+            .path(&app.fx_rates)
+            .build()
+            .map_err(resources_failed)?;
         let profile = AccountProfile;
+        let price = AsOfJoin::new(PriceInUsd);
         let VendorBindings {
             risk_engine,
             case_system,
@@ -195,8 +214,12 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             stages: {
                 account_history = source!(AccountHistory => history_feed);
                 transactions    = source!(Transaction => transactions_feed);
+                fx_rates        = source!(FxRate => rates_feed);
                 profile         = join!(
                     catalog account_history: AccountHistory, Transaction -> ProfiledTransaction => profile
+                );
+                price           = join!(
+                    catalog fx_rates: FxRate, Transaction -> PricedTransaction => price
                 );
                 score           = effectful_transform!(
                     ProfiledTransaction -> { TransactionCleared, AlertRaised, ScoreUnavailable }
@@ -205,7 +228,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 );
                 cleared         = sink!(TransactionCleared => cleared_register);
                 daily_profile   = stateful!(Transaction -> AlertRaised => daily_profile);
-                day_totals      = stateful!(Transaction -> DayTotals => day_totals);
+                day_totals      = stateful!(PricedTransaction -> DayTotals => day_totals);
                 alerts          = merge!(first score: AlertRaised => merges::concat);
                 open_case       = effectful_transform!(
                     AlertRaised -> { CaseOpened, CaseUnavailable }
@@ -218,8 +241,9 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
 
             topology: {
                 (account_history, transactions) |> profile;
+                (fx_rates, transactions) |> price;
                 transactions |> daily_profile;
-                transactions |> day_totals;
+                price |> day_totals;
                 profile |> score;
                 score |> cleared;
                 score |> alerts;

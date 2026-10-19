@@ -621,6 +621,7 @@ fn durable_execution_contract_child() {
             app.run_blocking(then_live::build_flow(scenario))
         }
         Graph::Concat => app.run_blocking(concat::build_flow(scenario)),
+        Graph::AsOfLoading | Graph::AsOfPricing => app.run_blocking(as_of::build_flow(scenario)),
         Graph::PaymentDemo => app
             .with_presentation(payment_demo::presentation())
             .run_blocking(payment_demo::build_flow(scenario)),
@@ -661,6 +662,8 @@ enum Graph {
     ThenLive,
     ThenLiveEffect,
     Concat,
+    AsOfLoading,
+    AsOfPricing,
     PaymentDemo,
     TwoEffects,
     EmitOnly,
@@ -3054,6 +3057,244 @@ mod concat {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_kill_in_the_last_phase_resumes_it_once() {
         row("concat_last_phase", Cut::LastPhase).await;
+    }
+}
+
+mod as_of {
+    use super::*;
+    use obzenflow::flow::join;
+    use obzenflow::middleware::rate_limit;
+    use obzenflow::stages::joins::{self, AsOf};
+    use obzenflow::stages::sources::{CsvDecoder, CsvSource};
+
+    const RATES: &str = "currency,effective_minute,usd_per_unit\n\
+                         EUR,0,0.9904\n\
+                         GBP,0,1.1510\n\
+                         EUR,60,0.9934\n\
+                         GBP,60,1.1545\n\
+                         EUR,120,0.9910\n";
+    const CORRECTED: &str = "currency,effective_minute,usd_per_unit\n\
+                             EUR,0,0.9904\n\
+                             GBP,0,1.1510\n\
+                             EUR,60,0.9999\n\
+                             GBP,60,1.1545\n\
+                             EUR,120,0.9910\n";
+    const PAYMENTS: &str = "payment,currency,booked_minute\n\
+                            p-1,EUR,10\n\
+                            p-2,GBP,30\n\
+                            p-3,EUR,60\n\
+                            p-4,USD,70\n\
+                            p-5,EUR,90\n\
+                            p-6,GBP,100\n\
+                            p-7,EUR,130\n";
+    const LOADED: [(&str, Option<f64>); 7] = [
+        ("p-1", Some(0.9904)),
+        ("p-2", Some(1.1510)),
+        ("p-3", Some(0.9934)),
+        ("p-4", None),
+        ("p-5", Some(0.9934)),
+        ("p-6", Some(1.1545)),
+        ("p-7", Some(0.9910)),
+    ];
+    const FIRST_PRICED_FROM_THE_CORRECTED_RATE: usize = 2;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Rate {
+        currency: String,
+        effective_minute: u32,
+        usd_per_unit: f64,
+    }
+    impl TypedPayload for Rate {
+        const EVENT_TYPE: &'static str = "durable_contract.as_of.rate";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Payment {
+        payment: String,
+        currency: String,
+        booked_minute: u32,
+    }
+    impl TypedPayload for Payment {
+        const EVENT_TYPE: &'static str = "durable_contract.as_of.payment";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub(super) struct Priced {
+        payment: String,
+        usd_per_unit: Option<f64>,
+    }
+    impl TypedPayload for Priced {
+        const EVENT_TYPE: &'static str = "durable_contract.as_of.priced";
+    }
+
+    #[derive(Clone, Debug)]
+    struct RateCsv;
+    impl CsvDecoder for RateCsv {
+        type Output = Rate;
+    }
+
+    #[derive(Clone, Debug)]
+    struct PaymentCsv;
+    impl CsvDecoder for PaymentCsv {
+        type Output = Payment;
+    }
+
+    fn rates_input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("rates.csv")
+    }
+
+    fn payments_input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("payments.csv")
+    }
+
+    fn fresh(name: &str, graph: Graph) -> Scenario {
+        let scenario = Scenario::for_graph(name, graph);
+        std::fs::write(rates_input(&scenario), RATES).expect("write rates");
+        std::fs::write(payments_input(&scenario), PAYMENTS).expect("write payments");
+        scenario
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        let (rates_pace, payments_pace) = match scenario.graph {
+            Graph::AsOfPricing => (1000.0, 2.0),
+            _ => (2.0, 1000.0),
+        };
+        let rates_feed = CsvSource::builder(RateCsv)
+            .path(rates_input(scenario))
+            .chunk_size(1)
+            .build()
+            .expect("the rates channel is configured");
+        let payments_feed = CsvSource::builder(PaymentCsv)
+            .path(payments_input(scenario))
+            .chunk_size(1)
+            .build()
+            .expect("the payments channel is configured");
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let price = joins::left_as_of(
+                |rate: &Rate| rate.currency.clone(),
+                |rate: &Rate| rate.effective_minute,
+                |payment: &Payment| payment.currency.clone(),
+                |payment: &Payment| payment.booked_minute,
+                |rate: AsOf<Rate>, payment: Payment| Priced {
+                    payment: payment.payment,
+                    usd_per_unit: match rate {
+                        AsOf::Found(rate) => Some(rate.usd_per_unit),
+                        AsOf::BeforeFirstVersion | AsOf::NoVersions => None,
+                    },
+                },
+            );
+            let priced = DiscardSink::<Priced>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_as_of",
+                journals: disk_journals(journals),
+
+                stages: {
+                    fx_rates = source!(Rate => rates_feed with rate_limit(rates_pace));
+                    payments = source!(Payment => payments_feed with rate_limit(payments_pace));
+                    price = join!(catalog fx_rates: Rate, Payment -> Priced => price);
+                    priced = sink!(Priced => priced);
+                },
+
+                topology: {
+                    (fx_rates, payments) |> price;
+                    price |> priced;
+                }
+            })
+        })
+    }
+
+    fn outcomes(archive: &Archive) -> Vec<(String, Option<f64>)> {
+        archive
+            .facts::<Priced>("price")
+            .map(|(_, priced)| (priced.payment, priced.usd_per_unit))
+            .collect()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Cut {
+        RatesReading,
+        Pricing,
+    }
+
+    impl Cut {
+        fn graph(self) -> Graph {
+            match self {
+                Self::RatesReading => Graph::AsOfLoading,
+                Self::Pricing => Graph::AsOfPricing,
+            }
+        }
+
+        fn holds(self, archive: &Archive) -> bool {
+            match self {
+                Self::RatesReading => {
+                    archive.facts::<Rate>("fx_rates").count() >= 1
+                        && archive.eof("fx_rates").is_none()
+                }
+                Self::Pricing => {
+                    let priced = outcomes(archive).len();
+                    archive.eof("fx_rates") == Some(EofKind::Natural)
+                        && (1..=FIRST_PRICED_FROM_THE_CORRECTED_RATE).contains(&priced)
+                        && archive.eof("payments").is_none()
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Between {
+        Nothing,
+        CorrectOneRate,
+    }
+
+    async fn row(name: &str, cut: Cut, between: Between) {
+        let scenario = fresh(name, cut.graph());
+        let child = Child::spawn(&scenario, Vec::new(), None);
+        let killed = child.run().await;
+        until(&killed, name, |archive| cut.holds(archive)).await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        let at_kill = Archive::read(&killed).await;
+        assert!(cut.holds(&at_kill), "{name}: the kill landed in {cut:?}");
+        if let Between::CorrectOneRate = between {
+            std::fs::write(rates_input(&scenario), CORRECTED).expect("correct one rate");
+        }
+
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        let expected: Vec<(String, Option<f64>)> = LOADED
+            .iter()
+            .map(|(payment, rate)| ((*payment).to_owned(), *rate))
+            .collect();
+        assert_eq!(
+            outcomes(&Archive::read(&resumed).await),
+            expected,
+            "{name}: each payment is priced once, at the rate the killed run loaded"
+        );
+
+        remove_input(&rates_input(&scenario));
+        remove_input(&payments_input(&scenario));
+        let replayed = Child::spawn(&scenario, replay(&resumed), None)
+            .completed()
+            .await;
+        let (code, report) = verify_exit(&resumed, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rate_corrected_after_loading_leaves_the_resume_on_the_loaded_rates() {
+        row(
+            "as_of_corrected_after_loading",
+            Cut::Pricing,
+            Between::CorrectOneRate,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_while_the_rates_load_resumes_without_a_second_version() {
+        row("as_of_rates_reading", Cut::RatesReading, Between::Nothing).await;
     }
 }
 

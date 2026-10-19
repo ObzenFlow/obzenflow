@@ -87,7 +87,7 @@ fn visit_families(
     mut visit: impl FnMut(ObservationFamily, CaptureStamp, &dyn Fn() -> ObservabilityContext) -> bool,
 ) {
     // Exhaustive destructuring makes a new packet or runtime field require an
-    // explicit selection decision here. There is no separate kind catalogue.
+    // explicit selection decision here. There is no separate kind catalog.
     let ObservabilityContext {
         capture: stamp,
         runtime_snapshot,

@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_catalogue_excludes_output_commit() {
+    fn surface_catalog_excludes_output_commit() {
         assert_eq!(
             OBSERVER_SURFACE_KINDS,
             &[
