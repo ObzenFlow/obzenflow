@@ -126,7 +126,7 @@ impl<'ast> Visit<'ast> for SurfaceVisitor {
 }
 
 #[test]
-fn typed_join_is_the_only_authored_surface_and_erasure_has_one_adapter() {
+fn typed_join_is_the_only_authored_surface_and_each_erasure_adapter_is_allowlisted() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut retired_hits = Vec::new();
     let mut erased_impls = Vec::new();
