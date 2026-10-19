@@ -634,14 +634,23 @@ fn then_live_join(
             ),
         }
     }
+    let batch_stream = graph.sorted(batch_stream);
+    if let Some((witness, left, right)) = second_stream_path(graph, &batch_stream, streams) {
+        return Err(Refusal(format!(
+            "join `{name}` uses {uses}, but batch rows from `{}` reach its stream by two paths \
+             (`{}`, `{}`).\nFeed those branches into one stage and join that stage.",
+            graph.name(witness),
+            graph.name(left),
+            graph.name(right),
+        )));
+    }
 
     Ok(PhaseWitnesses {
         catalog: catalog_witnesses
             .into_iter()
             .map(|id| graph.witness(id))
             .collect(),
-        batch_stream: graph
-            .sorted(batch_stream)
+        batch_stream: batch_stream
             .into_iter()
             .map(|id| graph.witness(id))
             .collect(),
@@ -742,6 +751,33 @@ fn paths_to(
     }
     memo.insert(stage, count);
     count
+}
+
+fn second_stream_path(
+    graph: &Graph<'_>,
+    witnesses: &[StageId],
+    streams: &[StageId],
+) -> Option<(StageId, StageId, StageId)> {
+    let span = graph.upstream_closure(streams.iter().copied());
+    let streams = graph.sorted(streams.iter().copied());
+    for witness in witnesses {
+        let mut arrivals = Vec::new();
+        for stream in &streams {
+            let mut memo = HashMap::new();
+            for _ in 0..paths_to(graph, *witness, *stream, &span, &mut memo) {
+                arrivals.push(*stream);
+            }
+        }
+        if let [first, second, ..] = arrivals.as_slice() {
+            let (left, right) = if first == second {
+                first_fork(graph, *witness, *first, &span, &mut HashMap::new())
+            } else {
+                (*first, *second)
+            };
+            return Some((*witness, left, right));
+        }
+    }
+    None
 }
 
 fn first_fork(

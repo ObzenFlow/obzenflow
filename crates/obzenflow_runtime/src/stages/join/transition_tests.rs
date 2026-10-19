@@ -15,13 +15,13 @@ use obzenflow_core::{
     ChainEvent, FlowId, JournalWriterId, ReaderGeneration, StageId, StageKey, TypedPayload,
     WriterId,
 };
-use obzenflow_fsm::{EventVariant, FsmAction, StateMachine, StateVariant};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmError, StateMachine, StateVariant};
 use serde::{Deserialize, Serialize};
 
 use super::config::{JoinReferenceMode, LiveStream, PhaseWitness, PhaseWitnesses};
 use super::fsm::{
     DrainStep, JoinAction, JoinContext, JoinDrain, JoinEvent, JoinPlan, JoinReading, JoinResources,
-    JoinState, LiveReads,
+    JoinState, JoinSubscriptionSide, LiveReads,
 };
 use super::supervisor::JoinSupervisor;
 use crate::backpressure::BackpressureWriter;
@@ -842,6 +842,29 @@ async fn ready_leaves_each_reading_state_as_it_was() {
         let mut join = Join::new(state.clone(), Some(witnesses.clone()), Vec::new());
         assert!(join.send(JoinEvent::Ready).await.is_empty());
         assert_eq!(join.state(), &state);
+    }
+}
+
+#[tokio::test]
+async fn a_promotion_without_its_held_subscription_fails() {
+    let plan = plan(JoinReferenceMode::FiniteEof, None);
+    for (side, input) in [
+        (JoinSubscriptionSide::Reference, "catalog"),
+        (JoinSubscriptionSide::Stream, "stream"),
+    ] {
+        let mut join = Join::new(JoinState::Hydrating(reading(plan)), None, Vec::new());
+        let error = JoinAction::<Handler>::PromoteHeld {
+            side,
+            generation: ReaderGeneration(1),
+        }
+        .execute(&mut join.ctx)
+        .await
+        .unwrap_err();
+        let expected = format!("join 'posted' has no {input} subscription to promote");
+        assert!(
+            matches!(&error, FsmError::HandlerError(detail) if *detail == expected),
+            "{error:?}"
+        );
     }
 }
 

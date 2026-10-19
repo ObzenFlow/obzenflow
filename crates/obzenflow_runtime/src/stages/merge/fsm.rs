@@ -433,9 +433,13 @@ impl FsmAction for MergeAction {
             }
             MergeAction::CatchUp(action) => action.execute(&mut ctx.catch_up).await,
             MergeAction::PromoteHeld(generation) => {
-                if let Some(held) = ctx.held.subscription.as_mut() {
-                    held.promote_held_readers(*generation);
-                }
+                let held = ctx.held.subscription.as_mut().ok_or_else(|| {
+                    FsmError::HandlerError(format!(
+                        "merge '{}' has no held subscription to promote",
+                        ctx.stage_name
+                    ))
+                })?;
+                held.promote_held_readers(*generation);
                 Ok(())
             }
             MergeAction::ForwardControl(envelope) => {

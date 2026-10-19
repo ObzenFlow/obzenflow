@@ -12,7 +12,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{
     ChainEvent, FlowId, JournalWriterId, ReaderGeneration, StageId, StageKey, WriterId,
 };
-use obzenflow_fsm::{EventVariant, StateMachine, StateVariant};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmError, StateMachine, StateVariant};
 
 use super::fsm::{MergeAction, MergeContext, MergeEvent, MergeInputs, MergeState};
 use super::supervisor::MergeSupervisor;
@@ -321,6 +321,20 @@ async fn ready_leaves_each_reading_state_as_it_was() {
     assert_eq!(last.variant_name(), "LastPhase");
     assert!(merge.send(MergeEvent::Ready).await.is_empty());
     assert_eq!(merge.state(), &last);
+}
+
+#[tokio::test]
+async fn a_promotion_without_its_held_subscription_fails() {
+    let mut merge = Merge::resumed(first_phase());
+    let error = MergeAction::PromoteHeld(ReaderGeneration(1))
+        .execute(&mut merge.ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, FsmError::HandlerError(detail)
+            if detail == "merge 'trades' has no held subscription to promote"),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

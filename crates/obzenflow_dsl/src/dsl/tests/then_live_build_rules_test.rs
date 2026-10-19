@@ -324,6 +324,109 @@ fn a_join_whose_stream_is_all_batch_has_an_empty_live_phase() {
     assert_eq!(witnesses.live_stream, LiveStream::Absent);
 }
 
+fn then_live_catalog() -> Vec<(&'static str, Box<dyn StageDescriptor>)> {
+    vec![
+        ("batch_accounts", batch_accounts()),
+        ("live_accounts", live_accounts()),
+        ("accounts", crate::merge!(Account => merges::then_live)),
+        (
+            "posted",
+            join_with!(inner_then_live, accounts: Account, Entry),
+        ),
+    ]
+}
+
+fn then_live_catalog_edges() -> Vec<AuthoredConnection> {
+    vec![
+        edge("batch_accounts", "accounts"),
+        edge("live_accounts", "accounts"),
+    ]
+}
+
+#[test]
+fn a_batch_stream_input_that_also_feeds_another_is_refused() {
+    let mut members = then_live_catalog();
+    members.push(("batch_tx", batch_tx()));
+    members.push((
+        "big_tx",
+        crate::transform!(Entry -> Entry => placeholder!()),
+    ));
+    let mut connections = then_live_catalog_edges();
+    connections.extend([
+        edge("batch_tx", "big_tx"),
+        join("accounts", "batch_tx", "posted"),
+        join("accounts", "big_tx", "posted"),
+    ]);
+    assert_eq!(
+        flow(members, connections).refusal(),
+        "join `posted` uses inner_then_live, but batch rows from `batch_tx` reach its stream by \
+         two paths (`batch_tx`, `big_tx`).\nFeed those branches into one stage and join that \
+         stage."
+    );
+}
+
+#[test]
+fn a_batch_producer_that_reaches_the_stream_merge_by_two_paths_is_refused() {
+    let mut members = then_live_catalog();
+    members.extend([
+        ("batch_tx", batch_tx()),
+        (
+            "reversals",
+            crate::transform!(Entry -> Entry => placeholder!()),
+        ),
+        ("live_tx", live_tx()),
+        ("transactions", crate::merge!(Entry => merges::then_live)),
+    ]);
+    let mut connections = then_live_catalog_edges();
+    connections.extend([
+        edge("batch_tx", "transactions"),
+        edge("batch_tx", "reversals"),
+        edge("reversals", "transactions"),
+        edge("live_tx", "transactions"),
+        join("accounts", "transactions", "posted"),
+    ]);
+    assert_eq!(
+        flow(members, connections).refusal(),
+        "join `posted` uses inner_then_live, but batch rows from `batch_tx` reach its stream by \
+         two paths (`reversals`, `transactions`).\nFeed those branches into one stage and join \
+         that stage."
+    );
+}
+
+#[test]
+fn branches_fed_into_one_stage_before_the_join_build() {
+    let mut members = then_live_catalog();
+    members.extend([
+        ("batch_tx", batch_tx()),
+        (
+            "big_tx",
+            crate::transform!(Entry -> Entry => placeholder!()),
+        ),
+        (
+            "all_tx",
+            crate::transform!(Entry -> Entry => placeholder!()),
+        ),
+    ]);
+    let mut connections = then_live_catalog_edges();
+    connections.extend([
+        edge("batch_tx", "big_tx"),
+        edge("batch_tx", "all_tx"),
+        edge("big_tx", "all_tx"),
+        join("accounts", "all_tx", "posted"),
+    ]);
+    let flow = flow(members, connections);
+    let plan = flow.plan().unwrap_or_else(|error| panic!("{error}"));
+    let (binding, witnesses) = &plan.witnesses[0];
+    assert_eq!(binding, "posted");
+    let batch_stream: Vec<_> = witnesses
+        .batch_stream
+        .iter()
+        .map(|witness| witness.stage_key.as_str())
+        .collect();
+    assert_eq!(batch_stream, ["all_tx"]);
+    assert_eq!(witnesses.live_stream, LiveStream::Absent);
+}
+
 #[test]
 fn a_merge_without_a_live_producer_is_refused() {
     let flow = flow(

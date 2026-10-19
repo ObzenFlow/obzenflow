@@ -600,13 +600,19 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
             }
             JoinAction::CatchUp(action) => action.execute(&mut ctx.catch_up).await,
             JoinAction::PromoteHeld { side, generation } => {
-                let held = match side {
-                    JoinSubscriptionSide::Reference => ctx.reference_subscription.as_mut(),
-                    JoinSubscriptionSide::Stream => ctx.stream_subscription.as_mut(),
+                let (held, input) = match side {
+                    JoinSubscriptionSide::Reference => {
+                        (ctx.reference_subscription.as_mut(), "catalog")
+                    }
+                    JoinSubscriptionSide::Stream => (ctx.stream_subscription.as_mut(), "stream"),
                 };
-                if let Some(subscription) = held {
-                    subscription.promote_held_readers(*generation);
-                }
+                let held = held.ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "join '{}' has no {input} subscription to promote",
+                        ctx.stage_name
+                    ))
+                })?;
+                held.promote_held_readers(*generation);
                 Ok(())
             }
             JoinAction::ForwardControl(envelope) => {
