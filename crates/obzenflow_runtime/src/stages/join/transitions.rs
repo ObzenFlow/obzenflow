@@ -2,427 +2,534 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::{ReaderGeneration, StageId, StageKey};
-use obzenflow_fsm::Transition;
+use obzenflow_core::ReaderGeneration;
+use obzenflow_fsm::types::{BoxFuture, FsmResult};
+use obzenflow_fsm::{EventVariant, FsmError, StateVariant, Transition};
 
-use super::config::PhaseWitnesses;
 use super::fsm::{
-    DrainStep, HoldCompletion, JoinAction, JoinDrain, JoinEvent, JoinPlan, JoinReading,
-    JoinResources, JoinState, JoinSubscriptionSide, PlanShape, ThenLivePhases,
+    DrainStep, HoldCompletion, JoinAction, JoinContext, JoinDrain, JoinEnrichment, JoinEvent,
+    JoinHold, JoinLive, JoinReading, JoinResources, JoinState, PlanShape, ThenLivePhases,
 };
-use super::phase::{check_crossing_phase, observe_hold, CrossingPhase, HoldOutcome};
+use super::phase::{check_crossing_phase, observe_hold, HoldOutcome};
 use crate::messaging::upstream_subscription::ReaderFrontier;
 use crate::stages::common::handlers::UnifiedJoinHandler;
-use crate::stages::common::input_facts::{fold_worst, EofRead, WatermarkRead};
-use crate::stages::common::supervision::catch_up::{frontier_step, CatchUpContext, CatchUpState};
+use crate::stages::common::input_facts::{fold_worst, EofRead};
+use crate::stages::common::supervision::catch_up::frontier_step;
 use crate::supervised_base::handler_supervised::SupervisorAction;
 
-pub(crate) struct JoinInputs<'a> {
-    pub(crate) stage_name: &'a str,
-    pub(crate) phase_witnesses: Option<&'a PhaseWitnesses>,
-    pub(crate) witness_keys: &'a HashMap<StageId, StageKey>,
-    pub(crate) archived_phases: &'a [JoinPhaseFact],
-    pub(crate) catch_up: &'a CatchUpContext,
-}
+type JoinTransition<H> = Transition<JoinState, JoinAction<H>>;
+type Decision<'a, H> = BoxFuture<'a, FsmResult<JoinTransition<H>>>;
 
-impl<'a> JoinInputs<'a> {
-    pub(crate) fn of<H: UnifiedJoinHandler>(resources: &'a JoinResources<H>) -> Self {
-        Self {
-            stage_name: &resources.stage_name,
-            phase_witnesses: resources.phase_witnesses.as_ref(),
-            witness_keys: &resources.witness_keys,
-            archived_phases: &resources.archived_phases,
-            catch_up: &resources.catch_up,
-        }
+fn change<H>(next_state: JoinState, actions: Vec<JoinAction<H>>) -> JoinTransition<H> {
+    Transition {
+        next_state,
+        actions,
     }
 }
 
-pub(crate) type JoinTransition<H> = Transition<JoinState, JoinAction<H>>;
+fn decided<'a, H: UnifiedJoinHandler + 'a>(transition: JoinTransition<H>) -> Decision<'a, H> {
+    Box::pin(async move { Ok(transition) })
+}
 
-pub(crate) fn failure<H>(cause: String) -> JoinTransition<H> {
-    Transition {
-        next_state: JoinState::failure(cause.clone()),
-        actions: vec![
+fn failing<H>(cause: String) -> JoinTransition<H> {
+    change(
+        JoinState::failure(cause.clone()),
+        vec![
             JoinAction::SendFailure { message: cause },
             JoinAction::Cleanup,
             JoinAction::Host(SupervisorAction::CloseMailbox),
             JoinAction::Host(SupervisorAction::SettlePublications),
             JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled)),
         ],
-    }
+    )
 }
 
-pub(crate) fn opening<H>(plan: JoinPlan) -> JoinTransition<H> {
-    let reading = JoinReading::new(plan);
-    let next_state = match plan.shape() {
-        PlanShape::Live(_) => JoinState::Live(reading),
-        PlanShape::FiniteEof | PlanShape::ThenLive(_) => JoinState::Hydrating(reading),
+fn counted<H: UnifiedJoinHandler>(ctx: &JoinContext<H>, cause: String) -> JoinTransition<H> {
+    ctx.instrumentation
+        .failures_total
+        .fetch_add(1, Ordering::Relaxed);
+    failing(cause)
+}
+
+fn decide<'a, H: UnifiedJoinHandler + 'a>(
+    ctx: &JoinContext<H>,
+    from: &JoinState,
+    decision: impl FnOnce(&JoinResources<H>) -> Result<JoinTransition<H>, String>,
+) -> Decision<'a, H> {
+    let decision = match ctx.resources.as_ref() {
+        Some(resources) => decision(resources).inspect(|transition| {
+            if transition.next_state.variant_name() != from.variant_name() {
+                tracing::info!(
+                    stage_name = %resources.stage_name,
+                    from = from.variant_name(),
+                    to = transition.next_state.variant_name(),
+                    "Join changed phase"
+                );
+            }
+        }),
+        None => Err("join resources belong to a pending operation".to_string()),
     };
-    Transition {
-        next_state,
-        actions: Vec::new(),
-    }
+    decided(decision.unwrap_or_else(|cause| counted(ctx, cause)))
 }
 
-struct Crossing<H> {
-    catch_up: CatchUpState,
-    actions: Vec<JoinAction<H>>,
-}
-
-fn cross<H>(
-    catch_up: &CatchUpState,
+fn crossed<H: UnifiedJoinHandler>(
+    state: &JoinState,
     generation: ReaderGeneration,
     frontier: ReaderFrontier,
-    phase: CrossingPhase,
-    held: Option<JoinSubscriptionSide>,
-    inputs: &JoinInputs<'_>,
-) -> Result<Crossing<H>, String> {
-    let step = frontier_step(catch_up, generation, frontier, inputs.catch_up);
-    if let CatchUpState::Refused { fatal } | CatchUpState::Failed { fatal } = &step.next {
-        return Err(fatal.detail.clone());
-    }
+    resources: &JoinResources<H>,
+) -> Result<(JoinReading, Vec<JoinAction<H>>), String> {
+    let (Some(reading), Some(phase)) = (state.reading(), state.crossing_phase()) else {
+        unreachable!()
+    };
+    let step = frontier_step(&reading.catch_up, generation, frontier, &resources.catch_up)
+        .into_result()
+        .map_err(|fatal| fatal.detail)?;
+    let mut actions: Vec<_> = step.actions.into_iter().map(JoinAction::CatchUp).collect();
     if let Some(crossed) = step.crossed_into {
-        check_crossing_phase(inputs.stage_name, inputs.archived_phases, crossed, phase)?;
+        check_crossing_phase(
+            &resources.stage_name,
+            &resources.archived_phases,
+            crossed,
+            phase,
+        )?;
+        actions.extend(state.held_input().map(|side| JoinAction::PromoteHeld {
+            side,
+            generation: crossed,
+        }));
     }
-    let mut actions: Vec<JoinAction<H>> =
-        step.actions.into_iter().map(JoinAction::CatchUp).collect();
-    if let (Some(generation), Some(side)) = (step.crossed_into, held) {
-        actions.push(JoinAction::PromoteHeld { side, generation });
-    }
-    Ok(Crossing {
-        catch_up: step.next,
+    Ok((
+        JoinReading {
+            catch_up: step.next,
+            ..reading.clone()
+        },
         actions,
-    })
+    ))
 }
 
-fn entered(completion: HoldCompletion, live: bool) -> JoinPhaseFact {
-    if live {
-        JoinPhaseFact::LiveEntered {
-            generation: completion.generation,
-            ended_by: completion.ended_by,
-        }
-    } else {
-        JoinPhaseFact::EnrichingEntered {
-            generation: completion.generation,
-            ended_by: completion.ended_by,
-        }
-    }
+fn read_eof<H: UnifiedJoinHandler>(
+    state: &JoinState,
+    eof: &EofRead,
+    resources: &JoinResources<H>,
+) -> Result<(JoinReading, Vec<JoinAction<H>>), String> {
+    let (mut reading, mut actions) =
+        crossed(state, eof.frontier.highest(), eof.frontier, resources)?;
+    actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
+    reading.worst_eof = fold_worst(reading.worst_eof, eof.side_worst);
+    Ok((reading, actions))
 }
 
-fn ended(eof: &EofRead, worst_eof: Option<EofKind>, step: DrainStep) -> JoinDrain {
-    JoinDrain {
+fn drained_by(eof: &EofRead, reading: &JoinReading, step: DrainStep) -> JoinState {
+    JoinState::Draining(JoinDrain {
         step,
-        worst_eof,
+        worst_eof: reading.worst_eof,
         clock: eof.clock(),
+    })
+}
+
+fn hydrated(reading: JoinReading, completion: HoldCompletion) -> (JoinState, JoinPhaseFact) {
+    match reading.plan.shape() {
+        PlanShape::Live(reads) | PlanShape::ThenLive(ThenLivePhases::LiveOnly(reads)) => (
+            JoinState::Live(JoinLive { reading, reads }),
+            completion.live_entered(),
+        ),
+        PlanShape::FiniteEof => (
+            JoinState::Enriching(JoinEnrichment::ToEnd(reading)),
+            completion.enriching_entered(),
+        ),
+        PlanShape::ThenLive(ThenLivePhases::BatchThenLive(_) | ThenLivePhases::BatchOnly) => (
+            JoinState::Enriching(JoinEnrichment::Holding(JoinHold::new(reading))),
+            completion.enriching_entered(),
+        ),
     }
 }
 
-pub(crate) fn hydrating_watermark<H>(
-    reading: &JoinReading,
-    read: &WatermarkRead,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    let crossing = cross(
-        &reading.catch_up,
-        read.generation,
-        read.frontier,
-        CrossingPhase::Hydrating,
-        Some(JoinSubscriptionSide::Stream),
-        inputs,
-    )?;
-    Ok(Transition {
-        next_state: JoinState::Hydrating(JoinReading {
-            catch_up: crossing.catch_up,
-            ..reading.clone()
-        }),
-        actions: crossing.actions,
-    })
-}
-
-pub(crate) fn hydrating_eof<H>(
-    reading: &JoinReading,
+fn batch_read<H: UnifiedJoinHandler>(
+    hold: &JoinHold,
+    reading: JoinReading,
     eof: &EofRead,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    let crossing = cross(
-        &reading.catch_up,
-        eof.frontier.highest(),
-        eof.frontier,
-        CrossingPhase::Hydrating,
-        Some(JoinSubscriptionSide::Stream),
-        inputs,
-    )?;
-    let mut actions = crossing.actions;
-    actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
-    let worst_eof = fold_worst(reading.worst_eof, eof.side_worst);
-    let witnesses = inputs
+    resources: &JoinResources<H>,
+) -> Result<(JoinState, Option<JoinPhaseFact>), String> {
+    let batch = resources
         .phase_witnesses
-        .map(|witnesses| witnesses.catalog.as_slice());
-    let (witnessed, hold) = observe_hold(&reading.witnessed, witnesses, inputs.witness_keys, eof);
-    let held = JoinReading {
-        plan: reading.plan,
-        catch_up: crossing.catch_up,
-        worst_eof,
-        witnessed,
-    };
-    let next_state = match hold {
-        HoldOutcome::Holding => JoinState::Hydrating(held),
-        HoldOutcome::Completed(completion) => {
-            actions.push(JoinAction::EmitHydrationHeartbeat);
-            let next = JoinReading {
-                witnessed: Arc::default(),
-                ..held
-            };
-            match reading.plan.shape() {
-                PlanShape::Live(_) | PlanShape::ThenLive(ThenLivePhases::LiveOnly(_)) => {
-                    actions.push(JoinAction::RecordPhase(entered(completion, true)));
-                    JoinState::Live(next)
-                }
-                PlanShape::FiniteEof
-                | PlanShape::ThenLive(
-                    ThenLivePhases::BatchThenLive(_) | ThenLivePhases::BatchOnly,
-                ) => {
-                    actions.push(JoinAction::RecordPhase(entered(completion, false)));
-                    JoinState::Enriching(next)
-                }
+        .as_ref()
+        .map(|witnesses| witnesses.batch_stream.as_slice());
+    let (witnessed, outcome) = observe_hold(&hold.witnessed, batch, &resources.witness_keys, eof);
+    Ok(match outcome {
+        HoldOutcome::Holding => (
+            JoinState::Enriching(JoinEnrichment::Holding(JoinHold { reading, witnessed })),
+            None,
+        ),
+        HoldOutcome::Completed(completion) => match reading.plan.live_reads() {
+            Some(reads) => (
+                JoinState::Live(JoinLive { reading, reads }),
+                Some(completion.live_entered()),
+            ),
+            None if eof.ends_reads => (
+                drained_by(
+                    eof,
+                    &reading,
+                    DrainStep::Finalize {
+                        final_eof: eof.envelope.clone(),
+                    },
+                ),
+                None,
+            ),
+            None => {
+                return Err(format!(
+                    "join '{}' completed its batch on an EOF that did not end its stream",
+                    resources.stage_name
+                ))
             }
-        }
-        HoldOutcome::LeftOpen => {
-            actions.push(JoinAction::EmitHydrationHeartbeat);
-            JoinState::Draining(JoinDrain {
-                step: DrainStep::Flush,
-                worst_eof,
-                clock: None,
-            })
+        },
+        HoldOutcome::LeftOpen => (drained_by(eof, &reading, DrainStep::Flush), None),
+    })
+}
+
+pub(super) fn initialize<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Created(plan) = state else {
+        unreachable!()
+    };
+    decided(change(
+        JoinState::Initializing(*plan),
+        vec![
+            JoinAction::Host(SupervisorAction::Register),
+            JoinAction::AllocateResources,
+            JoinAction::Host(SupervisorAction::Emit(JoinEvent::InitializationCompleted)),
+        ],
+    ))
+}
+
+pub(super) fn initialized<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Initializing(plan) = state else {
+        unreachable!()
+    };
+    decided(change(JoinState::Initialized(*plan), Vec::new()))
+}
+
+pub(super) fn ready<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Initialized(plan) = state else {
+        unreachable!()
+    };
+    decided(change(
+        JoinState::Starting(*plan),
+        vec![
+            JoinAction::PublishRunning,
+            JoinAction::Host(SupervisorAction::Emit(JoinEvent::ActivationCompleted)),
+        ],
+    ))
+}
+
+pub(super) fn activated<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Starting(plan) = state else {
+        unreachable!()
+    };
+    let reading = JoinReading::new(*plan);
+    let next_state = match plan.shape() {
+        PlanShape::Live(reads) => JoinState::Live(JoinLive { reading, reads }),
+        PlanShape::FiniteEof | PlanShape::ThenLive(_) => {
+            JoinState::Hydrating(JoinHold::new(reading))
         }
     };
-    Ok(Transition {
-        next_state,
-        actions,
+    decided(change(next_state, Vec::new()))
+}
+
+pub(super) fn watermark<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    event: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinEvent::WatermarkRead(read) = event else {
+        unreachable!()
+    };
+    decide(ctx, state, |resources| {
+        let (reading, actions) = crossed(state, read.generation, read.frontier, resources)?;
+        Ok(change(state.with_reading(reading), actions))
     })
 }
 
-fn enriching_held(plan: JoinPlan) -> Option<JoinSubscriptionSide> {
-    plan.enriching_holds_catalog()
-        .then_some(JoinSubscriptionSide::Reference)
-}
-
-pub(crate) fn enriching_watermark<H>(
-    reading: &JoinReading,
-    read: &WatermarkRead,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    let crossing = cross(
-        &reading.catch_up,
-        read.generation,
-        read.frontier,
-        CrossingPhase::Enriching,
-        enriching_held(reading.plan),
-        inputs,
-    )?;
-    Ok(Transition {
-        next_state: JoinState::Enriching(JoinReading {
-            catch_up: crossing.catch_up,
-            ..reading.clone()
-        }),
-        actions: crossing.actions,
+pub(super) fn hydrating_eof<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    event: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let (JoinState::Hydrating(hold), JoinEvent::ReferenceEofRead(eof)) = (state, event) else {
+        unreachable!()
+    };
+    decide(ctx, state, |resources| {
+        let (reading, mut actions) = read_eof(state, eof, resources)?;
+        let catalog = resources
+            .phase_witnesses
+            .as_ref()
+            .map(|witnesses| witnesses.catalog.as_slice());
+        let (witnessed, outcome) =
+            observe_hold(&hold.witnessed, catalog, &resources.witness_keys, eof);
+        let next_state = match outcome {
+            HoldOutcome::Holding => JoinState::Hydrating(JoinHold { reading, witnessed }),
+            HoldOutcome::Completed(completion) => {
+                let (next_state, entered) = hydrated(reading, completion);
+                actions.push(JoinAction::EmitHydrationHeartbeat);
+                actions.push(JoinAction::RecordPhase(entered));
+                next_state
+            }
+            HoldOutcome::LeftOpen => {
+                actions.push(JoinAction::EmitHydrationHeartbeat);
+                JoinState::Draining(JoinDrain {
+                    step: DrainStep::Flush,
+                    worst_eof: reading.worst_eof,
+                    clock: None,
+                })
+            }
+        };
+        Ok(change(next_state, actions))
     })
 }
 
-pub(crate) fn enriching_eof<H>(
-    reading: &JoinReading,
-    eof: &EofRead,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    let crossing = cross(
-        &reading.catch_up,
-        eof.frontier.highest(),
-        eof.frontier,
-        CrossingPhase::Enriching,
-        enriching_held(reading.plan),
-        inputs,
-    )?;
-    let mut actions = crossing.actions;
-    actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
-    let worst_eof = fold_worst(reading.worst_eof, eof.side_worst);
-
-    if !reading.plan.enriching_holds_catalog() {
-        let next_state = if eof.ends_reads {
-            JoinState::Draining(ended(
+pub(super) fn enriching_eof<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    event: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let (JoinState::Enriching(enrichment), JoinEvent::StreamEofRead(eof)) = (state, event) else {
+        unreachable!()
+    };
+    decide(ctx, state, |resources| {
+        let (reading, mut actions) = read_eof(state, eof, resources)?;
+        let next_state = match enrichment {
+            JoinEnrichment::ToEnd(_) if eof.ends_reads => drained_by(
                 eof,
-                worst_eof,
+                &reading,
                 DrainStep::CheckInputs {
                     final_eof: eof.envelope.clone(),
                 },
-            ))
-        } else {
-            JoinState::Enriching(JoinReading {
-                catch_up: crossing.catch_up,
-                worst_eof,
-                ..reading.clone()
-            })
+            ),
+            JoinEnrichment::ToEnd(_) => state.with_reading(reading),
+            JoinEnrichment::Holding(hold) => {
+                let (next_state, entered) = batch_read(hold, reading, eof, resources)?;
+                actions.extend(entered.map(JoinAction::RecordPhase));
+                next_state
+            }
         };
-        return Ok(Transition {
-            next_state,
-            actions,
-        });
-    }
-
-    let witnesses = inputs
-        .phase_witnesses
-        .map(|witnesses| witnesses.batch_stream.as_slice());
-    let (witnessed, hold) = observe_hold(&reading.witnessed, witnesses, inputs.witness_keys, eof);
-    let held = JoinReading {
-        plan: reading.plan,
-        catch_up: crossing.catch_up,
-        worst_eof,
-        witnessed,
-    };
-    let batch_only = matches!(
-        reading.plan.shape(),
-        PlanShape::ThenLive(ThenLivePhases::BatchOnly)
-    );
-    let next_state = match hold {
-        HoldOutcome::Holding => JoinState::Enriching(held),
-        HoldOutcome::Completed(_) if batch_only && eof.ends_reads => JoinState::Draining(ended(
-            eof,
-            worst_eof,
-            DrainStep::Finalize {
-                final_eof: eof.envelope.clone(),
-            },
-        )),
-        HoldOutcome::Completed(_) if batch_only => {
-            return Err(format!(
-                "join '{}' completed its batch on an EOF that did not end its stream",
-                inputs.stage_name
-            ))
-        }
-        HoldOutcome::Completed(completion) => {
-            actions.push(JoinAction::RecordPhase(entered(completion, true)));
-            JoinState::Live(JoinReading {
-                witnessed: Arc::default(),
-                ..held
-            })
-        }
-        HoldOutcome::LeftOpen => JoinState::Draining(ended(eof, worst_eof, DrainStep::Flush)),
-    };
-    Ok(Transition {
-        next_state,
-        actions,
+        Ok(change(next_state, actions))
     })
 }
 
-pub(crate) fn live_watermark<H>(
-    reading: &JoinReading,
-    read: &WatermarkRead,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    let crossing = cross(
-        &reading.catch_up,
-        read.generation,
-        read.frontier,
-        CrossingPhase::Live,
-        None,
-        inputs,
-    )?;
-    Ok(Transition {
-        next_state: JoinState::Live(JoinReading {
-            catch_up: crossing.catch_up,
-            ..reading.clone()
-        }),
-        actions: crossing.actions,
+pub(super) fn live_reference_eof<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    event: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinEvent::ReferenceEofRead(eof) = event else {
+        unreachable!()
+    };
+    decide(ctx, state, |resources| {
+        let (reading, actions) = read_eof(state, eof, resources)?;
+        Ok(change(state.with_reading(reading), actions))
     })
 }
 
-pub(crate) fn live_eof<H>(
-    reading: &JoinReading,
-    eof: &EofRead,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    let crossing = cross(
-        &reading.catch_up,
-        eof.frontier.highest(),
-        eof.frontier,
-        CrossingPhase::Live,
-        None,
-        inputs,
-    )?;
-    let mut actions = crossing.actions;
-    actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
-    let worst_eof = fold_worst(reading.worst_eof, eof.side_worst);
-    let next_state = if eof.ends_reads {
-        JoinState::Draining(ended(
-            eof,
-            worst_eof,
-            DrainStep::Finalize {
-                final_eof: eof.envelope.clone(),
+pub(super) fn live_stream_eof<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    event: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinEvent::StreamEofRead(eof) = event else {
+        unreachable!()
+    };
+    decide(ctx, state, |resources| {
+        let (reading, actions) = read_eof(state, eof, resources)?;
+        let next_state = if eof.ends_reads {
+            drained_by(
+                eof,
+                &reading,
+                DrainStep::Finalize {
+                    final_eof: eof.envelope.clone(),
+                },
+            )
+        } else {
+            state.with_reading(reading)
+        };
+        Ok(change(next_state, actions))
+    })
+}
+
+pub(super) fn drain_step_ended<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Draining(drain) = state else {
+        unreachable!()
+    };
+    decide(ctx, state, |resources| {
+        let step = match &drain.step {
+            DrainStep::CheckInputs { final_eof } => DrainStep::Finalize {
+                final_eof: final_eof.clone(),
             },
+            DrainStep::Finalize { .. } => DrainStep::Flush,
+            DrainStep::Flush => {
+                return Err(format!(
+                    "join '{}' reported a drain step after its flush",
+                    resources.stage_name
+                ))
+            }
+        };
+        Ok(change(
+            JoinState::Draining(JoinDrain {
+                step,
+                ..drain.clone()
+            }),
+            Vec::new(),
         ))
-    } else {
-        JoinState::Live(JoinReading {
-            catch_up: crossing.catch_up,
-            worst_eof,
-            ..reading.clone()
-        })
-    };
-    Ok(Transition {
-        next_state,
-        actions,
     })
 }
 
-pub(crate) fn drain_step_ended<H>(
-    drain: &JoinDrain,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    let step = match &drain.step {
-        DrainStep::CheckInputs { final_eof } => DrainStep::Finalize {
-            final_eof: final_eof.clone(),
-        },
-        DrainStep::Finalize { .. } => DrainStep::Flush,
-        DrainStep::Flush => {
+pub(super) fn drain_complete<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Draining(drain) = state else {
+        unreachable!()
+    };
+    decide(ctx, state, |resources| {
+        if drain.step != DrainStep::Flush {
             return Err(format!(
-                "join '{}' reported a drain step after its flush",
-                inputs.stage_name
-            ))
+                "join '{}' completed its drain before its flush",
+                resources.stage_name
+            ));
         }
-    };
-    Ok(Transition {
-        next_state: JoinState::Draining(JoinDrain {
-            step,
-            ..drain.clone()
-        }),
-        actions: Vec::new(),
+        Ok(change(
+            JoinState::Finalizing,
+            vec![
+                JoinAction::AuthorEof {
+                    kind: drain.worst_eof.unwrap_or(EofKind::Natural),
+                    clock: drain.clock.clone(),
+                },
+                JoinAction::SendCompletion,
+                JoinAction::Cleanup,
+                JoinAction::Host(SupervisorAction::CloseMailbox),
+                JoinAction::Host(SupervisorAction::SettlePublications),
+                JoinAction::Host(SupervisorAction::Emit(JoinEvent::FinalizationCompleted)),
+            ],
+        ))
     })
 }
 
-pub(crate) fn drain_complete<H>(
-    drain: &JoinDrain,
-    inputs: &JoinInputs<'_>,
-) -> Result<JoinTransition<H>, String> {
-    if drain.step != DrainStep::Flush {
-        return Err(format!(
-            "join '{}' completed its drain before its flush",
-            inputs.stage_name
-        ));
-    }
-    Ok(Transition {
-        next_state: JoinState::Finalizing,
-        actions: vec![
-            JoinAction::AuthorEof {
-                kind: drain.worst_eof.unwrap_or(EofKind::Natural),
-                clock: drain.clock.clone(),
-            },
-            JoinAction::SendCompletion,
-            JoinAction::Cleanup,
-            JoinAction::Host(SupervisorAction::CloseMailbox),
-            JoinAction::Host(SupervisorAction::SettlePublications),
-            JoinAction::Host(SupervisorAction::Emit(JoinEvent::FinalizationCompleted)),
-        ],
+pub(super) fn finalized<'a, H: UnifiedJoinHandler>(
+    _: &'a JoinState,
+    _: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    decided(change(JoinState::Drained, Vec::new()))
+}
+
+pub(super) fn failure_settled<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Failing(cause) = state else {
+        unreachable!()
+    };
+    decided(change(JoinState::Failed(cause.clone()), Vec::new()))
+}
+
+pub(super) fn cancellation_settled<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    _: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinState::Cancelling(cause) = state else {
+        unreachable!()
+    };
+    decided(change(JoinState::Cancelled(cause.clone()), Vec::new()))
+}
+
+pub(super) fn cancelling_error<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    event: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinEvent::Error(cause) = event else {
+        unreachable!()
+    };
+    decided(match JoinState::failure(cause.clone()) {
+        JoinState::Cancelling(_) => change(state.clone(), Vec::new()),
+        _ => failing(cause.clone()),
+    })
+}
+
+pub(super) fn failure<'a, H: UnifiedJoinHandler>(
+    _: &'a JoinState,
+    event: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinEvent::Error(cause) = event else {
+        unreachable!()
+    };
+    decided(failing(cause.clone()))
+}
+
+pub(super) fn counted_failure<'a, H: UnifiedJoinHandler>(
+    _: &'a JoinState,
+    event: &'a JoinEvent,
+    ctx: &'a mut JoinContext<H>,
+) -> Decision<'a, H> {
+    let JoinEvent::Error(cause) = event else {
+        unreachable!()
+    };
+    decided(counted(ctx, cause.clone()))
+}
+
+pub(super) fn unhandled<'a, H: UnifiedJoinHandler>(
+    state: &'a JoinState,
+    event: &'a JoinEvent,
+    _: &'a mut JoinContext<H>,
+) -> BoxFuture<'a, FsmResult<()>> {
+    let ignored = matches!(event, JoinEvent::Initialize | JoinEvent::Ready)
+        || matches!(
+            state,
+            JoinState::Failing(_)
+                | JoinState::Cancelling(_)
+                | JoinState::Failed(_)
+                | JoinState::Cancelled(_)
+                | JoinState::Drained
+        );
+    let state_name = state.variant_name().to_string();
+    let event_name = event.variant_name().to_string();
+    Box::pin(async move {
+        if ignored {
+            return Ok(());
+        }
+        tracing::error!(
+            supervisor = "JoinSupervisor",
+            state = %state_name,
+            event = %event_name,
+            "Unhandled event in FSM - this indicates a state machine configuration error"
+        );
+        Err(FsmError::UnhandledEvent {
+            state: state_name,
+            event: event_name,
+        })
     })
 }

@@ -34,13 +34,12 @@ impl EofRead {
     pub(crate) fn new(
         envelope: DeliveredRecord<ChainPayload>,
         outcome: Option<EofOutcome>,
-        ends_reads: bool,
         generation: Option<ReaderGeneration>,
         frontier: ReaderFrontier,
     ) -> Self {
         Self {
             envelope: Arc::new(envelope),
-            ends_reads,
+            ends_reads: outcome.as_ref().is_some_and(|outcome| outcome.is_final),
             side_worst: outcome.as_ref().and_then(|outcome| outcome.worst_kind),
             frontier,
             generation: generation.unwrap_or_default(),

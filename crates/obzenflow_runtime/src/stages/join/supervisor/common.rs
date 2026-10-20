@@ -58,9 +58,9 @@ pub(super) fn ensure_subscriptions<
 pub(super) async fn read_control<H: UnifiedJoinHandler>(
     ctx: &mut JoinResources<H>,
     subscription: &mut UpstreamSubscription<ChainEvent>,
+    side: JoinSubscriptionSide,
     beside: Option<&UpstreamSubscription<ChainEvent>>,
     observed: Option<JoinSide>,
-    final_ends_reads: bool,
     envelope: DeliveredRecord<ChainPayload>,
 ) -> Result<Option<JoinEvent>, Box<dyn std::error::Error + Send + Sync>> {
     let ChainPayload::FlowControl(signal) = &envelope.payload else {
@@ -107,12 +107,12 @@ pub(super) async fn read_control<H: UnifiedJoinHandler>(
     }
     if envelope.is_eof() {
         let outcome = subscription.take_last_eof_outcome();
-        let ends_reads =
-            final_ends_reads && outcome.as_ref().is_some_and(|outcome| outcome.is_final);
         let generation = subscription.last_delivered_generation();
-        return Ok(Some(JoinEvent::EofRead(EofRead::new(
-            envelope, outcome, ends_reads, generation, frontier,
-        ))));
+        let eof = EofRead::new(envelope, outcome, generation, frontier);
+        return Ok(Some(match side {
+            JoinSubscriptionSide::Reference => JoinEvent::ReferenceEofRead(eof),
+            JoinSubscriptionSide::Stream => JoinEvent::StreamEofRead(eof),
+        }));
     }
     forward_control_to_journal(ctx, &envelope).await?;
     Ok(None)

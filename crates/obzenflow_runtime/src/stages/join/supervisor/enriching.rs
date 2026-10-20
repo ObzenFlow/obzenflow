@@ -23,7 +23,7 @@ use std::time::Instant;
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::stages::join::fsm::{
-    JoinEvent, JoinReading, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
+    JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
 };
 
 pub(super) async fn dispatch_enriching<
@@ -31,12 +31,11 @@ pub(super) async fn dispatch_enriching<
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState,
-    reading: &JoinReading,
     ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
-    if reading.plan.enriching_holds_catalog() {
-        common::renew_held_inputs(ctx, JoinSubscriptionSide::Reference);
+    if let Some(held) = state.held_input() {
+        common::renew_held_inputs(ctx, held);
     }
 
     ctx.instrumentation
@@ -74,9 +73,9 @@ pub(super) async fn dispatch_enriching<
                     match common::read_control(
                         ctx,
                         subscription,
+                        JoinSubscriptionSide::Stream,
                         None,
                         Some(crate::stages::observer::JoinSide::Stream),
-                        true,
                         envelope,
                     )
                     .await?

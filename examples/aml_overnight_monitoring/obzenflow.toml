@@ -13,7 +13,9 @@ fx_rates = "examples/aml_overnight_monitoring/fixtures/simulated-treasury-rates.
 risk_ledger = "target/aml-risk-calls.jsonl"
 case_ledger = "target/aml-case-calls.jsonl"
 cleared_register = "target/aml-cleared.csv"
+unscored_register = "target/aml-unscored.csv"
 case_register = "target/aml-cases.csv"
+unopened_register = "target/aml-unopened-alerts.csv"
 
 [app.rules]
 fan_out_counterparties = 10

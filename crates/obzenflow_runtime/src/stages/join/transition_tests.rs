@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use super::config::{JoinReferenceMode, LiveStream, PhaseWitness, PhaseWitnesses};
 use super::fsm::{
-    DrainStep, JoinAction, JoinContext, JoinDrain, JoinEvent, JoinPlan, JoinReading, JoinResources,
-    JoinState, JoinSubscriptionSide, LiveReads,
+    DrainStep, JoinAction, JoinContext, JoinDrain, JoinEnrichment, JoinEvent, JoinHold, JoinLive,
+    JoinPlan, JoinReading, JoinResources, JoinState, JoinSubscriptionSide, LiveReads,
 };
 use super::supervisor::JoinSupervisor;
 use crate::backpressure::BackpressureWriter;
@@ -258,6 +258,25 @@ fn reading(plan: JoinPlan) -> JoinReading {
     JoinReading::new(plan)
 }
 
+fn hydrating(plan: JoinPlan) -> JoinState {
+    JoinState::Hydrating(JoinHold::new(reading(plan)))
+}
+
+fn holding(plan: JoinPlan) -> JoinState {
+    JoinState::Enriching(JoinEnrichment::Holding(JoinHold::new(reading(plan))))
+}
+
+fn to_end(plan: JoinPlan) -> JoinState {
+    JoinState::Enriching(JoinEnrichment::ToEnd(reading(plan)))
+}
+
+fn live(plan: JoinPlan) -> JoinState {
+    JoinState::Live(JoinLive {
+        reading: reading(plan),
+        reads: plan.live_reads().expect("a plan with a live phase"),
+    })
+}
+
 fn clock_of(author: StageId) -> VectorClock {
     let mut clock = VectorClock::new();
     clock.clocks.insert(coordinate(&author.to_string()), 7);
@@ -301,11 +320,17 @@ fn draining(state: &JoinState) -> &JoinDrain {
 }
 
 fn reading_of(state: &JoinState) -> &JoinReading {
+    state
+        .reading()
+        .unwrap_or_else(|| panic!("expected a reading state, found {state:?}"))
+}
+
+fn witnessed_of(state: &JoinState) -> &BTreeMap<StageKey, EofKind> {
     match state {
-        JoinState::Hydrating(reading)
-        | JoinState::Enriching(reading)
-        | JoinState::Live(reading) => reading,
-        other => panic!("expected a reading state, found {other:?}"),
+        JoinState::Hydrating(hold) | JoinState::Enriching(JoinEnrichment::Holding(hold)) => {
+            &hold.witnessed
+        }
+        other => panic!("expected a holding state, found {other:?}"),
     }
 }
 
@@ -355,13 +380,9 @@ async fn hydration_completes_when_every_catalog_witness_ends_naturally_in_either
     );
     let plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
     for (first, last) in [(&a, &b), (&b, &a)] {
-        let mut join = Join::new(
-            JoinState::Hydrating(reading(plan)),
-            Some(witnesses.clone()),
-            Vec::new(),
-        );
+        let mut join = Join::new(hydrating(plan), Some(witnesses.clone()), Vec::new());
         let held = join
-            .send(JoinEvent::EofRead(eof(
+            .send(JoinEvent::ReferenceEofRead(eof(
                 first.stage_id,
                 EofKind::Natural,
                 false,
@@ -371,15 +392,12 @@ async fn hydration_completes_when_every_catalog_witness_ends_naturally_in_either
         assert_eq!(held, ["forward"]);
         assert_eq!(join.state().variant_name(), "Hydrating");
         assert_eq!(
-            reading_of(join.state())
-                .witnessed
-                .get(&first.stage_key)
-                .copied(),
+            witnessed_of(join.state()).get(&first.stage_key).copied(),
             Some(EofKind::Natural)
         );
 
         let completed = join
-            .send(JoinEvent::EofRead(eof(
+            .send(JoinEvent::ReferenceEofRead(eof(
                 last.stage_id,
                 EofKind::Natural,
                 true,
@@ -387,8 +405,11 @@ async fn hydration_completes_when_every_catalog_witness_ends_naturally_in_either
             )))
             .await;
         assert_eq!(completed, ["forward", "heartbeat", "enriching_entered 0"]);
-        assert_eq!(join.state().variant_name(), "Enriching");
-        assert!(reading_of(join.state()).witnessed.is_empty());
+        assert!(matches!(
+            join.state(),
+            JoinState::Enriching(JoinEnrichment::Holding(_))
+        ));
+        assert!(witnessed_of(join.state()).is_empty());
     }
 }
 
@@ -397,13 +418,9 @@ async fn a_plan_with_no_batch_stream_goes_from_hydrating_straight_to_live() {
     let prices = witness("prices");
     let witnesses = then_live(vec![prices.clone()], Vec::new(), LiveStream::Present);
     let plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
-    let mut join = Join::new(
-        JoinState::Hydrating(reading(plan)),
-        Some(witnesses),
-        Vec::new(),
-    );
+    let mut join = Join::new(hydrating(plan), Some(witnesses), Vec::new());
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::ReferenceEofRead(eof(
             prices.stage_id,
             EofKind::Natural,
             true,
@@ -423,13 +440,9 @@ async fn a_hydration_left_open_drains_at_flush_with_no_clock() {
         LiveStream::Present,
     );
     let plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
-    let mut join = Join::new(
-        JoinState::Hydrating(reading(plan)),
-        Some(witnesses),
-        Vec::new(),
-    );
+    let mut join = Join::new(hydrating(plan), Some(witnesses), Vec::new());
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::ReferenceEofRead(eof(
             prices.stage_id,
             EofKind::Poison,
             true,
@@ -453,13 +466,9 @@ async fn a_holding_batch_goes_live_on_its_witnesses_and_drains_when_left_open() 
     );
     let plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
 
-    let mut join = Join::new(
-        JoinState::Enriching(reading(plan)),
-        Some(witnesses.clone()),
-        Vec::new(),
-    );
+    let mut join = Join::new(holding(plan), Some(witnesses.clone()), Vec::new());
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::StreamEofRead(eof(
             orders.stage_id,
             EofKind::Natural,
             false,
@@ -469,13 +478,9 @@ async fn a_holding_batch_goes_live_on_its_witnesses_and_drains_when_left_open() 
     assert_eq!(actions, ["forward", "live_entered 0"]);
     assert_eq!(join.state().variant_name(), "Live");
 
-    let mut join = Join::new(
-        JoinState::Enriching(reading(plan)),
-        Some(witnesses),
-        Vec::new(),
-    );
+    let mut join = Join::new(holding(plan), Some(witnesses), Vec::new());
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::StreamEofRead(eof(
             orders.stage_id,
             EofKind::Poison,
             true,
@@ -498,27 +503,19 @@ async fn a_batch_with_no_live_phase_drains_at_finalize_when_its_stream_ends() {
     );
     let plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
 
-    let mut join = Join::new(
-        JoinState::Enriching(reading(plan)),
-        Some(witnesses.clone()),
-        Vec::new(),
-    );
+    let mut join = Join::new(holding(plan), Some(witnesses.clone()), Vec::new());
     let ended = eof(orders.stage_id, EofKind::Natural, true, not_crossing());
     let final_eof = ended.envelope.clone();
-    let actions = join.send(JoinEvent::EofRead(ended)).await;
+    let actions = join.send(JoinEvent::StreamEofRead(ended)).await;
     assert_eq!(actions, ["forward"]);
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::Finalize { final_eof });
     assert_eq!(drain.worst_eof, Some(EofKind::Natural));
     assert_eq!(drain.clock, Some(clock_of(orders.stage_id)));
 
-    let mut join = Join::new(
-        JoinState::Enriching(reading(plan)),
-        Some(witnesses),
-        Vec::new(),
-    );
+    let mut join = Join::new(holding(plan), Some(witnesses), Vec::new());
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::StreamEofRead(eof(
             orders.stage_id,
             EofKind::Natural,
             false,
@@ -539,10 +536,10 @@ async fn a_batch_with_no_live_phase_drains_at_finalize_when_its_stream_ends() {
 async fn a_finite_eof_batch_reads_its_stream_to_the_end_then_checks_its_inputs() {
     let plan = plan(JoinReferenceMode::FiniteEof, None);
     let orders = StageId::new();
-    let mut join = Join::new(JoinState::Enriching(reading(plan)), None, Vec::new());
+    let mut join = Join::new(to_end(plan), None, Vec::new());
 
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::StreamEofRead(eof(
             orders,
             EofKind::Natural,
             false,
@@ -550,11 +547,17 @@ async fn a_finite_eof_batch_reads_its_stream_to_the_end_then_checks_its_inputs()
         )))
         .await;
     assert_eq!(actions, ["forward"]);
-    assert_eq!(join.state().variant_name(), "Enriching");
+    assert!(matches!(
+        join.state(),
+        JoinState::Enriching(JoinEnrichment::ToEnd(_))
+    ));
 
     let ended = eof(orders, EofKind::Natural, true, not_crossing());
     let final_eof = ended.envelope.clone();
-    assert_eq!(join.send(JoinEvent::EofRead(ended)).await, ["forward"]);
+    assert_eq!(
+        join.send(JoinEvent::StreamEofRead(ended)).await,
+        ["forward"]
+    );
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::CheckInputs { final_eof });
     assert_eq!(drain.clock, Some(clock_of(orders)));
@@ -564,20 +567,23 @@ async fn a_finite_eof_batch_reads_its_stream_to_the_end_then_checks_its_inputs()
 async fn live_ends_only_on_the_stream_eof_that_ends_its_reads() {
     let plan = plan(JoinReferenceMode::Live, None);
     let (prices, orders) = (StageId::new(), StageId::new());
-    let mut join = Join::new(JoinState::Live(reading(plan)), None, Vec::new());
+    let mut join = Join::new(live(plan), None, Vec::new());
 
-    for (author, kind) in [(prices, EofKind::Poison), (orders, EofKind::Natural)] {
-        let actions = join
-            .send(JoinEvent::EofRead(eof(author, kind, false, not_crossing())))
-            .await;
-        assert_eq!(actions, ["forward"]);
+    for event in [
+        JoinEvent::ReferenceEofRead(eof(prices, EofKind::Poison, true, not_crossing())),
+        JoinEvent::StreamEofRead(eof(orders, EofKind::Natural, false, not_crossing())),
+    ] {
+        assert_eq!(join.send(event).await, ["forward"]);
         assert_eq!(join.state().variant_name(), "Live");
     }
     assert_eq!(reading_of(join.state()).worst_eof, Some(EofKind::Poison));
 
     let ended = eof(orders, EofKind::Natural, true, not_crossing());
     let final_eof = ended.envelope.clone();
-    assert_eq!(join.send(JoinEvent::EofRead(ended)).await, ["forward"]);
+    assert_eq!(
+        join.send(JoinEvent::StreamEofRead(ended)).await,
+        ["forward"]
+    );
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::Finalize { final_eof });
     assert_eq!(drain.worst_eof, Some(EofKind::Poison));
@@ -644,8 +650,8 @@ async fn the_drain_runs_its_steps_in_order() {
 async fn the_join_authors_its_eof_with_the_clock_of_the_eof_that_ended_its_reading() {
     let plan = plan(JoinReferenceMode::Live, None);
     let orders = StageId::new();
-    let mut join = Join::new(JoinState::Live(reading(plan)), None, Vec::new());
-    join.send(JoinEvent::EofRead(eof(
+    let mut join = Join::new(live(plan), None, Vec::new());
+    join.send(JoinEvent::StreamEofRead(eof(
         orders,
         EofKind::Natural,
         true,
@@ -676,19 +682,10 @@ async fn each_crossing_promotes_only_what_its_state_holds() {
     );
     let then_live_plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
     for (state, promoted) in [
-        (
-            JoinState::Hydrating(reading(then_live_plan)),
-            Some("promote Stream 1"),
-        ),
-        (
-            JoinState::Enriching(reading(then_live_plan)),
-            Some("promote Reference 1"),
-        ),
-        (
-            JoinState::Enriching(reading(plan(JoinReferenceMode::FiniteEof, None))),
-            None,
-        ),
-        (JoinState::Live(reading(then_live_plan)), None),
+        (hydrating(then_live_plan), Some("promote Stream 1")),
+        (holding(then_live_plan), Some("promote Reference 1")),
+        (to_end(plan(JoinReferenceMode::FiniteEof, None)), None),
+        (live(then_live_plan), None),
     ] {
         let name = state.variant_name().to_string();
         let mut join = Join::new(state, Some(witnesses.clone()), Vec::new());
@@ -709,7 +706,7 @@ async fn each_crossing_promotes_only_what_its_state_holds() {
 #[tokio::test]
 async fn an_unreached_frontier_crosses_nothing() {
     let mut join = Join::new(
-        JoinState::Hydrating(reading(plan(JoinReferenceMode::FiniteEof, None))),
+        hydrating(plan(JoinReferenceMode::FiniteEof, None)),
         None,
         Vec::new(),
     );
@@ -727,9 +724,9 @@ async fn an_unreached_frontier_crosses_nothing() {
 async fn a_stream_eof_that_completes_a_crossing_forwards_after_it_and_drains() {
     let plan = plan(JoinReferenceMode::Live, None);
     let orders = StageId::new();
-    let mut join = Join::new(JoinState::Live(reading(plan)), None, Vec::new());
+    let mut join = Join::new(live(plan), None, Vec::new());
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::StreamEofRead(eof(
             orders,
             EofKind::Natural,
             true,
@@ -749,13 +746,9 @@ async fn a_hold_eof_that_completes_a_crossing_promotes_before_the_forward() {
         LiveStream::Present,
     );
     let plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
-    let mut join = Join::new(
-        JoinState::Hydrating(reading(plan)),
-        Some(witnesses),
-        Vec::new(),
-    );
+    let mut join = Join::new(hydrating(plan), Some(witnesses), Vec::new());
     let actions = join
-        .send(JoinEvent::EofRead(eof(
+        .send(JoinEvent::ReferenceEofRead(eof(
             prices.stage_id,
             EofKind::Natural,
             true,
@@ -788,11 +781,7 @@ async fn a_join_crossing_fails_when_its_archive_entered_a_later_phase() {
         ended_by: Vec::new(),
     }];
 
-    let mut join = Join::new(
-        JoinState::Enriching(reading(plan)),
-        Some(witnesses.clone()),
-        archived.clone(),
-    );
+    let mut join = Join::new(holding(plan), Some(witnesses.clone()), archived.clone());
     let actions = join.send(watermark(1)).await;
     assert!(
         actions
@@ -811,7 +800,7 @@ async fn a_join_crossing_fails_when_its_archive_entered_a_later_phase() {
     }
     assert!(join.journal.markers().is_empty());
 
-    let mut caught_up = Join::new(JoinState::Live(reading(plan)), Some(witnesses), archived);
+    let mut caught_up = Join::new(live(plan), Some(witnesses), archived);
     caught_up.send_and_run_catch_up(watermark(1)).await;
     assert_eq!(caught_up.state().variant_name(), "Live");
     assert_eq!(caught_up.journal.markers(), vec![1]);
@@ -826,18 +815,25 @@ async fn ready_leaves_each_reading_state_as_it_was() {
         LiveStream::Present,
     );
     let plan = plan(JoinReferenceMode::FiniteThenLive, Some(&witnesses));
-    let held = JoinReading {
+    let reading = JoinReading {
         plan,
         catch_up: CatchUpState::Rebuilding {
             crossed: ReaderGeneration(1),
         },
         worst_eof: Some(EofKind::Poison),
+    };
+    let hold = JoinHold {
+        reading: reading.clone(),
         witnessed: Arc::new(BTreeMap::from([(prices.stage_key, EofKind::Natural)])),
     };
     for state in [
-        JoinState::Hydrating(held.clone()),
-        JoinState::Enriching(held.clone()),
-        JoinState::Live(held.clone()),
+        JoinState::Hydrating(hold.clone()),
+        JoinState::Enriching(JoinEnrichment::Holding(hold)),
+        JoinState::Enriching(JoinEnrichment::ToEnd(reading.clone())),
+        JoinState::Live(JoinLive {
+            reading,
+            reads: LiveReads::Preference,
+        }),
     ] {
         let mut join = Join::new(state.clone(), Some(witnesses.clone()), Vec::new());
         assert!(join.send(JoinEvent::Ready).await.is_empty());
@@ -852,7 +848,7 @@ async fn a_promotion_without_its_held_subscription_fails() {
         (JoinSubscriptionSide::Reference, "catalog"),
         (JoinSubscriptionSide::Stream, "stream"),
     ] {
-        let mut join = Join::new(JoinState::Hydrating(reading(plan)), None, Vec::new());
+        let mut join = Join::new(hydrating(plan), None, Vec::new());
         let error = JoinAction::<Handler>::PromoteHeld {
             side,
             generation: ReaderGeneration(1),
@@ -881,9 +877,13 @@ fn every_join_state_keeps_its_name() {
         JoinState::Initializing(plan),
         JoinState::Initialized(plan),
         JoinState::Starting(plan),
-        JoinState::Hydrating(reading(plan)),
-        JoinState::Enriching(reading(plan)),
-        JoinState::Live(reading(plan)),
+        hydrating(plan),
+        holding(plan),
+        to_end(plan),
+        JoinState::Live(JoinLive {
+            reading: reading(plan),
+            reads: LiveReads::Preference,
+        }),
         JoinState::Draining(drain),
         JoinState::Finalizing,
         JoinState::Drained,
@@ -903,6 +903,7 @@ fn every_join_state_keeps_its_name() {
             "Initialized",
             "Starting",
             "Hydrating",
+            "Enriching",
             "Enriching",
             "Live",
             "Draining",
@@ -950,6 +951,122 @@ fn a_plan_without_a_live_phase_has_no_live_read_policy() {
     ] {
         assert_eq!(plan.live_reads(), reads, "{plan:?}");
     }
-    assert!(plan(JoinReferenceMode::FiniteThenLive, Some(&batch_only)).enriching_holds_catalog());
-    assert!(!plan(JoinReferenceMode::FiniteEof, None).enriching_holds_catalog());
+}
+
+async fn hydrate(
+    prices: &PhaseWitness,
+    mode: JoinReferenceMode,
+    witnesses: Option<PhaseWitnesses>,
+) -> (JoinPlan, Vec<String>, JoinState) {
+    let plan = JoinPlan::new(mode, witnesses.as_ref(), LiveReads::Canonical);
+    let mut join = Join::new(hydrating(plan), witnesses, Vec::new());
+    let actions = join
+        .send(JoinEvent::ReferenceEofRead(eof(
+            prices.stage_id,
+            EofKind::Natural,
+            true,
+            not_crossing(),
+        )))
+        .await;
+    (plan, actions, join.state().clone())
+}
+
+fn loaded(plan: JoinPlan) -> JoinReading {
+    JoinReading {
+        worst_eof: Some(EofKind::Natural),
+        ..JoinReading::new(plan)
+    }
+}
+
+#[tokio::test]
+async fn each_plan_hydrates_into_the_phase_it_names() {
+    let prices = witness("prices");
+    let batch = then_live(
+        vec![prices.clone()],
+        vec![witness("orders")],
+        LiveStream::Present,
+    );
+    let batch_only = then_live(
+        vec![prices.clone()],
+        vec![witness("orders")],
+        LiveStream::Absent,
+    );
+    let live_only = then_live(vec![prices.clone()], Vec::new(), LiveStream::Present);
+
+    let (plan, actions, state) = hydrate(&prices, JoinReferenceMode::FiniteEof, None).await;
+    assert_eq!(actions, ["forward", "heartbeat", "enriching_entered 0"]);
+    assert_eq!(
+        state,
+        JoinState::Enriching(JoinEnrichment::ToEnd(loaded(plan)))
+    );
+
+    for witnesses in [batch, batch_only] {
+        let (plan, actions, state) =
+            hydrate(&prices, JoinReferenceMode::FiniteThenLive, Some(witnesses)).await;
+        assert_eq!(actions, ["forward", "heartbeat", "enriching_entered 0"]);
+        assert_eq!(
+            state,
+            JoinState::Enriching(JoinEnrichment::Holding(JoinHold::new(loaded(plan))))
+        );
+    }
+
+    let (plan, actions, state) =
+        hydrate(&prices, JoinReferenceMode::FiniteThenLive, Some(live_only)).await;
+    assert_eq!(actions, ["forward", "heartbeat", "live_entered 0"]);
+    assert_eq!(
+        state,
+        JoinState::Live(JoinLive {
+            reading: loaded(plan),
+            reads: LiveReads::Canonical,
+        })
+    );
+}
+
+#[tokio::test]
+async fn live_reads_by_the_policy_its_plan_was_built_with() {
+    let opened = JoinPlan::new(JoinReferenceMode::Live, None, LiveReads::Recorded);
+    let mut join = Join::new(JoinState::Starting(opened), None, Vec::new());
+    join.send(JoinEvent::ActivationCompleted).await;
+    assert!(
+        matches!(
+            join.state(),
+            JoinState::Live(JoinLive {
+                reads: LiveReads::Recorded,
+                ..
+            })
+        ),
+        "{:?}",
+        join.state()
+    );
+
+    let orders = witness("orders");
+    let witnesses = then_live(
+        vec![witness("prices")],
+        vec![orders.clone()],
+        LiveStream::Present,
+    );
+    let batch = JoinPlan::new(
+        JoinReferenceMode::FiniteThenLive,
+        Some(&witnesses),
+        LiveReads::Canonical,
+    );
+    let mut join = Join::new(holding(batch), Some(witnesses), Vec::new());
+    join.send(JoinEvent::StreamEofRead(eof(
+        orders.stage_id,
+        EofKind::Natural,
+        false,
+        not_crossing(),
+    )))
+    .await;
+    assert!(
+        matches!(
+            join.state(),
+            JoinState::Live(JoinLive {
+                reads: LiveReads::Canonical,
+                ..
+            })
+        ),
+        "{:?}",
+        join.state()
+    );
 }

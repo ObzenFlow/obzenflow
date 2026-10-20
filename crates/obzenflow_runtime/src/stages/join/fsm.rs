@@ -25,6 +25,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::config::{JoinReferenceMode, LiveStream, PhaseWitnesses};
+use super::phase::CrossingPhase;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
@@ -100,10 +101,6 @@ impl JoinPlan {
         self.shape
     }
 
-    pub(crate) fn enriching_holds_catalog(self) -> bool {
-        matches!(self.shape, PlanShape::ThenLive(_))
-    }
-
     pub(crate) fn live_reads(self) -> Option<LiveReads> {
         match self.shape {
             PlanShape::Live(reads)
@@ -115,14 +112,13 @@ impl JoinPlan {
     }
 }
 
-/// A reading join's plan and catch-up state, the worst kind its inputs ended
-/// with and a hold's witnessed EOFs.
+/// A reading join's plan, its catch-up state and the worst kind its inputs
+/// ended with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JoinReading {
     pub(crate) plan: JoinPlan,
     pub(crate) catch_up: CatchUpState,
     pub(crate) worst_eof: Option<EofKind>,
-    pub(crate) witnessed: Arc<BTreeMap<StageKey, EofKind>>,
 }
 
 impl JoinReading {
@@ -131,9 +127,40 @@ impl JoinReading {
             plan,
             catch_up: CatchUpState::default(),
             worst_eof: None,
+        }
+    }
+}
+
+/// A holding join's reading and the witness EOFs it has folded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinHold {
+    pub(crate) reading: JoinReading,
+    pub(crate) witnessed: Arc<BTreeMap<StageKey, EofKind>>,
+}
+
+impl JoinHold {
+    pub(crate) fn new(reading: JoinReading) -> Self {
+        Self {
+            reading,
             witnessed: Arc::default(),
         }
     }
+}
+
+/// How an enriching join reads its stream.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JoinEnrichment {
+    /// Holds the catalog until the batch stream's witnesses end.
+    Holding(JoinHold),
+    /// Reads the stream to its end against a finished catalog.
+    ToEnd(JoinReading),
+}
+
+/// A live join's reading and the policy it reads both inputs by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinLive {
+    pub(crate) reading: JoinReading,
+    pub(crate) reads: LiveReads,
 }
 
 /// A draining join's step, the worst kind its inputs ended with and the clock
@@ -190,7 +217,7 @@ pub enum JoinState {
     /// - ONLY reads from reference subscription
     /// - Stream events queue in journal/subscription (natural backpressure)
     /// - Transitions to Enriching when reference EOF received
-    Hydrating(JoinReading),
+    Hydrating(JoinHold),
 
     /// Live: Reference side remains active while stream events are processed continuously.
     ///
@@ -198,14 +225,14 @@ pub enum JoinState {
     /// - Reads from both reference and stream subscriptions
     /// - Reference updates can arrive at any time and update catalogs
     /// - Stream events are enriched against the current catalog snapshot
-    Live(JoinReading),
+    Live(JoinLive),
 
     /// Enriching: Reference catalog complete, actively enriching stream events
     /// During this state:
     /// - ONLY reads from stream subscription
     /// - Reference catalog is complete and ready for lookups
     /// - Transitions to Draining when stream EOF received
-    Enriching(JoinReading),
+    Enriching(JoinEnrichment),
 
     /// All upstreams reached EOF, finishing processing
     Draining(JoinDrain),
@@ -245,6 +272,57 @@ impl JoinState {
             _ => Phase::Other,
         }
     }
+
+    pub(crate) fn reading(&self) -> Option<&JoinReading> {
+        match self {
+            Self::Hydrating(hold) | Self::Enriching(JoinEnrichment::Holding(hold)) => {
+                Some(&hold.reading)
+            }
+            Self::Enriching(JoinEnrichment::ToEnd(reading)) => Some(reading),
+            Self::Live(live) => Some(&live.reading),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn with_reading(&self, reading: JoinReading) -> Self {
+        match self {
+            Self::Hydrating(hold) => Self::Hydrating(JoinHold {
+                reading,
+                witnessed: hold.witnessed.clone(),
+            }),
+            Self::Enriching(JoinEnrichment::Holding(hold)) => {
+                Self::Enriching(JoinEnrichment::Holding(JoinHold {
+                    reading,
+                    witnessed: hold.witnessed.clone(),
+                }))
+            }
+            Self::Enriching(JoinEnrichment::ToEnd(_)) => {
+                Self::Enriching(JoinEnrichment::ToEnd(reading))
+            }
+            Self::Live(live) => Self::Live(JoinLive {
+                reading,
+                reads: live.reads,
+            }),
+            other => other.clone(),
+        }
+    }
+
+    pub(crate) fn crossing_phase(&self) -> Option<CrossingPhase> {
+        match self {
+            Self::Hydrating(_) => Some(CrossingPhase::Hydrating),
+            Self::Enriching(_) => Some(CrossingPhase::Enriching),
+            Self::Live(_) => Some(CrossingPhase::Live),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn held_input(&self) -> Option<JoinSubscriptionSide> {
+        match self {
+            Self::Hydrating(_) => Some(JoinSubscriptionSide::Stream),
+            Self::Enriching(JoinEnrichment::Holding(_)) => Some(JoinSubscriptionSide::Reference),
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================
@@ -267,8 +345,11 @@ pub enum JoinEvent {
     /// The reading state's dispatch read a catch-up watermark.
     WatermarkRead(WatermarkRead),
 
-    /// The reading state's dispatch read an EOF.
-    EofRead(EofRead),
+    /// The reading state's dispatch read an EOF on its reference subscription.
+    ReferenceEofRead(EofRead),
+
+    /// The reading state's dispatch read an EOF on its stream subscription.
+    StreamEofRead(EofRead),
 
     /// The current draining step finished its work.
     DrainStepEnded,
@@ -300,6 +381,22 @@ impl crate::supervised_base::with_external_events::ExternalControlEvent for Join
 pub struct HoldCompletion {
     pub generation: u64,
     pub ended_by: Vec<StageKey>,
+}
+
+impl HoldCompletion {
+    pub(crate) fn enriching_entered(self) -> JoinPhaseFact {
+        JoinPhaseFact::EnrichingEntered {
+            generation: self.generation,
+            ended_by: self.ended_by,
+        }
+    }
+
+    pub(crate) fn live_entered(self) -> JoinPhaseFact {
+        JoinPhaseFact::LiveEntered {
+            generation: self.generation,
+            ended_by: self.ended_by,
+        }
+    }
 }
 
 // ============================================================================

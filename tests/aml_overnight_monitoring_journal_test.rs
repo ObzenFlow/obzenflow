@@ -180,7 +180,9 @@ fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
         ("risk_ledger", dir.join("risk-calls.jsonl")),
         ("case_ledger", dir.join("case-calls.jsonl")),
         ("cleared_register", dir.join("cleared.csv")),
+        ("unscored_register", dir.join("unscored.csv")),
         ("case_register", dir.join("cases.csv")),
+        ("unopened_register", dir.join("unopened-alerts.csv")),
     ] {
         app.insert(
             key.to_owned(),

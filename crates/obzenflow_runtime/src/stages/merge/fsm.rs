@@ -17,23 +17,19 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, ReaderGeneration, StageId, WriterId};
-use obzenflow_fsm::{FsmAction, FsmContext, FsmError, Transition};
+use obzenflow_fsm::{FsmAction, FsmContext, FsmError};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter, StallEpisode};
 use crate::feed_plan::StageOutputContract;
-use crate::messaging::upstream_subscription::{
-    ContractConfig, ContractsWiring, ReaderFrontier, ReaderProgress,
-};
+use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalGate};
 use crate::stages::common::heartbeat::HeartbeatHandle;
-use crate::stages::common::input_facts::{fold_worst, EofRead, WatermarkRead};
+use crate::stages::common::input_facts::{EofRead, WatermarkRead};
 use crate::stages::common::supervision::backpressure_drain::PendingOutput;
-use crate::stages::common::supervision::catch_up::{
-    frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
-};
+use crate::stages::common::supervision::catch_up::{CatchUpAction, CatchUpContext, CatchUpState};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::lifecycle_actions;
@@ -66,15 +62,15 @@ pub enum MergeState {
 /// A reading merge's catch-up state and the worst kind its inputs ended with.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MergeInputs {
-    worst_eof: Option<EofKind>,
-    catch_up: CatchUpState,
+    pub(crate) worst_eof: Option<EofKind>,
+    pub(crate) catch_up: CatchUpState,
 }
 
 /// What the merge's own EOF takes from the EOF that ended its reading.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MergeDrain {
-    worst_eof: Option<EofKind>,
-    eof_clock: Option<VectorClock>,
+    pub(crate) worst_eof: Option<EofKind>,
+    pub(crate) eof_clock: Option<VectorClock>,
 }
 
 impl MergeState {
@@ -104,6 +100,25 @@ impl MergeState {
             Self::Cancelled(reason) => Phase::Cancelled(reason.clone()),
             _ => Phase::Other,
         }
+    }
+
+    pub(crate) fn inputs(&self) -> Option<&MergeInputs> {
+        match self {
+            Self::FirstPhase(inputs) | Self::LastPhase(inputs) => Some(inputs),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn with_inputs(&self, inputs: MergeInputs) -> Self {
+        match self {
+            Self::FirstPhase(_) => Self::FirstPhase(inputs),
+            Self::LastPhase(_) => Self::LastPhase(inputs),
+            other => other.clone(),
+        }
+    }
+
+    pub(crate) fn holding(&self) -> bool {
+        matches!(self, Self::FirstPhase(_))
     }
 }
 
@@ -213,161 +228,6 @@ impl MergeContext {
             self.stage_id,
             StageType::Merge,
         )
-    }
-}
-
-pub(super) fn failure_transition(cause: String) -> Transition<MergeState, MergeAction> {
-    Transition {
-        next_state: MergeState::failure(cause.clone()),
-        actions: vec![
-            MergeAction::SendFailure { message: cause },
-            MergeAction::Cleanup,
-            MergeAction::Host(SupervisorAction::CloseMailbox),
-            MergeAction::Host(SupervisorAction::SettlePublications),
-            MergeAction::Host(SupervisorAction::Emit(MergeEvent::TerminationSettled)),
-        ],
-    }
-}
-
-struct Crossing {
-    catch_up: CatchUpState,
-    actions: Vec<MergeAction>,
-    crossed_into: Option<ReaderGeneration>,
-}
-
-fn cross(
-    catch_up: &CatchUpState,
-    generation: ReaderGeneration,
-    frontier: ReaderFrontier,
-    ctx: &CatchUpContext,
-) -> Result<Crossing, String> {
-    let step = frontier_step(catch_up, generation, frontier, ctx);
-    if let CatchUpState::Refused { fatal } | CatchUpState::Failed { fatal } = &step.next {
-        return Err(fatal.detail.clone());
-    }
-    Ok(Crossing {
-        catch_up: step.next,
-        actions: step.actions.into_iter().map(MergeAction::CatchUp).collect(),
-        crossed_into: step.crossed_into,
-    })
-}
-
-pub(super) fn first_phase_watermark(
-    inputs: &MergeInputs,
-    read: &WatermarkRead,
-    ctx: &CatchUpContext,
-) -> Transition<MergeState, MergeAction> {
-    match cross(&inputs.catch_up, read.generation, read.frontier, ctx) {
-        Err(detail) => failure_transition(detail),
-        Ok(crossing) => {
-            let mut actions = crossing.actions;
-            actions.extend(crossing.crossed_into.map(MergeAction::PromoteHeld));
-            Transition {
-                next_state: MergeState::FirstPhase(MergeInputs {
-                    worst_eof: inputs.worst_eof,
-                    catch_up: crossing.catch_up,
-                }),
-                actions,
-            }
-        }
-    }
-}
-
-pub(super) fn first_phase_eof(
-    inputs: &MergeInputs,
-    eof: &EofRead,
-    ctx: &CatchUpContext,
-) -> Transition<MergeState, MergeAction> {
-    let crossing = match cross(&inputs.catch_up, eof.frontier.highest(), eof.frontier, ctx) {
-        Err(detail) => return failure_transition(detail),
-        Ok(crossing) => crossing,
-    };
-    let mut actions = crossing.actions;
-    actions.extend(crossing.crossed_into.map(MergeAction::PromoteHeld));
-    actions.push(MergeAction::ForwardControl(eof.envelope.clone()));
-    let worst_eof = fold_worst(inputs.worst_eof, eof.side_worst);
-    let next_state = if !eof.ends_reads {
-        MergeState::FirstPhase(MergeInputs {
-            worst_eof,
-            catch_up: crossing.catch_up,
-        })
-    } else if eof.side_worst.unwrap_or(EofKind::Natural) == EofKind::Natural {
-        MergeState::LastPhase(MergeInputs {
-            worst_eof,
-            catch_up: crossing.catch_up,
-        })
-    } else {
-        MergeState::Draining(MergeDrain {
-            worst_eof,
-            eof_clock: eof.clock(),
-        })
-    };
-    Transition {
-        next_state,
-        actions,
-    }
-}
-
-pub(super) fn last_phase_watermark(
-    inputs: &MergeInputs,
-    read: &WatermarkRead,
-    ctx: &CatchUpContext,
-) -> Transition<MergeState, MergeAction> {
-    match cross(&inputs.catch_up, read.generation, read.frontier, ctx) {
-        Err(detail) => failure_transition(detail),
-        Ok(crossing) => Transition {
-            next_state: MergeState::LastPhase(MergeInputs {
-                worst_eof: inputs.worst_eof,
-                catch_up: crossing.catch_up,
-            }),
-            actions: crossing.actions,
-        },
-    }
-}
-
-pub(super) fn last_phase_eof(
-    inputs: &MergeInputs,
-    eof: &EofRead,
-    ctx: &CatchUpContext,
-) -> Transition<MergeState, MergeAction> {
-    let crossing = match cross(&inputs.catch_up, eof.frontier.highest(), eof.frontier, ctx) {
-        Err(detail) => return failure_transition(detail),
-        Ok(crossing) => crossing,
-    };
-    let mut actions = crossing.actions;
-    actions.push(MergeAction::ForwardControl(eof.envelope.clone()));
-    let worst_eof = fold_worst(inputs.worst_eof, eof.side_worst);
-    let next_state = if eof.ends_reads {
-        MergeState::Draining(MergeDrain {
-            worst_eof,
-            eof_clock: eof.clock(),
-        })
-    } else {
-        MergeState::LastPhase(MergeInputs {
-            worst_eof,
-            catch_up: crossing.catch_up,
-        })
-    };
-    Transition {
-        next_state,
-        actions,
-    }
-}
-
-pub(super) fn drained(drain: &MergeDrain) -> Transition<MergeState, MergeAction> {
-    Transition {
-        next_state: MergeState::Finalizing,
-        actions: vec![
-            MergeAction::AuthorEof {
-                kind: drain.worst_eof.unwrap_or(EofKind::Natural),
-                clock: drain.eof_clock.clone(),
-            },
-            MergeAction::SendCompletion,
-            MergeAction::Cleanup,
-            MergeAction::Host(SupervisorAction::CloseMailbox),
-            MergeAction::Host(SupervisorAction::SettlePublications),
-            MergeAction::Host(SupervisorAction::Emit(MergeEvent::FinalizationCompleted)),
-        ],
     }
 }
 

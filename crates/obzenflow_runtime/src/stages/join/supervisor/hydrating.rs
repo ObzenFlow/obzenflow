@@ -26,7 +26,9 @@ pub(super) async fn dispatch_hydrating<
     ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
-    common::renew_held_inputs(ctx, JoinSubscriptionSide::Stream);
+    if let Some(held) = state.held_input() {
+        common::renew_held_inputs(ctx, held);
+    }
 
     let loop_count = ctx
         .instrumentation
@@ -72,8 +74,15 @@ pub(super) async fn dispatch_hydrating<
 
             let directive = match &envelope.payload {
                 ChainPayload::FlowControl(_) => {
-                    match common::read_control(ctx, subscription, None, None, true, envelope)
-                        .await?
+                    match common::read_control(
+                        ctx,
+                        subscription,
+                        JoinSubscriptionSide::Reference,
+                        None,
+                        None,
+                        envelope,
+                    )
+                    .await?
                     {
                         Some(fact) => EventLoopDirective::Transition(fact),
                         None => EventLoopDirective::Continue,

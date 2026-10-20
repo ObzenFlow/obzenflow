@@ -168,6 +168,15 @@ pub(crate) fn frontier_step(
     }
 }
 
+impl FrontierStep {
+    pub(crate) fn into_result(self) -> Result<Self, StageFatal> {
+        match self.next {
+            CatchUpState::Refused { fatal } | CatchUpState::Failed { fatal } => Err(fatal),
+            next => Ok(Self { next, ..self }),
+        }
+    }
+}
+
 impl CatchUpContext {
     pub(crate) fn producing(
         flow_context: FlowContext,

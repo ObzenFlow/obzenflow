@@ -25,8 +25,7 @@ use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::messaging::upstream_subscription::{selection_failure, NamedHead, RecordedStep};
 use crate::stages::join::fsm::{
-    JoinEvent, JoinReading, JoinResources, JoinState, JoinSubscriptionSide, LiveReads,
-    PendingSubscriptionAck,
+    JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, LiveReads, PendingSubscriptionAck,
 };
 
 type LiveDirective =
@@ -40,7 +39,7 @@ pub(super) async fn dispatch_live<
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState,
-    reading: &JoinReading,
+    reads: LiveReads,
     ctx: &mut JoinResources<H>,
 ) -> LiveDirective {
     common::ensure_subscriptions(sup, ctx);
@@ -54,21 +53,10 @@ pub(super) async fn dispatch_live<
     }
 
     let state_name = state.variant_name();
-    match reading.plan.live_reads() {
-        Some(LiveReads::Recorded) => {
-            return Box::pin(dispatch_live_recorded(sup, state_name, ctx)).await
-        }
-        Some(LiveReads::Canonical) => {
-            return dispatch_live_canonical(sup, state_name, ctx).await;
-        }
-        Some(LiveReads::Preference) => {}
-        None => {
-            return Err(format!(
-                "join '{}' is live under a plan with no live phase",
-                ctx.stage_name
-            )
-            .into())
-        }
+    match reads {
+        LiveReads::Recorded => return Box::pin(dispatch_live_recorded(sup, state_name, ctx)).await,
+        LiveReads::Canonical => return dispatch_live_canonical(sup, state_name, ctx).await,
+        LiveReads::Preference => {}
     }
 
     let cap = ctx.reference_batch_cap.unwrap_or(usize::MAX);
@@ -188,9 +176,9 @@ async fn handle_reference_envelope<
             match common::read_control(
                 ctx,
                 subscription,
+                JoinSubscriptionSide::Reference,
                 sup.stream_subscription.as_ref(),
                 Some(crate::stages::observer::JoinSide::Reference),
-                false,
                 envelope,
             )
             .await?
@@ -472,9 +460,9 @@ async fn handle_stream_envelope<
             match common::read_control(
                 ctx,
                 subscription,
+                JoinSubscriptionSide::Stream,
                 sup.reference_subscription.as_ref(),
                 Some(crate::stages::observer::JoinSide::Stream),
-                true,
                 envelope,
             )
             .await?
