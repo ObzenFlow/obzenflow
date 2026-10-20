@@ -390,3 +390,31 @@ async fn a_held_producer_outlasts_the_stall_ceiling_under_enforce() -> Result<()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn every_edge_of_a_concat_merge_records_one_passing_verdict() -> Result<()> {
+    let _guard = CONCAT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let run = run_to_end(
+        &journal_base,
+        Inputs {
+            first: 4,
+            last: 3,
+            first_rate: 1000.0,
+            enforce: None,
+        },
+        Vec::new(),
+    )
+    .await?;
+
+    assert_eq!(
+        replay_testkit::passing_verdicts(&run).await,
+        replay_testkit::one_verdict_per_edge(&[
+            "early -> merged",
+            "late -> merged",
+            "merged -> collector",
+        ])
+    );
+    Ok(())
+}

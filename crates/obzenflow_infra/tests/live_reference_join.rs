@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::chain_event::ChainEventFactory;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::SeqNo;
@@ -1251,7 +1252,7 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn live_join_forwards_reference_eof() {
+async fn live_join_forwards_reference_eof_and_records_one_verdict_per_input() {
     let flow_id = FlowId::new();
     let system_id = SystemId::new();
 
@@ -1451,6 +1452,20 @@ async fn live_join_forwards_reference_eof() {
             )
     });
     assert!(saw_reference_eof, "expected reference EOF to be forwarded");
+
+    let verdicts: Vec<(StageId, bool)> = events
+        .iter()
+        .filter_map(|env| match &env.payload {
+            ChainPayload::Execution(ExecutionPayload::ContractStatus {
+                upstream, pass, ..
+            }) => Some((*upstream, *pass)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+    for input in [reference_stage, stream_stage] {
+        assert!(verdicts.contains(&(input, true)), "{verdicts:?}");
+    }
 }
 
 #[derive(Clone, Debug)]

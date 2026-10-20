@@ -301,7 +301,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                         let next_state = match enrichment {
                             JoinEnrichment::ToEnd(_) if eof.ends_reads => {
                                 JoinState::Draining(JoinDrain {
-                                    step: DrainStep::CheckInputs {
+                                    step: DrainStep::Finalize {
                                         final_eof: eof.envelope.clone(),
                                     },
                                     worst_eof: reading.worst_eof,
@@ -447,9 +447,6 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                     Box::pin(async move {
                         let JoinState::Draining(drain) = state else { unreachable!() };
                         let step = match &drain.step {
-                            DrainStep::CheckInputs { final_eof } => DrainStep::Finalize {
-                                final_eof: final_eof.clone(),
-                            },
                             DrainStep::Finalize { .. } => DrainStep::Flush,
                             DrainStep::Flush => {
                                 return Ok(ctx.fail(format!(

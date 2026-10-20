@@ -10,7 +10,8 @@ use obzenflow::application::{
     verify_run_dirs, FlowApplication, LogLevel, VerifyOptions, VerifyOutcome,
 };
 use obzenflow::journal::read::{
-    open_disk_run, ChainPayload, FlowControlPayload, RunJournalKind, RunRecordData,
+    open_disk_run, ChainPayload, ExecutionPayload, FlowControlPayload, RunJournalKind,
+    RunRecordData,
 };
 use obzenflow::journal::JournalRecord;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
@@ -296,6 +297,29 @@ impl Archive {
                 }) if *writer == author)
             })
             .unwrap_or_else(|| panic!("{stage} passes on {author}'s natural EOF"))
+    }
+
+    fn passing_verdicts(&self) -> BTreeMap<String, usize> {
+        let names: BTreeMap<StageId, &str> = self
+            .stage_ids
+            .iter()
+            .map(|(name, id)| (*id, name.as_str()))
+            .collect();
+        let mut verdicts = BTreeMap::new();
+        for (_, row) in &self.rows {
+            if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
+                upstream,
+                reader,
+                pass: true,
+                ..
+            }) = &row.payload
+            {
+                *verdicts
+                    .entry(format!("{} -> {}", names[upstream], names[reader]))
+                    .or_insert(0) += 1;
+            }
+        }
+        verdicts
     }
 }
 
@@ -648,5 +672,44 @@ fn a_corrected_rate_in_a_fresh_run_diverges_only_where_it_priced() {
             ("fx_rates".to_owned(), 1),
             ("price".to_owned(), priced_from_it),
         ])
+    );
+}
+
+#[test]
+fn every_edge_records_one_passing_contract_verdict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture_config(dir.path(), &shipped_rates());
+    let journal_root = dir.path().join("journals");
+    run(
+        &config,
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let archive = Archive::read(&runs(&journal_root).pop().expect("the run's archive"));
+
+    let edges = [
+        "account_history -> profile",
+        "transactions -> profile",
+        "fx_rates -> price",
+        "transactions -> price",
+        "transactions -> daily_profile",
+        "price -> day_totals",
+        "profile -> score",
+        "score -> cleared",
+        "score -> unscored",
+        "score -> alerts",
+        "daily_profile -> alerts",
+        "alerts -> open_case",
+        "open_case -> case_register",
+        "open_case -> unopened_alerts",
+        "day_totals -> totals_report",
+    ];
+    assert_eq!(
+        archive.passing_verdicts(),
+        edges
+            .iter()
+            .map(|edge| (edge.to_string(), 1))
+            .collect::<BTreeMap<_, _>>()
     );
 }

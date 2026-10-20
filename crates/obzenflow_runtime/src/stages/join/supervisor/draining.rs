@@ -31,23 +31,23 @@ pub(super) async fn dispatch_draining<
     ctx.instrumentation
         .event_loops_total
         .fetch_add(1, Ordering::Relaxed);
+    if let Some(upstream) = [
+        (
+            sup.reference_subscription.as_ref(),
+            &ctx.reference_contract_state,
+        ),
+        (sup.stream_subscription.as_ref(), &ctx.stream_contract_state),
+    ]
+    .into_iter()
+    .find_map(|(subscription, progress)| subscription?.ended_without_verdict(progress))
+    {
+        return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+            "join '{}' read '{upstream}' to its end without a contract verdict",
+            ctx.stage_name
+        ))));
+    }
 
     match &drain.step {
-        DrainStep::CheckInputs { .. } => {
-            if let Some(subscription) = sup.reference_subscription.as_mut() {
-                subscription
-                    .check_contracts(&mut ctx.reference_contract_state[..])
-                    .await
-                    .into_result()?;
-            }
-            if let Some(subscription) = sup.stream_subscription.as_mut() {
-                subscription
-                    .check_contracts(&mut ctx.stream_contract_state[..])
-                    .await
-                    .into_result()?;
-            }
-            Ok(EventLoopDirective::Transition(JoinEvent::DrainStepEnded))
-        }
         DrainStep::Finalize { final_eof } => {
             if let FlushOutcome::Blocked = common::flush_pending_outputs(sup, ctx).await? {
                 return Ok(EventLoopDirective::Continue);

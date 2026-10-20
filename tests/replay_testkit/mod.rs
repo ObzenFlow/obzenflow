@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
@@ -21,7 +22,7 @@ use obzenflow_core::WriterId;
 use obzenflow_runtime::stages::sink::SinkWriteFailure;
 #[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::DeliveredOrderProjection;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// FLOWIP-120u: the host opens the replay/resume input archive and the
@@ -104,6 +105,39 @@ pub async fn read_stage_envelopes_appended(
         .as_str()
         .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
     read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(stage_journal)).await
+}
+
+pub async fn passing_verdicts(run_dir: &Path) -> BTreeMap<String, usize> {
+    let manifest = archive_manifest(run_dir);
+    let stages = manifest["stages"].as_object().expect("manifest stages");
+    let names: HashMap<&str, &str> = stages
+        .iter()
+        .map(|(name, stage)| (stage["stage_id"].as_str().expect("stage id"), name.as_str()))
+        .collect();
+    let mut verdicts = BTreeMap::new();
+    for stage in stages.keys() {
+        for record in read_stage_envelopes_appended(run_dir, stage).await {
+            if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
+                upstream,
+                reader,
+                pass: true,
+                ..
+            }) = &record.payload
+            {
+                let edge = format!(
+                    "{} -> {}",
+                    names[upstream.to_string().as_str()],
+                    names[reader.to_string().as_str()]
+                );
+                *verdicts.entry(edge).or_insert(0) += 1;
+            }
+        }
+    }
+    verdicts
+}
+
+pub fn one_verdict_per_edge(edges: &[&str]) -> BTreeMap<String, usize> {
+    edges.iter().map(|edge| (edge.to_string(), 1)).collect()
 }
 
 pub fn stage_writer(run_dir: &Path, stage_key: &str) -> WriterId {

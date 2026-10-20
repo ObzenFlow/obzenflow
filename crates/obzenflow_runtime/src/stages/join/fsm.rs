@@ -186,9 +186,6 @@ pub struct JoinDrain {
 
 #[derive(Clone, Debug)]
 pub(crate) enum DrainStep {
-    CheckInputs {
-        final_eof: Arc<DeliveredRecord<ChainPayload>>,
-    },
     Finalize {
         final_eof: Arc<DeliveredRecord<ChainPayload>>,
     },
@@ -198,10 +195,7 @@ pub(crate) enum DrainStep {
 impl PartialEq for DrainStep {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::CheckInputs { final_eof: a }, Self::CheckInputs { final_eof: b })
-            | (Self::Finalize { final_eof: a }, Self::Finalize { final_eof: b }) => {
-                Arc::ptr_eq(a, b)
-            }
+            (Self::Finalize { final_eof: a }, Self::Finalize { final_eof: b }) => Arc::ptr_eq(a, b),
             (Self::Flush, Self::Flush) => true,
             _ => false,
         }

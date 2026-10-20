@@ -576,6 +576,58 @@ async fn final_append_failure_keeps_final_emitted_false() {
 }
 
 #[tokio::test]
+async fn an_ended_reader_without_a_final_verdict_is_reported_until_one_lands() {
+    let upstream_stage = StageId::new();
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(upstream_stage)));
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let mut unchecked = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap();
+    unchecked.state.mark_reader_eof(0);
+    assert!(unchecked.ended_without_verdict(&reader_progress).is_none());
+
+    let contract_stage = StageId::new();
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(contract_stage)));
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(contract_stage),
+            contract_journal,
+            config: ContractConfig::default(),
+            reader_stage: None,
+            control_plane: Arc::new(NoControlPlane),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        });
+    assert!(subscription
+        .ended_without_verdict(&reader_progress)
+        .is_none());
+
+    subscription.state.mark_reader_eof(0);
+    assert_eq!(
+        subscription
+            .ended_without_verdict(&reader_progress)
+            .map(ToString::to_string),
+        Some("upstream".to_string())
+    );
+
+    assert!(subscription
+        .check_contracts(&mut reader_progress)
+        .await
+        .into_result()
+        .is_ok());
+    assert!(reader_progress[0].final_emitted);
+    assert!(subscription
+        .ended_without_verdict(&reader_progress)
+        .is_none());
+}
+
+#[tokio::test]
 async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);

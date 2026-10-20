@@ -533,7 +533,7 @@ async fn a_batch_with_no_live_phase_drains_at_finalize_when_its_stream_ends() {
 }
 
 #[tokio::test]
-async fn a_finite_eof_batch_reads_its_stream_to_the_end_then_checks_its_inputs() {
+async fn a_finite_eof_batch_reads_its_stream_to_the_end_then_finalizes() {
     let plan = plan(JoinReferenceMode::FiniteEof, None);
     let orders = StageId::new();
     let mut join = Join::new(to_end(plan), None, Vec::new());
@@ -559,7 +559,7 @@ async fn a_finite_eof_batch_reads_its_stream_to_the_end_then_checks_its_inputs()
         ["forward"]
     );
     let drain = draining(join.state());
-    assert_eq!(drain.step, DrainStep::CheckInputs { final_eof });
+    assert_eq!(drain.step, DrainStep::Finalize { final_eof });
     assert_eq!(drain.clock, Some(clock_of(orders)));
 }
 
@@ -595,7 +595,7 @@ async fn the_drain_runs_its_steps_in_order() {
     let orders = StageId::new();
     let final_eof = eof(orders, EofKind::Natural, true, not_crossing()).envelope;
     let drain = JoinDrain {
-        step: DrainStep::CheckInputs {
+        step: DrainStep::Finalize {
             final_eof: final_eof.clone(),
         },
         worst_eof: Some(EofKind::Poison),
@@ -603,13 +603,6 @@ async fn the_drain_runs_its_steps_in_order() {
     };
     let mut join = Join::new(JoinState::Draining(drain), None, Vec::new());
 
-    assert!(join.send(JoinEvent::DrainStepEnded).await.is_empty());
-    assert_eq!(
-        draining(join.state()).step,
-        DrainStep::Finalize {
-            final_eof: final_eof.clone()
-        }
-    );
     assert!(join.send(JoinEvent::DrainStepEnded).await.is_empty());
     assert_eq!(draining(join.state()).step, DrainStep::Flush);
 

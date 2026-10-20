@@ -716,6 +716,16 @@ async fn a_join_whose_stream_is_all_batch_drains_when_its_batch_ends() -> Result
         }
     );
     assert_eq!(stage_rows(&run, "posted").await, before_stop);
+    assert_eq!(
+        replay_testkit::passing_verdicts(&run).await,
+        replay_testkit::one_verdict_per_edge(&[
+            "batch_accounts -> accounts",
+            "live_accounts -> accounts",
+            "batch_tx -> posted",
+            "posted -> collector",
+        ]),
+        "the join never reads its catalog to its end, so that edge has no verdict"
+    );
     Ok(())
 }
 

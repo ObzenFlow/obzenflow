@@ -206,13 +206,16 @@ pub(super) async fn dispatch_reading(
                     )));
                 }
                 if envelope.is_eof() {
+                    subscription
+                        .check_contracts(&mut contract_state[..])
+                        .await
+                        .into_result()?;
                     let eof = EofRead::new(
                         envelope,
                         subscription.take_last_eof_outcome(),
                         subscription.last_delivered_generation(),
                         subscription.reader_frontier(),
                     );
-                    contract_tick(subscription, contract_state, last_contract_check).await?;
                     return Ok(EventLoopDirective::Transition(MergeEvent::EofRead(eof)));
                 }
                 forward_control_event(

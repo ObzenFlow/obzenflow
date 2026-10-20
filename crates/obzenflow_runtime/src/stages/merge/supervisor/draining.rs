@@ -12,6 +12,17 @@ pub(super) async fn dispatch_draining(
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat.state.mark_draining();
     }
+    if let Some(upstream) = [&ctx.first_phase, &ctx.held].into_iter().find_map(|input| {
+        input
+            .subscription
+            .as_ref()?
+            .ended_without_verdict(&input.contract_state)
+    }) {
+        return Ok(EventLoopDirective::Transition(MergeEvent::Error(format!(
+            "merge '{}' read '{upstream}' to its end without a contract verdict",
+            ctx.stage_name
+        ))));
+    }
     if common::flush_pending_outputs(ctx).await?.backed_off {
         return Ok(EventLoopDirective::Continue);
     }

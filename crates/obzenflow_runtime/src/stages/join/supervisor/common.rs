@@ -106,6 +106,14 @@ pub(super) async fn read_control<H: UnifiedJoinHandler>(
         })));
     }
     if envelope.is_eof() {
+        let contract_state = match side {
+            JoinSubscriptionSide::Reference => &mut ctx.reference_contract_state,
+            JoinSubscriptionSide::Stream => &mut ctx.stream_contract_state,
+        };
+        subscription
+            .check_contracts(&mut contract_state[..])
+            .await
+            .into_result()?;
         let outcome = subscription.take_last_eof_outcome();
         let generation = subscription.last_delivered_generation();
         let eof = EofRead::new(envelope, outcome, generation, frontier);
