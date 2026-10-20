@@ -709,7 +709,7 @@ impl Effect for PaidEffect {
         json!({})
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn execute(&self, _: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         Ok(CompositionFact)
     }
 }
@@ -725,7 +725,7 @@ impl EffectfulTransformHandler for PaidHandler {
 
     async fn process(
         &self,
-        _input: Self::Input,
+        _: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         Ok(fx.complete()?)
@@ -743,7 +743,7 @@ impl EffectfulTransformHandler for NoEffectHandler {
 
     async fn process(
         &self,
-        _input: Self::Input,
+        _: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         Ok(fx.complete()?)
@@ -754,7 +754,7 @@ fn row_flow<F>(guarded: F) -> FlowDefinition
 where
     F: FnOnce() -> Box<dyn StageDescriptor> + Send + 'static,
 {
-    FlowDefinition::materialize(move |_runtime_config| {
+    FlowDefinition::materialize(move |_| {
         let guarded = guarded();
         Ok(flow! {
             name: "effect_row_build",
@@ -850,7 +850,8 @@ async fn a_control_naming_no_effect_on_a_stage_with_several_effects_fails_build(
     })
     .await;
     assert!(
-        rendered.contains("requires exactly one declared effect; build it with `.for_effect::<E>()`")
+        rendered
+            .contains("requires exactly one declared effect; build it with `.for_effect::<E>()`")
             && rendered.contains(EffectA::EFFECT_TYPE)
             && rendered.contains(EffectB::EFFECT_TYPE),
         "{rendered}"
@@ -891,7 +892,7 @@ async fn middleware_for_an_effect_on_a_stage_that_performs_none_fails_build() {
     );
 
     let source_limit = rate_limit(10.0).for_effect::<EffectA>();
-    let error = build(FlowDefinition::materialize(move |_runtime_config| {
+    let error = build(FlowDefinition::materialize(move |_| {
         Ok(flow! {
             name: "effect_scoped_source",
             journals: memory_journals(),

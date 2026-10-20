@@ -723,9 +723,12 @@ jobs:
           tool: cargo-machete
 
       - name: cargo-deny
-        run: |
-          rm -rf target/advisory-dbs
-          cargo deny --all-features check
+        run: cargo deny --all-features check bans licenses sources
 
       - name: cargo-machete
         run: cargo machete --skip-target-dir
+
+  # A new RustSec advisory fails this check without any commit, so it runs
+  # apart from policy, and its own workflow also runs it daily.
+  advisories:
+    uses: ./.github/workflows/advisories.yml

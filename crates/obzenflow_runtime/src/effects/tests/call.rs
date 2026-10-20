@@ -31,7 +31,7 @@ struct RefusingLedger;
 
 #[async_trait]
 impl LedgerPort for RefusingLedger {
-    async fn write(&self, _value: u64) -> Result<u64, LedgerRefused> {
+    async fn write(&self, _: u64) -> Result<u64, LedgerRefused> {
         Err(LedgerRefused)
     }
 }
@@ -64,7 +64,7 @@ impl CallRequest for LedgerWrite {
     async fn call(
         &self,
         ledger: &dyn LedgerPort,
-        _ctx: &mut EffectContext,
+        _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
         let value = ledger
             .write(self.value)
@@ -89,7 +89,7 @@ impl CallRequest for LedgerCheck {
     async fn call(
         &self,
         ledger: &dyn LedgerPort,
-        _ctx: &mut EffectContext,
+        _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
         let value = ledger
             .write(self.value)
@@ -111,8 +111,8 @@ impl CallRequest for LedgerCommit {
 
     async fn call(
         &self,
-        _ledger: &dyn LedgerPort,
-        _ctx: &mut EffectContext,
+        _: &dyn LedgerPort,
+        _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
         Ok(LedgerWritten { value: 0 })
     }
@@ -467,7 +467,7 @@ impl Effect for VendorScore {
         Value::Null
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn execute(&self, _: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         Ok(LedgerWritten { value: 0 })
     }
 }
@@ -496,8 +496,8 @@ impl CallRequest for ScoreLike {
 
     async fn call(
         &self,
-        _ledger: &dyn LedgerPort,
-        _ctx: &mut EffectContext,
+        _: &dyn LedgerPort,
+        _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
         Ok(LedgerWritten { value: 0 })
     }

@@ -193,7 +193,7 @@ where
     ///
     ///     async fn process(
     ///         &self,
-    ///         _order: Order,
+    ///         _: Order,
     ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
     ///         fx.call(ChargeCardRequest).await?;
@@ -238,7 +238,7 @@ where
     ///
     ///     async fn process(
     ///         &self,
-    ///         _order: Order,
+    ///         _: Order,
     ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
     ///         fx.call(ChargeCardRequest).await?;
@@ -287,7 +287,7 @@ where
     ///
     ///     async fn process(
     ///         &self,
-    ///         _order: Order,
+    ///         _: Order,
     ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
     ///         fx.call(ChargeCardRequest).await?;
@@ -336,7 +336,7 @@ where
     ///
     ///     async fn process(
     ///         &self,
-    ///         _order: Order,
+    ///         _: Order,
     ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
     ///         fx.call(StampOrder).await?;

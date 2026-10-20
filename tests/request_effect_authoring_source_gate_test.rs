@@ -37,7 +37,11 @@ fn examples_perform_requests_without_binding_plumbing() {
         .iter()
         .flat_map(|file| {
             let source = fs::read_to_string(file).expect("read an example source");
-            let shown = file.strip_prefix(&root).unwrap_or(file).display().to_string();
+            let shown = file
+                .strip_prefix(&root)
+                .unwrap_or(file)
+                .display()
+                .to_string();
             plumbing
                 .iter()
                 .filter(move |name| source.contains(**name))

@@ -4665,7 +4665,7 @@ macro_rules! effectful_stateful {
 /// #     async fn process(&self, _: Fact, _: &mut Effects<Fact, Self::AllowedEffects>) -> Result<StageCompletion<Fact>, HandlerError> { unimplemented!() }
 /// # }
 /// let first_limit = rate_limit(10.0).for_effect::<First>();
-/// let _stage = obzenflow_dsl::effectful_transform!(
+/// let stage = obzenflow_dsl::effectful_transform!(
 ///     Fact -> Fact with first_limit => Handler
 /// );
 /// ```
@@ -4705,7 +4705,7 @@ macro_rules! effectful_stateful {
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![First, Second];
 /// #     async fn process(&self, _: Fact, _: &mut Effects<Fact, Self::AllowedEffects>) -> Result<StageCompletion<Fact>, HandlerError> { unimplemented!() }
 /// # }
-/// let _stage = obzenflow_dsl::effectful_transform!(
+/// let stage = obzenflow_dsl::effectful_transform!(
 ///     Fact -> Fact with { { rate_limit(10.0) } } => Handler
 /// );
 /// ```
@@ -4756,7 +4756,7 @@ macro_rules! effectful_stateful {
 /// # fn main() -> Result<(), SystemError> {
 /// let card = System::<dyn CardPort>::eager("card", Arc::new(Card))?;
 /// let checkout = Checkout;
-/// let _stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout.system(card));
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout.system(card));
 /// # Ok(())
 /// # }
 /// ```
@@ -4801,7 +4801,7 @@ macro_rules! effectful_stateful {
 /// #     }
 /// # }
 /// let checkout = Checkout;
-/// let _stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout);
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout);
 /// ```
 ///
 /// Neither does a system that answers none of the handler's effects:
@@ -4853,7 +4853,7 @@ macro_rules! effectful_stateful {
 /// let card = System::<dyn CardPort>::eager("card", Arc::new(Card))?;
 /// let ledger = System::<dyn LedgerPort>::eager("ledger", Arc::new(Ledger))?;
 /// let checkout = Checkout;
-/// let _stage = obzenflow_dsl::effectful_transform!(
+/// let stage = obzenflow_dsl::effectful_transform!(
 ///     Order -> Charged => checkout.system(card).system(ledger)
 /// );
 /// # Ok(())
@@ -4906,7 +4906,7 @@ macro_rules! effectful_stateful {
 /// let card = System::<dyn CardPort>::eager("card", Arc::new(Card))?;
 /// let spare_card = System::<dyn CardPort>::eager("spare-card", Arc::new(Card))?;
 /// let checkout = Checkout;
-/// let _stage = obzenflow_dsl::effectful_transform!(
+/// let stage = obzenflow_dsl::effectful_transform!(
 ///     Order -> Charged => checkout.system(card).system(spare_card)
 /// );
 /// # Ok(())
@@ -4917,19 +4917,19 @@ macro_rules! effectful_stateful {
 /// comes before `=>`, and the handler slot takes a name, not construction.
 ///
 /// ```compile_fail
-/// let _stage = obzenflow_dsl::effectful_transform!(Order -> Charged uses ChargeCard => checkout);
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged uses ChargeCard => checkout);
 /// ```
 ///
 /// ```compile_fail
-/// let _stage = obzenflow_dsl::effectful_transform!(Order -> Charged via card => checkout);
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged via card => checkout);
 /// ```
 ///
 /// ```compile_fail
-/// let _stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout with retry());
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout with retry());
 /// ```
 ///
 /// ```compile_fail
-/// let _stage = obzenflow_dsl::effectful_transform!(Order -> Charged => Checkout::new());
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => Checkout::new());
 /// ```
 #[macro_export]
 macro_rules! effectful_transform {
@@ -5037,7 +5037,7 @@ macro_rules! join {
 /// #     async fn write(&mut self, _: Fact) -> Result<(), SinkWriteFailure> { Ok(()) }
 /// # }
 /// let ledger = Ledger;
-/// let _sink = obzenflow_dsl::sink!(Fact => ledger.idempotent());
+/// let sink = obzenflow_dsl::sink!(Fact => ledger.idempotent());
 /// ```
 ///
 /// The `delivery:` clause was removed.
@@ -5046,7 +5046,7 @@ macro_rules! join {
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
-/// let _sink = obzenflow_dsl::sink!(Fact => ledger, delivery: idempotent);
+/// let sink = obzenflow_dsl::sink!(Fact => ledger, delivery: idempotent);
 /// ```
 #[macro_export]
 macro_rules! sink {
@@ -5061,7 +5061,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
-/// let _source = obzenflow_dsl::source!(Fact with { rate_limit(10.0), circuit_breaker().consecutive_failures(3) } => placeholder!());
+/// let source = obzenflow_dsl::source!(Fact with { rate_limit(10.0), circuit_breaker().consecutive_failures(3) } => placeholder!());
 /// ```
 ///
 /// Empty groups are invalid.
@@ -5071,7 +5071,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
-/// let _source = obzenflow_dsl::source!(Fact with {} => placeholder!());
+/// let source = obzenflow_dsl::source!(Fact with {} => placeholder!());
 /// ```
 ///
 /// Groups cannot be nested.
@@ -5081,7 +5081,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
-/// let _source = obzenflow_dsl::source!(Fact with { { rate_limit(10.0) } } => placeholder!());
+/// let source = obzenflow_dsl::source!(Fact with { { rate_limit(10.0) } } => placeholder!());
 /// ```
 ///
 /// Each stage accepts one clause.
@@ -5091,7 +5091,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
-/// let _source = obzenflow_dsl::source!(Fact with rate_limit(10.0) with circuit_breaker().consecutive_failures(3) => placeholder!());
+/// let source = obzenflow_dsl::source!(Fact with rate_limit(10.0) with circuit_breaker().consecutive_failures(3) => placeholder!());
 /// ```
 ///
 /// Square-bracket attachment lists are not part of the grammar.
@@ -5101,7 +5101,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
-/// let _source = obzenflow_dsl::source!(Fact with [rate_limit(10.0)] => placeholder!());
+/// let source = obzenflow_dsl::source!(Fact with [rate_limit(10.0)] => placeholder!());
 /// ```
 ///
 /// `with` after the handler is refused.
@@ -5111,7 +5111,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::rate_limit;
-/// let _source = obzenflow_dsl::source!(Fact => placeholder!() with rate_limit(10.0));
+/// let source = obzenflow_dsl::source!(Fact => placeholder!() with rate_limit(10.0));
 /// ```
 ///
 /// Backpressure is set in configuration, not after the handler.
@@ -5120,7 +5120,7 @@ macro_rules! sink {
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
-/// let _source = obzenflow_dsl::source!(Fact => placeholder!(), backpressure: enforced(64));
+/// let source = obzenflow_dsl::source!(Fact => placeholder!(), backpressure: enforced(64));
 /// ```
 ///
 /// Observers use the same attachment clause.
@@ -5130,7 +5130,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
-/// let _source = obzenflow_dsl::source!(Fact => placeholder!()  , observers: []);
+/// let source = obzenflow_dsl::source!(Fact => placeholder!()  , observers: []);
 /// ```
 ///
 /// Hosted ingress placement is inferred from the configured source.
@@ -5140,7 +5140,7 @@ macro_rules! sink {
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "grammar.fact"; }
 /// # use obzenflow_adapters::middleware::{rate_limit, circuit_breaker};
-/// let _source = obzenflow_dsl::source!(Fact => placeholder!()  , ingress with rate_limit(10.0));
+/// let source = obzenflow_dsl::source!(Fact => placeholder!()  , ingress with rate_limit(10.0));
 /// ```
 #[macro_export]
 macro_rules! source {
@@ -5154,7 +5154,7 @@ macro_rules! source {
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "stateful_doc.fact"; }
-/// let _stage = obzenflow_dsl::stateful!(
+/// let stage = obzenflow_dsl::stateful!(
 ///     Fact -> Fact => totals,
 ///     emit_interval = std::time::Duration::from_secs(5)
 /// );

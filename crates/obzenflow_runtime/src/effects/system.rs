@@ -23,7 +23,7 @@ pub struct System<P: ?Sized + Send + Sync + 'static> {
     name: LogicalEffectBindingName,
     evidence: SystemBindingEvidence,
     port: Arc<SystemPort>,
-    _port: PhantomData<fn() -> Arc<P>>,
+    port_type: PhantomData<fn() -> Arc<P>>,
 }
 
 impl<P: ?Sized + Send + Sync + 'static> System<P> {
@@ -58,7 +58,7 @@ impl<P: ?Sized + Send + Sync + 'static> System<P> {
             name,
             evidence,
             port: Arc::new(port),
-            _port: PhantomData,
+            port_type: PhantomData,
         })
     }
 
@@ -74,7 +74,7 @@ impl<P: ?Sized + Send + Sync + 'static> Clone for System<P> {
             name: self.name.clone(),
             evidence: self.evidence.clone(),
             port: Arc::clone(&self.port),
-            _port: PhantomData,
+            port_type: PhantomData,
         }
     }
 }
@@ -457,7 +457,7 @@ where
     type Marked = Mask;
 
     fn declaration(
-        _systems: &Systems,
+        _: &Systems,
         acknowledged: Option<AcknowledgedSafety>,
     ) -> Result<EffectDeclaration, StageEffectsError> {
         Ok(EffectDeclaration::for_binding::<E>(
@@ -502,9 +502,9 @@ impl<Systems, Mask> DeclareEffects<Systems, Mask, ()> for EmptySet {
     type Marked = Mask;
 
     fn declarations(
-        _systems: &Systems,
-        _acknowledgements: &[EffectAcknowledgement],
-        _out: &mut Vec<EffectDeclaration>,
+        _: &Systems,
+        _: &[EffectAcknowledgement],
+        _: &mut Vec<EffectDeclaration>,
     ) -> Result<(), StageEffectsError> {
         Ok(())
     }
@@ -584,7 +584,7 @@ where
 /// the systems named after it.
 #[doc(hidden)]
 pub fn effectful_transform_effects<H, Systems, Index>(
-    _handler: &H,
+    _: &H,
     systems: &Systems,
     acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
@@ -605,7 +605,7 @@ where
 /// set and the systems named after it.
 #[doc(hidden)]
 pub fn effectful_stateful_effects<H, Systems, Index>(
-    _handler: &H,
+    _: &H,
     systems: &Systems,
     acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
