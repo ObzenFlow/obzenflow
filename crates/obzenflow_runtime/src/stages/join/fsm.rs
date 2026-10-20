@@ -30,14 +30,13 @@ use super::phase::{check_crossing_phase, observe_hold, CrossingPhase, HoldOutcom
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{
-    ContractConfig, ContractsWiring, ReaderFrontier, ReaderProgress,
+    ContractConfig, ContractsWiring, EofOutcome, ReaderFrontier, ReaderProgress,
 };
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
-use crate::stages::common::input_facts::{fold_worst, EofRead, WatermarkRead};
 use crate::stages::common::supervision::catch_up::{
     frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
 };
@@ -137,7 +136,10 @@ impl JoinReading {
 
     pub(crate) fn with_worst_of(self, eof: &EofRead) -> Self {
         Self {
-            worst_eof: fold_worst(self.worst_eof, eof.side_worst),
+            worst_eof: match (self.worst_eof, eof.side_worst) {
+                (Some(current), Some(kind)) => Some(current.worst(kind)),
+                (current, kind) => current.or(kind),
+            },
             ..self
         }
     }
@@ -311,6 +313,65 @@ impl JoinState {
 // ============================================================================
 // FSM Events
 // ============================================================================
+
+/// A catch-up watermark the join read, with the frontier of the inputs it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatermarkRead {
+    pub(crate) generation: ReaderGeneration,
+    pub(crate) frontier: ReaderFrontier,
+}
+
+/// An EOF the join read, with what its subscription knew once it arrived.
+#[derive(Clone, Debug)]
+pub struct EofRead {
+    pub(crate) envelope: Arc<DeliveredRecord<ChainPayload>>,
+    pub(crate) ends_reads: bool,
+    pub(crate) side_worst: Option<EofKind>,
+    pub(crate) frontier: ReaderFrontier,
+    pub(crate) generation: ReaderGeneration,
+    pub(crate) ended_by: Option<StageKey>,
+}
+
+impl EofRead {
+    pub(crate) fn new(
+        envelope: DeliveredRecord<ChainPayload>,
+        outcome: Option<EofOutcome>,
+        generation: Option<ReaderGeneration>,
+        frontier: ReaderFrontier,
+    ) -> Self {
+        Self {
+            envelope: Arc::new(envelope),
+            ends_reads: outcome.as_ref().is_some_and(|outcome| outcome.is_final),
+            side_worst: outcome.as_ref().and_then(|outcome| outcome.worst_kind),
+            frontier,
+            generation: generation.unwrap_or_default(),
+            ended_by: outcome.map(|outcome| StageKey::from(outcome.stage_name)),
+        }
+    }
+
+    pub(crate) fn clock(&self) -> Option<VectorClock> {
+        match &self.envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { vector_clock, .. }) => {
+                vector_clock.clone()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn author(&self) -> Option<(StageId, EofKind)> {
+        let event = self.envelope.authored();
+        let ChainPayload::FlowControl(FlowControlPayload::Eof {
+            kind, writer_id, ..
+        }) = &event.payload
+        else {
+            return None;
+        };
+        match writer_id.unwrap_or(event.writer_id) {
+            WriterId::Stage(stage) => Some((stage, *kind)),
+            _ => None,
+        }
+    }
+}
 
 /// Events that trigger join state transitions
 #[derive(Clone, Debug, obzenflow_fsm::EventVariant)]

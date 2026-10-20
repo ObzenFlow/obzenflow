@@ -12,8 +12,7 @@ use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::{ReaderGeneration, StageId, StageKey};
 
 use super::config::{PhaseWitness, PhaseWitnesses};
-use super::fsm::HoldCompletion;
-use crate::stages::common::input_facts::EofRead;
+use super::fsm::{EofRead, HoldCompletion};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoldOutcome {

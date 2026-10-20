@@ -9,12 +9,13 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{
-    ChainEvent, FlowId, JournalWriterId, ReaderGeneration, StageId, StageKey, WriterId,
-};
+use obzenflow_core::{ChainEvent, FlowId, JournalWriterId, ReaderGeneration, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmError, StateMachine, StateVariant};
 
-use super::fsm::{MergeAction, MergeContext, MergeEvent, MergeInputs, MergeResources, MergeState};
+use super::fsm::{
+    EofRead, MergeAction, MergeContext, MergeEvent, MergeInputs, MergeResources, MergeState,
+    WatermarkRead,
+};
 use super::supervisor::MergeSupervisor;
 use crate::backpressure::BackpressureWriter;
 use crate::execution::{RuntimeExecution, RuntimeMode};
@@ -24,7 +25,6 @@ use crate::messaging::DeliveredRecord;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::JonestownSignalStrategy;
-use crate::stages::common::input_facts::{EofRead, WatermarkRead};
 use crate::stages::common::supervision::catch_up::test_support::{
     caught_up_through, context, open_at, RecordingJournal,
 };
@@ -160,8 +160,6 @@ fn eof(author: StageId, kind: EofKind, ends_reads: bool, frontier: ReaderFrontie
         ends_reads,
         side_worst: Some(kind),
         frontier,
-        generation: frontier.highest(),
-        ended_by: Some(StageKey::from("producer")),
     })
 }
 

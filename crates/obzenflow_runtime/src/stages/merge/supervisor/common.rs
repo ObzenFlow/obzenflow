@@ -13,13 +13,14 @@ use obzenflow_fsm::StateVariant;
 
 use super::BoxError;
 use crate::messaging::{DeliveredRecord, PollResult, UpstreamSubscription};
-use crate::stages::common::input_facts::{EofRead, WatermarkRead};
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, DrainOutcome, PendingOutput,
 };
 use crate::stages::common::supervision::control_resolution::await_signal_gate;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
-use crate::stages::merge::fsm::{MergeEvent, MergeInput, MergeResources, MergeState, PendingRow};
+use crate::stages::merge::fsm::{
+    EofRead, MergeEvent, MergeInput, MergeResources, MergeState, PendingRow, WatermarkRead,
+};
 use crate::supervised_base::EventLoopDirective;
 
 pub(super) fn align_held_selection(ctx: &mut MergeResources) {
@@ -213,7 +214,6 @@ pub(super) async fn dispatch_reading(
                     let eof = EofRead::new(
                         envelope,
                         subscription.take_last_eof_outcome(),
-                        subscription.last_delivered_generation(),
                         subscription.reader_frontier(),
                     );
                     return Ok(EventLoopDirective::Transition(MergeEvent::EofRead(eof)));

@@ -22,14 +22,13 @@ use obzenflow_fsm::{FsmAction, FsmContext, FsmError, Transition};
 use crate::backpressure::{BackpressureReader, BackpressureWriter, StallEpisode};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{
-    ContractConfig, ContractsWiring, ReaderFrontier, ReaderProgress,
+    ContractConfig, ContractsWiring, EofOutcome, ReaderFrontier, ReaderProgress,
 };
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalGate};
 use crate::stages::common::heartbeat::HeartbeatHandle;
-use crate::stages::common::input_facts::{fold_worst, EofRead, WatermarkRead};
 use crate::stages::common::supervision::backpressure_drain::PendingOutput;
 use crate::stages::common::supervision::catch_up::{
     frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
@@ -110,8 +109,51 @@ impl MergeState {
 impl MergeInputs {
     pub(crate) fn with_worst_of(self, eof: &EofRead) -> Self {
         Self {
-            worst_eof: fold_worst(self.worst_eof, eof.side_worst),
+            worst_eof: match (self.worst_eof, eof.side_worst) {
+                (Some(current), Some(kind)) => Some(current.worst(kind)),
+                (current, kind) => current.or(kind),
+            },
             ..self
+        }
+    }
+}
+
+/// A catch-up watermark the merge read, with the frontier of the inputs it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatermarkRead {
+    pub(crate) generation: ReaderGeneration,
+    pub(crate) frontier: ReaderFrontier,
+}
+
+/// An EOF the merge read, with what its subscription knew once it arrived.
+#[derive(Clone, Debug)]
+pub struct EofRead {
+    pub(crate) envelope: Arc<DeliveredRecord<ChainPayload>>,
+    pub(crate) ends_reads: bool,
+    pub(crate) side_worst: Option<EofKind>,
+    pub(crate) frontier: ReaderFrontier,
+}
+
+impl EofRead {
+    pub(crate) fn new(
+        envelope: DeliveredRecord<ChainPayload>,
+        outcome: Option<EofOutcome>,
+        frontier: ReaderFrontier,
+    ) -> Self {
+        Self {
+            envelope: Arc::new(envelope),
+            ends_reads: outcome.as_ref().is_some_and(|outcome| outcome.is_final),
+            side_worst: outcome.and_then(|outcome| outcome.worst_kind),
+            frontier,
+        }
+    }
+
+    pub(crate) fn clock(&self) -> Option<VectorClock> {
+        match &self.envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { vector_clock, .. }) => {
+                vector_clock.clone()
+            }
+            _ => None,
         }
     }
 }

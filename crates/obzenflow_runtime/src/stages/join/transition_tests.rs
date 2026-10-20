@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use super::config::{JoinReferenceMode, LiveStream, PhaseWitness, PhaseWitnesses};
 use super::fsm::{
-    DrainStep, JoinAction, JoinContext, JoinDrain, JoinEnrichment, JoinEvent, JoinHold, JoinLive,
-    JoinPlan, JoinReading, JoinResources, JoinState, JoinSubscriptionSide, LiveReads,
+    DrainStep, EofRead, JoinAction, JoinContext, JoinDrain, JoinEnrichment, JoinEvent, JoinHold,
+    JoinLive, JoinPlan, JoinReading, JoinResources, JoinState, JoinSubscriptionSide, LiveReads,
+    WatermarkRead,
 };
 use super::supervisor::JoinSupervisor;
 use crate::backpressure::BackpressureWriter;
@@ -35,7 +36,6 @@ use crate::stages::common::control_strategies::JonestownSignalStrategy;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::join::TypedJoinHandlerAdapter;
 use crate::stages::common::handlers::{JoinReferenceView, TypedJoinHandler, UnifiedJoinHandler};
-use crate::stages::common::input_facts::{EofRead, WatermarkRead};
 use crate::stages::common::supervision::catch_up::test_support::{
     caught_up_through, context, open_at, RecordingJournal,
 };

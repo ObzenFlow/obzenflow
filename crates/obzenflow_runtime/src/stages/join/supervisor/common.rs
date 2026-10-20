@@ -7,13 +7,14 @@ use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::UnifiedJoinHandler;
-use crate::stages::common::input_facts::{EofRead, WatermarkRead};
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::await_signal_gate;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
-use crate::stages::join::fsm::{JoinEvent, JoinResources, JoinSubscriptionSide};
+use crate::stages::join::fsm::{
+    EofRead, JoinEvent, JoinResources, JoinSubscriptionSide, WatermarkRead,
+};
 use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
