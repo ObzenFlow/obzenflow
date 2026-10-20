@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::sync::atomic::Ordering;
 
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
 };
@@ -14,10 +14,12 @@ use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_fsm::{fsm, StateMachine, StateVariant};
+use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 
-use super::fsm::{MergeAction, MergeContext, MergeEvent, MergeInput, MergeState, PendingRow};
-use super::transitions;
+use super::fsm::{
+    MergeAction, MergeContext, MergeDrain, MergeEvent, MergeInput, MergeInputs, MergeState,
+    PendingRow,
+};
 use crate::messaging::{DeliveredRecord, PollResult, UpstreamSubscription};
 use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::stages::common::input_facts::{EofRead, WatermarkRead};
@@ -64,60 +66,289 @@ impl Supervisor for MergeSupervisor {
             initial: initial_state;
 
             state MergeState::Created {
-                on MergeEvent::Initialize => transitions::initialize;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::Initialize => |_, _, _| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: MergeState::Initializing,
+                            actions: vec![
+                                MergeAction::Host(SupervisorAction::Register),
+                                MergeAction::AllocateResources,
+                                MergeAction::Host(SupervisorAction::Emit(
+                                    MergeEvent::InitializationCompleted,
+                                )),
+                            ],
+                        })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::Initializing {
-                on MergeEvent::InitializationCompleted => transitions::initialized;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::InitializationCompleted => |_, _, _| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: MergeState::Initialized,
+                            actions: Vec::new(),
+                        })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::Initialized {
-                on MergeEvent::Ready => transitions::ready;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::Ready => |_, _, _| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: MergeState::Starting,
+                            actions: vec![
+                                MergeAction::PublishRunning,
+                                MergeAction::Host(SupervisorAction::Emit(
+                                    MergeEvent::ActivationCompleted,
+                                )),
+                            ],
+                        })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::Starting {
-                on MergeEvent::ActivationCompleted => transitions::activated;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::ActivationCompleted => |_, _, _| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: MergeState::FirstPhase(MergeInputs::default()),
+                            actions: Vec::new(),
+                        })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::FirstPhase {
-                on MergeEvent::WatermarkRead => transitions::watermark;
-                on MergeEvent::EofRead => transitions::first_phase_eof;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::WatermarkRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::WatermarkRead(read) = event else { unreachable!() };
+                        let (inputs, actions) =
+                            match ctx.cross(state, read.generation, read.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        Ok(Transition {
+                            next_state: MergeState::FirstPhase(inputs),
+                            actions,
+                        })
+                    })
+                };
+
+                on MergeEvent::EofRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::EofRead(eof) = event else { unreachable!() };
+                        let (inputs, mut actions) =
+                            match ctx.cross(state, eof.frontier.highest(), eof.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        actions.push(MergeAction::ForwardControl(eof.envelope.clone()));
+                        let inputs = inputs.with_worst_of(eof);
+                        let next_state = if !eof.ends_reads {
+                            MergeState::FirstPhase(inputs)
+                        } else if eof.side_worst.unwrap_or(EofKind::Natural) == EofKind::Natural {
+                            tracing::info!(
+                                stage_name = %ctx.stage_name,
+                                strategy = ?ctx.strategy,
+                                "Merge first phase completed; reading held producers"
+                            );
+                            MergeState::LastPhase(inputs)
+                        } else {
+                            tracing::info!(
+                                stage_name = %ctx.stage_name,
+                                strategy = ?ctx.strategy,
+                                "Merge first phase left open; draining without held producers"
+                            );
+                            MergeState::Draining(MergeDrain {
+                                worst_eof: inputs.worst_eof,
+                                eof_clock: eof.clock(),
+                            })
+                        };
+                        Ok(Transition { next_state, actions })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::LastPhase {
-                on MergeEvent::WatermarkRead => transitions::watermark;
-                on MergeEvent::EofRead => transitions::last_phase_eof;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::WatermarkRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::WatermarkRead(read) = event else { unreachable!() };
+                        let (inputs, actions) =
+                            match ctx.cross(state, read.generation, read.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        Ok(Transition {
+                            next_state: MergeState::LastPhase(inputs),
+                            actions,
+                        })
+                    })
+                };
+
+                on MergeEvent::EofRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::EofRead(eof) = event else { unreachable!() };
+                        let (inputs, mut actions) =
+                            match ctx.cross(state, eof.frontier.highest(), eof.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        actions.push(MergeAction::ForwardControl(eof.envelope.clone()));
+                        let inputs = inputs.with_worst_of(eof);
+                        let next_state = if eof.ends_reads {
+                            MergeState::Draining(MergeDrain {
+                                worst_eof: inputs.worst_eof,
+                                eof_clock: eof.clock(),
+                            })
+                        } else {
+                            MergeState::LastPhase(inputs)
+                        };
+                        Ok(Transition { next_state, actions })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::Draining {
-                on MergeEvent::DrainComplete => transitions::drain_complete;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::DrainComplete => |state, _, _| {
+                    Box::pin(async move {
+                        let MergeState::Draining(drain) = state else { unreachable!() };
+                        Ok(Transition {
+                            next_state: MergeState::Finalizing,
+                            actions: vec![
+                                MergeAction::AuthorEof {
+                                    kind: drain.worst_eof.unwrap_or(EofKind::Natural),
+                                    clock: drain.eof_clock.clone(),
+                                },
+                                MergeAction::SendCompletion,
+                                MergeAction::Cleanup,
+                                MergeAction::Host(SupervisorAction::CloseMailbox),
+                                MergeAction::Host(SupervisorAction::SettlePublications),
+                                MergeAction::Host(SupervisorAction::Emit(
+                                    MergeEvent::FinalizationCompleted,
+                                )),
+                            ],
+                        })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::Finalizing {
-                on MergeEvent::FinalizationCompleted => transitions::finalized;
-                on MergeEvent::Error => transitions::failure;
+                on MergeEvent::FinalizationCompleted => |_, _, _| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: MergeState::Drained,
+                            actions: Vec::new(),
+                        })
+                    })
+                };
+
+                on MergeEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let MergeEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
             }
 
             state MergeState::Failing {
-                on MergeEvent::TerminationSettled => transitions::failure_settled;
+                on MergeEvent::TerminationSettled => |state, _, _| {
+                    Box::pin(async move {
+                        let MergeState::Failing(cause) = state else { unreachable!() };
+                        Ok(Transition {
+                            next_state: MergeState::Failed(cause.clone()),
+                            actions: Vec::new(),
+                        })
+                    })
+                };
             }
 
             state MergeState::Cancelling {
-                on MergeEvent::TerminationSettled => transitions::cancellation_settled;
+                on MergeEvent::TerminationSettled => |state, _, _| {
+                    Box::pin(async move {
+                        let MergeState::Cancelling(cause) = state else { unreachable!() };
+                        Ok(Transition {
+                            next_state: MergeState::Cancelled(cause.clone()),
+                            actions: Vec::new(),
+                        })
+                    })
+                };
             }
 
             state MergeState::Drained {}
             state MergeState::Failed {}
             state MergeState::Cancelled {}
 
-            unhandled => transitions::unhandled;
+            unhandled => |state, event, _| {
+                Box::pin(async move {
+                    let ignored = matches!(event, MergeEvent::Initialize | MergeEvent::Ready)
+                        || matches!(
+                            state,
+                            MergeState::Failing(_)
+                                | MergeState::Cancelling(_)
+                                | MergeState::Failed(_)
+                                | MergeState::Cancelled(_)
+                                | MergeState::Drained
+                        );
+                    if ignored {
+                        return Ok(());
+                    }
+                    Err(FsmError::UnhandledEvent {
+                        state: state.variant_name().to_string(),
+                        event: event.variant_name().to_string(),
+                    })
+                })
+            };
         }
     }
 

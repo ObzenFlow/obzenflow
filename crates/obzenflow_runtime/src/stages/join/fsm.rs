@@ -19,23 +19,28 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, ReaderGeneration, StageId, StageKey, WriterId};
-use obzenflow_fsm::{FsmAction, FsmContext};
+use obzenflow_fsm::{FsmAction, FsmContext, Transition};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::config::{JoinReferenceMode, LiveStream, PhaseWitnesses};
-use super::phase::CrossingPhase;
+use super::phase::{check_crossing_phase, observe_hold, CrossingPhase, HoldOutcome};
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::feed_plan::StageOutputContract;
-use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
+use crate::messaging::upstream_subscription::{
+    ContractConfig, ContractsWiring, ReaderFrontier, ReaderProgress,
+};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
-use crate::stages::common::input_facts::{EofRead, WatermarkRead};
-use crate::stages::common::supervision::catch_up::{CatchUpAction, CatchUpContext, CatchUpState};
+use crate::stages::common::input_facts::{fold_worst, EofRead, WatermarkRead};
+use crate::stages::common::supervision::catch_up::{
+    frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
+};
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
@@ -127,6 +132,13 @@ impl JoinReading {
             plan,
             catch_up: CatchUpState::default(),
             worst_eof: None,
+        }
+    }
+
+    pub(crate) fn with_worst_of(self, eof: &EofRead) -> Self {
+        Self {
+            worst_eof: fold_worst(self.worst_eof, eof.side_worst),
+            ..self
         }
     }
 }
@@ -281,29 +293,6 @@ impl JoinState {
             Self::Enriching(JoinEnrichment::ToEnd(reading)) => Some(reading),
             Self::Live(live) => Some(&live.reading),
             _ => None,
-        }
-    }
-
-    pub(crate) fn with_reading(&self, reading: JoinReading) -> Self {
-        match self {
-            Self::Hydrating(hold) => Self::Hydrating(JoinHold {
-                reading,
-                witnessed: hold.witnessed.clone(),
-            }),
-            Self::Enriching(JoinEnrichment::Holding(hold)) => {
-                Self::Enriching(JoinEnrichment::Holding(JoinHold {
-                    reading,
-                    witnessed: hold.witnessed.clone(),
-                }))
-            }
-            Self::Enriching(JoinEnrichment::ToEnd(_)) => {
-                Self::Enriching(JoinEnrichment::ToEnd(reading))
-            }
-            Self::Live(live) => Self::Live(JoinLive {
-                reading,
-                reads: live.reads,
-            }),
-            other => other.clone(),
         }
     }
 
@@ -628,6 +617,97 @@ impl<H: UnifiedJoinHandler> JoinContext<H> {
                 "join resources belong to a pending operation".into(),
             )
         })
+    }
+
+    fn present(&self) -> &JoinResources<H> {
+        self.resources
+            .as_ref()
+            .expect("a join's resources are back before its machine handles a fact")
+    }
+
+    pub(crate) fn stage_name(&self) -> &str {
+        &self.present().stage_name
+    }
+
+    pub(crate) fn cross(
+        &self,
+        state: &JoinState,
+        generation: ReaderGeneration,
+        frontier: ReaderFrontier,
+    ) -> Result<(JoinReading, Vec<JoinAction<H>>), String> {
+        let (Some(reading), Some(phase)) = (state.reading(), state.crossing_phase()) else {
+            unreachable!()
+        };
+        let resources = self.present();
+        let step = frontier_step(&reading.catch_up, generation, frontier, &resources.catch_up)
+            .into_result()
+            .map_err(|fatal| fatal.detail)?;
+        let mut actions: Vec<_> = step.actions.into_iter().map(JoinAction::CatchUp).collect();
+        if let Some(crossed) = step.crossed_into {
+            check_crossing_phase(
+                &resources.stage_name,
+                &resources.archived_phases,
+                crossed,
+                phase,
+            )?;
+            actions.extend(state.held_input().map(|side| JoinAction::PromoteHeld {
+                side,
+                generation: crossed,
+            }));
+        }
+        Ok((
+            JoinReading {
+                catch_up: step.next,
+                ..reading.clone()
+            },
+            actions,
+        ))
+    }
+
+    pub(crate) fn fold_catalog_witness(
+        &self,
+        witnessed: &Arc<BTreeMap<StageKey, EofKind>>,
+        eof: &EofRead,
+    ) -> (Arc<BTreeMap<StageKey, EofKind>>, HoldOutcome) {
+        let resources = self.present();
+        let catalog = resources
+            .phase_witnesses
+            .as_ref()
+            .map(|witnesses| witnesses.catalog.as_slice());
+        observe_hold(witnessed, catalog, &resources.witness_keys, eof)
+    }
+
+    pub(crate) fn fold_batch_witness(
+        &self,
+        witnessed: &Arc<BTreeMap<StageKey, EofKind>>,
+        eof: &EofRead,
+    ) -> (Arc<BTreeMap<StageKey, EofKind>>, HoldOutcome) {
+        let resources = self.present();
+        let batch = resources
+            .phase_witnesses
+            .as_ref()
+            .map(|witnesses| witnesses.batch_stream.as_slice());
+        observe_hold(witnessed, batch, &resources.witness_keys, eof)
+    }
+
+    pub(crate) fn fail(&self, cause: String) -> Transition<JoinState, JoinAction<H>> {
+        self.instrumentation
+            .failures_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.fail_uncounted(cause)
+    }
+
+    pub(crate) fn fail_uncounted(&self, cause: String) -> Transition<JoinState, JoinAction<H>> {
+        Transition {
+            next_state: JoinState::failure(cause.clone()),
+            actions: vec![
+                JoinAction::SendFailure { message: cause },
+                JoinAction::Cleanup,
+                JoinAction::Host(SupervisorAction::CloseMailbox),
+                JoinAction::Host(SupervisorAction::SettlePublications),
+                JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled)),
+            ],
+        }
     }
 }
 impl<H: UnifiedJoinHandler + 'static> FsmContext for JoinContext<H> {}

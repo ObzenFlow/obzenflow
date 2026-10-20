@@ -12,7 +12,6 @@ pub mod handle;
 pub(crate) mod supervisor;
 #[cfg(test)]
 mod transition_tests;
-mod transitions;
 
 pub use builder::MergeBuilder;
 pub use config::MergeConfig;

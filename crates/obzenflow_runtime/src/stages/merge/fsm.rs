@@ -17,19 +17,23 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, ReaderGeneration, StageId, WriterId};
-use obzenflow_fsm::{FsmAction, FsmContext, FsmError};
+use obzenflow_fsm::{FsmAction, FsmContext, FsmError, Transition};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter, StallEpisode};
 use crate::feed_plan::StageOutputContract;
-use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
+use crate::messaging::upstream_subscription::{
+    ContractConfig, ContractsWiring, ReaderFrontier, ReaderProgress,
+};
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalGate};
 use crate::stages::common::heartbeat::HeartbeatHandle;
-use crate::stages::common::input_facts::{EofRead, WatermarkRead};
+use crate::stages::common::input_facts::{fold_worst, EofRead, WatermarkRead};
 use crate::stages::common::supervision::backpressure_drain::PendingOutput;
-use crate::stages::common::supervision::catch_up::{CatchUpAction, CatchUpContext, CatchUpState};
+use crate::stages::common::supervision::catch_up::{
+    frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::lifecycle_actions;
@@ -101,24 +105,14 @@ impl MergeState {
             _ => Phase::Other,
         }
     }
+}
 
-    pub(crate) fn inputs(&self) -> Option<&MergeInputs> {
-        match self {
-            Self::FirstPhase(inputs) | Self::LastPhase(inputs) => Some(inputs),
-            _ => None,
+impl MergeInputs {
+    pub(crate) fn with_worst_of(self, eof: &EofRead) -> Self {
+        Self {
+            worst_eof: fold_worst(self.worst_eof, eof.side_worst),
+            ..self
         }
-    }
-
-    pub(crate) fn with_inputs(&self, inputs: MergeInputs) -> Self {
-        match self {
-            Self::FirstPhase(_) => Self::FirstPhase(inputs),
-            Self::LastPhase(_) => Self::LastPhase(inputs),
-            other => other.clone(),
-        }
-    }
-
-    pub(crate) fn holding(&self) -> bool {
-        matches!(self, Self::FirstPhase(_))
     }
 }
 
@@ -228,6 +222,44 @@ impl MergeContext {
             self.stage_id,
             StageType::Merge,
         )
+    }
+
+    pub(crate) fn cross(
+        &self,
+        state: &MergeState,
+        generation: ReaderGeneration,
+        frontier: ReaderFrontier,
+    ) -> Result<(MergeInputs, Vec<MergeAction>), String> {
+        let (MergeState::FirstPhase(inputs) | MergeState::LastPhase(inputs)) = state else {
+            unreachable!()
+        };
+        let step = frontier_step(&inputs.catch_up, generation, frontier, &self.catch_up)
+            .into_result()
+            .map_err(|fatal| fatal.detail)?;
+        let mut actions: Vec<_> = step.actions.into_iter().map(MergeAction::CatchUp).collect();
+        if matches!(state, MergeState::FirstPhase(_)) {
+            actions.extend(step.crossed_into.map(MergeAction::PromoteHeld));
+        }
+        Ok((
+            MergeInputs {
+                catch_up: step.next,
+                ..inputs.clone()
+            },
+            actions,
+        ))
+    }
+
+    pub(crate) fn fail(&self, cause: String) -> Transition<MergeState, MergeAction> {
+        Transition {
+            next_state: MergeState::failure(cause.clone()),
+            actions: vec![
+                MergeAction::SendFailure { message: cause },
+                MergeAction::Cleanup,
+                MergeAction::Host(SupervisorAction::CloseMailbox),
+                MergeAction::Host(SupervisorAction::SettlePublications),
+                MergeAction::Host(SupervisorAction::Emit(MergeEvent::TerminationSettled)),
+            ],
+        }
     }
 }
 
