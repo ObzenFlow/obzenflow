@@ -179,8 +179,7 @@ pub(crate) struct MergeInput {
     pub(crate) last_contract_check: Option<tokio::time::Instant>,
 }
 
-/// Everything merge actions and dispatch need.
-pub struct MergeContext {
+pub(crate) struct MergeResources {
     pub(crate) stage_id: StageId,
     pub(crate) stage_name: String,
     pub(crate) flow_name: String,
@@ -211,9 +210,15 @@ pub struct MergeContext {
     pub(crate) catch_up: CatchUpContext,
 }
 
+/// A merge machine's context. A dispatch or an action holds the resources while it runs.
+pub struct MergeContext {
+    pub(crate) resources: Option<MergeResources>,
+    pub(crate) instrumentation: Arc<StageInstrumentation>,
+}
+
 impl FsmContext for MergeContext {}
 
-impl MergeContext {
+impl MergeResources {
     pub(crate) fn flow_context(&self) -> FlowContext {
         make_flow_context(
             &self.flow_name,
@@ -222,6 +227,35 @@ impl MergeContext {
             self.stage_id,
             StageType::Merge,
         )
+    }
+}
+
+impl MergeContext {
+    pub(crate) fn new(resources: MergeResources) -> Self {
+        Self {
+            instrumentation: resources.instrumentation.clone(),
+            resources: Some(resources),
+        }
+    }
+
+    pub(crate) fn resources_mut(&mut self) -> Result<&mut MergeResources, FsmError> {
+        self.resources.as_mut().ok_or_else(|| {
+            FsmError::HandlerError("merge resources belong to a pending operation".into())
+        })
+    }
+
+    fn present(&self) -> &MergeResources {
+        self.resources
+            .as_ref()
+            .expect("a merge's resources are back before its machine handles a fact")
+    }
+
+    pub(crate) fn stage_name(&self) -> &str {
+        &self.present().stage_name
+    }
+
+    pub(crate) fn strategy(&self) -> MergeStrategyKind {
+        self.present().strategy
     }
 
     pub(crate) fn cross(
@@ -233,9 +267,14 @@ impl MergeContext {
         let (MergeState::FirstPhase(inputs) | MergeState::LastPhase(inputs)) = state else {
             unreachable!()
         };
-        let step = frontier_step(&inputs.catch_up, generation, frontier, &self.catch_up)
-            .into_result()
-            .map_err(|fatal| fatal.detail)?;
+        let step = frontier_step(
+            &inputs.catch_up,
+            generation,
+            frontier,
+            &self.present().catch_up,
+        )
+        .into_result()
+        .map_err(|fatal| fatal.detail)?;
         let mut actions: Vec<_> = step.actions.into_iter().map(MergeAction::CatchUp).collect();
         if matches!(state, MergeState::FirstPhase(_)) {
             actions.extend(step.crossed_into.map(MergeAction::PromoteHeld));
@@ -268,6 +307,12 @@ impl FsmAction for MergeAction {
     type Context = MergeContext;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), FsmError> {
+        self.execute_resources(ctx.resources_mut()?).await
+    }
+}
+
+impl MergeAction {
+    pub(crate) async fn execute_resources(&self, ctx: &mut MergeResources) -> Result<(), FsmError> {
         match self {
             MergeAction::Host(_) => Err(FsmError::HandlerError(
                 "host action requires the supervised runner".into(),
@@ -287,7 +332,7 @@ impl FsmAction for MergeAction {
                     .into_iter()
                     .map(ReaderProgress::new)
                     .collect();
-                let wiring = |ctx: &MergeContext| ContractsWiring {
+                let wiring = |ctx: &MergeResources| ContractsWiring {
                     writer_id,
                     contract_journal: ctx.data_journal.clone(),
                     config: ContractConfig::default(),

@@ -14,7 +14,7 @@ use obzenflow_core::{
 };
 use obzenflow_fsm::{EventVariant, FsmAction, FsmError, StateMachine, StateVariant};
 
-use super::fsm::{MergeAction, MergeContext, MergeEvent, MergeInputs, MergeState};
+use super::fsm::{MergeAction, MergeContext, MergeEvent, MergeInputs, MergeResources, MergeState};
 use super::supervisor::MergeSupervisor;
 use crate::backpressure::BackpressureWriter;
 use crate::execution::{RuntimeExecution, RuntimeMode};
@@ -46,7 +46,7 @@ impl Merge {
         let journal = RecordingJournal::new();
         let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
         let empty = SubscriptionFactory::new(HashMap::new()).bind(&[]);
-        let ctx = MergeContext {
+        let ctx = MergeContext::new(MergeResources {
             stage_id,
             stage_name: "trades".to_string(),
             flow_name: "flow".to_string(),
@@ -72,7 +72,7 @@ impl Merge {
             backpressure_stall: Default::default(),
             heartbeat: None,
             catch_up: context(stage_id, "trades", execution, Some(journal)),
-        };
+        });
         let supervisor = MergeSupervisor::new("trades".to_string(), stage_id);
         Self {
             machine: supervisor.build_state_machine(state),

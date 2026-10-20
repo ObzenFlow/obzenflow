@@ -19,7 +19,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 use super::config::MergeConfig;
-use super::fsm::{MergeContext, MergeState};
+use super::fsm::{MergeContext, MergeResources, MergeState};
 use super::handle::MergeHandle;
 use super::supervisor::MergeSupervisor;
 
@@ -127,7 +127,7 @@ impl SupervisorBuilder for MergeBuilder {
             }))
         };
 
-        let context = MergeContext {
+        let resources = MergeResources {
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
             flow_name: self.config.flow_name.clone(),
@@ -166,6 +166,8 @@ impl SupervisorBuilder for MergeBuilder {
                 self.resources.runtime_execution.clone(),
             ),
         };
+
+        let context = MergeContext::new(resources);
 
         let supervisor = MergeSupervisor::new(self.config.stage_name.clone(), self.config.stage_id);
         let supervisor_name = format!("merge_{}", self.config.stage_name);
