@@ -155,6 +155,7 @@ pub(crate) enum MergeAction {
     CatchUp(CatchUpAction),
     PromoteHeld(ReaderGeneration),
     ForwardControl(Arc<DeliveredRecord<ChainPayload>>),
+    ReleaseInputs,
     AuthorEof {
         kind: EofKind,
         clock: Option<VectorClock>,
@@ -389,6 +390,12 @@ impl MergeAction {
                 )
                 .await
                 .map_err(|error| FsmError::HandlerError(error.to_string()))?;
+                Ok(())
+            }
+            MergeAction::ReleaseInputs => {
+                for reader in ctx.backpressure_readers.values() {
+                    reader.release();
+                }
                 Ok(())
             }
             MergeAction::AuthorEof { kind, clock } => {

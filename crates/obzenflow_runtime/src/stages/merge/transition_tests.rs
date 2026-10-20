@@ -123,6 +123,7 @@ fn shape(action: &MergeAction) -> String {
         }
         MergeAction::PromoteHeld(generation) => format!("promote {}", generation.0),
         MergeAction::ForwardControl(_) => "forward".to_string(),
+        MergeAction::ReleaseInputs => "release".to_string(),
         MergeAction::AuthorEof { kind, .. } => format!("author_eof {kind:?}"),
         MergeAction::SendCompletion => "completion".to_string(),
         MergeAction::SendFailure { .. } => "failure".to_string(),
@@ -276,6 +277,27 @@ async fn a_merge_drains_with_the_clock_of_the_eof_that_ended_its_reading() {
         (EofKind::Natural, Some(clock_of(live)))
     );
     assert_eq!(ended.state().variant_name(), "Finalizing");
+}
+
+#[tokio::test]
+async fn each_way_into_draining_releases_the_merge_inputs() {
+    let mut left_open = Merge::resumed(first_phase());
+    assert_eq!(
+        left_open
+            .send(eof(StageId::new(), EofKind::Poison, true, not_crossing()))
+            .await,
+        ["forward", "release"]
+    );
+    assert_eq!(left_open.state().variant_name(), "Draining");
+
+    let mut ended = Merge::resumed(MergeState::LastPhase(MergeInputs::default()));
+    assert_eq!(
+        ended
+            .send(eof(StageId::new(), EofKind::Natural, true, not_crossing()))
+            .await,
+        ["forward", "release"]
+    );
+    assert_eq!(ended.state().variant_name(), "Draining");
 }
 
 #[tokio::test]

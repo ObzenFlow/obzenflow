@@ -212,6 +212,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                                     "Join hydration left open; draining without held inputs"
                                 );
                                 actions.push(JoinAction::EmitHydrationHeartbeat);
+                                actions.push(JoinAction::ReleaseInputs);
                                 JoinState::Draining(JoinDrain {
                                     step: DrainStep::Flush,
                                     worst_eof: reading.worst_eof,
@@ -300,6 +301,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                         let reading = reading.with_worst_of(eof);
                         let next_state = match enrichment {
                             JoinEnrichment::ToEnd(_) if eof.ends_reads => {
+                                actions.push(JoinAction::ReleaseInputs);
                                 JoinState::Draining(JoinDrain {
                                     step: DrainStep::Finalize {
                                         final_eof: eof.envelope.clone(),
@@ -326,6 +328,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                                             stage_name = %ctx.stage_name(),
                                             "Join batch left open; draining without held inputs"
                                         );
+                                        actions.push(JoinAction::ReleaseInputs);
                                         JoinState::Draining(JoinDrain {
                                             step: DrainStep::Flush,
                                             worst_eof: reading.worst_eof,
@@ -342,6 +345,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                                         JoinState::Live(JoinLive { reading, reads })
                                     }
                                     (HoldOutcome::Completed(_), None) if eof.ends_reads => {
+                                        actions.push(JoinAction::ReleaseInputs);
                                         JoinState::Draining(JoinDrain {
                                             step: DrainStep::Finalize {
                                                 final_eof: eof.envelope.clone(),
@@ -420,6 +424,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
                         actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
                         let reading = reading.with_worst_of(eof);
                         let next_state = if eof.ends_reads {
+                            actions.push(JoinAction::ReleaseInputs);
                             JoinState::Draining(JoinDrain {
                                 step: DrainStep::Finalize {
                                     final_eof: eof.envelope.clone(),

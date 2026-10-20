@@ -399,6 +399,7 @@ pub(crate) enum JoinAction<H> {
         generation: ReaderGeneration,
     },
     ForwardControl(Arc<DeliveredRecord<ChainPayload>>),
+    ReleaseInputs,
     AuthorEof {
         kind: EofKind,
         clock: Option<VectorClock>,
@@ -426,6 +427,7 @@ impl<H> std::fmt::Debug for JoinAction<H> {
             Self::ForwardControl(envelope) => {
                 write!(f, "ForwardControl({})", envelope.event_type())
             }
+            Self::ReleaseInputs => write!(f, "ReleaseInputs"),
             Self::AuthorEof { kind, .. } => write!(f, "AuthorEof({kind:?})"),
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
@@ -796,6 +798,12 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 )
                 .await
                 .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+                Ok(())
+            }
+            JoinAction::ReleaseInputs => {
+                for reader in ctx.backpressure_readers.values() {
+                    reader.release();
+                }
                 Ok(())
             }
             JoinAction::AllocateResources => {

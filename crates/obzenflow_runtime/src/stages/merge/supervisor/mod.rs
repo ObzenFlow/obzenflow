@@ -182,6 +182,7 @@ impl Supervisor for MergeSupervisor {
                                 strategy = ?ctx.strategy(),
                                 "Merge first phase left open; draining without held producers"
                             );
+                            actions.push(MergeAction::ReleaseInputs);
                             MergeState::Draining(MergeDrain {
                                 worst_eof: inputs.worst_eof,
                                 eof_clock: eof.clock(),
@@ -226,6 +227,7 @@ impl Supervisor for MergeSupervisor {
                         actions.push(MergeAction::ForwardControl(eof.envelope.clone()));
                         let inputs = inputs.with_worst_of(eof);
                         let next_state = if eof.ends_reads {
+                            actions.push(MergeAction::ReleaseInputs);
                             MergeState::Draining(MergeDrain {
                                 worst_eof: inputs.worst_eof,
                                 eof_clock: eof.clock(),

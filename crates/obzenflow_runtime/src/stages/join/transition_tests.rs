@@ -213,6 +213,7 @@ fn shape(action: &JoinAction<Handler>) -> String {
             format!("promote {side:?} {}", generation.0)
         }
         JoinAction::ForwardControl(_) => "forward".to_string(),
+        JoinAction::ReleaseInputs => "release".to_string(),
         JoinAction::EmitHydrationHeartbeat => "heartbeat".to_string(),
         JoinAction::RecordPhase(JoinPhaseFact::EnrichingEntered { generation, .. }) => {
             format!("enriching_entered {generation}")
@@ -449,7 +450,7 @@ async fn a_hydration_left_open_drains_at_flush_with_no_clock() {
             not_crossing(),
         )))
         .await;
-    assert_eq!(actions, ["forward", "heartbeat"]);
+    assert_eq!(actions, ["forward", "heartbeat", "release"]);
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::Flush);
     assert_eq!(drain.worst_eof, Some(EofKind::Poison));
@@ -487,7 +488,7 @@ async fn a_holding_batch_goes_live_on_its_witnesses_and_drains_when_left_open() 
             not_crossing(),
         )))
         .await;
-    assert_eq!(actions, ["forward"]);
+    assert_eq!(actions, ["forward", "release"]);
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::Flush);
     assert_eq!(drain.clock, Some(clock_of(orders.stage_id)));
@@ -507,7 +508,7 @@ async fn a_batch_with_no_live_phase_drains_at_finalize_when_its_stream_ends() {
     let ended = eof(orders.stage_id, EofKind::Natural, true, not_crossing());
     let final_eof = ended.envelope.clone();
     let actions = join.send(JoinEvent::StreamEofRead(ended)).await;
-    assert_eq!(actions, ["forward"]);
+    assert_eq!(actions, ["forward", "release"]);
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::Finalize { final_eof });
     assert_eq!(drain.worst_eof, Some(EofKind::Natural));
@@ -556,7 +557,7 @@ async fn a_finite_eof_batch_reads_its_stream_to_the_end_then_finalizes() {
     let final_eof = ended.envelope.clone();
     assert_eq!(
         join.send(JoinEvent::StreamEofRead(ended)).await,
-        ["forward"]
+        ["forward", "release"]
     );
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::Finalize { final_eof });
@@ -582,7 +583,7 @@ async fn live_ends_only_on_the_stream_eof_that_ends_its_reads() {
     let final_eof = ended.envelope.clone();
     assert_eq!(
         join.send(JoinEvent::StreamEofRead(ended)).await,
-        ["forward"]
+        ["forward", "release"]
     );
     let drain = draining(join.state());
     assert_eq!(drain.step, DrainStep::Finalize { final_eof });
@@ -726,7 +727,10 @@ async fn a_stream_eof_that_completes_a_crossing_forwards_after_it_and_drains() {
             caught_up_through(1),
         )))
         .await;
-    assert_eq!(actions, ["watermarks through 1", "boundary 1", "forward"]);
+    assert_eq!(
+        actions,
+        ["watermarks through 1", "boundary 1", "forward", "release"]
+    );
     assert_eq!(join.state().variant_name(), "Draining");
 }
 
