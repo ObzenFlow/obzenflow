@@ -6,9 +6,9 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow::flow::backpressure::enforced;
 use obzenflow::stages::sources::{ChannelSource, ValuesSource};
 use obzenflow::stages::{joins, merges};
+use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, JoinPhaseFact, StageLifecycleFact,
 };
@@ -20,6 +20,10 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::run_context::FlowBuildContext;
+use obzenflow_runtime::runtime_config::{
+    CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+};
 use obzenflow_runtime::stages::common::handlers::{InlineSink, SinkDescription, SinkWriteFailure};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -99,7 +103,31 @@ struct Inputs {
     live_accounts: mpsc::Receiver<Account>,
     live_entries: mpsc::Receiver<Entry>,
     batch_rate: Option<f64>,
-    enforce: Option<(u64, u64)>,
+}
+
+fn enforced_backpressure(window: u64, stall_timeout_ms: u64) -> FlowBuildContext {
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(window)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(stall_timeout_ms),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .expect("the backpressure setting admits");
+    }
+    FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates)))
 }
 
 fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition {
@@ -110,7 +138,6 @@ fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition
             live_accounts,
             live_entries,
             batch_rate,
-            enforce,
         } = inputs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -132,44 +159,32 @@ fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition
         let rate = batch_rate.unwrap_or(10_000.0);
         let journals = journal_base.clone();
 
-        macro_rules! then_live_flow {
-            ($($backpressure:tt)*) => {
-                flow! {
-                    name: "then_live_join_test",
-                    journals: disk_journals(journals),
-                    $($backpressure)*
+        Ok(flow! {
+            name: "then_live_join_test",
+            journals: disk_journals(journals),
 
-                    stages: {
-                        batch_accounts = source!(Account => batch_accounts_source);
-                        batch_tx = source!(Entry => batch_tx_source with {
-                            obzenflow_adapters::middleware::rate_limit(rate)
-                        });
-                        live_accounts = async_infinite_source!(Account => live_accounts_source);
-                        live_tx = async_infinite_source!(Entry => live_tx_source);
+            stages: {
+                batch_accounts = source!(Account => batch_accounts_source);
+                batch_tx = source!(Entry with {
+                    obzenflow_adapters::middleware::rate_limit(rate)
+                } => batch_tx_source);
+                live_accounts = async_infinite_source!(Account => live_accounts_source);
+                live_tx = async_infinite_source!(Entry => live_tx_source);
 
-                        accounts = merge!(Account => merges::then_live);
-                        transactions = merge!(Entry => merges::then_live);
-                        posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
-                        collector = sink!(Posted => collector);
-                    },
-
-                    topology: {
-                        batch_accounts |> accounts;
-                        live_accounts |> accounts;
-                        batch_tx |> transactions;
-                        live_tx |> transactions;
-                        (accounts, transactions) |> posted;
-                        posted |> collector;
-                    }
-                }
-            };
-        }
-
-        Ok(match enforce {
-            Some((window, stall_timeout_ms)) => then_live_flow! {
-                backpressure: enforced(window).stall_timeout_ms(stall_timeout_ms),
+                accounts = merge!(Account => merges::then_live);
+                transactions = merge!(Entry => merges::then_live);
+                posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
+                collector = sink!(Posted => collector);
             },
-            None => then_live_flow! {},
+
+            topology: {
+                batch_accounts |> accounts;
+                live_accounts |> accounts;
+                batch_tx |> transactions;
+                live_tx |> transactions;
+                (accounts, transactions) |> posted;
+                posted |> collector;
+            }
         })
     })
 }
@@ -298,7 +313,6 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
             live_accounts,
             live_entries,
             batch_rate: None,
-            enforce: None,
         },
         sink.clone(),
     )
@@ -368,7 +382,6 @@ async fn live_rows_queued_before_the_run_post_after_every_batch_row() -> Result<
                 live_accounts: mpsc::channel(1).1,
                 live_entries: mpsc::channel(1).1,
                 batch_rate: None,
-                enforce: None,
             },
             Collect {
                 notes: Arc::default(),
@@ -417,7 +430,6 @@ async fn a_stop_during_the_batch_drains_without_reading_live_rows() -> Result<()
             live_accounts,
             live_entries,
             batch_rate: Some(2.0),
-            enforce: None,
         },
         sink.clone(),
     )
@@ -481,11 +493,10 @@ async fn a_hold_longer_than_the_stall_ceiling_completes_under_enforce() -> Resul
             live_accounts,
             live_entries,
             batch_rate: Some(2.0),
-            enforce: Some((2, 500)),
         },
         sink.clone(),
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(2, 500))
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -801,7 +812,6 @@ async fn a_join_with_no_live_phase_releases_its_live_catalog_under_enforce() -> 
         Ok(flow! {
             name: "then_live_join_released_catalog_test",
             journals: disk_journals(journals.clone()),
-            backpressure: enforced(2).stall_timeout_ms(500),
 
             stages: {
                 batch_accounts = source!(Account => batch_accounts_source);
@@ -820,7 +830,7 @@ async fn a_join_with_no_live_phase_releases_its_live_catalog_under_enforce() -> 
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(2, 500))
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -889,7 +899,6 @@ async fn a_live_join_releases_its_catalog_when_its_stream_ends_under_enforce() -
         Ok(flow! {
             name: "live_join_released_catalog_test",
             journals: disk_journals(journals.clone()),
-            backpressure: enforced(2).stall_timeout_ms(500),
 
             stages: {
                 live_accounts = async_infinite_source!(Account => live_accounts_source);
@@ -904,7 +913,7 @@ async fn a_live_join_releases_its_catalog_when_its_stream_ends_under_enforce() -
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(2, 500))
     .await
     .map_err(|error| anyhow!("{error:?}"))?;
     handle.start().await?;
@@ -959,9 +968,9 @@ async fn a_finite_eof_join_stopped_while_hydrating_posts_nothing() -> Result<()>
             journals: disk_journals(journals.clone()),
 
             stages: {
-                catalog = source!(Account => catalog_source with {
+                catalog = source!(Account with {
                     obzenflow_adapters::middleware::rate_limit(2.0)
-                });
+                } => catalog_source);
                 ledger = source!(Entry => stream_source);
                 posted = join!(catalog catalog: Account, Entry -> Posted => post_entry);
                 collector = sink!(Posted => collector);
@@ -1046,9 +1055,9 @@ fn build_two_per_side(
 
             stages: {
                 batch_accounts = source!(Account => batch_accounts_source);
-                batch_a = source!(Entry => batch_a_source with {
+                batch_a = source!(Entry with {
                     obzenflow_adapters::middleware::rate_limit(2.0)
-                });
+                } => batch_a_source);
                 batch_b = source!(Entry => batch_b_source);
                 live_a = async_infinite_source!(Entry => live_a_source);
                 live_b = async_infinite_source!(Entry => live_b_source);

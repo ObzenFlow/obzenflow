@@ -9,6 +9,11 @@ on_terminal = "exit"
 [metrics]
 enabled = false
 
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 64
+stall_timeout_ms = 30000
+
 # The demo's own settings. 100 inputs finish before the first simulated outage.
 [app]
 event_count = 100

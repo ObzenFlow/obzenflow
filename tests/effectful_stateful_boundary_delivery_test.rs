@@ -316,7 +316,7 @@ fn build_probe_flow(
                 input = async_infinite_source!(BoundaryProbeInput => source);
                 guarded = effectful_stateful!(
                     BoundaryProbeInput -> BoundaryProbeFact
-                    uses BoundaryProbeEffect with policy
+                    with policy
                     => handler,
                 );
                 output = sink!(BoundaryProbeFact => NoopSink);

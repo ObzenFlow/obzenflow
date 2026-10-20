@@ -137,8 +137,9 @@ mod validation;
 
 pub use middleware_factory::{
     capture_middleware, materialize_factory_checked, materialize_factory_checked_with_declaration,
-    CapturedMiddlewareFactory, MiddlewareBindingError, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareFactoryResult, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
+    CapturedMiddlewareFactory, EffectScoped, MiddlewareBindingError, MiddlewareFactory,
+    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareOverrideKey,
+    TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
 

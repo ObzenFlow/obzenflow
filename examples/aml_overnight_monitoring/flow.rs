@@ -2,15 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::case_system::CaseSystemPort;
 use super::console;
 use super::domain::{
     AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, FxRate, PricedTransaction,
     ProfiledTransaction, ScoreUnavailable, Transaction, TransactionCleared, TransactionRow,
 };
+use super::risk_engine::{RiskEngineOutage, RiskEnginePort};
 use super::stages::{AccountProfile, DailyProfile, OpenCaseHandler, PriceInUsd, ScoreHandler};
-use super::vendors::{
-    OpenCase, ScoreTransaction, VendorBindings, VendorBindingsError, VendorStats,
-};
+use super::vendors::{open_case_system, open_risk_engine, VendorStats};
+use obzenflow::effects::System;
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{
     effectful_transform, flow, join, merge, sink, source, stateful, FlowBuildError, FlowDefinition,
@@ -40,7 +41,15 @@ pub struct AmlApp {
     pub unscored_register: PathBuf,
     pub case_register: PathBuf,
     pub unopened_register: PathBuf,
+    pub risk_engine: RiskEngine,
     pub rules: AmlRules,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskEngine {
+    Simulated,
+    Outage,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -185,13 +194,6 @@ fn resources_failed(error: impl std::fmt::Display) -> FlowBuildError {
     FlowBuildError::StageResourcesFailed(error.to_string())
 }
 
-fn bindings_failed(error: VendorBindingsError) -> FlowBuildError {
-    FlowBuildError::BindingConfiguration {
-        binding: "vendors".to_string(),
-        detail: error.to_string(),
-    }
-}
-
 fn register_dir(register: &Path) -> Result<(), String> {
     match register
         .parent()
@@ -226,11 +228,20 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             .map_err(resources_failed)?;
         let profile = AccountProfile;
         let price = AsOfJoin::new(PriceInUsd);
-        let VendorBindings {
-            risk_engine,
-            case_system,
-        } = VendorBindings::simulated(&app.risk_ledger, &app.case_ledger, stats.clone())
-            .map_err(bindings_failed)?;
+        let risk_engine: System<dyn RiskEnginePort> = match app.risk_engine {
+            RiskEngine::Simulated => System::deferred(
+                "simulated-risk-engine",
+                open_risk_engine(&app.risk_ledger, &stats),
+            )?,
+            RiskEngine::Outage => System::<dyn RiskEnginePort>::eager(
+                "risk-engine-outage",
+                Arc::new(RiskEngineOutage),
+            )?,
+        };
+        let case_system: System<dyn CaseSystemPort> = System::deferred(
+            "simulated-case-system",
+            open_case_system(&app.case_ledger, &stats),
+        )?;
         let score = ScoreHandler;
         let daily_profile = DailyProfile::new(
             app.rules.fan_out_counterparties,
@@ -287,8 +298,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 );
                 score           = effectful_transform!(
                     ProfiledTransaction -> { TransactionCleared, AlertRaised, ScoreUnavailable }
-                    uses ScoreTransaction via risk_engine
-                    => score
+                    => score.system(risk_engine)
                 );
                 cleared         = sink!(TransactionCleared => cleared_register);
                 unscored        = sink!(ScoreUnavailable => unscored_register);
@@ -297,12 +307,11 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 alerts          = merge!(first score: AlertRaised => merges::concat);
                 open_case       = effectful_transform!(
                     AlertRaised -> { CaseOpened, CaseUnavailable }
-                    uses OpenCase via case_system
-                    => open_case
+                    => open_case.system(case_system)
                 );
                 case_register   = sink!(CaseOpened => case_register);
                 unopened_alerts = sink!(CaseUnavailable => unopened_register);
-                totals_report   = sink!(DayTotals => totals_report, delivery: idempotent);
+                totals_report   = sink!(DayTotals => totals_report.idempotent());
             },
 
             topology: {

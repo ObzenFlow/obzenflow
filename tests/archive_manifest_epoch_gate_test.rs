@@ -198,10 +198,10 @@ async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_material
             name: "whole_flow_middleware_preflight",
             journals: disk_journals(journal_root),
             stages: {
-                inputs = source!(Input => inputs with observer);
+                inputs = source!(Input with observer => inputs);
                 output = sink!(Input => output);
-                invalid = sink!(Input => placeholder!() with circuit_breaker()
-                    .count_window(2).minimum_calls(3).failure_rate_threshold(0.5));
+                invalid = sink!(Input with circuit_breaker()
+                    .count_window(2).minimum_calls(3).failure_rate_threshold(0.5) => placeholder!());
             },
             topology: {
                 inputs |> output;
@@ -246,8 +246,8 @@ async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io()
                 name: "empty_observer_label_preflight",
                 journals: disk_journals(journal_root),
                 stages: {
-                    inputs = source!(Input => inputs with observer);
-                    invalid = source!(Input => placeholder!() with source_poll_observer(label, PollObserver));
+                    inputs = source!(Input with observer => inputs);
+                    invalid = source!(Input with source_poll_observer(label, PollObserver) => placeholder!());
                     output = sink!(Input => output);
                 },
                 topology: {
@@ -320,8 +320,8 @@ async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
                 name: "hosted_slot_ownership_preflight",
                 journals: disk_journals(journal_root),
                 stages: {
-                    left = async_infinite_source!(Input => first with { rate_limit(10.0), observer });
-                    right = async_infinite_source!(Input => second with rate_limit(10.0));
+                    left = async_infinite_source!(Input with { rate_limit(10.0), observer } => first);
+                    right = async_infinite_source!(Input with rate_limit(10.0) => second);
                     output = sink!(Input => output);
                 },
                 topology: {

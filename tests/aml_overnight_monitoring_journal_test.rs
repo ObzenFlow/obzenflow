@@ -7,13 +7,13 @@ pub mod support;
 
 use chrono::NaiveDateTime;
 use obzenflow::application::{
-    verify_run_dirs, FlowApplication, LogLevel, VerifyOptions, VerifyOutcome,
+    verify_run_dirs, ApplicationError, FlowApplication, LogLevel, VerifyOptions, VerifyOutcome,
 };
 use obzenflow::journal::read::{
-    open_disk_run, ChainPayload, ExecutionPayload, FlowControlPayload, RunJournalKind,
-    RunRecordData,
+    open_disk_run, read_config_changes, ChainPayload, ExecutionPayload, FlowControlPayload,
+    RunJournalKind, RunRecordData,
 };
-use obzenflow::journal::JournalRecord;
+use obzenflow::journal::{EffectOutcomePayload, JournalRecord};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::{StageId, WriterId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,6 +171,11 @@ fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
         .get_mut("app")
         .and_then(toml::Value::as_table_mut)
         .expect("[app] table");
+    assert_eq!(
+        app.get("risk_engine").and_then(toml::Value::as_str),
+        Some("simulated"),
+        "the shipped configuration names the simulated risk engine"
+    );
     for (key, path) in [
         (
             "account_history",
@@ -199,7 +204,38 @@ fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
     path
 }
 
+fn with_risk_engine(config: &Path, risk_engine: &str) -> PathBuf {
+    let mut table: toml::Table = std::fs::read_to_string(config)
+        .expect("configuration is readable")
+        .parse()
+        .expect("configuration parses");
+    table
+        .get_mut("app")
+        .and_then(toml::Value::as_table_mut)
+        .expect("[app] table")
+        .insert(
+            "risk_engine".to_owned(),
+            toml::Value::String(risk_engine.to_owned()),
+        );
+    let path = config.with_file_name(format!("{risk_engine}.toml"));
+    std::fs::write(
+        &path,
+        toml::to_string(&table).expect("configuration serializes"),
+    )
+    .expect("configuration is written");
+    path
+}
+
 fn run(config: &Path, journal_root: &Path, replay_from: Option<&Path>, stats: Arc<VendorStats>) {
+    try_run(config, journal_root, replay_from, stats).expect("the flow completes");
+}
+
+fn try_run(
+    config: &Path,
+    journal_root: &Path,
+    replay_from: Option<&Path>,
+    stats: Arc<VendorStats>,
+) -> Result<(), ApplicationError> {
     let mut args = vec![
         OsString::from("aml_overnight_monitoring"),
         OsString::from("--config"),
@@ -216,7 +252,6 @@ fn run(config: &Path, journal_root: &Path, replay_from: Option<&Path>, stats: Ar
             journal_root.to_path_buf(),
             stats,
         ))
-        .expect("the flow completes");
 }
 
 fn runs(journal_root: &Path) -> Vec<PathBuf> {
@@ -274,6 +309,22 @@ impl Archive {
             .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
             .filter(|row| row.event_type() == event_type)
             .map(JournalRecord::payload)
+            .collect()
+    }
+
+    fn effect_failures(&self, stage: &str) -> Vec<(String, String)> {
+        self.rows(stage)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => {
+                    match &record.outcome {
+                        EffectOutcomePayload::Failed {
+                            cause: Some(cause), ..
+                        } => Some((cause.source.to_string(), cause.code.to_string())),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
             .collect()
     }
 
@@ -619,6 +670,90 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
     let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
         .expect("verification runs");
     assert_eq!(outcome.exit_code(), 0);
+}
+
+#[test]
+fn the_outage_stub_refuses_every_score_and_a_replay_naming_the_simulated_engine_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let simulated = fixture_config(dir.path(), &shipped_rates());
+    let outage = with_risk_engine(&simulated, "outage");
+    let journal_root = dir.path().join("journals");
+    let risk_ledger = dir.path().join("risk-calls.jsonl");
+    let case_ledger = dir.path().join("case-calls.jsonl");
+
+    let live = Arc::new(VendorStats::default());
+    run(&outage, &journal_root, None, live.clone());
+    assert_eq!(
+        live.engines_built(),
+        0,
+        "the outage stub replaces the engine"
+    );
+    assert!(!risk_ledger.exists(), "the simulated engine never runs");
+
+    let baseline = runs(&journal_root).pop().expect("the outage run's archive");
+    let archive = Archive::read(&baseline);
+    let unscored = archive.facts("score", "aml.score_unavailable");
+    assert_eq!(
+        unscored.len(),
+        fixture_rows().len(),
+        "each transaction ends once"
+    );
+    assert_eq!(
+        unscored.iter().map(txn_id).collect::<BTreeSet<_>>(),
+        fixture_txn_ids()
+    );
+    for fact in &unscored {
+        assert_eq!(fact["reason"], "the risk engine is unavailable");
+    }
+    assert!(archive.facts("score", "aml.transaction_cleared").is_empty());
+    assert!(archive.facts("score", "aml.alert_raised").is_empty());
+    let failures = archive.effect_failures("score");
+    assert_eq!(failures.len(), fixture_rows().len());
+    assert!(failures
+        .iter()
+        .all(|(source, code)| source == "risk_engine" && code == "unavailable"));
+
+    let case_calls = line_count(&case_ledger);
+    assert_eq!(
+        case_calls,
+        WHOLE_DAY.len(),
+        "only the whole-day alerts reach the case system"
+    );
+
+    let replay = Arc::new(VendorStats::default());
+    run(&outage, &journal_root, Some(&baseline), replay.clone());
+    assert_eq!(replay.engines_built(), 0);
+    assert_eq!(
+        replay.case_systems_built(),
+        0,
+        "strict replay builds no case system"
+    );
+    assert_eq!(line_count(&case_ledger), case_calls);
+    let candidate = runs(&journal_root).pop().expect("the replay's archive");
+    assert_ne!(candidate, baseline);
+    let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
+        .expect("verification runs");
+    assert_eq!(outcome.exit_code(), 0);
+
+    let refused = Arc::new(VendorStats::default());
+    assert!(
+        try_run(&simulated, &journal_root, Some(&baseline), refused.clone()).is_err(),
+        "a replay naming the simulated engine is refused"
+    );
+    assert_eq!(refused.engines_built(), 0, "the refusal precedes any call");
+    assert_eq!(refused.case_systems_built(), 0);
+    assert!(!risk_ledger.exists());
+    assert_eq!(line_count(&case_ledger), case_calls);
+    let refused_run = runs(&journal_root).pop().expect("the refused replay's run");
+    assert_ne!(refused_run, candidate);
+    let changes = read_config_changes(&refused_run).expect("the refused run's manifest reads");
+    assert_eq!(
+        changes
+            .iter()
+            .map(|compared| compared.changes.keys())
+            .collect::<Vec<_>>(),
+        [vec!["app.risk_engine"]]
+    );
 }
 
 #[test]

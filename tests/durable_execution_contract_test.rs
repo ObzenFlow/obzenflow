@@ -39,7 +39,6 @@ use obzenflow::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, StageCompletion,
 };
 use obzenflow::error::HandlerError;
-use obzenflow::flow::backpressure::enforced;
 use obzenflow::flow::{
     async_infinite_source, effectful_transform, flow, sink, source, stateful, FlowDefinition,
 };
@@ -532,14 +531,12 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             WebOrders::Yaml(web_orders_input) => flow! {
                 name: "durable_execution_contract",
                 journals: disk_journals(journals),
-                backpressure: enforced(4).stall_timeout_ms(120_000),
 
                 stages: {
                     web_orders = source!(CustomerOrderPlaced => web_orders_input);
                     store_orders = source!(CustomerOrderPlaced => store_orders_input);
                     authorize_payment = effectful_transform!(
-                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined }
-                            uses AuthorizePayment => authorize
+                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined } => authorize
                     );
                     settlement = stateful!(PaymentAuthorized -> SettlementLedger => ledger);
                     settled = sink!(SettlementLedger => settled_ledger);
@@ -557,14 +554,12 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             WebOrders::Http(web_orders_input) => flow! {
                 name: "durable_execution_contract",
                 journals: disk_journals(journals),
-                backpressure: enforced(4).stall_timeout_ms(120_000),
 
                 stages: {
                     web_orders = async_infinite_source!(CustomerOrderPlaced => web_orders_input);
                     store_orders = source!(CustomerOrderPlaced => store_orders_input);
                     authorize_payment = effectful_transform!(
-                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined }
-                            uses AuthorizePayment => authorize
+                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined } => authorize
                     );
                     settlement = stateful!(PaymentAuthorized -> SettlementLedger => ledger);
                     settled = sink!(SettlementLedger => settled_ledger);
@@ -615,7 +610,8 @@ fn durable_execution_contract_child() {
                 )),
                 None => WebOrders::Yaml(orders(scenario.web_input(), "/web_orders")),
             };
-            app.run_blocking(build_flow(scenario, plan.hold, web))
+            app.with_config_file(payment_config(scenario))
+                .run_blocking(build_flow(scenario, plan.hold, web))
         }
         Graph::ThenLive
         | Graph::ThenLiveEffect
@@ -673,6 +669,16 @@ enum Graph {
     FlashSale,
     RateLimitedSink,
     UnorderedFanIn,
+}
+
+fn payment_config(scenario: &Scenario) -> PathBuf {
+    let path = scenario.root.join("obzenflow.toml");
+    std::fs::write(
+        &path,
+        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 4\nstall_timeout_ms = 120000\n",
+    )
+    .expect("write the configuration");
+    path
 }
 
 impl Scenario {
@@ -2697,8 +2703,8 @@ mod then_live {
                     journals: disk_journals(journals),
 
                     stages: {
-                        batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
-                        batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
+                        batch_accounts = source!(Account with rate_limit(2.0) => batch_accounts_input);
+                        batch_tx = source!(Entry with rate_limit(2.0) => batch_tx_input);
                         live_accounts = async_infinite_source!(Account => live_accounts_input);
                         accounts = merge!(Account => merges::then_live);
                         posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
@@ -2721,7 +2727,7 @@ mod then_live {
                     stages: {
                         batch_accounts = source!(Account => batch_accounts_input);
                         batch_tx = source!(Entry => batch_tx_input);
-                        batch_tx_slow = source!(Entry => slow_tx_input with rate_limit(2.0));
+                        batch_tx_slow = source!(Entry with rate_limit(2.0) => slow_tx_input);
                         live_accounts = async_infinite_source!(Account => live_accounts_input);
                         live_tx = async_infinite_source!(Entry => live_tx_input);
                         accounts = merge!(Account => merges::then_live);
@@ -2747,9 +2753,9 @@ mod then_live {
                     journals: disk_journals(journals),
 
                     stages: {
-                        batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
-                        batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
-                        vet = effectful_transform!(Entry -> Entry uses Audit => vet);
+                        batch_accounts = source!(Account with rate_limit(2.0) => batch_accounts_input);
+                        batch_tx = source!(Entry with rate_limit(2.0) => batch_tx_input);
+                        vet = effectful_transform!(Entry -> Entry => vet);
                         live_accounts = async_infinite_source!(Account => live_accounts_input);
                         live_tx = async_infinite_source!(Entry => live_tx_input);
                         accounts = merge!(Account => merges::then_live);
@@ -2774,8 +2780,8 @@ mod then_live {
                 journals: disk_journals(journals),
 
                 stages: {
-                    batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
-                    batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
+                    batch_accounts = source!(Account with rate_limit(2.0) => batch_accounts_input);
+                    batch_tx = source!(Entry with rate_limit(2.0) => batch_tx_input);
                     live_accounts = async_infinite_source!(Account => live_accounts_input);
                     live_tx = async_infinite_source!(Entry => live_tx_input);
                     accounts = merge!(Account => merges::then_live);
@@ -3192,8 +3198,8 @@ mod concat {
                 journals: disk_journals(journals),
 
                 stages: {
-                    early = source!(Note => early_input with rate_limit(2.0));
-                    late = source!(Note => late_input with rate_limit(2.0));
+                    early = source!(Note with rate_limit(2.0) => early_input);
+                    late = source!(Note with rate_limit(2.0) => late_input);
                     merged = merge!(first early: Note => merges::concat);
                     collected = sink!(Note => collected);
                 },
@@ -3430,8 +3436,8 @@ mod as_of {
                 journals: disk_journals(journals),
 
                 stages: {
-                    fx_rates = source!(Rate => rates_feed with rate_limit(rates_pace));
-                    payments = source!(Payment => payments_feed with rate_limit(payments_pace));
+                    fx_rates = source!(Rate with rate_limit(rates_pace) => rates_feed);
+                    payments = source!(Payment with rate_limit(payments_pace) => payments_feed);
                     price = join!(catalog fx_rates: Rate, Payment -> Priced => price);
                     priced = sink!(Priced => priced);
                 },
@@ -3992,9 +3998,7 @@ mod two_effects {
                 stages: {
                     orders = source!(ChargeOrder => orders_input);
                     charge = effectful_transform!(
-                        ChargeOrder -> { Authorized, Captured }
-                            uses { AuthorizeOrder, CaptureOrder }
-                        => charge
+                        ChargeOrder -> { Authorized, Captured } => charge
                     );
                     captured = sink!(Captured => captured);
                 },
@@ -4171,9 +4175,9 @@ mod emit_only {
                 journals: disk_journals(journals),
 
                 stages: {
-                    ticks = source!(Tick => ticks_input with {
+                    ticks = source!(Tick with {
                         rate_limit(5.0).burst_capacity(1.0)
-                    });
+                    } => ticks_input);
                     stamp = effectful_transform!(Tick -> Stamped => Stamp);
                     stamped = sink!(Stamped => stamped);
                 },
@@ -4663,10 +4667,10 @@ mod lagging {
 
                 stages: {
                     items = source!(Item => items_input);
-                    deliver = sink!(Item => recording with {
+                    deliver = sink!(Item with {
                         rate_limit(4.0).burst_capacity(1.0),
                         sink_delivery_observer("observed", observer)
-                    });
+                    } => recording);
                 },
 
                 topology: {
@@ -4702,8 +4706,7 @@ mod lagging {
                     right = source!(Item => right_input);
                     combine = transform!(Item -> Combined => Combine);
                     print = sink!(
-                        Combined => print with { rate_limit(4.0).burst_capacity(1.0) },
-                        delivery: idempotent
+                        Combined with { rate_limit(4.0).burst_capacity(1.0) } => print.idempotent()
                     );
                 },
 

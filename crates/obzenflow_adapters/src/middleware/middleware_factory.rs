@@ -9,6 +9,7 @@
 
 use super::{MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
+use obzenflow_runtime::effects::Effect;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
 use std::any::TypeId;
@@ -274,6 +275,111 @@ pub trait MiddlewareFactory: Send + Sync {
     fn config_snapshot(&self) -> Option<serde_json::Value> {
         None
     }
+
+    /// The one effect this middleware guards or watches, when it was built
+    /// with [`for_effect`](Self::for_effect).
+    #[doc(hidden)]
+    fn effect_scope(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Guard or watch only the effect `E` of the stage this middleware is
+    /// attached to.
+    fn for_effect<E: Effect>(self) -> EffectScoped<Self>
+    where
+        Self: Sized,
+    {
+        EffectScoped {
+            inner: self,
+            effect_type: E::EFFECT_TYPE,
+        }
+    }
+}
+
+/// Middleware that guards or watches one effect of its stage, built with
+/// [`MiddlewareFactory::for_effect`].
+pub struct EffectScoped<F> {
+    inner: F,
+    effect_type: &'static str,
+}
+
+impl<F> EffectScoped<F> {
+    /// The effect type this middleware was built for.
+    pub fn effect_type(&self) -> &'static str {
+        self.effect_type
+    }
+}
+
+impl<F: MiddlewareFactory> MiddlewareFactory for EffectScoped<F> {
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        self.inner.override_key()
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        self.inner.declaration()
+    }
+
+    fn builtin_control(&self) -> Option<BuiltinControlContribution> {
+        self.inner.builtin_control()
+    }
+
+    fn validate_configuration(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        config: &StageConfig,
+        stage_type: StageType,
+    ) -> MiddlewareFactoryResult<()> {
+        self.inner
+            .validate_configuration(request, config, stage_type)
+    }
+
+    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        self.inner.sink_observer_input_type()
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        self.inner.materialize(request, context)
+    }
+
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        self.inner.dsl_config_defaults()
+    }
+
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        self.inner.consumed_config_keys()
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        self.inner.topology_config_slot()
+    }
+
+    fn supported_stage_types(&self) -> &[StageType] {
+        self.inner.supported_stage_types()
+    }
+
+    fn safety_level(&self) -> MiddlewareSafety {
+        self.inner.safety_level()
+    }
+
+    fn hints(&self) -> MiddlewareHints {
+        self.inner.hints()
+    }
+
+    fn config_snapshot(&self) -> Option<serde_json::Value> {
+        self.inner.config_snapshot()
+    }
+
+    fn effect_scope(&self) -> Option<&'static str> {
+        Some(self.effect_type)
+    }
 }
 
 // Implementation for Box<dyn MiddlewareFactory> to allow boxed factories
@@ -331,6 +437,10 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         (**self).config_snapshot()
     }
 
+    fn effect_scope(&self) -> Option<&'static str> {
+        (**self).effect_scope()
+    }
+
     fn declaration(&self) -> MiddlewareDeclaration {
         (**self).declaration()
     }
@@ -361,6 +471,7 @@ pub struct CapturedMiddlewareFactory {
     stage_types: Vec<StageType>,
     safety: MiddlewareSafety,
     hints: MiddlewareHints,
+    effect_scope: Option<&'static str>,
 }
 
 impl CapturedMiddlewareFactory {
@@ -383,6 +494,7 @@ impl CapturedMiddlewareFactory {
             stage_types: factory.supported_stage_types().to_vec(),
             safety: factory.safety_level(),
             hints: factory.hints(),
+            effect_scope: factory.effect_scope(),
             factory: Box::new(factory),
         }
     }
@@ -431,6 +543,9 @@ impl MiddlewareFactory for CapturedMiddlewareFactory {
     }
     fn hints(&self) -> MiddlewareHints {
         self.hints.clone()
+    }
+    fn effect_scope(&self) -> Option<&'static str> {
+        self.effect_scope
     }
     fn validate_configuration(
         &self,

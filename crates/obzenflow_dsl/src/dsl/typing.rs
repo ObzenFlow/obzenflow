@@ -638,7 +638,6 @@ pub fn typed_finite_source_descriptor<
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     H: AdmitSource<dyn UnifiedFiniteSourceHandler, Kind>,
@@ -658,7 +657,6 @@ where
         source_policies,
         ingress_policy,
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -679,7 +677,6 @@ pub fn typed_async_finite_source_descriptor<
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     H: AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, Kind>,
@@ -696,7 +693,6 @@ where
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
-    descriptor.backpressure = backpressure;
     wrap_typed_descriptor(Box::new(descriptor), metadata)
 }
 
@@ -716,7 +712,6 @@ pub fn typed_infinite_source_descriptor<
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     H: AdmitSource<dyn UnifiedInfiniteSourceHandler, Kind>,
@@ -736,7 +731,6 @@ where
         source_policies,
         ingress_policy,
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -757,7 +751,6 @@ pub fn typed_async_infinite_source_descriptor<
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     H: AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, Kind>,
@@ -775,7 +768,6 @@ where
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
-    descriptor.backpressure = backpressure;
     wrap_typed_descriptor(Box::new(descriptor), metadata)
 }
 
@@ -790,7 +782,6 @@ pub fn placeholder_finite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
@@ -807,7 +798,6 @@ where
         source_policies,
         ingress_policy,
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -820,7 +810,6 @@ pub fn placeholder_async_finite_source_descriptor<PrimaryOutput, ArrowOutputSet>
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
@@ -838,7 +827,6 @@ where
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
-    descriptor.backpressure = backpressure;
     wrap_typed_descriptor(Box::new(descriptor), metadata)
 }
 
@@ -850,7 +838,6 @@ pub fn placeholder_infinite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
@@ -867,7 +854,6 @@ where
         source_policies,
         ingress_policy,
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -880,7 +866,6 @@ pub fn placeholder_async_infinite_source_descriptor<PrimaryOutput, ArrowOutputSe
     source_policies: Vec<Box<dyn MiddlewareFactory>>,
     ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
@@ -898,7 +883,6 @@ where
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
-    descriptor.backpressure = backpressure;
     wrap_typed_descriptor(Box::new(descriptor), metadata)
 }
 
@@ -942,7 +926,6 @@ pub fn typed_transform_descriptor<
     name: impl Into<String>,
     handler: H,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     H: TypedTransformHandler + Clone + fmt::Debug + Send + Sync + 'static,
@@ -961,7 +944,6 @@ where
         name: name.into(),
         handler: TypedTransformHandlerAdapter::new(handler),
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -977,7 +959,6 @@ pub fn placeholder_transform_descriptor<
     name: impl Into<String>,
     message: Option<&'static str>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     ArrowInput: TypedPayload + Send + Sync + 'static,
@@ -993,7 +974,6 @@ where
         name: name.into(),
         handler: PlaceholderTransform::<ArrowInput, PrimaryOutput>::new(message),
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -1035,7 +1015,6 @@ pub fn typed_stateful_descriptor<
     handler: H,
     emit_interval: Option<std::time::Duration>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     H: TypedStatefulHandler + Clone + fmt::Debug + Send + Sync + 'static,
@@ -1055,7 +1034,6 @@ where
         handler: TypedStatefulHandlerAdapter::new(handler),
         emit_interval,
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -1072,7 +1050,6 @@ pub fn placeholder_stateful_descriptor<
     message: Option<&'static str>,
     emit_interval: Option<std::time::Duration>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     ArrowInput: TypedPayload + Send + Sync + 'static,
@@ -1091,7 +1068,6 @@ where
         ),
         emit_interval,
         observers,
-        backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -1207,17 +1183,13 @@ where
 }
 
 #[doc(hidden)]
-pub fn merge_descriptor<T, S>(
-    name: impl Into<String>,
-    strategy: S,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
-) -> Box<dyn StageDescriptor>
+pub fn merge_descriptor<T, S>(name: impl Into<String>, strategy: S) -> Box<dyn StageDescriptor>
 where
     T: TypedPayload + Send + Sync + 'static,
     S: obzenflow_runtime::stages::merges::MergeStrategy,
     S::FirstClause: obzenflow_runtime::stages::merges::WithoutFirstClause,
 {
-    typed_merge_descriptor::<T>(name.into(), strategy.kind(), None, backpressure)
+    typed_merge_descriptor::<T>(name.into(), strategy.kind(), None)
 }
 
 #[doc(hidden)]
@@ -1225,21 +1197,19 @@ pub fn first_merge_descriptor<T, S>(
     name: impl Into<String>,
     first: &'static str,
     strategy: S,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     T: TypedPayload + Send + Sync + 'static,
     S: obzenflow_runtime::stages::merges::MergeStrategy,
     S::FirstClause: obzenflow_runtime::stages::merges::WithFirstClause,
 {
-    typed_merge_descriptor::<T>(name.into(), strategy.kind(), Some(first), backpressure)
+    typed_merge_descriptor::<T>(name.into(), strategy.kind(), Some(first))
 }
 
 fn typed_merge_descriptor<T>(
     name: String,
     strategy: obzenflow_runtime::stages::merges::MergeStrategyKind,
     first: Option<&'static str>,
-    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
     T: TypedPayload + Send + Sync + 'static,
@@ -1257,7 +1227,6 @@ where
             first,
             first_phase: Vec::new(),
             held: Vec::new(),
-            backpressure,
         });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -1772,10 +1741,6 @@ where
 impl StageDescriptor for TypedStageDescriptor {
     fn name(&self) -> &str {
         self.inner.name()
-    }
-
-    fn backpressure_clause(&self) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
-        self.inner.backpressure_clause()
     }
 
     fn set_name(&mut self, name: String) {
@@ -3007,10 +2972,6 @@ impl crate::dsl::stage_descriptor::sealed::Sealed for DeterministicOrdererOverri
 impl StageDescriptor for DeterministicOrdererOverride {
     fn name(&self) -> &str {
         self.inner.name()
-    }
-
-    fn backpressure_clause(&self) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
-        self.inner.backpressure_clause()
     }
 
     fn set_name(&mut self, name: String) {

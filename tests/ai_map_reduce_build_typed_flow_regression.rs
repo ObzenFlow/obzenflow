@@ -572,12 +572,42 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
     );
 }
 
+fn enforced_backpressure() -> obzenflow_runtime::run_context::FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    };
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(3)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(3_000),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .expect("the backpressure setting admits");
+    }
+    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
+        candidates,
+    )))
+}
+
 #[tokio::test]
 async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_exporter(metrics_model.clone());
+    let metrics_context = enforced_backpressure().with_metrics_exporter(metrics_model.clone());
     let delivered = Arc::new(AtomicUsize::new(0));
     let delivered_for_flow = delivered.clone();
     let total = Arc::new(AtomicU64::new(0));
@@ -591,8 +621,6 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         Ok(flow! {
             name: "amr_runtime_internal_contracts",
             journals: memory_journals(),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
-                .stall_timeout_ms(3_000),
             stages: {
                 seed = source!(BuildOnlySeed => seed_handler);
                 digest = generated_digest!(chat);

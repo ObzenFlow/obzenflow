@@ -467,10 +467,10 @@ async fn transform_applies_stage_middleware() -> Result<()> {
 
             stages: {
                 source = source!(TransformStageEvent => source_handler);
-                mw_transform = transform!(TransformStageEvent -> TransformStageEvent => transform_handler with { handler_observer(
+                mw_transform = transform!(TransformStageEvent -> TransformStageEvent with { handler_observer(
                         "count_handler_outputs",
                         CountHandlerOutputObserver { calls: observer_calls_for_flow.clone() }
-                    ) });
+                    ) } => transform_handler);
                 sink = sink!(TransformStageEvent => sink_handler);
             },
 

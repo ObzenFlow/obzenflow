@@ -55,6 +55,8 @@ pub enum MiddlewarePlanError {
         #[source]
         source: obzenflow_adapters::middleware::ControlCompositionError,
     },
+    #[error("{0}")]
+    InvalidStageRow(String),
 }
 
 impl MiddlewarePlanError {
@@ -178,7 +180,7 @@ pub enum FlowBuildError {
     BindingConfiguration { binding: String, detail: String },
 
     #[error(
-        "flow `{flow_name}` uses distinct bindings for `{effect_type} via {binding}`; construct `{binding}` once and reuse it"
+        "flow `{flow_name}` builds two systems named `{binding}` for `{effect_type}`; build `{binding}` once and name that value in each row"
     )]
     DistinctEffectBindings {
         flow_name: &'static str,
@@ -187,7 +189,7 @@ pub enum FlowBuildError {
     },
 
     #[error(
-        "flow `{flow_name}` cannot collect `{effect_type} via {binding}`: {detail}; construct fresh bindings inside FlowDefinition::materialize"
+        "flow `{flow_name}` cannot collect `{binding}` for `{effect_type}`: {detail}; build systems and bindings inside FlowDefinition::materialize"
     )]
     EffectBindingPackageUnavailable {
         flow_name: &'static str,
@@ -410,5 +412,14 @@ impl FlowBuildError {
 impl From<FlowBuildError> for String {
     fn from(err: FlowBuildError) -> Self {
         err.to_string()
+    }
+}
+
+impl From<obzenflow_runtime::effects::SystemError> for FlowBuildError {
+    fn from(error: obzenflow_runtime::effects::SystemError) -> Self {
+        Self::BindingConfiguration {
+            binding: error.system().to_string(),
+            detail: error.to_string(),
+        }
     }
 }

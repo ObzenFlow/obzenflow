@@ -203,7 +203,6 @@ mod tests {
             name: name.to_string(),
             handler: NoopTransform,
             observers: vec![],
-            backpressure: None,
         })
     }
 
@@ -874,7 +873,6 @@ mod tests {
             name: "digest__chunk".to_string(),
             handler: NoopTransform,
             observers: vec![],
-            backpressure: None,
         });
         members.insert("digest__chunk".to_string(), existing.into_flow_member());
 

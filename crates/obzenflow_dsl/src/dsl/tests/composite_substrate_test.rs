@@ -95,7 +95,6 @@ mod tests {
             name: name.to_string(),
             handler: Noop,
             observers: vec![],
-            backpressure: None,
         };
         let mut metadata = StageTypingMetadata::transform(input, output, false, None);
         if !extra_outputs.is_empty() {
@@ -230,7 +229,6 @@ mod tests {
                             name: "worker".to_string(),
                             handler: Noop,
                             observers: vec![],
-                            backpressure: None,
                         },
                     }));
                 ctx.edge("intake", "worker");

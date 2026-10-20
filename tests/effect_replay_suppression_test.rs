@@ -7,7 +7,7 @@ mod exported_jsonl;
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry};
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, MiddlewareFactory};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
     event::payloads::delivery_payload::DeliveryMethod,
@@ -1055,7 +1055,7 @@ fn build_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1082,11 +1082,11 @@ fn build_source_limiter_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                inputs = source!(ReplayInput => inputs_handler with {
+                inputs = source!(ReplayInput with {
                     rate_limit(1.0)
-                });
+                } => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1120,7 +1120,7 @@ fn build_fast_limiter_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with rate_limit(1000.0) => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with rate_limit(1000.0) => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1163,7 +1163,7 @@ fn build_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses BlockingEffect with { resilience.0, resilience.1 } => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with { resilience.0, resilience.1 } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1199,7 +1199,7 @@ fn build_post_perform_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1231,7 +1231,7 @@ fn build_fan_out_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 fan_out = transform!(ReplayInput -> ReplayInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1261,7 +1261,7 @@ fn build_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1298,13 +1298,9 @@ fn build_policy_stateful_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 allocate = effectful_stateful!(
                     ReplayInput -> { PolicyReserved, ReservationFailed }
-                    uses SlowReserveEffect
-                        with reserve_resilience
+                    with reserve_resilience
                     => allocator);
-                reservation_failures = sink!(
-                    ReservationFailed => failure_sink,
-                    delivery: idempotent
-                );
+                reservation_failures = sink!(ReservationFailed => failure_sink.idempotent());
             },
 
             topology: {
@@ -1341,7 +1337,7 @@ fn build_dishonest_one_fact_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1376,7 +1372,7 @@ fn build_error_after_commit_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1413,7 +1409,7 @@ fn build_apply_rejection_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -1443,7 +1439,7 @@ fn build_product_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } uses ProductEffect => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -3850,7 +3846,7 @@ fn build_ported_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ported = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses PortedEffect via ported_binding => ported_handler
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ported_handler.system(ported_binding)
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4018,7 +4014,7 @@ async fn reusing_a_collected_binding_package_fails_closed_before_stage_work() {
     };
     assert!(
         detail.contains(
-            "cannot collect `effect_port_supply.ported via greeting`: the package was already collected"
+            "cannot collect `greeting` for `effect_port_supply.ported`: the package was already collected"
         ),
         "unexpected build failure: {detail}"
     );
@@ -4185,7 +4181,7 @@ fn build_transactional_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses transactional(LedgerEffect) via ledger_binding with resilience => ledger_handler
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => ledger_handler.system(ledger_binding).transactional::<LedgerEffect>()
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4476,7 +4472,7 @@ fn build_fail_fast_rejection_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses AlwaysFailingEffect with resilience => effectful_handler);
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -4494,7 +4490,9 @@ fn build_multi_effect_per_effect_breaker_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let resilience = circuit_breaker().consecutive_failures(1);
+        let resilience = circuit_breaker()
+            .consecutive_failures(1)
+            .for_effect::<AlwaysFailingEffect>();
         let inputs_handler = ReplaySource::new();
         let effectful_handler = MultiEffectFailFastTransform { calls };
         let collector_handler = CollectSink { outputs };
@@ -4507,10 +4505,7 @@ fn build_multi_effect_per_effect_breaker_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue }
-                    uses {
-                        AlwaysFailingEffect with resilience,
-                        CountingEffect,
-                    }
+                    with resilience
                     => effectful_handler);
                 collector = sink!(ReplayOutput => collector_handler);
             },

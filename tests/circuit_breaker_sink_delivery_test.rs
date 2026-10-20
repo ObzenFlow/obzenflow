@@ -154,7 +154,7 @@ async fn sink_observer_input_mismatch_fails_flow_construction() {
             journals: disk_journals(root),
             stages: {
                 source = source!(SinkBreakerEvent => source);
-                destination = sink!(SinkBreakerEvent => sink_handler with { sink_delivery_observer("wrong-input", WrongInputObserver) });
+                destination = sink!(SinkBreakerEvent with { sink_delivery_observer("wrong-input", WrongInputObserver) } => sink_handler);
             },
             topology: { source |> destination; }
         })
@@ -205,13 +205,13 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
 
             stages: {
                 cb_source = source!(SinkBreakerEvent => source);
-                cb_sink = sink!(SinkBreakerEvent => sink_handler with { breaker(THRESHOLD), sink_delivery_observer(
+                cb_sink = sink!(SinkBreakerEvent with { breaker(THRESHOLD), sink_delivery_observer(
                     "delivery-classifications",
                     RecordsDeliveryClassifications {
                         outcomes: outcomes_for_flow,
                         deliveries: deliveries_for_flow,
                     }
-                ) });
+                ) } => sink_handler);
             },
 
             topology: {

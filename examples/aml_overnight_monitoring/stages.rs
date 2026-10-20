@@ -186,9 +186,7 @@ impl EffectfulTransformHandler for ScoreHandler {
         profiled: ProfiledTransaction,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        let binding = fx.project_named_effect::<ScoreTransaction, _>()?;
-        let request = ScoreRequest::for_transaction(&profiled);
-        if let Err(error) = fx.perform(ScoreTransaction::new(request, binding)).await {
+        if let Err(error) = fx.call(ScoreRequest::for_transaction(&profiled)).await {
             let Some(reason) = unavailable_reason(&error, RISK_ENGINE_SOURCE) else {
                 return Err(error.into());
             };
@@ -228,11 +226,7 @@ impl EffectfulTransformHandler for OpenCaseHandler {
         alert: AlertRaised,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        let binding = fx.project_named_effect::<OpenCase, _>()?;
-        if let Err(error) = fx
-            .perform(OpenCase::new(CaseRequest::for_alert(&alert), binding))
-            .await
-        {
+        if let Err(error) = fx.call(CaseRequest::for_alert(&alert)).await {
             let Some(reason) = unavailable_reason(&error, CASE_SYSTEM_SOURCE) else {
                 return Err(error.into());
             };
@@ -267,7 +261,7 @@ mod tests {
     use super::super::domain::{AlertId, PaymentFormat, TxnId, AMLWORLD_TIME};
     use super::super::money::Money;
     use super::*;
-    use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
+    use obzenflow::effects::RetryDisposition;
 
     fn payment(txn_id: u64, timestamp: &str, from: &str, to: &str) -> Transaction {
         let amount = Money::parse(Currency::UsDollar, "250.00").expect("a booked amount");
@@ -387,12 +381,11 @@ mod tests {
     }
 
     fn refused(system: &str) -> EffectError {
-        EffectError::DependencyFailed {
-            failure_source: EffectFailureSource::new(system),
-            code: EffectFailureCode::new("ledger_write_failed"),
-            message: format!("the {system} could not record the call"),
-            retry: RetryDisposition::Retryable,
-        }
+        EffectError::unavailable(
+            system,
+            "unavailable",
+            format!("the {system} is unavailable"),
+        )
     }
 
     #[test]

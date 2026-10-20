@@ -176,9 +176,9 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
             journals: disk_journals(journal_base_for_flow),
 
             stages: {
-                src = async_source!(DripEvent => source with {
+                src = async_source!(DripEvent with {
                     rate_limit(0.2).burst_capacity(1.0)
-                });
+                } => source);
                 snk = sink!(DripEvent => sink);
             },
 

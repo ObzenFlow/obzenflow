@@ -6,7 +6,7 @@
 //! with both provenance axes, so "what configuration was this run executed
 //! under" is answerable from the run directory alone.
 
-use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
+use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, MiddlewareFactory};
 use obzenflow_core::config::{ConfigAddress, ConfigSource, ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::archive::manifest::RunManifest;
@@ -330,7 +330,7 @@ fn build_rate_limited_flow_future(
 
             stages: {
                 src = source!(Item => one_shot_source);
-                snk = sink!(Item => null_sink with {limiter});
+                snk = sink!(Item with {limiter} => null_sink);
             },
 
             topology: {
@@ -355,8 +355,8 @@ fn build_two_effect_flow_future(
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
     FlowDefinition::materialize(move |_runtime_config| {
-        let authorize_resilience = payment_resilience();
-        let refund_resilience = payment_resilience();
+        let authorize_resilience = payment_resilience().for_effect::<AuthorizePayment>();
+        let refund_resilience = payment_resilience().for_effect::<RefundPayment>();
         let one_shot_source = OneShotSource { emitted: false };
         let payment_effects = PaymentEffectsHandler;
         let null_sink = NullSink::<PaymentEffectFact>::new();
@@ -369,10 +369,7 @@ fn build_two_effect_flow_future(
                 orders = source!(Item => one_shot_source);
                 authorize_payment = effectful_transform!(
                     Item -> PaymentEffectFact
-                    uses {
-                        AuthorizePayment with authorize_resilience,
-                        RefundPayment with refund_resilience,
-                    }
+                    with { authorize_resilience, refund_resilience }
                     => payment_effects);
                 output = sink!(PaymentEffectFact => null_sink);
             },

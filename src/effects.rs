@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Replay-safe external operations and their typed bindings.
+//! Replay-safe external operations, the requests systems answer, and their
+//! typed bindings.
 
-pub use obzenflow_core::{BindingEvidenceError, BoundedBindingEvidence};
+pub use obzenflow_core::{BindingEvidenceError, BoundedBindingEvidence, SystemBindingEvidence};
 pub use obzenflow_runtime::effect_set;
 pub use obzenflow_runtime::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectAttemptOrdinal, EffectCursor,
@@ -21,6 +22,9 @@ pub use obzenflow_runtime::effects::{
     EffectRegistrationCollectionError, EffectSafety, EffectSet, Effects, IdempotencyKey,
     IdempotencyKeyPolicy, LogicalEffectBindingName, Named, NamedEffect, NoPortMetadata, Portless,
     RecordedReply, ResolvedEffectPort, RetryDisposition, StageCompletion, TransactionalEffectPort,
+};
+pub use obzenflow_runtime::effects::{
+    Call, CallRequest, HandlerSystems, StageSystem, System, SystemError, WithSystems,
 };
 
 // Proof bounds needed by application-owned typed effect helpers.

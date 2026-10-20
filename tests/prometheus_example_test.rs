@@ -51,13 +51,55 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
     use serde_json::Value;
     use std::time::Duration;
 
+    let shipped: toml::Table = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/prometheus_demo/obzenflow.toml"
+    ))
+    .unwrap()
+    .parse()
+    .unwrap();
+    let flow_backpressure = &shipped["runtime"]["backpressure"]["flow"];
+    let mut candidates = obzenflow_runtime::runtime_config::CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            obzenflow_runtime::runtime_config::ConfigValue::Text(
+                flow_backpressure["mode"].as_str().unwrap().to_owned(),
+            ),
+        ),
+        (
+            "runtime.backpressure.window",
+            obzenflow_runtime::runtime_config::ConfigValue::U64(
+                u64::try_from(flow_backpressure["window"].as_integer().unwrap()).unwrap(),
+            ),
+        ),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            obzenflow_runtime::runtime_config::ConfigValue::U64(
+                u64::try_from(flow_backpressure["stall_timeout_ms"].as_integer().unwrap()).unwrap(),
+            ),
+        ),
+    ] {
+        candidates
+            .admit(
+                obzenflow_runtime::runtime_config::ScopedCandidate::unqualified(
+                    key,
+                    obzenflow_core::config::ConfigScope::Flow,
+                    ConfigSource::File,
+                    value,
+                ),
+            )
+            .unwrap();
+    }
     let directory = tempfile::tempdir_in("target").unwrap();
     let flow = prometheus_demo::flow_definition_with_outage_interval(
         1_000,
         directory.path().join("journals"),
         500,
     )
-    .build(FlowBuildContext::for_tests())
+    .build(FlowBuildContext::new(std::sync::Arc::new(
+        obzenflow_runtime::runtime_config::ResolvedRuntimeConfig::new(candidates),
+    )))
     .await
     .unwrap();
     let topology = flow.topology().unwrap();
@@ -111,7 +153,7 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
         let to = StageKey::from(to);
         assert_eq!(
             config.backpressure_mode_for(&from, &to),
-            (BackpressureMode::Enforce, ConfigSource::Dsl)
+            (BackpressureMode::Enforce, ConfigSource::File)
         );
         assert_eq!(
             config

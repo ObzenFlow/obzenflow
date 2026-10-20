@@ -167,10 +167,10 @@ fn failing_materialization_flow(
             journals: disk_journals(base),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with FailingObserverFactory {
+                src = source!(TestEvent with FailingObserverFactory {
                     label: name,
                     materialisations,
-                });
+                } => placeholder!());
                 snk = sink!(TestEvent => placeholder!());
             },
 

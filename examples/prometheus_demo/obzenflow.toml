@@ -22,6 +22,12 @@ mode = "periodic"
 interval_ms = 250
 export_interval_ms = 250
 
+# Enforced backpressure: at most 64 unacknowledged events per edge.
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 64
+stall_timeout_ms = 30000
+
 # The demo's own settings, at their defaults. source_rate_limit = false omits
 # the 1,000/s source limiter for measurement.
 [app]

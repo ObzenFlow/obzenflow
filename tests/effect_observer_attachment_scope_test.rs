@@ -231,8 +231,7 @@ async fn public_effect_observer_path_keys_dispatch_and_shares_declaration_quaran
                 input = source!(Input => input_source);
                 observed = effectful_transform!(
                     Input -> EffectFact
-                    uses { EffectA, EffectB }
-                    => observed_handler with { effect_observer(
+                    with { effect_observer(
                             "panics-on-a",
                             PanicsOnEffectA {
                                 calls: panicking_calls_for_flow,
@@ -243,8 +242,9 @@ async fn public_effect_observer_path_keys_dispatch_and_shares_declaration_quaran
                             RecordsEffects {
                                 calls: sibling_calls_for_flow,
                             }
-                        ) });
-                output = sink!(EffectFact => output_sink, delivery: idempotent);
+                        ) }
+                    => observed_handler);
+                output = sink!(EffectFact => output_sink.idempotent());
             },
 
             topology: {
@@ -322,7 +322,8 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                     calls: effect_calls.clone(),
                     panic_on_a: !implementation_panics,
                 },
-            );
+            )
+            .for_effect::<EffectA>();
             let implementation_sibling = effect_observer(
                 "implementation-sibling",
                 ScopedRecorder {
@@ -336,7 +337,8 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                     calls: effect_sibling_calls.clone(),
                     panic_on_a: false,
                 },
-            );
+            )
+            .for_effect::<EffectA>();
             let (implementation_first, implementation_second, named_first, named_second) =
                 if reverse_group {
                     (implementation_sibling, implementation, named_sibling, named)
@@ -355,12 +357,9 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                         input = source!(Input => input_source);
                         observed = effectful_transform!(
                             Input -> EffectFact
-                            uses {
-                                EffectA with { named_first, named_second },
-                                EffectB,
-                            }
-                            => observed_handler with { implementation_first, implementation_second });
-                        output = sink!(EffectFact => output_sink, delivery: idempotent);
+                            with { implementation_first, implementation_second, named_first, named_second }
+                            => observed_handler);
+                        output = sink!(EffectFact => output_sink.idempotent());
                     },
                     topology: {
                         input |> observed;
@@ -558,7 +557,8 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
             RecordsEffects {
                 calls: named_calls.clone(),
             },
-        );
+        )
+        .for_effect::<EffectA>();
         let deliveries_for_flow = deliveries.clone();
         let handle = FlowDefinition::materialize(move |_runtime_config| {
             let input_source = OneInputSource { emitted: false };
@@ -573,9 +573,9 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
                     input = source!(Input => input_source);
                     observed = effectful_transform!(
                         Input -> EffectFact
-                        uses { EffectA with { named }, EffectB }
-                        => observed_handler with { broad });
-                    output = sink!(EffectFact => output_sink, delivery: idempotent);
+                        with { broad, named }
+                        => observed_handler);
+                    output = sink!(EffectFact => output_sink.idempotent());
                 },
                 topology: {
                     input |> observed;

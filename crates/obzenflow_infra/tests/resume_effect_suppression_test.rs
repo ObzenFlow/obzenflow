@@ -224,7 +224,7 @@ fn build_flow(
             stages: {
                 src = infinite_source!(Reading => reader);
                 enrich = effectful_transform!(
-                    Reading -> { Enriched, EffectValue } uses CountingEffect => enrich_transform);
+                    Reading -> { Enriched, EffectValue } => enrich_transform);
                 snk = sink!(Enriched => counting_sink);
             },
 

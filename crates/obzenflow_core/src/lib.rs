@@ -25,7 +25,7 @@ pub mod web;
 // Re-export key types for convenience
 pub use effect_binding::{
     BindingEvidenceDigest, BindingEvidenceError, BoundedBindingEvidence, EffectBindingIdentity,
-    MAX_BINDING_EVIDENCE_BYTES,
+    SystemBindingEvidence, MAX_BINDING_EVIDENCE_BYTES,
 };
 pub use error::Result;
 pub use event::chain_event::ChainEvent;

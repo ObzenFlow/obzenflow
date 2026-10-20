@@ -356,17 +356,13 @@ fn build_flow(
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
                     TicketRaised -> TicketSummarised
-                    uses at_least_once(ChatCompletion)
-                        via chat
-                        with ai_resilience()
-                    => chat_handler,
+                    with ai_resilience()
+                    => chat_handler.system(chat).at_least_once::<ChatCompletion>(),
                 );
                 embedding = effectful_transform!(
                     TicketSummarised -> TicketEmbedded
-                    uses at_least_once(EmbeddingGeneration)
-                        via embedding
-                        with ai_resilience()
-                    => embedding_handler,
+                    with ai_resilience()
+                    => embedding_handler.system(embedding).at_least_once::<EmbeddingGeneration>(),
                 );
                 collected = sink!(TicketEmbedded => collected);
             },

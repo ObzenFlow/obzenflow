@@ -7,7 +7,6 @@
 //! Public only for downstream macro reachability. This is not a supported
 //! authoring surface (FLOWIP-115r).
 
-use crate::dsl::backpressure_clause::BackpressureClause;
 use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::topology::LoweredFlow;
 use obzenflow_core::event::chain_event::ChainEvent;
@@ -154,7 +153,6 @@ pub async fn build_flow<J, P>(
     journal_factory_provider: P,
     lowered: LoweredFlow,
     build_ctx: FlowBuildContext,
-    flow_backpressure_clause: Option<BackpressureClause>,
 ) -> Result<FlowBuildOutput, crate::FlowBuildFailure>
 where
     J: FlowJournalFactory,
@@ -593,9 +591,6 @@ where
         // the topology (§4c). Policy-attachment guards ride this walk (they
         // previously ran during plan extraction, after journal creation;
         // failing before substrate selection is strictly earlier).
-        // FLOWIP-115e: the flow-level `backpressure:` clause, when declared.
-        let __flow_backpressure_clause = flow_backpressure_clause;
-
         let __flow_effective = {
             use obzenflow_core::config::ConfigScope;
             use obzenflow_runtime::runtime_config::DslCandidates;
@@ -642,15 +637,6 @@ where
                         );
                     }
                 }
-
-                // FLOWIP-115e: the stage's `backpressure:` clause is pure
-                // DSL-tier candidate sugar at the declaring scope.
-                if let Some(clause) = descriptor.backpressure_clause() {
-                    clause.declare(&mut __dsl_candidates, ConfigScope::stage(descriptor.name()));
-                }
-            }
-            if let Some(clause) = &__flow_backpressure_clause {
-                clause.declare(&mut __dsl_candidates, ConfigScope::Flow);
             }
             let __resolution_ctx = obzenflow_runtime::runtime_config::FlowResolutionContext {
                 flow_name: flow_name.to_string(),
@@ -703,7 +689,7 @@ where
         };
 
         {
-            use crate::dsl::backpressure_clause::{resolve_edge_backpressure, EdgeBackpressure};
+            use crate::dsl::backpressure_edges::{resolve_edge_backpressure, EdgeBackpressure};
             let mut enforced_edges = HashSet::new();
             for (from_var, to_var, _kind) in &connections {
                 let from_key = obzenflow_core::StageKey::from(descriptors[from_var].name());
@@ -1359,7 +1345,7 @@ where
                 let up_scc = topology.scc_id(to_topology_id(up_id));
                 let cycle_internal =
                     up_scc.is_some() && up_scc == topology.scc_id(to_topology_id(down_id));
-                use crate::dsl::backpressure_clause::{
+                use crate::dsl::backpressure_edges::{
                     resolve_edge_backpressure, EdgeBackpressure,
                 };
                 match resolve_edge_backpressure(mode, mode_source, cycle_internal) {

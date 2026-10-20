@@ -183,10 +183,10 @@ pub fn build_flow(
             stages: {
                 // Ingestion
                 batch_accounts = source!(AccountOpened => accounts_source);
-                batch_tx = source!(LedgerEntry => ledger_source with { rate_limit(2.0) });
+                batch_tx = source!(LedgerEntry with { rate_limit(2.0) } => ledger_source);
                 live_accounts = async_infinite_source!(AccountOpened => new_accounts_source);
                 live_tx = async_infinite_source!(
-                    LedgerEntry => tx_source with { rate_limit(50.0) }
+                    LedgerEntry with { rate_limit(50.0) } => tx_source
                 );
 
                 // Processing

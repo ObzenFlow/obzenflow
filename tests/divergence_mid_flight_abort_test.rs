@@ -468,7 +468,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         journals: memory_journals(),
 
         stages: {
-            src = source!(SeedEvent => source with {inject_signals});
+            src = source!(SeedEvent with {inject_signals} => source);
             delay = effectful_transform!(
                 SeedEvent -> SeedEvent => delay,
             );

@@ -517,14 +517,14 @@ fn build_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                input = source!(HookInput => hook_source with {
+                input = source!(HookInput with {
                     HookProofFactory::new(counters.clone(), 1, SourcePoll)
-                });
+                } => hook_source);
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with HookProofFactory::new(counters.clone(), 1, Effect) => hook_transform);
-                output = sink!(HookOutput => output_sink with {
+                    HookInput -> { HookOutput, HookEffectValue } with HookProofFactory::new(counters.clone(), 1, Effect) => hook_transform);
+                output = sink!(HookOutput with {
                     HookProofFactory::new(counters.clone(), 1, SinkDelivery)
-                });
+                } => output_sink);
             },
 
             topology: {
@@ -553,7 +553,7 @@ fn build_failure_cause_flow(
             stages: {
                 input = source!(HookInput => hook_source);
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(BreakerCauseProofFactory) => hook_transform);
+                    HookInput -> { HookOutput, HookEffectValue } with Box::new(BreakerCauseProofFactory) => hook_transform);
                 output = sink!(HookOutput => output_sink);
             },
 

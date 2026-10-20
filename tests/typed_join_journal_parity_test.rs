@@ -11,6 +11,7 @@
 
 mod replay_testkit;
 
+use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
@@ -18,6 +19,10 @@ use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::run_context::FlowBuildContext;
+use obzenflow_runtime::runtime_config::{
+    CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
@@ -28,6 +33,55 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+fn enforced_backpressure(
+    window: u64,
+    stall_timeout_ms: u64,
+    stage_windows: &[(&str, u64)],
+) -> FlowBuildContext {
+    let flow_settings = [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(window)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(stall_timeout_ms),
+        ),
+    ]
+    .map(|(key, value)| {
+        ScopedCandidate::unqualified(key, ConfigScope::Flow, ConfigSource::File, value)
+    });
+    let stage_settings = stage_windows.iter().map(|(stage, window)| {
+        ScopedCandidate::unqualified(
+            "runtime.backpressure.window",
+            ConfigScope::stage(*stage),
+            ConfigSource::File,
+            ConfigValue::U64(*window),
+        )
+    });
+    let mut candidates = CandidateSet::default();
+    for candidate in flow_settings.into_iter().chain(stage_settings) {
+        candidates
+            .admit(candidate)
+            .expect("the backpressure setting admits");
+    }
+    FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates)))
+}
+
+fn enforced_backpressure_file(dir: &Path, window: u64, stall_timeout_ms: u64) -> PathBuf {
+    let path = dir.join("obzenflow.toml");
+    std::fs::create_dir_all(dir).expect("create the configuration directory");
+    std::fs::write(
+        &path,
+        format!(
+            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = {window}\nstall_timeout_ms = {stall_timeout_ms}\n"
+        ),
+    )
+    .expect("write the configuration");
+    path
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ReferenceItem {
@@ -666,8 +720,6 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
 #[tokio::test(flavor = "multi_thread")]
 async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpressure() {
     use obzenflow_core::StageKey;
-    use obzenflow_dsl::dsl::backpressure_clause::enforced;
-    use obzenflow_runtime::run_context::FlowBuildContext;
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("multi-stream");
     let handle = FlowDefinition::materialize(move |_| {
@@ -679,9 +731,8 @@ async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpr
         Ok(flow! {
             name: "explicit_multi_stream_join",
             journals: disk_journals(journal_base),
-            backpressure: enforced(2).stall_timeout_ms(3_000),
             stages: {
-                references = source!(ReferenceItem => references , backpressure: enforced(1));
+                references = source!(ReferenceItem => references);
                 stream_a = source!(StreamItem => stream_a);
                 stream_b = source!(StreamItem => stream_b);
                 joined = join!(catalog references: ReferenceItem, StreamItem -> JoinedFact => joined);
@@ -693,7 +744,7 @@ async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpr
                 joined |> output;
             }
         })
-    }).build(FlowBuildContext::for_tests()).await.unwrap();
+    }).build(enforced_backpressure(2, 3_000, &[("references", 1)])).await.unwrap();
     let topology = handle.topology().unwrap();
     let join = topology
         .stages()
@@ -757,8 +808,6 @@ async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpr
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mixed_join_feeds_filter_both_roles_with_backpressure_and_replay() {
-    use obzenflow_dsl::dsl::backpressure_clause::enforced;
-
     let temp = tempfile::tempdir().unwrap();
     let mut live_archive = None;
     let mut live_facts = Vec::new();
@@ -814,7 +863,6 @@ async fn mixed_join_feeds_filter_both_roles_with_backpressure_and_replay() {
             Ok(flow! {
                 name: "mixed_join_feeds",
                 journals: disk_journals(journal_base),
-                backpressure: enforced(1).stall_timeout_ms(3_000),
                 stages: {
                     references = source!({ ReferenceItem, StreamItem } => references);
                     stream_a = source!({ ReferenceItem, StreamItem } => stream_a);
@@ -838,6 +886,7 @@ async fn mixed_join_feeds_filter_both_roles_with_backpressure_and_replay() {
             std::time::Duration::from_secs(30),
             FlowApplication::builder()
                 .with_cli_args(args)
+                .with_config_file(enforced_backpressure_file(&base, 1, 3_000))
                 .run_async(definition),
         )
         .await
@@ -898,7 +947,6 @@ async fn mixed_join_feeds_filter_both_roles_with_backpressure_and_replay() {
 
 #[tokio::test]
 async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
-    use obzenflow_runtime::run_context::FlowBuildContext;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("must-not-exist");
     let providers = Arc::new(AtomicUsize::new(0));
@@ -1094,9 +1142,7 @@ async fn hooks_under_enforce(
 ) -> (HookCounts, Vec<JoinedFact>) {
     use obzenflow::stages::merges;
     use obzenflow::stages::sources::ChannelSource;
-    use obzenflow_dsl::dsl::backpressure_clause::enforced;
     use obzenflow_dsl::{async_infinite_source, merge};
-    use obzenflow_runtime::run_context::FlowBuildContext;
 
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("hooks");
@@ -1123,7 +1169,6 @@ async fn hooks_under_enforce(
             return Ok(flow! {
                 name: "join_hooks_under_enforce",
                 journals: disk_journals(journal_base),
-                backpressure: enforced(1).stall_timeout_ms(10_000),
                 stages: {
                     batch_references = source!(ReferenceItem => references);
                     live_references = async_infinite_source!(ReferenceItem => live_references);
@@ -1143,7 +1188,6 @@ async fn hooks_under_enforce(
         Ok(flow! {
             name: "join_hooks_under_enforce",
             journals: disk_journals(journal_base),
-            backpressure: enforced(1).stall_timeout_ms(10_000),
             stages: {
                 references = source!(ReferenceItem => references);
                 streams = source!(StreamItem => streams);
@@ -1156,7 +1200,7 @@ async fn hooks_under_enforce(
             }
         })
     })
-    .build(FlowBuildContext::for_tests())
+    .build(enforced_backpressure(1, 10_000, &[]))
     .await
     .unwrap();
     let archive = handle

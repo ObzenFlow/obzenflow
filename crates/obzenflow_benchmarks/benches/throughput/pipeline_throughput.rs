@@ -9,10 +9,10 @@
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use obzenflow_benchmarks::case::{declare, Category};
+use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
-use obzenflow_dsl::dsl::backpressure_clause::enforced;
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
 use obzenflow_runtime::effects::{
@@ -20,6 +20,10 @@ use obzenflow_runtime::effects::{
     StageCompletion,
 };
 use obzenflow_runtime::pipeline::FlowHandle;
+use obzenflow_runtime::run_context::FlowBuildContext;
+use obzenflow_runtime::runtime_config::{
+    CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -106,6 +110,30 @@ impl InlineSink for Sink {
         Ok(())
     }
 }
+fn enforced_backpressure(window: u64) -> FlowBuildContext {
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(window)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(30_000),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .unwrap();
+    }
+    FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates)))
+}
 async fn build<P, J>(
     journals: P,
     deep: bool,
@@ -130,11 +158,9 @@ where
             delivered,
             constrained,
         };
-        let capacity = if constrained { 2 } else { 64 };
         Ok(if deep {
             flow! {
                 journals: journals,
-                backpressure: enforced(capacity).stall_timeout_ms(30_000),
                 stages: {
                     src = async_source!(Input => source);
                     a = transform!(Input -> Input => Identity);
@@ -147,7 +173,6 @@ where
         } else {
             flow! {
                 journals: journals,
-                backpressure: enforced(capacity).stall_timeout_ms(30_000),
                 stages: {
                     src = async_source!(Input => source);
                     a = transform!(Input -> Input => Identity);
@@ -157,7 +182,7 @@ where
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(if constrained { 2 } else { 64 }))
     .await
     .unwrap()
 }
@@ -297,16 +322,15 @@ async fn build_effectful(
         let sink = SettledSink { settled };
         Ok(flow! {
             journals: journals,
-            backpressure: enforced(64).stall_timeout_ms(30_000),
             stages: {
                 src = async_source!(Input => source);
-                settle = effectful_transform!(Input -> Settled uses Settle => SettleEach);
+                settle = effectful_transform!(Input -> Settled => SettleEach);
                 snk = sink!(Settled => sink);
             },
             topology: { src |> settle; settle |> snk; }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(64))
     .await
     .unwrap()
 }

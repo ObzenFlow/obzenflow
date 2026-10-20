@@ -231,10 +231,10 @@ async fn observe_sink(timing: DeliveryTiming, fault: ObserverFault) -> DeliveryP
                 journals: memory_journals(),
                 stages: {
                     input = source!(HandlerInput => source);
-                    output = sink!(HandlerInput => connector with { sink_delivery_observer("faulting", FaultingDeliveryObserver {
+                    output = sink!(HandlerInput with { sink_delivery_observer("faulting", FaultingDeliveryObserver {
                             fault, probe: for_flow.clone(),
                         }),
-                        sink_delivery_observer("healthy", ObservesDelivery(for_flow)) });
+                        sink_delivery_observer("healthy", ObservesDelivery(for_flow)) } => connector);
                 },
                 topology: { input |> output; }
             })
@@ -478,12 +478,12 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
                     stream = source!(StreamInput => stream_source);
                     joined = join!(
                         catalog reference: Reference,
-                        StreamInput -> Joined => join_handler with join_observer(
+                        StreamInput -> Joined with join_observer(
                                 "join-occurrences",
                                 RecordsJoinOccurrences {
                                     observations: observations_for_flow,
                                 }
-                            ));
+                            ) => join_handler);
                     output = sink!(Joined => sink_handler);
                 },
 
@@ -752,12 +752,12 @@ async fn handler_observer_runs_once_for_zero_output_and_reports_the_whole_fan_ou
                 stages: {
                     input = source!(HandlerInput => inputs);
                     expanded = transform!(
-                        HandlerInput -> HandlerOutput => handler with { handler_observer(
+                        HandlerInput -> HandlerOutput with { handler_observer(
                             "handler-occurrences",
                             RecordsHandlerOccurrences {
                                 observations: observations_for_flow,
                             }
-                        ) });
+                        ) } => handler);
                     output = sink!(HandlerOutput => output);
                 },
 
@@ -940,19 +940,19 @@ async fn graph_fan_out_dispatches_once_per_concurrent_stage_occurrence() {
                 stages: {
                     input = source!(ConcurrentInput => input);
                     left = effectful_transform!(
-                        ConcurrentInput -> ConcurrentOutput => left with { handler_observer(
+                        ConcurrentInput -> ConcurrentOutput with { handler_observer(
                             "left-occurrences",
                             RecordsHandlerOccurrences {
                                 observations: observations_for_left,
                             }
-                        ) });
+                        ) } => left);
                     right = effectful_transform!(
-                        ConcurrentInput -> ConcurrentOutput => right with { handler_observer(
+                        ConcurrentInput -> ConcurrentOutput with { handler_observer(
                             "right-occurrences",
                             RecordsHandlerOccurrences {
                                 observations: observations_for_right,
                             }
-                        ) });
+                        ) } => right);
                     output = sink!(ConcurrentOutput => output);
                 },
 
@@ -1046,7 +1046,7 @@ async fn fatal_handler_return_has_before_without_after_and_one_failed_lifecycle(
                 stages: {
                     input = source!(HandlerInput => input);
                     fatal = transform!(
-                        HandlerInput -> HandlerOutput => fatal with { handler_observer(
+                        HandlerInput -> HandlerOutput with { handler_observer(
                                 "fatal-handler-occurrences",
                                 RecordsHandlerOccurrences {
                                     observations: observations_for_flow,
@@ -1057,7 +1057,7 @@ async fn fatal_handler_return_has_before_without_after_and_one_failed_lifecycle(
                                 RecordsLifecycle {
                                     phases: phases_for_flow,
                                 }
-                            ) });
+                            ) } => fatal);
                     output = sink!(HandlerOutput => output);
                 },
 

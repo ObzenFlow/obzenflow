@@ -374,7 +374,7 @@ fn build_two_channel_flow_with_jitter(
                 source_b = source!(FanInInput => source_b);
                 merge = transform!(FanInInput -> MergedRecord => merge);
                 effectful = effectful_transform!(
-                    MergedRecord -> { FanInOutput, FanInEffectValue } uses CountingEffect => effectful);
+                    MergedRecord -> { FanInOutput, FanInEffectValue } => effectful);
                 collector = sink!(FanInOutput => collector);
             },
 
@@ -416,7 +416,7 @@ fn build_skip_level_flow_with_delay(
                 tap = transform!(FanInInput -> FanInInput => tap);
                 merge = transform!(FanInInput -> MergedRecord => merge);
                 effectful = effectful_transform!(
-                    MergedRecord -> { FanInOutput, FanInEffectValue } uses CountingEffect => effectful);
+                    MergedRecord -> { FanInOutput, FanInEffectValue } => effectful);
                 collector = sink!(FanInOutput => collector);
             },
 

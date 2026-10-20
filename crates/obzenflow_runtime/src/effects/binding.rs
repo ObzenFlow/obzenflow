@@ -6,7 +6,9 @@
 
 use super::ports::PendingRegistrationPackage;
 use super::Effect;
-use obzenflow_core::{BindingEvidenceDigest, BoundedBindingEvidence, EffectBindingIdentity};
+use obzenflow_core::{
+    BindingEvidenceDigest, BoundedBindingEvidence, EffectBindingIdentity, SystemBindingEvidence,
+};
 use ring::digest::{digest, SHA256};
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
@@ -20,6 +22,14 @@ pub trait EffectBindingEvidence: Clone + Eq + Send + Sync + 'static {
     const SCHEMA_VERSION: u32;
 
     fn canonical_bytes(&self) -> BoundedBindingEvidence;
+}
+
+impl EffectBindingEvidence for SystemBindingEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> BoundedBindingEvidence {
+        SystemBindingEvidence::canonical_bytes(self).clone()
+    }
 }
 
 mod private {
@@ -36,21 +46,23 @@ pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Portless;
 
-/// An effect whose declaration requires typed evidence and lexical `via`.
+/// An effect answered by a named binding that carries typed evidence. A stage
+/// names that binding after its handler with `.system(…)`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Named<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
 
 impl private::Sealed for Portless {}
 impl<B: EffectBindingEvidence> private::Sealed for Named<B> {}
 
-/// Observable logical name chosen by the trusted composition root.
+/// Observable name of a binding, such as the system a stage names, chosen by
+/// the trusted composition root.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LogicalEffectBindingName(String);
 
 impl LogicalEffectBindingName {
     pub fn new(value: impl Into<String>) -> Result<Self, BindingIdentifierError> {
         let value = value.into();
-        if !is_public_identifier(&value) {
+        if !is_binding_name(&value) {
             return Err(BindingIdentifierError::InvalidLogicalBindingName);
         }
         Ok(Self(value))
@@ -86,7 +98,7 @@ impl TryFrom<&str> for LogicalEffectBindingName {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BindingIdentifierError {
-    #[error("logical effect binding names must match [A-Za-z_][A-Za-z0-9_]{{0,63}}")]
+    #[error("effect binding names must match [A-Za-z0-9_][A-Za-z0-9_.-]{{0,63}}")]
     InvalidLogicalBindingName,
     #[error("effect port slot names must match [A-Za-z_][A-Za-z0-9_]{{0,63}}")]
     InvalidSlotName,
@@ -124,6 +136,28 @@ fn is_public_identifier(value: &str) -> bool {
         && bytes[1..]
             .iter()
             .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+fn is_binding_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    matches!(bytes[0], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
+        && bytes[1..].iter().all(
+            |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-'),
+        )
+}
+
+pub(super) fn is_system_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    bytes[0].is_ascii_alphanumeric()
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 const fn is_public_identifier_const(value: &str) -> bool {
@@ -338,7 +372,8 @@ pub(super) struct BoundEffectPortSlot {
     pub(super) coordinate: BindingCoordinate,
 }
 
-/// Typed declaration value selected lexically by `via`.
+/// A named binding for one effect, which a stage names after its handler with
+/// `.system(…)`.
 #[derive(Clone)]
 pub struct EffectBinding<E: NamedEffect> {
     logical_name: LogicalEffectBindingName,

@@ -10,15 +10,11 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderCancelled, OrderId, OrderPlaced,
     ReservationConfirmed, ReservationFailed, Sku, SoldOut, StockReleased, StockReserved,
 };
-use super::warehouse::{
-    ReleaseStock, ReserveStock, WarehouseBindingsBuildError, WarehouseConfig,
-    WarehouseEffectBindings, WarehouseStats,
-};
-use obzenflow::flow::{
-    effectful_stateful, flow, sink, source, stateful, FlowBuildError, FlowDefinition,
-};
+use super::warehouse::{warehouse_system, ReserveStock, WarehouseConfig, WarehouseStats};
+use obzenflow::effects::SystemError;
+use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::circuit_breaker;
+use obzenflow::middleware::{circuit_breaker, MiddlewareFactory};
 use obzenflow::stages::sinks::TracingSink;
 use obzenflow::stages::sources;
 use serde::{Deserialize, Serialize};
@@ -114,14 +110,13 @@ pub fn settings_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize_with(move |_runtime_config, settings: FlashSaleSettings| {
         let reservation_pace = settings.warehouse.reservation_pace();
-        allocation_flow(
+        Ok(allocation_flow(
             inputs,
             settings.warehouse.into_config(),
             reservation_pace,
             warehouse_stats,
             journal_root,
-        )
-        .map_err(warehouse_binding_failed)
+        )?)
     })
 }
 
@@ -133,22 +128,14 @@ pub fn assemble_flow(
     journal_root: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        allocation_flow(
+        Ok(allocation_flow(
             inputs,
             warehouse_config,
             Duration::ZERO,
             warehouse_stats,
             journal_root,
-        )
-        .map_err(warehouse_binding_failed)
+        )?)
     })
-}
-
-fn warehouse_binding_failed(error: WarehouseBindingsBuildError) -> FlowBuildError {
-    FlowBuildError::BindingConfiguration {
-        binding: "warehouse".to_string(),
-        detail: error.to_string(),
-    }
 }
 
 fn allocation_flow(
@@ -157,11 +144,8 @@ fn allocation_flow(
     reservation_pace: Duration,
     warehouse_stats: Arc<WarehouseStats>,
     journal_root: PathBuf,
-) -> Result<FlowDefinition, WarehouseBindingsBuildError> {
-    let WarehouseEffectBindings {
-        reserve: reserve_warehouse,
-        release: release_warehouse,
-    } = WarehouseEffectBindings::with_stats(&warehouse_config, warehouse_stats)?;
+) -> Result<FlowDefinition, SystemError> {
+    let warehouse = warehouse_system(&warehouse_config, warehouse_stats)?;
 
     let reserve_breaker = circuit_breaker()
         .count_window(1)
@@ -171,7 +155,7 @@ fn allocation_flow(
         .slow_call_rate_threshold(1.0)
         .open_for(Duration::from_secs(60))
         .probes(1);
-    let reserve_resilience = reserve_breaker;
+    let reserve_resilience = reserve_breaker.for_effect::<ReserveStock>();
 
     let allocation_feed = sources::ValuesSource::new(inputs);
     let phone_feed = sources::ValuesSource::new(phone_reservations());
@@ -209,35 +193,19 @@ fn allocation_flow(
                     SoldOut,
                     CancelIgnored,
                 }
-                uses {
-                    ReserveStock
-                        via reserve_warehouse
-                        with reserve_resilience,
-                    ReleaseStock
-                        via release_warehouse,
-                }
-                => allocator,
+                with reserve_resilience
+                => allocator.system(warehouse),
             );
 
-            reservations = sink!(
-                StockReserved => record_reservation,
-                delivery: idempotent
-            );
-            releases = sink!(
-                StockReleased => record_release,
-                delivery: idempotent
-            );
+            reservations = sink!(StockReserved => record_reservation.idempotent());
+            releases = sink!(StockReleased => record_release.idempotent());
             reservation_failures = sink!(
-                ReservationFailed => record_reservation_failure,
-                delivery: idempotent
+                ReservationFailed => record_reservation_failure.idempotent()
             );
 
             phone_reservations = source!(StockReserved => phone_feed);
             reservation_desk = stateful!(StockReserved -> ReservationConfirmed => desk);
-            confirmations = sink!(
-                ReservationConfirmed => record_confirmation,
-                delivery: idempotent
-            );
+            confirmations = sink!(ReservationConfirmed => record_confirmation.idempotent());
         },
 
         topology: {

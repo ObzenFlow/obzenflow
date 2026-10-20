@@ -60,7 +60,7 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::{id::StageId, EventId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai_map_reduce, flow, sink, source, FlowBuildError, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{FlowApplication, FlowApplicationBuilder};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
@@ -598,11 +598,51 @@ impl InlineSink for CollectOut {
     }
 }
 
+fn enforced_app(journal_base: &Path) -> FlowApplicationBuilder {
+    let config = journal_base.with_extension("toml");
+    std::fs::write(
+        &config,
+        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 5000\n",
+    )
+    .expect("write the backpressure configuration");
+    FlowApplication::builder().with_config_file(config)
+}
+
+fn enforced_context(window: u64) -> obzenflow_runtime::run_context::FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    };
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(window)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(5_000),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .expect("the backpressure setting admits");
+    }
+    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
+        candidates,
+    )))
+}
+
 fn build_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     chat_port: ChatPortRecipe,
-    backpressure_window: u64,
     map_request_target: ChatTarget,
     map_prepare_failure: bool,
 ) -> FlowDefinition {
@@ -610,7 +650,6 @@ fn build_flow(
         journal_base,
         outputs,
         chat_port,
-        backpressure_window,
         map_request_target,
         map_prepare_failure,
         map_interpret_failure: false,
@@ -624,7 +663,6 @@ struct FlowBehaviour {
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     chat_port: ChatPortRecipe,
-    backpressure_window: u64,
     map_request_target: ChatTarget,
     map_prepare_failure: bool,
     map_interpret_failure: bool,
@@ -647,7 +685,6 @@ fn build_flow_with_chunk_plan(
         journal_base,
         outputs,
         chat_port,
-        backpressure_window,
         map_request_target,
         map_prepare_failure,
         map_interpret_failure,
@@ -670,8 +707,6 @@ fn build_flow_with_chunk_plan(
         Ok(flow! {
             name: "hn_ai_digest_effect_replay_journal",
             journals: disk_journals(journal_base),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(backpressure_window)
-                .stall_timeout_ms(5_000),
             stages: {
                 seed = source!(DigestSeed => seed);
                 digest = ai_map_reduce!(
@@ -730,8 +765,6 @@ fn build_recovery_flow(
         Ok(flow! {
             name: "hn_ai_digest_recovery_composition",
             journals: disk_journals(journal_base),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
-                .stall_timeout_ms(5_000),
             stages: {
                 recovery_seed = source!(DigestSeed => recovery_seed);
                 recovery_digest = ai_map_reduce!(
@@ -790,8 +823,6 @@ fn build_credit_flow(
         Ok(flow! {
             name: "hn_ai_digest_credit_composition",
             journals: disk_journals(journal_base),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
-                .stall_timeout_ms(5_000),
             stages: {
                 credit_seed = source!(DigestSeed => credit_seed);
                 credit_digest = ai_map_reduce!(
@@ -849,8 +880,6 @@ fn build_chunk_interruption_flow(
         Ok(flow! {
             name: "hn_ai_digest_chunk_interruption",
             journals: disk_journals(journal_base),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
-                .stall_timeout_ms(5_000),
             stages: {
                 interrupt_seed = source!(DigestSeed => interrupt_seed);
                 interrupt_digest = ai_map_reduce!(
@@ -1234,7 +1263,7 @@ async fn assert_archive_contract_rejected_before_port_resolution(
 ) {
     let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let result = FlowApplication::builder()
+    let result = enforced_app(journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -1244,7 +1273,6 @@ async fn assert_archive_contract_rejected_before_port_resolution(
             journal_base.to_path_buf(),
             Arc::new(Mutex::new(Vec::new())),
             deferred_chat_port(resolutions.clone(), calls.clone(), true),
-            3,
             target(),
             false,
         ))
@@ -1540,7 +1568,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     let prepare_calls = Arc::new(AtomicUsize::new(0));
     let prepare_outputs = Arc::new(Mutex::new(Vec::new()));
     let prepare_base = prepare_temp.path().join("journals");
-    FlowApplication::builder()
+    enforced_app(&prepare_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow_with_behaviour(FlowBehaviour {
             journal_base: prepare_base.clone(),
@@ -1550,7 +1578,6 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
                 prepare_calls.clone(),
                 false,
             ),
-            backpressure_window: 3,
             map_request_target: target(),
             map_prepare_failure: true,
             map_interpret_failure: false,
@@ -1585,7 +1612,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     let interpretation_calls = Arc::new(AtomicUsize::new(0));
     let interpretation_outputs = Arc::new(Mutex::new(Vec::new()));
     let interpretation_base = interpretation_temp.path().join("journals");
-    FlowApplication::builder()
+    enforced_app(&interpretation_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow_with_behaviour(FlowBehaviour {
             journal_base: interpretation_base.clone(),
@@ -1595,7 +1622,6 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
                 interpretation_calls.clone(),
                 false,
             ),
-            backpressure_window: 3,
             map_request_target: target(),
             map_prepare_failure: false,
             map_interpret_failure: true,
@@ -1632,7 +1658,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     let provider_calls = Arc::new(AtomicUsize::new(0));
     let provider_outputs = Arc::new(Mutex::new(Vec::new()));
     let provider_base = provider_temp.path().join("journals");
-    FlowApplication::builder()
+    enforced_app(&provider_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow_with_behaviour(FlowBehaviour {
             journal_base: provider_base.clone(),
@@ -1643,7 +1669,6 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
                     message: "fixture rejected request".to_string(),
                 },
             ),
-            backpressure_window: 3,
             map_request_target: target(),
             map_prepare_failure: false,
             map_interpret_failure: false,
@@ -1731,7 +1756,7 @@ async fn zero_chunk_jobs_skip_map_but_finalize_live_and_replay_without_live_chat
         let live_calls = Arc::new(AtomicUsize::new(0));
         let live_outputs = Arc::new(Mutex::new(Vec::new()));
 
-        FlowApplication::builder()
+        enforced_app(&journal_base)
             .with_cli_args(["obzenflow"])
             .run_async(build_flow_with_chunk_plan(
                 FlowBehaviour {
@@ -1742,7 +1767,6 @@ async fn zero_chunk_jobs_skip_map_but_finalize_live_and_replay_without_live_chat
                         live_calls.clone(),
                         false,
                     ),
-                    backpressure_window: 3,
                     map_request_target: target(),
                     map_prepare_failure: false,
                     map_interpret_failure: false,
@@ -1787,7 +1811,7 @@ async fn zero_chunk_jobs_skip_map_but_finalize_live_and_replay_without_live_chat
         let replay_resolutions = Arc::new(AtomicUsize::new(0));
         let replay_calls = Arc::new(AtomicUsize::new(0));
         let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-        FlowApplication::builder()
+        enforced_app(&journal_base)
             .with_cli_args(vec![
                 OsString::from("obzenflow"),
                 OsString::from("--replay-from"),
@@ -1802,7 +1826,6 @@ async fn zero_chunk_jobs_skip_map_but_finalize_live_and_replay_without_live_chat
                         replay_calls.clone(),
                         true,
                     ),
-                    backpressure_window: 3,
                     map_request_target: target(),
                     map_prepare_failure: false,
                     map_interpret_failure: false,
@@ -1854,13 +1877,12 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
 
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
             live_outputs.clone(),
             deferred_chat_port(live_resolutions.clone(), live_calls.clone(), false),
-            3,
             target(),
             false,
         ))
@@ -2031,7 +2053,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
 
     let divergent_resolutions = Arc::new(AtomicUsize::new(0));
     let divergent_calls = Arc::new(AtomicUsize::new(0));
-    let divergent_result = FlowApplication::builder()
+    let divergent_result = enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2041,7 +2063,6 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
             deferred_chat_port(divergent_resolutions.clone(), divergent_calls.clone(), true),
-            3,
             target(),
             true,
         ))
@@ -2057,7 +2078,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_estimator_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2067,7 +2088,6 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
             journal_base: journal_base.clone(),
             outputs: replay_outputs.clone(),
             chat_port: deferred_chat_port(replay_resolutions.clone(), replay_calls.clone(), true),
-            backpressure_window: 3,
             map_request_target: target(),
             map_prepare_failure: false,
             map_interpret_failure: false,
@@ -2141,7 +2161,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         .expect("retain the omission replay verdict");
 
     let empty_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2151,7 +2171,6 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
             journal_base.clone(),
             empty_outputs.clone(),
             ChatPortRecipe::Missing,
-            3,
             target(),
             false,
         ))
@@ -2163,7 +2182,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     );
 
     let eager_calls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2173,7 +2192,6 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
             journal_base,
             Arc::new(Mutex::new(Vec::new())),
             eager_chat_port(eager_calls.clone(), true),
-            3,
             target(),
             false,
         ))
@@ -2198,7 +2216,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     let live_task = tokio::spawn({
         let journal_base = journal_base.clone();
         async move {
-            FlowApplication::builder()
+            enforced_app(&journal_base)
                 .with_cli_args(["obzenflow"])
                 .run_async(build_recovery_flow(
                     journal_base,
@@ -2234,7 +2252,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
     let resume_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -2307,7 +2325,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     }));
 
     let strict_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -2325,7 +2343,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
 
     let replay_resolutions = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let refusal = FlowApplication::builder()
+    let refusal = enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -2383,7 +2401,7 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
         let prepare_calls = prepare_calls.clone();
         let outputs = outputs.clone();
         async move {
-            FlowApplication::builder()
+            enforced_app(&journal_base)
                 .with_cli_args(["obzenflow"])
                 .run_async(build_credit_flow(
                     journal_base,
@@ -2475,7 +2493,7 @@ async fn resume_closes_a_generated_plan_interrupted_before_its_manifest() {
         let journal_base = journal_base.clone();
         let live_calls = live_calls.clone();
         async move {
-            FlowApplication::builder()
+            enforced_app(&journal_base)
                 .with_cli_args(["obzenflow"])
                 .run_async(build_chunk_interruption_flow(
                     journal_base,
@@ -2519,7 +2537,7 @@ async fn resume_closes_a_generated_plan_interrupted_before_its_manifest() {
 
     let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
     let resumed_calls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -2585,7 +2603,7 @@ async fn resume_reproduces_a_map_that_passed_its_manifest_through() {
     let live_task = tokio::spawn({
         let journal_base = journal_base.clone();
         async move {
-            FlowApplication::builder()
+            enforced_app(&journal_base)
                 .with_cli_args(["obzenflow"])
                 .run_async(build_chunk_interruption_flow(
                     journal_base,
@@ -2615,7 +2633,7 @@ async fn resume_reproduces_a_map_that_passed_its_manifest_through() {
 
     let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
     let resumed_calls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--resume-from"),
@@ -3041,11 +3059,10 @@ async fn descriptor_bound_rejects_one_and_two_credit_windows_before_port_resolut
             temp.path().join("journals"),
             Arc::new(Mutex::new(Vec::new())),
             deferred_chat_port(resolutions.clone(), calls.clone(), true),
-            window,
             target(),
             false,
         )
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(enforced_context(window))
         .await;
 
         let error = match result {
@@ -3072,13 +3089,12 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     let calls = Arc::new(AtomicUsize::new(0));
     let downstream_attempts = Arc::new(AtomicUsize::new(0));
 
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
             internally_retrying_chat_port(calls.clone(), downstream_attempts.clone()),
-            3,
             target(),
             false,
         ))
@@ -3188,7 +3204,7 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     let journal_base = temp.path().join("journals");
     let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let result = FlowApplication::builder()
+    let result = enforced_app(&journal_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
@@ -3199,7 +3215,6 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
                 calls.clone(),
                 false,
             )),
-            3,
             target(),
             false,
         ))
@@ -3261,13 +3276,12 @@ async fn endpoint_fingerprint_drift_is_rejected_by_effect_history_before_port_re
     assert_ne!(endpoint_a, endpoint_b);
 
     let live_calls = Arc::new(AtomicUsize::new(0));
-    FlowApplication::builder()
+    enforced_app(&journal_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow_with_behaviour(FlowBehaviour {
             journal_base: journal_base.clone(),
             outputs: Arc::new(Mutex::new(Vec::new())),
             chat_port: eager_chat_port_for_target(live_calls.clone(), false, endpoint_a.clone()),
-            backpressure_window: 3,
             map_request_target: endpoint_a.clone(),
             map_prepare_failure: false,
             map_interpret_failure: false,
@@ -3282,7 +3296,7 @@ async fn endpoint_fingerprint_drift_is_rejected_by_effect_history_before_port_re
 
     let replay_resolutions = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let replay_result = FlowApplication::builder()
+    let replay_result = enforced_app(&journal_base)
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
@@ -3297,7 +3311,6 @@ async fn endpoint_fingerprint_drift_is_rejected_by_effect_history_before_port_re
                 replay_calls.clone(),
                 true,
             )),
-            backpressure_window: 3,
             map_request_target: endpoint_b.clone(),
             map_prepare_failure: false,
             map_interpret_failure: false,
@@ -3333,13 +3346,12 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
     let journal_base = temp.path().join("journals");
     let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let result = FlowApplication::builder()
+    let result = enforced_app(&journal_base)
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
             post_start_mismatch_port(resolutions.clone(), calls.clone()),
-            3,
             target(),
             false,
         ))

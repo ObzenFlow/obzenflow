@@ -8,3 +8,8 @@ on_terminal = "exit"
 
 [metrics]
 enabled = true
+
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 64
+stall_timeout_ms = 30000

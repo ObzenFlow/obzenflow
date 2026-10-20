@@ -316,24 +316,23 @@ pub(crate) fn build_flow(
         };
         let authorised = match treatment {
             ObserverTreatment::WithoutObservers => effectful_transform!(
-                OrderAccepted -> { ShippingAuthorised, ShippingReady } uses AuthoriseShippingEffect => authorise_shipping),
+                OrderAccepted -> { ShippingAuthorised, ShippingReady } => authorise_shipping),
             ObserverTreatment::Observers | ObserverTreatment::PanickingObserver => {
                 effectful_transform!(
-                    OrderAccepted -> { ShippingAuthorised, ShippingReady } uses AuthoriseShippingEffect => authorise_shipping with { effect_observer(
+                    OrderAccepted -> { ShippingAuthorised, ShippingReady } with { effect_observer(
                         "effect-probe",
                         EffectProbeObserver {
                             calls: probe.effect_callbacks.clone(),
                         }
-                    ) })
+                    ) } => authorise_shipping)
             }
         };
         let delivered = match treatment {
             ObserverTreatment::WithoutObservers => sink!(
-                ShippingReady => shipping_handoff,
-                delivery: idempotent
+                ShippingReady => shipping_handoff.idempotent()
             ),
             ObserverTreatment::Observers => sink!(
-                ShippingReady => shipping_handoff with { stage_lifecycle_observer(
+                ShippingReady with { stage_lifecycle_observer(
                         "lifecycle-probe",
                         LifecycleProbeObserver {
                             calls: probe.lifecycle_callbacks.clone(),
@@ -345,10 +344,9 @@ pub(crate) fn build_flow(
                             calls: probe.delivery_callbacks.clone(),
                             delivered: probe.delivered_callbacks.clone(),
                         }
-                    ) },
-                delivery: idempotent),
+                    ) } => shipping_handoff.idempotent()),
             ObserverTreatment::PanickingObserver => sink!(
-                ShippingReady => shipping_handoff with { stage_lifecycle_observer(
+                ShippingReady with { stage_lifecycle_observer(
                         "lifecycle-probe",
                         LifecycleProbeObserver {
                             calls: probe.lifecycle_callbacks.clone(),
@@ -366,8 +364,7 @@ pub(crate) fn build_flow(
                             calls: probe.delivery_callbacks.clone(),
                             delivered: probe.delivered_callbacks.clone(),
                         }
-                    ) },
-                delivery: idempotent),
+                    ) } => shipping_handoff.idempotent()),
         };
 
         Ok(flow! {

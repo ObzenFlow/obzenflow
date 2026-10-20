@@ -341,9 +341,9 @@ async fn adjacent_rejections_open_no_breaker_and_reach_natural_eof() {
             name: "yaml_breaker",
             journals: disk_journals(flow_base.clone()),
             stages: {
-                orders = source!(Order => orders with {
+                orders = source!(Order with {
                     circuit_breaker().consecutive_failures(1)
-                });
+                } => orders);
                 output = sink!(Order => output);
             },
             topology: { orders |> output; }

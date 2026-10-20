@@ -14,7 +14,9 @@ use crate::payment_domain::{
 };
 use async_trait::async_trait;
 use obzenflow::stages::sources;
-use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, Retry};
+use obzenflow_adapters::middleware::{
+    circuit_breaker, rate_limit, retry, MiddlewareFactory, Retry,
+};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
@@ -310,36 +312,37 @@ pub fn build_flow(
         let authorize_payment_stage = match policy {
             ReleasePolicy::BreakerOnly => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with { gateway_breaker, gateway_limiter }
+                with { gateway_breaker, gateway_limiter }
                 => authorize_payment_handler
             ),
             ReleasePolicy::BreakerRecovery => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with {
-                    gateway_breaker, gateway_limiter, canonical_recovery()
-                }
+                with { gateway_breaker, gateway_limiter, canonical_recovery() }
                 => authorize_payment_handler
             ),
             ReleasePolicy::RetryOnly => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with canonical_recovery()
+                with canonical_recovery()
                 => authorize_payment_handler
             ),
             ReleasePolicy::RetryWithLimiter => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with { gateway_limiter, canonical_recovery() }
+                with { gateway_limiter, canonical_recovery() }
                 => authorize_payment_handler
             ),
             ReleasePolicy::RetryWithLimiterPermuted => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with { canonical_recovery(), gateway_limiter }
+                with { canonical_recovery(), gateway_limiter }
                 => authorize_payment_handler
             ),
-            ReleasePolicy::RetryWithLimiterSplit => effectful_transform!(
-                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with canonical_recovery()
-                => authorize_payment_handler with gateway_limiter
-            ),
+            ReleasePolicy::RetryWithLimiterSplit => {
+                let effect_recovery = canonical_recovery().for_effect::<ScriptedAuthorizePayment>();
+                effectful_transform!(
+                    ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                    with { effect_recovery, gateway_limiter }
+                    => authorize_payment_handler
+                )
+            }
         };
         let record_authorized = Discard::<PaymentAuthorized> {
             input: std::marker::PhantomData,

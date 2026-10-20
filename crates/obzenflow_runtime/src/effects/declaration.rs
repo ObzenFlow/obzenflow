@@ -149,6 +149,7 @@ where
 #[derive(Debug, Clone)]
 pub struct EffectDeclaration {
     effect_type: &'static str,
+    rust_type: &'static str,
     safety: EffectSafety,
     idempotency_key_policy: IdempotencyKeyPolicy,
     syntax: EffectDeclarationSyntax,
@@ -164,7 +165,7 @@ pub struct EffectDeclaration {
 /// acknowledgement, not a second safety classification: [`Effect::SAFETY`]
 /// remains authoritative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EffectDeclarationSyntax {
+pub(super) enum EffectDeclarationSyntax {
     Bare,
     AtLeastOnce,
     Transactional,
@@ -173,56 +174,13 @@ enum EffectDeclarationSyntax {
 mod declaration_diagnostic_sealed {
     use super::*;
 
-    pub trait WithoutBinding {}
-
-    impl<E> WithoutBinding for E where E: Effect<BindingMode = Portless> {}
-
     pub trait BindingFor<E: Effect> {}
 
     impl<E> BindingFor<E> for EffectBinding<E> where E: NamedEffect {}
 }
 
-/// Compiler-facing proof that an effect declaration may omit `via`.
-/// Exported stage macros use this facade so a named effect produces the
-/// authoring diagnostic instead of exposing `BindingMode` internals.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "effect declaration `{Self}` requires a typed binding",
-    label = "this named effect is missing `via <binding>`",
-    note = "write `{Self} via binding`, where `binding` is the matching `EffectBinding<{Self}>`"
-)]
-pub trait EffectDeclarationWithoutBinding:
-    Effect + declaration_diagnostic_sealed::WithoutBinding
-{
-    #[doc(hidden)]
-    fn declaration_without_binding() -> EffectDeclaration;
-
-    #[doc(hidden)]
-    fn at_least_once_declaration_without_binding() -> EffectDeclaration;
-}
-
-#[diagnostic::do_not_recommend]
-impl<E> EffectDeclarationWithoutBinding for E
-where
-    E: Effect<BindingMode = Portless>,
-{
-    fn declaration_without_binding() -> EffectDeclaration {
-        EffectDeclaration::for_binding::<E>(
-            EffectDeclarationBinding::Portless,
-            EffectDeclarationSyntax::Bare,
-        )
-    }
-
-    fn at_least_once_declaration_without_binding() -> EffectDeclaration {
-        EffectDeclaration::for_binding::<E>(
-            EffectDeclarationBinding::Portless,
-            EffectDeclarationSyntax::AtLeastOnce,
-        )
-    }
-}
-
-/// Compiler-facing proof that the lexical value after `via` is the exact
-/// typed binding belonging to the declared effect.
+/// Compiler-facing proof that the binding after `via` in an `inference!` or
+/// `ai_map_reduce!` row is the exact typed binding of the declared effect.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "binding `{Self}` does not match declared effect `{E}`",
@@ -231,13 +189,7 @@ where
 )]
 pub trait EffectBindingFor<E: Effect>: declaration_diagnostic_sealed::BindingFor<E> {
     #[doc(hidden)]
-    fn named_declaration_for(&self) -> EffectDeclaration;
-
-    #[doc(hidden)]
     fn at_least_once_declaration_for(&self) -> EffectDeclaration;
-
-    #[doc(hidden)]
-    fn transactional_declaration_for(&self) -> EffectDeclaration;
 }
 
 #[diagnostic::do_not_recommend]
@@ -245,51 +197,12 @@ impl<E> EffectBindingFor<E> for EffectBinding<E>
 where
     E: NamedEffect,
 {
-    fn named_declaration_for(&self) -> EffectDeclaration {
-        EffectDeclaration::for_binding::<E>(
-            self.declaration_binding(),
-            EffectDeclarationSyntax::Bare,
-        )
-    }
-
     fn at_least_once_declaration_for(&self) -> EffectDeclaration {
         EffectDeclaration::for_binding::<E>(
             self.declaration_binding(),
             EffectDeclarationSyntax::AtLeastOnce,
         )
     }
-
-    fn transactional_declaration_for(&self) -> EffectDeclaration {
-        EffectDeclaration::for_binding::<E>(
-            self.declaration_binding(),
-            EffectDeclarationSyntax::Transactional,
-        )
-    }
-}
-
-#[doc(hidden)]
-pub fn declare_effect_without_binding<E>() -> EffectDeclaration
-where
-    E: EffectDeclarationWithoutBinding,
-{
-    E::declaration_without_binding()
-}
-
-#[doc(hidden)]
-pub fn declare_at_least_once_without_binding<E>() -> EffectDeclaration
-where
-    E: EffectDeclarationWithoutBinding,
-{
-    E::at_least_once_declaration_without_binding()
-}
-
-#[doc(hidden)]
-pub fn declare_named_effect<E, B>(binding: &B) -> EffectDeclaration
-where
-    E: Effect,
-    B: EffectBindingFor<E> + ?Sized,
-{
-    binding.named_declaration_for()
 }
 
 #[doc(hidden)]
@@ -299,15 +212,6 @@ where
     B: EffectBindingFor<E> + ?Sized,
 {
     binding.at_least_once_declaration_for()
-}
-
-#[doc(hidden)]
-pub fn declare_transactional_effect<E, B>(binding: &B) -> EffectDeclaration
-where
-    E: Effect,
-    B: EffectBindingFor<E> + ?Sized,
-{
-    binding.transactional_declaration_for()
 }
 
 impl EffectDeclaration {
@@ -329,7 +233,7 @@ impl EffectDeclaration {
         )
     }
 
-    /// Declare a named effect using the lexical binding selected by `via`.
+    /// Declare a named effect answered by `binding`.
     pub fn named<E>(binding: &EffectBinding<E>) -> Self
     where
         E: NamedEffect,
@@ -337,7 +241,10 @@ impl EffectDeclaration {
         Self::for_binding::<E>(binding.declaration_binding(), EffectDeclarationSyntax::Bare)
     }
 
-    fn for_binding<E>(binding: EffectDeclarationBinding, syntax: EffectDeclarationSyntax) -> Self
+    pub(super) fn for_binding<E>(
+        binding: EffectDeclarationBinding,
+        syntax: EffectDeclarationSyntax,
+    ) -> Self
     where
         E: Effect,
     {
@@ -358,6 +265,7 @@ impl EffectDeclaration {
 
         Self {
             effect_type: E::EFFECT_TYPE,
+            rust_type: std::any::type_name::<E>(),
             safety: E::SAFETY,
             idempotency_key_policy,
             syntax,
@@ -404,12 +312,14 @@ impl EffectDeclaration {
                 EffectDeclarationSyntax::Bare,
                 EffectSafety::NonIdempotentAtLeastOnce,
             ) => Err(format!(
-                "declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
-                self.effect_type
+                "performs paid non-idempotent effect '{}' without acknowledging it; add `.at_least_once::<{}>()` after the handler",
+                self.effect_type,
+                self.short_rust_type()
             )),
             (EffectDeclarationSyntax::Bare, EffectSafety::Transactional) => Err(format!(
-                "declares transactional effect '{}' without the transactional(...) wrapper",
-                self.effect_type
+                "performs transactional effect '{}' without acknowledging it; add `.transactional::<{}>()` after the handler",
+                self.effect_type,
+                self.short_rust_type()
             )),
             (
                 EffectDeclarationSyntax::AtLeastOnce,
@@ -417,7 +327,7 @@ impl EffectDeclaration {
                 | EffectSafety::NonIdempotentRequiresKey
                 | EffectSafety::Transactional),
             ) => Err(format!(
-                "wraps effect '{}' with at_least_once(...), but its authoritative Effect::SAFETY is {safety:?}",
+                "acknowledges `{}` as at-least-once, but its safety is {safety:?}",
                 self.effect_type
             )),
             (
@@ -426,11 +336,15 @@ impl EffectDeclaration {
                 | EffectSafety::NonIdempotentRequiresKey
                 | EffectSafety::NonIdempotentAtLeastOnce),
             ) => Err(format!(
-                "wraps effect '{}' with transactional(...), but its authoritative Effect::SAFETY is {safety:?}",
+                "acknowledges `{}` as transactional, but its safety is {safety:?}",
                 self.effect_type
             )),
             _ => Ok(()),
         }
+    }
+
+    fn short_rust_type(&self) -> String {
+        short_type_name(self.rust_type)
     }
 
     /// Explicit acknowledgement for an effect whose only safe recovery is a
@@ -519,10 +433,26 @@ pub trait TransactionalEffectPort<E: Effect>: Send + Sync {
     ) -> Result<E::Outcome, EffectError>;
 }
 
-/// Reserved effect-local slot used by `transactional(E) via binding`.
+/// Reserved effect-local slot that executes a transactional effect.
 pub const fn transactional_effect_port_slot<E: Effect>(
 ) -> EffectPortSlot<dyn TransactionalEffectPort<E>> {
     EffectPortSlot::new("executor")
+}
+
+fn short_type_name(full: &str) -> String {
+    let mut short = String::with_capacity(full.len());
+    let mut segment = String::new();
+    for character in full.chars() {
+        if character.is_alphanumeric() || character == '_' || character == ':' {
+            segment.push(character);
+        } else {
+            short.push_str(segment.rsplit("::").next().unwrap_or_default());
+            segment.clear();
+            short.push(character);
+        }
+    }
+    short.push_str(segment.rsplit("::").next().unwrap_or_default());
+    short
 }
 
 #[cfg(test)]
@@ -552,6 +482,21 @@ mod tests {
         async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn diagnostics_name_effect_types_without_module_paths() {
+        assert_eq!(
+            short_type_name(
+                "obzenflow_runtime::effects::call::Call<aml::risk_engine::ScoreRequest>"
+            ),
+            "Call<ScoreRequest>"
+        );
+        assert_eq!(short_type_name("billing::ChargeCard"), "ChargeCard");
+        assert_eq!(
+            short_type_name("fixtures::Pair<a::Left, b::Right>"),
+            "Pair<Left, Right>"
+        );
     }
 
     #[test]

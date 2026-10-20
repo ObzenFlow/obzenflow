@@ -16,6 +16,7 @@ cleared_register = "target/aml-cleared.csv"
 unscored_register = "target/aml-unscored.csv"
 case_register = "target/aml-cases.csv"
 unopened_register = "target/aml-unopened-alerts.csv"
+risk_engine = "simulated"
 
 [app.rules]
 fan_out_counterparties = 10

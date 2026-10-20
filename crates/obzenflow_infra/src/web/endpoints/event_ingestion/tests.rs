@@ -1356,7 +1356,7 @@ async fn duplicate_limiters_resolving_to_hosted_ingress_are_rejected() {
 
             stages: {
                 source = async_infinite_source!(
-                    PlacementPayload => hosted_source with { rate_limit(10.0), rate_limit(10.0) }
+                    PlacementPayload with { rate_limit(10.0), rate_limit(10.0) } => hosted_source
                 );
                 sink = sink!(PlacementPayload => placeholder!());
             },
@@ -1411,7 +1411,7 @@ async fn a_hosted_rate_limiter_refuses_through_a_running_flow() {
                 // One burst token: the first POST is admitted, the second is
                 // rate-limited fail-fast at the hosted edge.
                 source = async_infinite_source!(
-                    Order => source with rate_limit(0.001).burst_capacity(1.0)
+                    Order with rate_limit(0.001).burst_capacity(1.0) => source
                 );
                 sink = sink!(Order => sink);
             },

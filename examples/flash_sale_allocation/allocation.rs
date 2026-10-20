@@ -8,7 +8,7 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderId, ReservationFailed, Sku, SoldOut,
     StockReleased, StockReserved,
 };
-use super::warehouse::{ReleaseStock, ReserveStock, WarehouseEffects};
+use super::warehouse::{ReleaseStock, ReserveStock, StockRelease, StockReservation};
 use async_trait::async_trait;
 use obzenflow::effects::{EffectError, Effects, StageCompletion};
 use obzenflow::error::HandlerError;
@@ -120,7 +120,10 @@ impl EffectfulStatefulHandler for Allocator {
                 }
 
                 match fx
-                    .reserve_stock(placed.order_id.clone(), placed.sku.clone())
+                    .call(StockReservation {
+                        order_id: placed.order_id.clone(),
+                        sku: placed.sku.clone(),
+                    })
                     .await
                 {
                     Ok(_) => Ok(fx.complete()?),
@@ -147,8 +150,12 @@ impl EffectfulStatefulHandler for Allocator {
                     return Ok(fx.complete()?);
                 };
 
-                fx.release_stock(cancelled.order_id.clone(), sku, hold_id)
-                    .await?;
+                fx.call(StockRelease {
+                    order_id: cancelled.order_id.clone(),
+                    sku,
+                    hold_id,
+                })
+                .await?;
                 Ok(fx.complete()?)
             }
         }

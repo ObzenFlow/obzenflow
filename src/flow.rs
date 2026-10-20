@@ -66,7 +66,6 @@
 //! All three incoming edges at `output` now carry `OrderPlaced`. Each source
 //! keeps its own schema, and the conversions remain visible in the topology.
 
-pub use obzenflow_dsl::backpressure;
 pub use obzenflow_dsl::{
     ai_map_reduce, async_infinite_source, async_source, effectful_stateful, effectful_transform,
     flow, handler_set, inference, infinite_source, join, merge, placeholder, sink, source,

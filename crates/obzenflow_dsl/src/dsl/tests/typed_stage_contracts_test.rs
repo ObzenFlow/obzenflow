@@ -35,7 +35,6 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::any::type_name;
     use std::collections::HashMap;
-    use std::time::Duration;
 
     use crate::dsl::error::{EdgeTypingMismatchKind, FlowBuildError};
     use crate::dsl::stage_descriptor::StageDescriptor;
@@ -740,8 +739,7 @@ mod tests {
 
         let stateful = crate::stateful!(
             name: "stateful",
-            InputEvent -> OutputEvent => ExactStateful,
-            emit_interval = Duration::from_secs(5)
+            InputEvent -> OutputEvent => ExactStateful
         );
         let stateful_meta = stateful.typing_metadata().unwrap();
         assert_eq!(stateful_meta.input_type, exact::<InputEvent>());
@@ -869,8 +867,7 @@ mod tests {
 
         let stateful = crate::stateful!(
             name: "multi_output_stateful",
-            InputEvent -> { OutputEvent, AlternateEvent } => MultiOutputStateful,
-            emit_interval = Duration::from_secs(1)
+            InputEvent -> { OutputEvent, AlternateEvent } => MultiOutputStateful
         );
         let stateful_meta = stateful.typing_metadata().unwrap();
         assert_eq!(stateful_meta.output_type, exact::<OutputEvent>());
@@ -1099,7 +1096,6 @@ mod tests {
             name: "transform".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         let transform_metadata = StageTypingMetadata::transform(
             TypeHint::exact::<InputEvent>(),
@@ -3026,7 +3022,6 @@ mod tests {
             name: "untyped_transform".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         // Sanity: the bare TransformDescriptor returns None.
         assert!(descriptor.typing_metadata().is_none());
@@ -3057,7 +3052,6 @@ mod tests {
             name: "synthetic".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(
             TypeHint::Unspecified,
@@ -3090,7 +3084,6 @@ mod tests {
             name: "synthetic".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(
             TypeHint::exact::<InputEvent>(),

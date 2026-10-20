@@ -9,7 +9,7 @@ use super::domain::{
 use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
 use super::money::{Currency, Money, UsdCents, UsdPerUnit};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectPortSlot, IdempotencyKey};
+use obzenflow::effects::IdempotencyKey;
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -17,8 +17,6 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
 pub const RULES_VERSION: &str = "sim-2026.10";
-
-pub const RISK_ENGINE: EffectPortSlot<dyn RiskEnginePort> = EffectPortSlot::new("risk_engine");
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ScoreRequest {
@@ -65,8 +63,21 @@ impl LedgerAnswer for RiskVerdict {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("the risk engine could not record the call: {0}")]
-pub struct RiskEngineError(#[from] std::io::Error);
+pub enum RiskEngineError {
+    #[error("the risk engine could not record the call: {0}")]
+    Ledger(#[from] std::io::Error),
+    #[error("the risk engine is unavailable")]
+    Unavailable,
+}
+
+impl RiskEngineError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Ledger(_) => "ledger_write_failed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
 
 #[async_trait]
 pub trait RiskEnginePort: Send + Sync {
@@ -76,6 +87,20 @@ pub trait RiskEnginePort: Send + Sync {
         flow_id: FlowId,
         request: &ScoreRequest,
     ) -> Result<RiskVerdict, RiskEngineError>;
+}
+
+pub struct RiskEngineOutage;
+
+#[async_trait]
+impl RiskEnginePort for RiskEngineOutage {
+    async fn score(
+        &self,
+        _: &IdempotencyKey,
+        _: FlowId,
+        _: &ScoreRequest,
+    ) -> Result<RiskVerdict, RiskEngineError> {
+        Err(RiskEngineError::Unavailable)
+    }
 }
 
 pub struct SimulatedRiskEngine {

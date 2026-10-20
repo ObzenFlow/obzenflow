@@ -118,15 +118,15 @@ pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> F
             );
 
             per_order_printer = sink!(
-                EnrichedOrderWithPromo => per_order_printer_handler with {
+                EnrichedOrderWithPromo with {
                     rate_limit(0.5)
-                }
+                } => per_order_printer_handler
             );
 
             catalog_stats = stateful!(EnrichedOrderWithPromo -> CatalogAnalyticsSummary => catalog_stats_handler);
 
             summary_printer = sink!(
-                CatalogAnalyticsSummary => summary_printer_handler with SingleSummaryDelivery
+                CatalogAnalyticsSummary with SingleSummaryDelivery => summary_printer_handler
             );
         },
 

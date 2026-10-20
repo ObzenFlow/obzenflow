@@ -46,6 +46,36 @@ pub enum BindingEvidenceError {
     TooLarge,
 }
 
+/// Credential-free evidence naming the system that answers a request.
+///
+/// Its canonical bytes are the one-key JSON object `{"system":"<name>"}`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SystemBindingEvidence {
+    canonical: BoundedBindingEvidence,
+}
+
+impl SystemBindingEvidence {
+    pub fn named(system: &str) -> Result<Self, BindingEvidenceError> {
+        let canonical = serde_json::json!({ "system": system }).to_string();
+        Ok(Self {
+            canonical: BoundedBindingEvidence::try_new(canonical.into_bytes())?,
+        })
+    }
+
+    pub fn canonical_bytes(&self) -> &BoundedBindingEvidence {
+        &self.canonical
+    }
+}
+
+impl std::fmt::Debug for SystemBindingEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SystemBindingEvidence")
+            .field("canonical", &self.canonical)
+            .finish()
+    }
+}
+
 /// Versioned digest included in durable effect descriptor identity.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BindingEvidenceDigest {
@@ -90,6 +120,24 @@ mod tests {
         let rendered = format!("{evidence:?}");
         assert!(!rendered.contains("credential-canary"));
         assert!(rendered.contains("not disclosed"));
+    }
+
+    #[test]
+    fn system_evidence_is_the_one_key_system_object() {
+        let evidence = SystemBindingEvidence::named("simulated-risk-engine").unwrap();
+        assert_eq!(
+            evidence.canonical_bytes().as_bytes(),
+            br#"{"system":"simulated-risk-engine"}"#
+        );
+    }
+
+    #[test]
+    fn system_evidence_refuses_bytes_past_the_framework_bound() {
+        let oversize = "s".repeat(MAX_BINDING_EVIDENCE_BYTES);
+        assert_eq!(
+            SystemBindingEvidence::named(&oversize),
+            Err(BindingEvidenceError::TooLarge)
+        );
     }
 
     #[test]

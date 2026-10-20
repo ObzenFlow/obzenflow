@@ -148,7 +148,6 @@ where
                 name: "chunk".to_string(),
                 handler: chunk_handler,
                 observers: Vec::new(),
-                backpressure: None,
             }),
             StageTypingMetadata::transform(
                 TypeHint::exact_payload::<Seed>(),
@@ -209,7 +208,6 @@ where
                 handler: collector,
                 emit_interval: None,
                 observers: Vec::new(),
-                backpressure: None,
             }),
             StageTypingMetadata::stateful(
                 TypeHint::exact_payload::<AiMapReduceTaggedPartial<Partial>>(),

@@ -391,7 +391,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>, probes: &Probes) -
                 validate = effectful_transform!(
                     OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_order);
                 authorize = effectful_transform!(
-                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_payment);
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => authorize_payment);
                 paid_orders = sink!(OrderAuthorized => paid_orders);
                 cancelled_orders = sink!(OrderCancelled => cancelled_orders);
                 manual_review = sink!(AuthorizationUnavailable => manual_review);

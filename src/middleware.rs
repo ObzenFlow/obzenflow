@@ -47,7 +47,7 @@ pub use obzenflow_adapters::middleware::control::{ai_resilience, ControlConfigur
 pub use obzenflow_adapters::middleware::{
     circuit_breaker, effect_observer, handler_observer, join_observer, rate_limit, retry,
     sink_delivery_observer, source_poll_observer, stage_lifecycle_observer, stateful_observer,
-    CircuitBreaker, CircuitBreakerConfigError, EffectObserverFactory, FailureHealth,
+    CircuitBreaker, CircuitBreakerConfigError, EffectObserverFactory, EffectScoped, FailureHealth,
     HandlerObserverFactory, JoinObserverFactory, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareFactoryResult, RateLimiter, Retry, SinkDeliveryObserver, SinkDeliveryObserverFactory,
     SourcePollObserverFactory, StageLifecycleObserverFactory, StatefulObserverFactory,

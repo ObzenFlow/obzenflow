@@ -361,7 +361,7 @@ async fn build(
                 src = infinite_source!(Reading => reader);
                 score = effectful_transform!(
                     Reading -> { Scored, Score, Unscored, Noted, Capped }
-                        uses ScoreEffect => score_transform);
+                        => score_transform);
                 snk = sink!(Scored => counting_sink);
             },
 
@@ -1114,9 +1114,9 @@ async fn build_accounts(
             journals: disk_journals(base),
 
             stages: {
-                accounts = source!(Account => accounts_source with {
+                accounts = source!(Account with {
                     rate_limit(rate).burst_capacity(burst)
-                });
+                } => accounts_source);
                 collect = sink!(Account => collect_handler);
             },
 

@@ -48,6 +48,40 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Notify;
 
+fn enforced_backpressure(
+    window: u64,
+    stall_timeout_ms: u64,
+) -> obzenflow_runtime::run_context::FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    };
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(window)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(stall_timeout_ms),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .expect("the backpressure setting admits");
+    }
+    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
+        candidates,
+    )))
+}
+
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -304,9 +338,9 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let iter = IterationTransform::new(iter_processed_for_flow, Some(iteration_started));
 
     let harness = test_flow! {
+        build_context: enforced_backpressure(1, 5_000),
         name: "cycle_buffers_external_eof_until_scc_quiescent",
         journals: disk_journals(journal_root),
-        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1).stall_timeout_ms(5_000),
 
         stages: {
             src = async_source!(SeedEvent => source);
@@ -477,9 +511,9 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let iter = IterationTransform::new(iter_processed_for_flow, None);
 
     let harness = test_flow! {
+        build_context: enforced_backpressure(1, 5_000),
         name: "cycle_buffers_drain_until_scc_quiescent",
         journals: disk_journals(journal_root),
-        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1).stall_timeout_ms(5_000),
 
         stages: {
             src = async_infinite_source!(SeedEvent => source);

@@ -281,11 +281,11 @@ fn build_retry_flow(
 
             stages: {
                 // Source breaker stays closed; the scripted source never fails.
-                inputs = source!(CompInput => source_handler with {source_breaker});
+                inputs = source!(CompInput with {source_breaker} => source_handler);
                 fan_out = transform!(CompInput -> CompInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    CompInput -> { CompOutput, CompEffectValue } uses RetryOnceEffect with { effect_resilience.0, effect_resilience.1 } => effectful_handler);
-                collector = sink!(CompOutput => collector_handler with {sink_breaker});
+                    CompInput -> { CompOutput, CompEffectValue } with { effect_resilience.0, effect_resilience.1 } => effectful_handler);
+                collector = sink!(CompOutput with {sink_breaker} => collector_handler);
             },
 
             topology: {

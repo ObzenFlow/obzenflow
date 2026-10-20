@@ -48,6 +48,7 @@ use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 mod actions;
 mod binding;
 mod boundary;
+mod call;
 mod commit;
 mod completion;
 mod context;
@@ -61,6 +62,7 @@ mod identity;
 mod ports;
 mod replay;
 mod runtime;
+mod system;
 mod typed;
 
 #[cfg(test)]
@@ -84,19 +86,27 @@ pub use boundary::{
     PreparedRepeatableEffectCall, PreparedSingleUseEffectCall, RepeatableEffectOperation,
     SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
 };
+pub use call::{Call, CallRequest};
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
 pub use context::{EffectContext, EffectInvocationContext, EffectPortMetadataContext};
 pub(crate) use current_run::CurrentRunFailure;
 pub use current_run::CurrentRunHistory;
+pub use obzenflow_core::SystemBindingEvidence;
+#[doc(hidden)]
+pub use system::{
+    effectful_stateful_effects, effectful_transform_effects, AcknowledgedSafety, AnswersEffect,
+    DeclareByMode, DeclareEffects, EffectAcknowledgement, EverySystemAnswers, FindSystem,
+    MarkSystemUsed, StageEffectsError, StatefulHandlerKind, SystemAfter, SystemAnswersAnEffect,
+    SystemFound, SystemList, SystemMark, TransformHandlerKind, Unused, Used,
+};
+pub use system::{HandlerSystems, StageSystem, System, SystemError, WithSystems};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{
-    declare_at_least_once_without_binding, declare_effect_without_binding,
-    declare_named_at_least_once_effect, declare_named_effect, declare_transactional_effect,
-    transactional_effect_port_slot, DomainFacts, Effect, EffectBindingFor, EffectDeclaration,
-    EffectDeclarationWithoutBinding, EffectOutcomeKind, EffectOutcomeSemantics, EffectSafety,
+    declare_named_at_least_once_effect, transactional_effect_port_slot, DomainFacts, Effect,
+    EffectBindingFor, EffectDeclaration, EffectOutcomeKind, EffectOutcomeSemantics, EffectSafety,
     IdempotencyKey, IdempotencyKeyPolicy, PreparedEffectSuccess, RecordedReply,
     SinkRedeliverySafety, TransactionalEffectPort,
 };

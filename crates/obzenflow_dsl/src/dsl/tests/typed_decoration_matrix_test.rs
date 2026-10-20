@@ -399,6 +399,7 @@ mod tests {
 
     #[test]
     fn every_stage_family_accepts_a_bound_path_in_its_maximally_decorated_form() {
+        use obzenflow_adapters::middleware::rate_limit;
         let finite = Src;
         let async_finite = AsyncSrc;
         let infinite = InfSrc;
@@ -412,53 +413,43 @@ mod tests {
 
         let _ = crate::source!(
             name: "finite",
-            Out => finite ,
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            Out with rate_limit(10.0) => finite
         );
         let _ = crate::async_source!(
             name: "async_finite",
-            Out => async_finite ,
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            Out with rate_limit(10.0) => async_finite
         );
         let _ = crate::infinite_source!(
             name: "infinite",
-            Out => infinite ,
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            Out with rate_limit(10.0) => infinite
         );
         let _ = crate::async_infinite_source!(
             name: "async_infinite",
-            Out => async_infinite ,
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            Out with rate_limit(10.0) => async_infinite
         );
         let _ = crate::transform!(
             name: "transform",
-            In -> Out => transform,
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            In -> Out with rate_limit(10.0) => transform
         );
         let _ = crate::effectful_transform!(
             name: "effectful_transform",
-            In -> Out => effectful_transform,
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            In -> Out with rate_limit(10.0) => effectful_transform
         );
         let _ = crate::stateful!(
             name: "stateful",
-            In -> Out => stateful,
-            emit_interval = std::time::Duration::from_millis(1),
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            In -> Out with rate_limit(10.0) => stateful
         );
         let _ = crate::effectful_stateful!(
             name: "effectful_stateful",
-            In -> Out => effectful_stateful,
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
+            In -> Out with rate_limit(10.0) => effectful_stateful
         );
         let _ = crate::join!(
             name: "join",
             catalog reference_stage: In,
-            In -> Out => join);
+            In -> Out with rate_limit(10.0) => join);
         let _ = crate::sink!(
             name: "sink",
-            Out => sink,
-            delivery: idempotent);
+            Out with rate_limit(10.0) => sink.idempotent());
     }
 
     // ── source! ─────────────────────────────────────────────────────────────
@@ -583,19 +574,15 @@ mod tests {
     #[test]
     fn effectful_transform_transactional_effect_clause_declares_executor() {
         let tx = tx_binding();
+        assert_eq!(tx.logical_name().as_str(), "tx");
         let descriptor = crate::effectful_transform!(
-            In -> Out uses transactional(TxEffect) via tx => TxFxTr);
+            In -> Out => TxFxTr.system(tx).transactional::<TxEffect>());
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].effect_type(), TxEffect::EFFECT_TYPE);
         assert_eq!(declarations[0].safety(), EffectSafety::Transactional);
-        assert_eq!(tx.logical_name().as_str(), "tx");
     }
-
-    // The effect-manifest muncher cross-check lives in
-    // `lowering_helper_contract_test.rs`, the sole test file licensed to
-    // invoke lowering helpers directly (FLOWIP-133a helper boundary).
 
     // ── stateful! ───────────────────────────────────────────────────────────
     #[test]
@@ -635,15 +622,17 @@ mod tests {
 
     #[test]
     fn effectful_stateful_accepts_and_retains_inline_effect_policy() {
-        let descriptor = crate::effectful_stateful!(
+        let mut descriptor = crate::effectful_stateful!(
             In -> Out
-            uses PolicyEffect
-                with obzenflow_adapters::middleware::rate_limit(1_000.0)
+            with obzenflow_adapters::middleware::rate_limit(1_000.0)
             => FxPolicySt);
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].effect_type(), PolicyEffect::EFFECT_TYPE);
+        descriptor
+            .prepare_middleware()
+            .expect("the policy guards the stage's one effect");
         let policies = descriptor.effect_policy_attachments();
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].effect_type, PolicyEffect::EFFECT_TYPE);
@@ -654,11 +643,15 @@ mod tests {
 
     #[test]
     fn uniform_groups_compose_controls_across_effect_and_implementation_sites() {
-        use obzenflow_adapters::middleware::{circuit_breaker, effect_observer, rate_limit, retry};
-        let limiter = rate_limit(10.0);
+        use obzenflow_adapters::middleware::{
+            circuit_breaker, effect_observer, rate_limit, retry, MiddlewareFactory,
+        };
+        let limiter = rate_limit(10.0).for_effect::<PolicyEffect>();
+        let audit = effect_observer("audit", EffectAudit).for_effect::<PolicyEffect>();
         let mut descriptor = crate::effectful_stateful!(
-            In -> Out uses PolicyEffect with { limiter, effect_observer("audit", EffectAudit) }
-            => FxPolicySt with { retry(), circuit_breaker().consecutive_failures(3), effect_observer("audit", EffectAudit) }
+            In -> Out
+            with { limiter, audit, retry(), circuit_breaker().consecutive_failures(3), effect_observer("audit", EffectAudit) }
+            => FxPolicySt
         );
         descriptor
             .prepare_middleware()
@@ -683,10 +676,10 @@ mod tests {
         };
         struct PollAudit;
         impl obzenflow_runtime::stages::observer::SourcePollObserver for PollAudit {}
-        let mut source = crate::source!(Out => Src with { circuit_breaker().consecutive_failures(3), source_poll_observer("audit", PollAudit), rate_limit(10.0) });
+        let mut source = crate::source!(Out with { circuit_breaker().consecutive_failures(3), source_poll_observer("audit", PollAudit), rate_limit(10.0) } => Src);
         source.prepare_middleware().unwrap();
         assert_eq!(source.stage_middleware_factories().len(), 3);
-        let mut sink = crate::sink!(Out => Sn with { sink_delivery_observer("audit", OutObserver), rate_limit(10.0), circuit_breaker().consecutive_failures(3) });
+        let mut sink = crate::sink!(Out with { sink_delivery_observer("audit", OutObserver), rate_limit(10.0), circuit_breaker().consecutive_failures(3) } => Sn);
         sink.prepare_middleware().unwrap();
         assert_eq!(sink.stage_middleware_factories().len(), 3);
     }
@@ -748,13 +741,13 @@ mod tests {
         );
 
         let pending = crate::sink!(
-            Out => handler_set!(first_sink, second_sink) with { ({
+            Out with { ({
                 policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 obzenflow_adapters::middleware::rate_limit(1_000.0)
             }), ({
                 observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 obzenflow_adapters::middleware::sink_delivery_observer("capture-proof", OutObserver)
-            }) })
+            }) } => handler_set!(first_sink, second_sink))
         .expect("the closed handler set is valid");
         let result = pending.select_configured_sink_handler("unknown_sink");
 
@@ -802,14 +795,13 @@ mod tests {
 
         let pending = crate::sink!(
             name: "selected_output",
-            Out => handler_set!(inline_sink, classified_sink) with { ({
+            Out with { ({
                 policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 obzenflow_adapters::middleware::rate_limit(1_000.0)
             }), ({
                 observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 obzenflow_adapters::middleware::sink_delivery_observer("capture-proof", OutObserver)
-            }) },
-            delivery: idempotent)
+            }) } => handler_set!(inline_sink, classified_sink).idempotent())
         .expect("the closed handler set is valid");
         let selected = pending
             .select_configured_sink_handler("inline_sink")
@@ -834,19 +826,18 @@ mod tests {
         );
     }
     #[test]
-    fn sink_typed_delivery_clause() {
-        // Site-level classification applies to every configured connector.
+    fn sink_typed_redelivery_decoration() {
         let idempotent_sink = Sn;
-        let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
+        let _ = crate::sink!(Out => idempotent_sink.idempotent());
         let non_idempotent_sink = Sn;
-        let _ = crate::sink!(Out => non_idempotent_sink, delivery: non_idempotent);
+        let _ = crate::sink!(Out => non_idempotent_sink.non_idempotent());
     }
     #[test]
     fn sink_exact_contract_inline_sink() {
         let bare_sink = Sn;
         let _ = crate::sink!(Out => bare_sink);
         let idempotent_sink = Sn;
-        let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
+        let _ = crate::sink!(Out => idempotent_sink.idempotent());
         let named_sink = Sn;
         let _ = crate::sink!(name: "s", Out => named_sink);
     }
@@ -857,7 +848,6 @@ mod tests {
         let named_sink = Sn;
         let _ = crate::sink!(
             name: "s",
-            Out => named_sink,
-            delivery: idempotent);
+            Out => named_sink.idempotent());
     }
 }

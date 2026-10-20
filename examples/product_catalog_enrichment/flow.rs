@@ -101,9 +101,9 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
                 );
 
                 per_order_printer = sink!(
-                    EnrichedOrderWithPromo => per_order_printer_handler with {
+                    EnrichedOrderWithPromo with {
                         rate_limit(0.5)
-                    }
+                    } => per_order_printer_handler
                 );
 
                 catalog_stats = stateful!(
@@ -111,7 +111,7 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
                 );
 
                 summary_printer = sink!(
-                    CatalogAnalyticsSummary => summary_printer_handler with SingleSummaryDelivery
+                    CatalogAnalyticsSummary with SingleSummaryDelivery => summary_printer_handler
                 );
             },
 

@@ -205,10 +205,8 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
         name,
         handler,
-        effects,
+        Ok(effects),
         Vec::new(),
-        Vec::new(),
-        None,
     ));
     let metadata = StageTypingMetadata::transform(
         TypeHint::exact_payload::<ContainmentInput>(),

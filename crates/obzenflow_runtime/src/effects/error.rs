@@ -166,6 +166,18 @@ pub enum EffectError {
 }
 
 impl EffectError {
+    /// The named system did not act on the call, and a later call may succeed.
+    /// A call that may have reached the system is a maybe, not a no, and maps to
+    /// `Timeout` or `Transport`.
+    pub fn unavailable(source: &str, code: &str, error: impl std::fmt::Display) -> Self {
+        Self::DependencyFailed {
+            failure_source: EffectFailureSource::new(source),
+            code: EffectFailureCode::new(code),
+            message: error.to_string(),
+            retry: RetryDisposition::Retryable,
+        }
+    }
+
     /// Construct a target-invariant failure from a validated typed slot.
     pub fn target_invariant_violation<P, M>(slot: EffectPortSlot<P, M>) -> Self
     where

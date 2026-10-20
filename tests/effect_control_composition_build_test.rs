@@ -13,9 +13,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::dsl::stage_descriptor::{
-    EffectPolicyAttachment, EffectfulTransformDescriptor, StageDescriptor,
-};
+use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use obzenflow_dsl::{effectful_stateful, effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
@@ -365,7 +363,7 @@ macro_rules! single_effect_flow {
                 journals: memory_journals(),
                 stages: {
                     input = source!(CompositionInput => placeholder!());
-                    guarded = effectful_transform!(CompositionInput -> CompositionFact uses EffectA with $policy => guarded_handler);
+                    guarded = effectful_transform!(CompositionInput -> CompositionFact with $policy => guarded_handler);
                     output = sink!(CompositionFact => placeholder!());
                 },
                 topology: { input |> guarded; guarded |> output; }
@@ -383,7 +381,7 @@ macro_rules! single_effect_flow {
                 stages: {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_transform!(
-                        CompositionInput -> CompositionFact uses EffectA with $policy => guarded_handler with { $($observer),* });
+                        CompositionInput -> CompositionFact with { $policy, $($observer),* } => guarded_handler);
                     output = sink!(CompositionFact => placeholder!());
                 },
 
@@ -400,6 +398,8 @@ macro_rules! two_effect_flow {
     (effect_a: $effect_a:expr, effect_b: $effect_b:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
             let guarded_handler = TwoEffectHandler;
+            let effect_a_policy = $effect_a.for_effect::<EffectA>();
+            let effect_b_policy = $effect_b.for_effect::<EffectB>();
 
             Ok(flow! {
                 name: "effect_control_composition_two_effects",
@@ -409,10 +409,7 @@ macro_rules! two_effect_flow {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_transform!(
                         CompositionInput -> CompositionFact
-                        uses {
-                            EffectA with $effect_a,
-                            EffectB with $effect_b,
-                        }
+                        with { effect_a_policy, effect_b_policy }
                         => guarded_handler);
                     output = sink!(CompositionFact => placeholder!());
                 },
@@ -439,8 +436,8 @@ macro_rules! stateful_single_effect_flow {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_stateful!(
                         CompositionInput -> CompositionFact
-                        uses EffectA with $policy
-                        => guarded_handler with { $($observer),* });
+                        with { $policy, $($observer),* }
+                        => guarded_handler);
                     output = sink!(CompositionFact => placeholder!());
                 },
 
@@ -460,18 +457,13 @@ fn malformed_effect_policy_attachment_flow(
         let guarded: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
             "guarded",
             OneEffectHandler,
-            vec![EffectDeclaration::of::<EffectA>()],
-            Vec::new(),
-            vec![EffectPolicyAttachment {
-                effect_type: EffectB::EFFECT_TYPE,
-                authored_site: obzenflow_adapters::middleware::MiddlewareAttachmentSite::Effect,
-                // No config defaults: the structural attachment plan must
-                // reject this before configuration or materialisation.
-                factory: Box::new(OrdinaryControlFactory {
+            Ok(vec![EffectDeclaration::of::<EffectA>()]),
+            vec![Box::new(
+                OrdinaryControlFactory {
                     materializations: policy_materializations.clone(),
-                }),
-            }],
-            None,
+                }
+                .for_effect::<EffectB>(),
+            )],
         ));
         let guarded = wrap_typed_descriptor(
             guarded,
@@ -509,25 +501,21 @@ fn duplicate_effect_policy_attachment_flow(
         let guarded: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
             "guarded",
             OneEffectHandler,
-            vec![EffectDeclaration::of::<EffectA>()],
-            Vec::new(),
+            Ok(vec![EffectDeclaration::of::<EffectA>()]),
             vec![
-                EffectPolicyAttachment {
-                    effect_type: EffectA::EFFECT_TYPE,
-                    authored_site: obzenflow_adapters::middleware::MiddlewareAttachmentSite::Effect,
-                    factory: Box::new(OrdinaryControlFactory {
+                Box::new(
+                    OrdinaryControlFactory {
                         materializations: first_materializations.clone(),
-                    }),
-                },
-                EffectPolicyAttachment {
-                    effect_type: EffectA::EFFECT_TYPE,
-                    authored_site: obzenflow_adapters::middleware::MiddlewareAttachmentSite::Effect,
-                    factory: Box::new(OrdinaryControlFactory {
+                    }
+                    .for_effect::<EffectA>(),
+                ),
+                Box::new(
+                    OrdinaryControlFactory {
                         materializations: second_materializations.clone(),
-                    }),
-                },
+                    }
+                    .for_effect::<EffectA>(),
+                ),
             ],
-            None,
         ));
         let guarded = wrap_typed_descriptor(
             guarded,
@@ -698,4 +686,234 @@ async fn materialization_cannot_swap_the_declaration_that_passed_structural_vali
         "{rendered}"
     );
     assert!(rendered.contains("circuit_breaker"), "{rendered}");
+}
+
+#[derive(Clone, Debug)]
+struct PaidEffect;
+
+#[async_trait]
+impl Effect for PaidEffect {
+    const EFFECT_TYPE: &'static str = "effect_control_composition.paid";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+    type BindingMode = obzenflow_runtime::effects::Portless;
+
+    type Outcome = CompositionFact;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "paid"
+    }
+
+    fn canonical_input(&self) -> serde_json::Value {
+        json!({})
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        Ok(CompositionFact)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PaidHandler;
+
+#[async_trait]
+impl EffectfulTransformHandler for PaidHandler {
+    type Input = CompositionInput;
+    type Output = obzenflow_core::stage_fact_set![CompositionFact];
+    type AllowedEffects = obzenflow_runtime::effect_set![PaidEffect];
+
+    async fn process(
+        &self,
+        _input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        Ok(fx.complete()?)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NoEffectHandler;
+
+#[async_trait]
+impl EffectfulTransformHandler for NoEffectHandler {
+    type Input = CompositionInput;
+    type Output = obzenflow_core::stage_fact_set![CompositionFact];
+    type AllowedEffects = obzenflow_runtime::effect_set![];
+
+    async fn process(
+        &self,
+        _input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        Ok(fx.complete()?)
+    }
+}
+
+fn row_flow<F>(guarded: F) -> FlowDefinition
+where
+    F: FnOnce() -> Box<dyn StageDescriptor> + Send + 'static,
+{
+    FlowDefinition::materialize(move |_runtime_config| {
+        let guarded = guarded();
+        Ok(flow! {
+            name: "effect_row_build",
+            journals: memory_journals(),
+
+            stages: {
+                input = source!(CompositionInput => placeholder!());
+                guarded = guarded;
+                output = sink!(CompositionFact => placeholder!());
+            },
+
+            topology: {
+                input |> guarded;
+                guarded |> output;
+            }
+        })
+    })
+}
+
+async fn row_refusal<F>(guarded: F) -> String
+where
+    F: FnOnce() -> Box<dyn StageDescriptor> + Send + 'static,
+{
+    build(row_flow(guarded))
+        .await
+        .expect_err("the row must fail the flow build")
+        .to_string()
+}
+
+#[tokio::test]
+async fn an_acknowledged_paid_effect_builds() {
+    build(row_flow(|| {
+        let paid = PaidHandler;
+        effectful_transform!(CompositionInput -> CompositionFact => paid.at_least_once::<PaidEffect>())
+    }))
+    .await
+    .expect("an acknowledged paid effect builds");
+}
+
+#[tokio::test]
+async fn a_paid_effect_without_its_acknowledgement_fails_build() {
+    let rendered = row_refusal(|| {
+        let paid = PaidHandler;
+        effectful_transform!(CompositionInput -> CompositionFact => paid)
+    })
+    .await;
+    assert!(
+        rendered.contains(
+            "performs paid non-idempotent effect 'effect_control_composition.paid' without \
+             acknowledging it; add `.at_least_once::<PaidEffect>()` after the handler"
+        ),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn an_acknowledgement_for_an_effect_the_handler_does_not_perform_fails_build() {
+    let rendered = row_refusal(|| {
+        let guarded_handler = OneEffectHandler;
+        effectful_transform!(
+            CompositionInput -> CompositionFact => guarded_handler.at_least_once::<PaidEffect>()
+        )
+    })
+    .await;
+    assert!(
+        rendered.contains("which its handler does not perform")
+            && rendered.contains("`.at_least_once::<PaidEffect>()`"),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn an_acknowledgement_of_the_wrong_kind_fails_build() {
+    let rendered = row_refusal(|| {
+        let paid = PaidHandler;
+        effectful_transform!(CompositionInput -> CompositionFact => paid.transactional::<PaidEffect>())
+    })
+    .await;
+    assert!(
+        rendered.contains(
+            "acknowledges `effect_control_composition.paid` as transactional, but its safety is \
+             NonIdempotentAtLeastOnce"
+        ),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn a_control_naming_no_effect_on_a_stage_with_several_effects_fails_build() {
+    let rendered = row_refusal(|| {
+        let guarded_handler = TwoEffectHandler;
+        effectful_transform!(CompositionInput -> CompositionFact with rate_limit(10.0) => guarded_handler)
+    })
+    .await;
+    assert!(
+        rendered.contains("requires exactly one declared effect; build it with `.for_effect::<E>()`")
+            && rendered.contains(EffectA::EFFECT_TYPE)
+            && rendered.contains(EffectB::EFFECT_TYPE),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn middleware_for_an_effect_the_handler_does_not_perform_fails_build() {
+    let rendered = row_refusal(|| {
+        let guarded_handler = OneEffectHandler;
+        let effect_b_limit = rate_limit(10.0).for_effect::<EffectB>();
+        effectful_transform!(CompositionInput -> CompositionFact with effect_b_limit => guarded_handler)
+    })
+    .await;
+    assert!(
+        rendered.contains(&format!(
+            "undeclared effect '{}'; `.for_effect::<E>()` must name an effect its handler performs",
+            EffectB::EFFECT_TYPE
+        )),
+        "{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn middleware_for_an_effect_on_a_stage_that_performs_none_fails_build() {
+    let rendered = row_refusal(|| {
+        let guarded_handler = NoEffectHandler;
+        let effect_a_limit = rate_limit(10.0).for_effect::<EffectA>();
+        effectful_transform!(CompositionInput -> CompositionFact with effect_a_limit => guarded_handler)
+    })
+    .await;
+    assert!(
+        rendered.contains(
+            "stage 'guarded' performs no effects, so middleware built with `.for_effect::<E>()` \
+             has nothing to guard"
+        ),
+        "{rendered}"
+    );
+
+    let source_limit = rate_limit(10.0).for_effect::<EffectA>();
+    let error = build(FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "effect_scoped_source",
+            journals: memory_journals(),
+
+            stages: {
+                input = source!(CompositionInput with source_limit => placeholder!());
+                output = sink!(CompositionInput => placeholder!());
+            },
+
+            topology: {
+                input |> output;
+            }
+        })
+    }))
+    .await
+    .expect_err("a source performs no effects");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(
+            "stage 'input' performs no effects, so middleware built with `.for_effect::<E>()` \
+             has nothing to guard"
+        ),
+        "{rendered}"
+    );
 }

@@ -117,17 +117,17 @@ pub enum EffectBindingBuildError {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EffectRegistrationCollectionError {
-    #[error("distinct bindings were declared for '{effect_type} via {binding}'")]
+    #[error("distinct bindings named '{binding}' were declared for '{effect_type}'")]
     DistinctBindings {
         binding: LogicalEffectBindingName,
         effect_type: &'static str,
     },
-    #[error("binding package for '{effect_type} via {binding}' was already collected")]
+    #[error("the binding package '{binding}' for '{effect_type}' was already collected")]
     AlreadyCollected {
         binding: LogicalEffectBindingName,
         effect_type: &'static str,
     },
-    #[error("declaration for '{effect_type} via {binding}' has no pending binding package")]
+    #[error("the declaration of '{effect_type}' names binding '{binding}', which has no pending package")]
     MissingPackage {
         binding: LogicalEffectBindingName,
         effect_type: &'static str,
@@ -162,6 +162,45 @@ struct PendingPort {
     recipe: PortRecipe,
 }
 
+/// The one port recipe a system shares across every effect it answers, so
+/// each run resolves it at most once.
+pub(super) struct SystemPort {
+    coordinate: BindingCoordinate,
+    recipe: PortRecipe,
+}
+
+impl SystemPort {
+    pub(super) fn eager<P>(port: Arc<P>) -> Self
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        Self {
+            coordinate: BindingCoordinate::mint(),
+            recipe: PortRecipe::Eager(ErasedResolvedEffectPort {
+                port: Arc::new(port),
+                metadata: Arc::new(Arc::new(NoPortMetadata)),
+            }),
+        }
+    }
+
+    pub(super) fn deferred<P>(resolver: EffectPortResolver<P>) -> Self
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        let erased: ErasedResolver = Arc::new(move || {
+            let port = resolver()?;
+            Ok(ErasedResolvedEffectPort {
+                port: Arc::new(port),
+                metadata: Arc::new(Arc::new(NoPortMetadata)),
+            })
+        });
+        Self {
+            coordinate: BindingCoordinate::mint(),
+            recipe: PortRecipe::Deferred(erased),
+        }
+    }
+}
+
 enum PendingRegistrationState {
     Pending(Vec<(BindingCoordinate, PortRecipe)>),
     Collected,
@@ -173,6 +212,7 @@ pub(super) struct PendingRegistrationPackage {
     effect_type: &'static str,
     effect_type_id: TypeId,
     coordinate: BindingCoordinate,
+    system: Option<Arc<SystemPort>>,
     state: Mutex<PendingRegistrationState>,
 }
 
@@ -180,6 +220,7 @@ impl PendingRegistrationPackage {
     fn new<E: NamedEffect>(
         logical_name: LogicalEffectBindingName,
         coordinate: BindingCoordinate,
+        system: Option<Arc<SystemPort>>,
         entries: Vec<(BindingCoordinate, PortRecipe)>,
     ) -> Self {
         Self {
@@ -187,8 +228,16 @@ impl PendingRegistrationPackage {
             effect_type: E::EFFECT_TYPE,
             effect_type_id: TypeId::of::<E>(),
             coordinate,
+            system,
             state: Mutex::new(PendingRegistrationState::Pending(entries)),
         }
+    }
+
+    fn shares_system_with(&self, other: &Self) -> bool {
+        matches!(
+            (&self.system, &other.system),
+            (Some(left), Some(right)) if Arc::ptr_eq(left, right)
+        )
     }
 }
 
@@ -210,6 +259,7 @@ pub struct EffectRegistrationBuilder<E: NamedEffect> {
     evidence: E::BindingEvidence,
     expected: Vec<EffectPortSlotRequirement>,
     pending: Vec<PendingPort>,
+    system: Option<Arc<SystemPort>>,
     _effect: PhantomData<fn() -> E>,
 }
 
@@ -231,8 +281,22 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
             evidence,
             expected,
             pending: Vec::new(),
+            system: None,
             _effect: PhantomData,
         }
+    }
+
+    pub(super) fn bind_system<P>(
+        mut self,
+        slot: EffectPortSlot<P>,
+        port: &Arc<SystemPort>,
+    ) -> Result<Self, EffectBindingBuildError>
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        self.push_at(slot, port.coordinate, port.recipe.clone())?;
+        self.system = Some(Arc::clone(port));
+        Ok(self)
     }
 
     pub fn bind_eager<P>(
@@ -314,6 +378,19 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
         P: ?Sized + Send + Sync + 'static,
         M: Send + Sync + 'static,
     {
+        self.push_at(slot, BindingCoordinate::mint(), recipe)
+    }
+
+    fn push_at<P, M>(
+        &mut self,
+        slot: EffectPortSlot<P, M>,
+        coordinate: BindingCoordinate,
+        recipe: PortRecipe,
+    ) -> Result<(), EffectBindingBuildError>
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
         // Validate the effect identifier before constructing any error that
         // would otherwise project the author's raw `EFFECT_TYPE` string.
         validate_effect_type(E::EFFECT_TYPE)
@@ -349,7 +426,7 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
         }
         self.pending.push(PendingPort {
             requirement,
-            coordinate: BindingCoordinate::mint(),
+            coordinate,
             recipe,
         });
         Ok(())
@@ -412,6 +489,7 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
         let package = Arc::new(PendingRegistrationPackage::new::<E>(
             self.logical_name.clone(),
             registration_coordinate,
+            self.system,
             self.pending
                 .into_iter()
                 .map(|pending| (pending.coordinate, pending.recipe))
@@ -468,6 +546,7 @@ impl EffectPortRegistry {
             (&'static str, String),
             (BindingCoordinate, Arc<PendingRegistrationPackage>),
         > = HashMap::new();
+        let mut same_system = Vec::new();
 
         for declaration in declarations {
             let Some((logical_name, registration, _)) = declaration.binding().named_parts() else {
@@ -480,19 +559,28 @@ impl EffectPortRegistry {
                 }
             })?;
             let key = (declaration.effect_type(), logical_name.as_str().to_string());
-            if let Some((first_coordinate, _)) = by_key.get(&key) {
-                if *first_coordinate != registration {
+            if let Some((first_coordinate, first_package)) = by_key.get(&key) {
+                if *first_coordinate == registration {
+                    continue;
+                }
+                if !first_package.shares_system_with(package) {
                     return Err(EffectRegistrationCollectionError::DistinctBindings {
                         binding: logical_name.clone(),
                         effect_type: declaration.effect_type(),
                     });
+                }
+                if !same_system
+                    .iter()
+                    .any(|(coordinate, _)| *coordinate == registration)
+                {
+                    same_system.push((registration, Arc::clone(package)));
                 }
                 continue;
             }
             by_key.insert(key, (registration, Arc::clone(package)));
         }
 
-        let mut packages = by_key.into_values().collect::<Vec<_>>();
+        let mut packages = by_key.into_values().chain(same_system).collect::<Vec<_>>();
         packages.sort_by_key(|(coordinate, _)| *coordinate);
 
         // The ordered mutex guards are the process-local reservation. Holding the

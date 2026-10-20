@@ -43,12 +43,15 @@
 //! `__obzenflow_*` macros are doc-hidden cross-crate lowering machinery and are
 //! unsupported for direct author calls.
 //!
-//! ## FLOWIP-132a: effect capabilities follow the type transformation
+//! ## Effects come from the handler's effect set
 //!
-//! A pure effectful handler omits the capability clause: `In -> Out`. A
-//! singleton declaration uses `In -> Out uses Effect`; braces are reserved for
-//! unordered sets of at least two effects. Detached `effects: [...]`, empty
-//! sets, braced singletons, and arrow-embedded effect rows are rejected.
+//! An effectful handler's `type AllowedEffects = effect_set![...]` declares the
+//! effects its stage performs, and the row never restates them. A handler
+//! whose effect set is empty is written `In -> Out => handler`. A named effect
+//! is answered by a system named after the handler, as in
+//! `=> score.system(risk_engine)`, and a paid at-least-once or transactional
+//! effect is acknowledged after the handler with `.at_least_once::<E>()` or
+//! `.transactional::<E>()`.
 //!
 //! ```
 //! use async_trait::async_trait;
@@ -91,26 +94,23 @@
 //!     }
 //! }
 //!
-//! // Pure signature: no `uses` clause.
 //! let _ = effectful_transform!(In -> Out => Handler);
 //! ```
 //!
-//! ## FLOWIP-120c H7: per-effect policies attach inside `uses`
-//!
-//! A policy attaches to the exact effect it guards (`Effect with policy`).
-//!
-//! ## Uniform middleware attachments
+//! ## Middleware attachments
 //!
 //! Controls and passive observers attach with `with middleware` or a flat,
-//! non-empty `with { first, second }` group. Typed context determines which
-//! operation a control protects and which declared points an observer sees.
+//! non-empty `with { first, second }` group, written after the stage's types
+//! and before `=>`. Typed context determines which operation a control
+//! protects and which declared points an observer sees. On a stage that
+//! performs several effects, middleware built in a `let` with
+//! `.for_effect::<E>()` guards or watches only `E`, and middleware that names
+//! no effect covers the stage's implementation.
 //!
-//! A sink's `delivery:` clause follows its optional middleware attachment.
-//!
-//! The `delivery:` clause accepts only `idempotent` or `non_idempotent`.
-//!
-//! Connector descriptions and a site-level `delivery:` classification compose,
-//! but the connector's typed input remains authoritative for the arrow.
+//! A sink classifies its redelivery after its handler with `.idempotent()` or
+//! `.non_idempotent()`. Connector descriptions and that classification
+//! compose, but the connector's typed input remains authoritative for the
+//! arrow.
 //!
 //! A sink may instead consume one compile-time-closed set of heterogeneous,
 //! cold sink bindings. Each binding identifier is also its exact configuration
@@ -127,8 +127,7 @@
 //! flow! {
 //!     stages: {
 //!         output = sink!(
-//!             Out => handler_set!(console_sink, postgres_sink),
-//!             delivery: idempotent,
+//!             Out => handler_set!(console_sink, postgres_sink).idempotent()
 //!         )?;
 //!     },
 //!     // topology
@@ -151,8 +150,8 @@
 //! common selection trait, or runtime selector.
 //!
 //! A small named integration can implement `InlineSink` directly. It needs no
-//! separate connector. Its required description declares the delivery method;
-//! a site-level clause can classify
+//! separate connector. Its required description declares the delivery method,
+//! and `.idempotent()` or `.non_idempotent()` after the handler classifies
 //! redelivery when archive replay matters.
 //!
 //! ```
@@ -186,13 +185,13 @@
 //! }
 //!
 //! // The inline sink stays small; the flow row owns this deployment choice.
-//! let _ = sink!(Out => Typed, delivery: idempotent);
+//! let _ = sink!(Out => Typed.idempotent());
 //! ```
 
 #[doc(hidden)]
 pub mod ai_effect;
 mod attachment_plan;
-pub mod backpressure_clause;
+mod backpressure_edges;
 mod binder;
 pub mod composites;
 /// FLOWIP-128a composite substrate. Public for macro reachability only;

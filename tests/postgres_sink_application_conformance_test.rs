@@ -624,7 +624,7 @@ fn single_flow(
                 journals: disk_journals(journal_root),
 
                 stages: {
-                    payments = source!(Payment => payments with PoisonFactory);
+                    payments = source!(Payment with PoisonFactory => payments);
                     postgres = sink!(Payment => postgres);
                 },
 

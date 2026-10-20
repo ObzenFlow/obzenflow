@@ -316,12 +316,11 @@ mod tests {
     }
 
     #[test]
-    fn sink_macro_delivery_clause_snapshots_through_bound_typed_adapters() {
+    fn sink_redelivery_decorations_snapshot_through_bound_typed_adapters() {
         let idempotent_sink = DiscardInput { safety: None };
         let idempotent = crate::sink!(
             name: "declared_idempotent",
-            SinkInput => idempotent_sink,
-            delivery: idempotent
+            SinkInput => idempotent_sink.idempotent()
         );
         assert_eq!(
             idempotent
@@ -333,8 +332,7 @@ mod tests {
         let non_idempotent_sink = DiscardInput { safety: None };
         let non_idempotent = crate::sink!(
             name: "declared_non_idempotent",
-            SinkInput => non_idempotent_sink,
-            delivery: non_idempotent
+            SinkInput => non_idempotent_sink.non_idempotent()
         );
         assert_eq!(
             non_idempotent
@@ -346,8 +344,7 @@ mod tests {
         let adapter_sink = DiscardInput { safety: None };
         let adapter_form = crate::sink!(
             name: "adapter_declared",
-            SinkInput => adapter_sink,
-            delivery: idempotent
+            SinkInput => adapter_sink.idempotent()
         );
         assert_eq!(
             adapter_form
