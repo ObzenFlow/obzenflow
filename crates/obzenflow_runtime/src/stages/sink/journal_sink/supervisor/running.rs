@@ -324,7 +324,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
             .watermark_delivered(subscription, *announced)
             .await;
         return Ok(match disposition {
-            CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
+            CatchUpDisposition::Consumed | CatchUpDisposition::Crossed => {
                 EventLoopDirective::Continue
             }
             CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
@@ -338,7 +338,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
     // normal EOF handling.
     if envelope.is_eof() {
         match ctx.catch_up.eof_delivered(subscription).await {
-            CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {}
+            CatchUpDisposition::Consumed | CatchUpDisposition::Crossed => {}
             CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
                 return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
                     fatal.detail,
@@ -471,14 +471,6 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                 stage_name = %ctx.stage_name,
                 event_type = envelope.event_type(),
                 "Unexpected control resolution for sink; ignoring"
-            );
-            Ok(EventLoopDirective::Continue)
-        }
-        ControlAction::Skip => {
-            tracing::warn!(
-                stage_name = %ctx.stage_name,
-                event_type = envelope.event_type(),
-                "Sink skipping control event (dangerous!)"
             );
             Ok(EventLoopDirective::Continue)
         }
@@ -892,7 +884,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                     edges_redelivering: classification.edges_redelivering(),
                 };
                 match ctx.catch_up.send(unsettled).await {
-                    CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {}
+                    CatchUpDisposition::Consumed | CatchUpDisposition::Crossed => {}
                     CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
                         return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
                             fatal.detail,

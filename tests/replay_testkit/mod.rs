@@ -12,8 +12,9 @@
 
 #![allow(dead_code)]
 
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
 use obzenflow_core::id::StageId;
 use obzenflow_core::journal::JournalReader;
@@ -21,7 +22,7 @@ use obzenflow_core::WriterId;
 use obzenflow_runtime::stages::sink::SinkWriteFailure;
 #[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::DeliveredOrderProjection;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// FLOWIP-120u: the host opens the replay/resume input archive and the
@@ -104,6 +105,80 @@ pub async fn read_stage_envelopes_appended(
         .as_str()
         .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
     read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(stage_journal)).await
+}
+
+pub async fn passing_verdicts(run_dir: &Path) -> BTreeMap<String, usize> {
+    let manifest = archive_manifest(run_dir);
+    let stages = manifest["stages"].as_object().expect("manifest stages");
+    let names: HashMap<&str, &str> = stages
+        .iter()
+        .map(|(name, stage)| (stage["stage_id"].as_str().expect("stage id"), name.as_str()))
+        .collect();
+    let mut verdicts = BTreeMap::new();
+    for stage in stages.keys() {
+        for record in read_stage_envelopes_appended(run_dir, stage).await {
+            if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
+                upstream,
+                reader,
+                pass: true,
+                ..
+            }) = &record.payload
+            {
+                let edge = format!(
+                    "{} -> {}",
+                    names[upstream.to_string().as_str()],
+                    names[reader.to_string().as_str()]
+                );
+                *verdicts.entry(edge).or_insert(0) += 1;
+            }
+        }
+    }
+    verdicts
+}
+
+pub fn one_verdict_per_edge(edges: &[&str]) -> BTreeMap<String, usize> {
+    edges.iter().map(|edge| (edge.to_string(), 1)).collect()
+}
+
+pub fn stage_writer(run_dir: &Path, stage_key: &str) -> WriterId {
+    let stage_id: StageId = archive_manifest(run_dir)["stages"][stage_key]["stage_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest should contain the stage id for '{stage_key}'"))
+        .parse()
+        .unwrap_or_else(|error| panic!("the stage id for '{stage_key}' parses: {error}"));
+    WriterId::from(stage_id)
+}
+
+pub async fn assert_eof_carries_the_ending_clock(run_dir: &Path, stage_key: &str) {
+    let stage = stage_writer(run_dir, stage_key);
+    let eofs: Vec<(WriterId, Option<VectorClock>)> =
+        read_stage_envelopes_appended(run_dir, stage_key)
+            .await
+            .iter()
+            .filter_map(|record| match &record.payload {
+                ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    writer_id,
+                    vector_clock,
+                    ..
+                }) => Some((
+                    writer_id.unwrap_or(record.envelope.provenance.event.writer_id),
+                    vector_clock.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+    let own = eofs
+        .iter()
+        .position(|(writer, _)| *writer == stage)
+        .unwrap_or_else(|| panic!("'{stage_key}' authors its own EOF: {eofs:?}"));
+    let ending = own
+        .checked_sub(1)
+        .map(|index| &eofs[index])
+        .unwrap_or_else(|| panic!("an input EOF ended the reading of '{stage_key}': {eofs:?}"));
+    assert_eq!(
+        eofs[own].1, ending.1,
+        "the EOF of '{stage_key}' carries the clock of the EOF that ended its reading"
+    );
 }
 
 /// Observe committed records without opening a writer or recovering its tail.

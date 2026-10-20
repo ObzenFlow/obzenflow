@@ -4,12 +4,6 @@
 
 //! Runtime control-strategy hooks (FLOWIP-115c).
 //!
-//! The supervisor consults a small set of typed hooks at named decision
-//! points. Every driving hook shares the same shape, `Continue` or `Pause`,
-//! and adds its own hook-local stop, so the type system keeps an admission
-//! rejection distinct from a suppressed signal or a poison EOF. Observation is
-//! a callback that never steers the loop.
-//!
 //! This slice defines the contract for loop-level controls. Live I/O policies
 //! (source/effect/sink delivery) compose as boundary middleware outside this
 //! gate model. Admission/observation remain available for output-commit

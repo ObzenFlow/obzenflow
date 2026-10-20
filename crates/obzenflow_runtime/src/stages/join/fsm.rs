@@ -18,53 +18,214 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, StageKey, WriterId};
-use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use obzenflow_core::{ChainEvent, FlowId, ReaderGeneration, StageId, StageKey, WriterId};
+use obzenflow_fsm::{FsmAction, FsmContext, Transition};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::config::{JoinReferenceMode, PhaseWitnesses};
+use super::config::{JoinReferenceMode, LiveStream, PhaseWitnesses};
+use super::phase::{check_crossing_phase, observe_hold, CrossingPhase, HoldOutcome};
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::feed_plan::StageOutputContract;
-use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
+use crate::messaging::upstream_subscription::{
+    ContractConfig, ContractsWiring, EofOutcome, ReaderFrontier, ReaderProgress,
+};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
+use crate::stages::common::supervision::catch_up::{
+    frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
+};
+use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
+use crate::supervised_base::handler_supervised::SupervisorAction;
 
 // ============================================================================
 // FSM States
 // ============================================================================
 
-/// FSM states for join stages
-#[derive(Serialize, Deserialize, Default)]
-pub enum JoinState<H> {
-    /// Initial state - join stage created but not initialized
-    #[default]
-    Created,
+/// The phases a join runs and how its `Live` phase reads, fixed when it is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JoinPlan {
+    shape: PlanShape,
+}
 
-    Initializing,
-    Starting,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlanShape {
+    Live(LiveReads),
+    FiniteEof,
+    ThenLive(ThenLivePhases),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThenLivePhases {
+    BatchThenLive(LiveReads),
+    LiveOnly(LiveReads),
+    BatchOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveReads {
+    Recorded,
+    Canonical,
+    Preference,
+}
+
+impl JoinPlan {
+    pub(crate) fn new(
+        mode: JoinReferenceMode,
+        witnesses: Option<&PhaseWitnesses>,
+        reads: LiveReads,
+    ) -> Self {
+        let shape = match mode {
+            JoinReferenceMode::Live => PlanShape::Live(reads),
+            JoinReferenceMode::FiniteEof => PlanShape::FiniteEof,
+            JoinReferenceMode::FiniteThenLive => {
+                let batch_empty =
+                    witnesses.is_some_and(|witnesses| witnesses.batch_stream.is_empty());
+                let live_empty =
+                    witnesses.is_some_and(|witnesses| witnesses.live_stream == LiveStream::Absent);
+                PlanShape::ThenLive(match (batch_empty, live_empty) {
+                    (true, _) => ThenLivePhases::LiveOnly(reads),
+                    (false, true) => ThenLivePhases::BatchOnly,
+                    (false, false) => ThenLivePhases::BatchThenLive(reads),
+                })
+            }
+        };
+        Self { shape }
+    }
+
+    pub(crate) fn shape(self) -> PlanShape {
+        self.shape
+    }
+
+    pub(crate) fn live_reads(self) -> Option<LiveReads> {
+        match self.shape {
+            PlanShape::Live(reads)
+            | PlanShape::ThenLive(
+                ThenLivePhases::BatchThenLive(reads) | ThenLivePhases::LiveOnly(reads),
+            ) => Some(reads),
+            PlanShape::FiniteEof | PlanShape::ThenLive(ThenLivePhases::BatchOnly) => None,
+        }
+    }
+}
+
+/// A reading join's plan, its catch-up state and the worst kind its inputs
+/// ended with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinReading {
+    pub(crate) plan: JoinPlan,
+    pub(crate) catch_up: CatchUpState,
+    pub(crate) worst_eof: Option<EofKind>,
+}
+
+impl JoinReading {
+    pub(crate) fn new(plan: JoinPlan) -> Self {
+        Self {
+            plan,
+            catch_up: CatchUpState::default(),
+            worst_eof: None,
+        }
+    }
+
+    pub(crate) fn with_worst_of(self, eof: &EofRead) -> Self {
+        Self {
+            worst_eof: match (self.worst_eof, eof.side_worst) {
+                (Some(current), Some(kind)) => Some(current.worst(kind)),
+                (current, kind) => current.or(kind),
+            },
+            ..self
+        }
+    }
+}
+
+/// A holding join's reading and the witness EOFs it has folded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinHold {
+    pub(crate) reading: JoinReading,
+    pub(crate) witnessed: Arc<BTreeMap<StageKey, EofKind>>,
+}
+
+impl JoinHold {
+    pub(crate) fn new(reading: JoinReading) -> Self {
+        Self {
+            reading,
+            witnessed: Arc::default(),
+        }
+    }
+}
+
+/// How an enriching join reads its stream.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JoinEnrichment {
+    /// Holds the catalog until the batch stream's witnesses end.
+    Holding(JoinHold),
+    /// Reads the stream to its end against a finished catalog.
+    ToEnd(JoinReading),
+}
+
+/// A live join's reading and the policy it reads both inputs by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinLive {
+    pub(crate) reading: JoinReading,
+    pub(crate) reads: LiveReads,
+}
+
+/// A draining join's step, the worst kind its inputs ended with and the clock
+/// its own EOF carries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JoinDrain {
+    pub(crate) step: DrainStep,
+    pub(crate) worst_eof: Option<EofKind>,
+    pub(crate) clock: Option<VectorClock>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DrainStep {
+    Finalize {
+        final_eof: Arc<DeliveredRecord<ChainPayload>>,
+    },
+    Flush,
+}
+
+impl PartialEq for DrainStep {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Finalize { final_eof: a }, Self::Finalize { final_eof: b }) => Arc::ptr_eq(a, b),
+            (Self::Flush, Self::Flush) => true,
+            _ => false,
+        }
+    }
+}
+
+/// FSM states for join stages
+#[derive(Clone, Debug, PartialEq, obzenflow_fsm::StateVariant)]
+pub enum JoinState {
+    /// Initial state - join stage created but not initialized
+    Created(JoinPlan),
+
+    Initializing(JoinPlan),
+    Starting(JoinPlan),
     Finalizing,
     Failing(String),
     Cancelling(String),
     Cancelled(String),
 
     /// Resources allocated, ready to start processing
-    Initialized,
+    Initialized(JoinPlan),
 
     /// Hydrating: Building reference catalog from reference events
     /// During this state:
     /// - ONLY reads from reference subscription
     /// - Stream events queue in journal/subscription (natural backpressure)
     /// - Transitions to Enriching when reference EOF received
-    Hydrating,
+    Hydrating(JoinHold),
 
     /// Live: Reference side remains active while stream events are processed continuously.
     ///
@@ -72,122 +233,26 @@ pub enum JoinState<H> {
     /// - Reads from both reference and stream subscriptions
     /// - Reference updates can arrive at any time and update catalogs
     /// - Stream events are enriched against the current catalog snapshot
-    Live,
+    Live(JoinLive),
 
     /// Enriching: Reference catalog complete, actively enriching stream events
     /// During this state:
     /// - ONLY reads from stream subscription
     /// - Reference catalog is complete and ready for lookups
     /// - Transitions to Draining when stream EOF received
-    Enriching,
+    Enriching(JoinEnrichment),
 
     /// All upstreams reached EOF, finishing processing
-    Draining,
+    Draining(JoinDrain),
 
     /// All events processed, ready to complete
     Drained,
 
     /// Unrecoverable error occurred
     Failed(String),
-
-    #[serde(skip)]
-    _Phantom(PhantomData<H>),
 }
 
-// Manual implementations that don't require H to implement these traits
-impl<H> Clone for JoinState<H> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Created => Self::Created,
-            Self::Initializing => Self::Initializing,
-            Self::Starting => Self::Starting,
-            Self::Finalizing => Self::Finalizing,
-            Self::Failing(cause) => Self::Failing(cause.clone()),
-            Self::Cancelling(cause) => Self::Cancelling(cause.clone()),
-            Self::Cancelled(cause) => Self::Cancelled(cause.clone()),
-
-            Self::Initialized => Self::Initialized,
-            Self::Hydrating => Self::Hydrating,
-            Self::Live => Self::Live,
-            Self::Enriching => Self::Enriching,
-            Self::Draining => Self::Draining,
-            Self::Drained => Self::Drained,
-            Self::Failed(msg) => Self::Failed(msg.clone()),
-            Self::_Phantom(_) => Self::_Phantom(PhantomData),
-        }
-    }
-}
-
-impl<H> std::fmt::Debug for JoinState<H> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Created => write!(f, "Created"),
-            Self::Initializing => write!(f, "Initializing"),
-            Self::Starting => write!(f, "Starting"),
-            Self::Finalizing => write!(f, "Finalizing"),
-            Self::Failing(cause) => write!(f, "Failing({cause:?})"),
-            Self::Cancelling(cause) => write!(f, "Cancelling({cause:?})"),
-            Self::Cancelled(cause) => write!(f, "Cancelled({cause:?})"),
-
-            Self::Initialized => write!(f, "Initialized"),
-            Self::Hydrating => write!(f, "Hydrating"),
-            Self::Live => write!(f, "Live"),
-            Self::Enriching => write!(f, "Enriching"),
-            Self::Draining => write!(f, "Draining"),
-            Self::Drained => write!(f, "Drained"),
-            Self::Failed(msg) => write!(f, "Failed({msg:?})"),
-            Self::_Phantom(_) => write!(f, "_Phantom"),
-        }
-    }
-}
-
-impl<H: Send + Sync> PartialEq for JoinState<H> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (JoinState::Created, JoinState::Created) => true,
-            (Self::Initializing, Self::Initializing) => true,
-            (Self::Starting, Self::Starting) => true,
-            (Self::Finalizing, Self::Finalizing) => true,
-            (Self::Failing(a), Self::Failing(b)) => a == b,
-            (Self::Cancelling(a), Self::Cancelling(b)) => a == b,
-            (Self::Cancelled(a), Self::Cancelled(b)) => a == b,
-
-            (JoinState::Initialized, JoinState::Initialized) => true,
-            (JoinState::Hydrating, JoinState::Hydrating) => true,
-            (JoinState::Live, JoinState::Live) => true,
-            (JoinState::Enriching, JoinState::Enriching) => true,
-            (JoinState::Draining, JoinState::Draining) => true,
-            (JoinState::Drained, JoinState::Drained) => true,
-            (JoinState::Failed(a), JoinState::Failed(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl<H: Send + Sync + 'static> StateVariant for JoinState<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            JoinState::Created => "Created",
-            Self::Initializing => "Initializing",
-            Self::Starting => "Starting",
-            Self::Finalizing => "Finalizing",
-            Self::Failing(..) => "Failing",
-            Self::Cancelling(..) => "Cancelling",
-            Self::Cancelled(..) => "Cancelled",
-
-            JoinState::Initialized => "Initialized",
-            JoinState::Hydrating => "Hydrating",
-            JoinState::Live => "Live",
-            JoinState::Enriching => "Enriching",
-            JoinState::Draining => "Draining",
-            JoinState::Drained => "Drained",
-            JoinState::Failed(_) => "Failed",
-            JoinState::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
-    }
-}
-
-impl<H> JoinState<H> {
+impl JoinState {
     pub(crate) fn failure(cause: String) -> Self {
         use crate::stages::common::stage_handle::{
             FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
@@ -203,9 +268,9 @@ impl<H> JoinState<H> {
     pub(crate) fn lifecycle_phase(&self) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
         use crate::stages::common::stage_lifecycle::LifecyclePhase as Phase;
         match self {
-            Self::Initializing => Phase::Initializing,
-            Self::Initialized => Phase::Initialized,
-            Self::Hydrating | Self::Live | Self::Enriching => Phase::Active,
+            Self::Initializing(_) => Phase::Initializing,
+            Self::Initialized(_) => Phase::Initialized,
+            Self::Hydrating(_) | Self::Live(_) | Self::Enriching(_) => Phase::Active,
             Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
@@ -215,15 +280,102 @@ impl<H> JoinState<H> {
             _ => Phase::Other,
         }
     }
+
+    pub(crate) fn reading(&self) -> Option<&JoinReading> {
+        match self {
+            Self::Hydrating(hold) | Self::Enriching(JoinEnrichment::Holding(hold)) => {
+                Some(&hold.reading)
+            }
+            Self::Enriching(JoinEnrichment::ToEnd(reading)) => Some(reading),
+            Self::Live(live) => Some(&live.reading),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn crossing_phase(&self) -> Option<CrossingPhase> {
+        match self {
+            Self::Hydrating(_) => Some(CrossingPhase::Hydrating),
+            Self::Enriching(_) => Some(CrossingPhase::Enriching),
+            Self::Live(_) => Some(CrossingPhase::Live),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn held_input(&self) -> Option<JoinSubscriptionSide> {
+        match self {
+            Self::Hydrating(_) => Some(JoinSubscriptionSide::Stream),
+            Self::Enriching(JoinEnrichment::Holding(_)) => Some(JoinSubscriptionSide::Reference),
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================
 // FSM Events
 // ============================================================================
 
+/// A catch-up watermark the join read, with the frontier of the inputs it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatermarkRead {
+    pub(crate) generation: ReaderGeneration,
+    pub(crate) frontier: ReaderFrontier,
+}
+
+/// An EOF the join read, with what its subscription knew once it arrived.
+#[derive(Clone, Debug)]
+pub struct EofRead {
+    pub(crate) envelope: Arc<DeliveredRecord<ChainPayload>>,
+    pub(crate) ends_reads: bool,
+    pub(crate) side_worst: Option<EofKind>,
+    pub(crate) frontier: ReaderFrontier,
+    pub(crate) generation: ReaderGeneration,
+    pub(crate) ended_by: Option<StageKey>,
+}
+
+impl EofRead {
+    pub(crate) fn new(
+        envelope: DeliveredRecord<ChainPayload>,
+        outcome: Option<EofOutcome>,
+        generation: Option<ReaderGeneration>,
+        frontier: ReaderFrontier,
+    ) -> Self {
+        Self {
+            envelope: Arc::new(envelope),
+            ends_reads: outcome.as_ref().is_some_and(|outcome| outcome.is_final),
+            side_worst: outcome.as_ref().and_then(|outcome| outcome.worst_kind),
+            frontier,
+            generation: generation.unwrap_or_default(),
+            ended_by: outcome.map(|outcome| StageKey::from(outcome.stage_name)),
+        }
+    }
+
+    pub(crate) fn clock(&self) -> Option<VectorClock> {
+        match &self.envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { vector_clock, .. }) => {
+                vector_clock.clone()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn author(&self) -> Option<(StageId, EofKind)> {
+        let event = self.envelope.authored();
+        let ChainPayload::FlowControl(FlowControlPayload::Eof {
+            kind, writer_id, ..
+        }) = &event.payload
+        else {
+            return None;
+        };
+        match writer_id.unwrap_or(event.writer_id) {
+            WriterId::Stage(stage) => Some((stage, *kind)),
+            _ => None,
+        }
+    }
+}
+
 /// Events that trigger join state transitions
-#[derive(Clone)]
-pub enum JoinEvent<H> {
+#[derive(Clone, Debug, obzenflow_fsm::EventVariant)]
+pub enum JoinEvent {
     /// Initialize the join stage
     Initialize,
     InitializationCompleted,
@@ -234,53 +386,26 @@ pub enum JoinEvent<H> {
     /// Ready to start processing
     Ready,
 
-    /// Received EOF from upstream (subscription context determines which one)
-    ReceivedEOF,
+    /// The reading state's dispatch read a catch-up watermark.
+    WatermarkRead(WatermarkRead),
 
-    /// Every input that ends the current holding state ended naturally.
-    HoldCompleted(HoldCompletion),
+    /// The reading state's dispatch read an EOF on its reference subscription.
+    ReferenceEofRead(EofRead),
 
-    /// Every input the holding state reads ended, not all naturally; the join
-    /// drains without reading the inputs it holds.
-    HoldLeftOpen,
+    /// The reading state's dispatch read an EOF on its stream subscription.
+    StreamEofRead(EofRead),
 
-    /// Begin draining process
-    BeginDrain,
+    /// The current draining step finished its work.
+    DrainStepEnded,
 
     /// Draining complete
     DrainComplete,
 
     /// Unrecoverable error occurred
     Error(String),
-
-    #[doc(hidden)]
-    _Phantom(PhantomData<H>),
 }
 
-impl<H> std::fmt::Debug for JoinEvent<H> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Initialize => write!(f, "Initialize"),
-            Self::InitializationCompleted => write!(f, "InitializationCompleted"),
-            Self::ActivationCompleted => write!(f, "ActivationCompleted"),
-            Self::FinalizationCompleted => write!(f, "FinalizationCompleted"),
-            Self::TerminationSettled => write!(f, "TerminationSettled"),
-
-            Self::Ready => write!(f, "Ready"),
-            Self::ReceivedEOF => write!(f, "ReceivedEOF"),
-            Self::HoldCompleted(completion) => write!(f, "HoldCompleted({completion:?})"),
-            Self::HoldLeftOpen => write!(f, "HoldLeftOpen"),
-            Self::BeginDrain => write!(f, "BeginDrain"),
-            Self::DrainComplete => write!(f, "DrainComplete"),
-            Self::Error(msg) => write!(f, "Error({msg:?})"),
-            Self::_Phantom(_) => write!(f, "_Phantom"),
-        }
-    }
-}
-
-impl<H: Clone + Send + Sync + 'static>
-    crate::supervised_base::with_external_events::ExternalControlEvent for JoinEvent<H>
-{
+impl crate::supervised_base::with_external_events::ExternalControlEvent for JoinEvent {
     fn discard_details(
         &self,
     ) -> (
@@ -289,40 +414,8 @@ impl<H: Clone + Send + Sync + 'static>
     ) {
         crate::stages::common::stage_handle::discarded_control_details(match self {
             Self::Error(message) => Some(message.as_str()),
-            Self::InitializationCompleted
-            | Self::ActivationCompleted
-            | Self::FinalizationCompleted
-            | Self::TerminationSettled => None,
-            Self::Initialize
-            | Self::Ready
-            | Self::ReceivedEOF
-            | Self::HoldCompleted(_)
-            | Self::HoldLeftOpen
-            | Self::BeginDrain
-            | Self::DrainComplete => None,
-            Self::_Phantom(_) => unreachable!("PhantomData variant"),
+            _ => None,
         })
-    }
-}
-
-impl<H: Clone + Send + Sync + 'static> EventVariant for JoinEvent<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            JoinEvent::Initialize => "Initialize",
-            Self::InitializationCompleted => "InitializationCompleted",
-            Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalizationCompleted => "FinalizationCompleted",
-            Self::TerminationSettled => "TerminationSettled",
-
-            JoinEvent::Ready => "Ready",
-            JoinEvent::ReceivedEOF => "ReceivedEOF",
-            JoinEvent::HoldCompleted(_) => "HoldCompleted",
-            JoinEvent::HoldLeftOpen => "HoldLeftOpen",
-            JoinEvent::BeginDrain => "BeginDrain",
-            JoinEvent::DrainComplete => "DrainComplete",
-            JoinEvent::Error(_) => "Error",
-            JoinEvent::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
     }
 }
 
@@ -334,48 +427,49 @@ pub struct HoldCompletion {
     pub ended_by: Vec<StageKey>,
 }
 
+impl HoldCompletion {
+    pub(crate) fn enriching_entered(self) -> JoinPhaseFact {
+        JoinPhaseFact::EnrichingEntered {
+            generation: self.generation,
+            ended_by: self.ended_by,
+        }
+    }
+
+    pub(crate) fn live_entered(self) -> JoinPhaseFact {
+        JoinPhaseFact::LiveEntered {
+            generation: self.generation,
+            ended_by: self.ended_by,
+        }
+    }
+}
+
 // ============================================================================
 // FSM Actions
 // ============================================================================
 
-/// Actions that join FSM transitions can emit
 #[derive(Clone)]
-pub enum JoinAction<H> {
-    Host(crate::supervised_base::handler_supervised::SupervisorAction<JoinEvent<H>>),
-    /// Allocate resources (writer ID, subscriptions)
+pub(crate) enum JoinAction<H> {
+    Host(SupervisorAction<JoinEvent>),
     AllocateResources,
-
-    /// Initialize handler state
-    InitializeHandlerState,
-
-    /// Publish running event to journal
     PublishRunning,
     EmitHydrationHeartbeat,
-
-    /// Journal the phase this transition entered.
     RecordPhase(JoinPhaseFact),
-
-    /// Hydrate reference catalog from reference event
-    HydrateCatalog,
-
-    /// Enrich stream event with reference data
-    EnrichEvent,
-
-    /// Forward EOF event downstream
-    ForwardEOF,
-
-    /// Send completion event
+    CatchUp(CatchUpAction),
+    PromoteHeld {
+        side: JoinSubscriptionSide,
+        generation: ReaderGeneration,
+    },
+    ForwardControl(Arc<DeliveredRecord<ChainPayload>>),
+    ReleaseInputs,
+    AuthorEof {
+        kind: EofKind,
+        clock: Option<VectorClock>,
+    },
     SendCompletion,
-
-    /// Send failure event to journal with metrics
     SendFailure {
         message: String,
     },
-
-    /// Clean up all resources
     Cleanup,
-
-    #[doc(hidden)]
     _Phantom(PhantomData<H>),
 }
 
@@ -383,15 +477,19 @@ impl<H> std::fmt::Debug for JoinAction<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Host(action) => action.fmt(f),
-
             Self::AllocateResources => write!(f, "AllocateResources"),
-            Self::InitializeHandlerState => write!(f, "InitializeHandlerState"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::EmitHydrationHeartbeat => write!(f, "EmitHydrationHeartbeat"),
             Self::RecordPhase(fact) => write!(f, "RecordPhase({fact:?})"),
-            Self::HydrateCatalog => write!(f, "HydrateCatalog"),
-            Self::EnrichEvent => write!(f, "EnrichEvent"),
-            Self::ForwardEOF => write!(f, "ForwardEOF"),
+            Self::CatchUp(action) => write!(f, "CatchUp({action:?})"),
+            Self::PromoteHeld { side, generation } => {
+                write!(f, "PromoteHeld({side:?}, {generation:?})")
+            }
+            Self::ForwardControl(envelope) => {
+                write!(f, "ForwardControl({})", envelope.event_type())
+            }
+            Self::ReleaseInputs => write!(f, "ReleaseInputs"),
+            Self::AuthorEof { kind, .. } => write!(f, "AuthorEof({kind:?})"),
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::Cleanup => write!(f, "Cleanup"),
@@ -403,11 +501,6 @@ impl<H> std::fmt::Debug for JoinAction<H> {
 // ============================================================================
 // FSM Context
 // ============================================================================
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PendingTransition {
-    DrainComplete,
-}
 
 /// Structural subscription branch that owns a deferred consumption ack.
 /// This is deliberately independent of event authorship and upstream ID.
@@ -459,8 +552,6 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     /// Error journal for writing error events
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
-    /// System journal for writing lifecycle events
-
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
@@ -488,24 +579,6 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     /// Last supervisor-driven contract check instant for the stream subscription (FLOWIP-080r).
     pub(crate) stream_last_contract_check: Option<tokio::time::Instant>,
 
-    /// Buffered EOF event to forward when draining completes
-    pub buffered_eof: Option<ChainEvent>,
-
-    /// Final stream-side EOF delivery that actually closed the stream
-    /// subscription. Earlier Poison EOFs and other non-final EOF deliveries
-    /// are deliberately not terminal-hook witnesses.
-    pub(crate) final_stream_eof: Option<DeliveredRecord<ChainPayload>>,
-
-    /// Worst-wins join over both sides' terminal EOF kinds (FLOWIP-095k).
-    pub terminal_eof_kind: Option<EofKind>,
-
-    /// Stream-side envelope template used to parent drain-time emissions.
-    ///
-    /// This should be the *stream EOF envelope* so that drain-time outputs can be
-    /// parented with a frontier that includes stream-side ancestry even when the
-    /// join emitted zero outputs prior to draining (FLOWIP-071h).
-    pub(crate) drain_parent: Option<DeliveredRecord<ChainPayload>>,
-
     /// Conservative high-water clock for the reference side (FLOWIP-071h interim).
     ///
     /// This accumulates ancestry from reference envelopes as they are consumed
@@ -525,18 +598,11 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     pub reference_subscription_factory: BoundSubscriptionFactory,
     pub stream_subscription_factory: BoundSubscriptionFactory,
 
-    /// Reference join mode (FiniteEof, Live or FiniteThenLive).
-    pub reference_mode: JoinReferenceMode,
-
     pub(crate) phase_witnesses: Option<PhaseWitnesses>,
 
     pub(crate) witness_keys: HashMap<StageId, StageKey>,
 
-    pub(crate) witnessed_eofs: HashMap<StageKey, EofKind>,
-
-    pub(crate) drain_without_held_inputs: bool,
-
-    pub(crate) pending_promotion: Option<(JoinSubscriptionSide, obzenflow_core::ReaderGeneration)>,
+    pub(crate) archived_phases: Vec<JoinPhaseFact>,
 
     /// Live-mode fairness cap (see `JoinConfig.reference_batch_cap`).
     pub reference_batch_cap: Option<usize>,
@@ -568,9 +634,6 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     /// Parent envelope for pending outputs (input that produced them).
     pub(crate) pending_parent: Option<DeliveredRecord<ChainPayload>>,
 
-    /// Pending state transition once blocked outputs are fully written.
-    pub(crate) pending_transition: Option<PendingTransition>,
-
     /// Structural subscription branch and upstream awaiting a consumption ack
     /// once pending outputs are drained.
     pub(crate) pending_subscription_ack: Option<PendingSubscriptionAck>,
@@ -585,32 +648,20 @@ pub struct JoinResources<H: UnifiedJoinHandler> {
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
-    /// Whether the flow build marked this join as a deterministic fan-in
-    /// orderer (FLOWIP-095d). Ordered live joins run the canonical
-    /// cross-subscription merge instead of preference polling.
-    pub(crate) deterministic_fan_in: bool,
-
     pub(crate) recorded: Option<crate::stages::resources_builder::RecordedSubscription>,
 
     pub(crate) recorded_order: Option<crate::messaging::upstream_subscription::RecordedOrder>,
 
-    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
+    pub(crate) catch_up: CatchUpContext,
 }
 
 pub struct JoinContext<H: UnifiedJoinHandler> {
     pub(crate) resources: Option<JoinResources<H>>,
     pub(crate) instrumentation: Arc<StageInstrumentation>,
-    pub(crate) reference_mode: JoinReferenceMode,
-    pub(crate) batch_phase_empty: bool,
 }
 impl<H: UnifiedJoinHandler> JoinContext<H> {
     pub(crate) fn new(resources: JoinResources<H>) -> Self {
         Self {
-            reference_mode: resources.reference_mode,
-            batch_phase_empty: resources
-                .phase_witnesses
-                .as_ref()
-                .is_some_and(|witnesses| witnesses.batch_stream.is_empty()),
             instrumentation: resources.instrumentation.clone(),
             resources: Some(resources),
         }
@@ -623,6 +674,97 @@ impl<H: UnifiedJoinHandler> JoinContext<H> {
                 "join resources belong to a pending operation".into(),
             )
         })
+    }
+
+    fn present(&self) -> &JoinResources<H> {
+        self.resources
+            .as_ref()
+            .expect("a join's resources are back before its machine handles a fact")
+    }
+
+    pub(crate) fn stage_name(&self) -> &str {
+        &self.present().stage_name
+    }
+
+    pub(crate) fn cross(
+        &self,
+        state: &JoinState,
+        generation: ReaderGeneration,
+        frontier: ReaderFrontier,
+    ) -> Result<(JoinReading, Vec<JoinAction<H>>), String> {
+        let (Some(reading), Some(phase)) = (state.reading(), state.crossing_phase()) else {
+            unreachable!()
+        };
+        let resources = self.present();
+        let step = frontier_step(&reading.catch_up, generation, frontier, &resources.catch_up)
+            .into_result()
+            .map_err(|fatal| fatal.detail)?;
+        let mut actions: Vec<_> = step.actions.into_iter().map(JoinAction::CatchUp).collect();
+        if let Some(crossed) = step.crossed_into {
+            check_crossing_phase(
+                &resources.stage_name,
+                &resources.archived_phases,
+                crossed,
+                phase,
+            )?;
+            actions.extend(state.held_input().map(|side| JoinAction::PromoteHeld {
+                side,
+                generation: crossed,
+            }));
+        }
+        Ok((
+            JoinReading {
+                catch_up: step.next,
+                ..reading.clone()
+            },
+            actions,
+        ))
+    }
+
+    pub(crate) fn fold_catalog_witness(
+        &self,
+        witnessed: &Arc<BTreeMap<StageKey, EofKind>>,
+        eof: &EofRead,
+    ) -> (Arc<BTreeMap<StageKey, EofKind>>, HoldOutcome) {
+        let resources = self.present();
+        let catalog = resources
+            .phase_witnesses
+            .as_ref()
+            .map(|witnesses| witnesses.catalog.as_slice());
+        observe_hold(witnessed, catalog, &resources.witness_keys, eof)
+    }
+
+    pub(crate) fn fold_batch_witness(
+        &self,
+        witnessed: &Arc<BTreeMap<StageKey, EofKind>>,
+        eof: &EofRead,
+    ) -> (Arc<BTreeMap<StageKey, EofKind>>, HoldOutcome) {
+        let resources = self.present();
+        let batch = resources
+            .phase_witnesses
+            .as_ref()
+            .map(|witnesses| witnesses.batch_stream.as_slice());
+        observe_hold(witnessed, batch, &resources.witness_keys, eof)
+    }
+
+    pub(crate) fn fail(&self, cause: String) -> Transition<JoinState, JoinAction<H>> {
+        self.instrumentation
+            .failures_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.fail_uncounted(cause)
+    }
+
+    pub(crate) fn fail_uncounted(&self, cause: String) -> Transition<JoinState, JoinAction<H>> {
+        Transition {
+            next_state: JoinState::failure(cause.clone()),
+            actions: vec![
+                JoinAction::SendFailure { message: cause },
+                JoinAction::Cleanup,
+                JoinAction::Host(SupervisorAction::CloseMailbox),
+                JoinAction::Host(SupervisorAction::SettlePublications),
+                JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled)),
+            ],
+        }
     }
 }
 impl<H: UnifiedJoinHandler + 'static> FsmContext for JoinContext<H> {}
@@ -688,7 +830,41 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                         "Failed to journal the join's phase: {error}"
                     ))
                 })?;
-                ctx.witnessed_eofs.clear();
+                Ok(())
+            }
+            JoinAction::CatchUp(action) => action.execute(&mut ctx.catch_up).await,
+            JoinAction::PromoteHeld { side, generation } => {
+                let (held, input) = match side {
+                    JoinSubscriptionSide::Reference => {
+                        (ctx.reference_subscription.as_mut(), "catalog")
+                    }
+                    JoinSubscriptionSide::Stream => (ctx.stream_subscription.as_mut(), "stream"),
+                };
+                let held = held.ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "join '{}' has no {input} subscription to promote",
+                        ctx.stage_name
+                    ))
+                })?;
+                held.promote_held_readers(*generation);
+                Ok(())
+            }
+            JoinAction::ForwardControl(envelope) => {
+                forward_control_event(
+                    envelope,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    StageType::Join,
+                    &ctx.data_journal,
+                )
+                .await
+                .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+                Ok(())
+            }
+            JoinAction::ReleaseInputs => {
+                for reader in ctx.backpressure_readers.values() {
+                    reader.release();
+                }
                 Ok(())
             }
             JoinAction::AllocateResources => {
@@ -785,11 +961,10 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 ctx.stream_subscription = Some(stream_subscription);
 
                 if let Some(archive) = ctx.runtime_execution.archive_for_io().cloned() {
-                    let archived_phases =
+                    ctx.archived_phases =
                         super::phase::load_archived_phases(&archive, &ctx.stage_name)
                             .await
                             .map_err(obzenflow_fsm::FsmError::HandlerError)?;
-                    ctx.catch_up.install_join_phases(archived_phases).await;
                 }
 
                 if let Some(recorded) = &ctx.recorded {
@@ -803,15 +978,6 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Join allocated resources"
-                );
-                Ok(())
-            }
-
-            JoinAction::InitializeHandlerState => {
-                // Handler state already initialized in context creation
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Join handler state initialized"
                 );
                 Ok(())
             }
@@ -851,62 +1017,18 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                 Ok(())
             }
 
-            JoinAction::HydrateCatalog => {
-                // This action is not used in the current implementation
-                // The hydration happens inline in dispatch_state during Hydrating state
-                // This is here for future refactoring to make actions more consistent
-                tracing::debug!(
-                    stage_name = %ctx.stage_name,
-                    "HydrateCatalog action (currently handled in dispatch_state)"
-                );
-                Ok(())
-            }
-
-            JoinAction::EnrichEvent => {
-                // This action is not used in the current implementation
-                // The enrichment happens inline in dispatch_state during Enriching state
-                // This is here for future refactoring to make actions more consistent
-                tracing::debug!(
-                    stage_name = %ctx.stage_name,
-                    "EnrichEvent action (currently handled in dispatch_state)"
-                );
-                Ok(())
-            }
-
-            JoinAction::ForwardEOF => {
+            JoinAction::AuthorEof { kind, clock } => {
                 let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to forward EOF".to_string(),
                     )
                 })?;
 
-                // Always emit an EOF authored by this stage, preserving the
-                // upstream vector clock while sealing only this stage's Data
-                // frontier.
-                let buffered = ctx.buffered_eof.take();
-                // FLOWIP-095k: the authored kind is the worst-wins join over
-                // both sides' terminal kinds; Natural covers the
-                // drain-terminated path where no EOF was received.
-                let eof_kind = ctx.terminal_eof_kind.unwrap_or(EofKind::Natural);
-                let mut upstream_vector_clock = None;
                 let runtime_context = ctx.instrumentation.snapshot();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
-                if let Some(buffered_event) = buffered {
-                    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
-                        writer_seq: _writer_seq,
-                        vector_clock,
-                        ..
-                    }) = buffered_event.payload.clone()
-                    {
-                        upstream_vector_clock = vector_clock;
-                        // We intentionally ignore the upstream writer_seq and
-                        // last_event_id and advertise our own position below.
-                    }
-                }
-
-                let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
+                let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, *kind);
 
                 if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                     writer_id: ref mut eof_writer,
@@ -922,8 +1044,8 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
                     *writer_seq = Some(authored_writer_seq);
                     *eof_writer_seq_by_event_type = writer_seq_by_event_type.clone();
                     *writer_seq_by_event_type_complete = true;
-                    if let Some(vc) = upstream_vector_clock {
-                        *vector_clock = Some(vc);
+                    if let Some(clock) = clock {
+                        *vector_clock = Some(clock.clone());
                     }
                     *last_event_id = authored_last_event_id;
                 }

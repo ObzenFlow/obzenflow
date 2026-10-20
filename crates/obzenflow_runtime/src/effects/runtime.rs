@@ -536,7 +536,7 @@ impl EffectsCore {
         )
         .await;
         match disposition {
-            CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => Ok(()),
+            CatchUpDisposition::Consumed | CatchUpDisposition::Crossed => Ok(()),
             CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
                 Err(self.latch(AuthoringHalt::Crossing(fatal)))
             }

@@ -264,6 +264,7 @@ async fn a_concat_merge_passes_on_its_first_producer_before_the_other() -> Resul
         "{merged:?}"
     );
     assert_eq!(merged.last(), Some(&natural_by("merged")), "{merged:?}");
+    replay_testkit::assert_eof_carries_the_ending_clock(&run, "merged").await;
 
     let manifest = replay_testkit::archive_manifest(&run);
     assert_eq!(
@@ -386,6 +387,34 @@ async fn a_held_producer_outlasts_the_stall_ceiling_under_enforce() -> Result<()
             "first-1", "first-2", "first-3", "first-4", "first-5", "first-6", "last-1", "last-2",
             "last-3", "last-4", "last-5"
         ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_edge_of_a_concat_merge_records_one_passing_verdict() -> Result<()> {
+    let _guard = CONCAT_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let run = run_to_end(
+        &journal_base,
+        Inputs {
+            first: 4,
+            last: 3,
+            first_rate: 1000.0,
+            enforce: None,
+        },
+        Vec::new(),
+    )
+    .await?;
+
+    assert_eq!(
+        replay_testkit::passing_verdicts(&run).await,
+        replay_testkit::one_verdict_per_edge(&[
+            "early -> merged",
+            "late -> merged",
+            "merged -> collector",
+        ])
     );
     Ok(())
 }

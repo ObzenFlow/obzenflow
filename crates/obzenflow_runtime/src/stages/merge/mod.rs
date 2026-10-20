@@ -9,7 +9,11 @@ pub mod builder;
 pub mod config;
 pub mod fsm;
 pub mod handle;
+#[cfg(test)]
+mod lifecycle_tests;
 pub(crate) mod supervisor;
+#[cfg(test)]
+mod transition_tests;
 
 pub use builder::MergeBuilder;
 pub use config::MergeConfig;

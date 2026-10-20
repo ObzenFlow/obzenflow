@@ -4,7 +4,8 @@
 
 use super::backpressure_drain::{drain_one_pending, DrainOutcome, PendingOutput};
 use super::control_resolution::{
-    resolve_control_event, resolve_forward_control_event, ControlAction, ControlResolution,
+    await_signal_gate, resolve_control_event, resolve_forward_control_event, ControlAction,
+    ControlResolution,
 };
 use super::flow_context_factory::make_flow_context;
 use crate::backpressure::{
@@ -365,10 +366,9 @@ fn resolve_forward_control_event_does_not_note_non_terminal_forwarded_eof() {
     assert!(!guard.has_seen_all_upstream_eofs(1));
 }
 
-#[test]
-fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
+#[tokio::test]
+async fn the_signal_gate_can_only_delay_a_signal() {
     let upstream = StageId::new_const(1);
-
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
     let envelope = JournalRecord::new(JournalWriterId::new(), eof);
     let signal = match &envelope.payload {
@@ -376,44 +376,32 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
         _ => unreachable!(),
     };
 
-    let strategy = FixedActionStrategy {
-        eof: SignalDecision::SuppressSignal,
+    let mut processing_ctx = crate::stages::common::control_strategies::ProcessingContext::new();
+    let started = std::time::Instant::now();
+    await_signal_gate(
+        signal,
+        &envelope,
+        &PauseEofOnceStrategy,
+        &mut processing_ctx,
+        "gated",
+    )
+    .await;
+    assert!(started.elapsed() >= Duration::from_millis(1));
+    assert!(processing_ctx.custom_state.contains_key("paused_eof_once"));
+
+    let continuing = FixedActionStrategy {
+        eof: SignalDecision::Continue,
         drain: SignalDecision::Continue,
         other: SignalDecision::Continue,
     };
-
-    let eof_outcome = EofOutcome {
-        stage_id: upstream,
-        stage_name: "u".to_string(),
-        reader_index: 0,
-        eof_count: 1,
-        total_readers: 1,
-        is_final: true,
-        worst_kind: None,
-    };
-
-    let mut guard = CycleGuard::new(
-        MaxIterations::new(30),
-        SccId::from_ulid(Ulid::from(0u128)),
-        false,
-        "t",
-    );
-
-    let resolution = resolve_control_event(
+    await_signal_gate(
         signal,
         &envelope,
-        &strategy,
+        &continuing,
         &mut crate::stages::common::control_strategies::ProcessingContext::new(),
-        None,
-        Some(&mut guard),
-        Some(&eof_outcome),
-        Some(upstream),
-        1,
-        true,
-    );
-
-    assert_eq!(resolution, ControlResolution::Ready(ControlAction::Skip));
-    assert!(!guard.has_seen_all_upstream_eofs(1));
+        "gated",
+    )
+    .await;
 }
 
 #[test]

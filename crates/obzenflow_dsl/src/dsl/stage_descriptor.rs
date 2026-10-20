@@ -3143,32 +3143,32 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
     }
 }
 
-fn translate_stage_event_to_join<H>(event: StageEvent) -> Result<JoinEvent<H>, String> {
+fn translate_stage_event_to_join(event: StageEvent) -> Result<JoinEvent, String> {
     match event {
         StageEvent::Initialize => Ok(JoinEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(JoinEvent::Ready), // Join stages use Ready like transforms
-        StageEvent::BeginDrain => Ok(JoinEvent::BeginDrain),
         StageEvent::ForceShutdown => Ok(JoinEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!("Unsupported stage event for join: {event:?}")),
     }
 }
 
-fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::StageStatus {
+fn check_join_state(state: &JoinState) -> crate::stage_handle_adapter::StageStatus {
     use crate::stage_handle_adapter::StageStatus;
     match state {
-        JoinState::Created => StageStatus::Created,
-        JoinState::Initializing => StageStatus::Initializing,
-        JoinState::Starting => StageStatus::Starting,
+        JoinState::Created(_) => StageStatus::Created,
+        JoinState::Initializing(_) => StageStatus::Initializing,
+        JoinState::Starting(_) => StageStatus::Starting,
         JoinState::Finalizing => StageStatus::Finalizing,
         JoinState::Failing(_) => StageStatus::Failing,
         JoinState::Cancelling(_) => StageStatus::Cancelling,
         JoinState::Cancelled(_) => StageStatus::Cancelled,
-        JoinState::Initialized => StageStatus::Ready,
-        JoinState::Hydrating | JoinState::Live | JoinState::Enriching => StageStatus::Running,
-        JoinState::Draining => StageStatus::Draining,
+        JoinState::Initialized(_) => StageStatus::Ready,
+        JoinState::Hydrating(_) | JoinState::Live(_) | JoinState::Enriching(_) => {
+            StageStatus::Running
+        }
+        JoinState::Draining(_) => StageStatus::Draining,
         JoinState::Drained => StageStatus::Drained,
         JoinState::Failed(_) => StageStatus::Failed,
-        JoinState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
     }
 }
 
@@ -3284,8 +3284,8 @@ fn check_merge_state(state: &MergeState) -> crate::stage_handle_adapter::StageSt
         MergeState::Initializing => StageStatus::Initializing,
         MergeState::Initialized => StageStatus::Ready,
         MergeState::Starting => StageStatus::Starting,
-        MergeState::FirstPhase | MergeState::LastPhase => StageStatus::Running,
-        MergeState::Draining => StageStatus::Draining,
+        MergeState::FirstPhase(_) | MergeState::LastPhase(_) => StageStatus::Running,
+        MergeState::Draining(_) => StageStatus::Draining,
         MergeState::Finalizing => StageStatus::Finalizing,
         MergeState::Drained => StageStatus::Drained,
         MergeState::Failing(_) => StageStatus::Failing,
@@ -3536,6 +3536,18 @@ mod tests {
         } else {
             builder.finish().unwrap()
         }
+    }
+
+    #[test]
+    fn a_join_refuses_a_direct_drain_as_a_merge_does() {
+        assert_eq!(
+            translate_stage_event_to_join(StageEvent::BeginDrain).unwrap_err(),
+            "Unsupported stage event for join: BeginDrain"
+        );
+        assert_eq!(
+            translate_stage_event_to_merge(StageEvent::BeginDrain).unwrap_err(),
+            "Unsupported stage event for merge: BeginDrain"
+        );
     }
 
     #[test]

@@ -13,21 +13,28 @@ use std::sync::Arc;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, ReaderGeneration, StageId, WriterId};
-use obzenflow_fsm::{FsmAction, FsmContext};
+use obzenflow_fsm::{FsmAction, FsmContext, FsmError, Transition};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter, StallEpisode};
 use crate::feed_plan::StageOutputContract;
-use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
+use crate::messaging::upstream_subscription::{
+    ContractConfig, ContractsWiring, EofOutcome, ReaderFrontier, ReaderProgress,
+};
 use crate::messaging::{DeliveredRecord, UpstreamSubscription};
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalGate};
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::backpressure_drain::PendingOutput;
+use crate::stages::common::supervision::catch_up::{
+    frontier_step, CatchUpAction, CatchUpContext, CatchUpState,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::merges::MergeStrategyKind;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
@@ -43,16 +50,30 @@ pub enum MergeState {
     Starting,
     /// Reads only the first-phase producers; the held producers wait in their
     /// journals and their edges are renewed as held.
-    FirstPhase,
+    FirstPhase(MergeInputs),
     /// Every first-phase producer authored natural EOF; reads the held producers.
-    LastPhase,
-    Draining,
+    LastPhase(MergeInputs),
+    Draining(MergeDrain),
     Finalizing,
     Drained,
     Failing(String),
     Failed(String),
     Cancelling(String),
     Cancelled(String),
+}
+
+/// A reading merge's catch-up state and the worst kind its inputs ended with.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MergeInputs {
+    pub(crate) worst_eof: Option<EofKind>,
+    pub(crate) catch_up: CatchUpState,
+}
+
+/// What the merge's own EOF takes from the EOF that ended its reading.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergeDrain {
+    pub(crate) worst_eof: Option<EofKind>,
+    pub(crate) eof_clock: Option<VectorClock>,
 }
 
 impl MergeState {
@@ -73,7 +94,7 @@ impl MergeState {
         match self {
             Self::Initializing => Phase::Initializing,
             Self::Initialized => Phase::Initialized,
-            Self::FirstPhase | Self::LastPhase => Phase::Active,
+            Self::FirstPhase(_) | Self::LastPhase(_) => Phase::Active,
             Self::Finalizing => Phase::Finalizing,
             Self::Failing(cause) => Phase::Failing(cause.clone()),
             Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
@@ -85,6 +106,58 @@ impl MergeState {
     }
 }
 
+impl MergeInputs {
+    pub(crate) fn with_worst_of(self, eof: &EofRead) -> Self {
+        Self {
+            worst_eof: match (self.worst_eof, eof.side_worst) {
+                (Some(current), Some(kind)) => Some(current.worst(kind)),
+                (current, kind) => current.or(kind),
+            },
+            ..self
+        }
+    }
+}
+
+/// A catch-up watermark the merge read, with the frontier of the inputs it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WatermarkRead {
+    pub(crate) generation: ReaderGeneration,
+    pub(crate) frontier: ReaderFrontier,
+}
+
+/// An EOF the merge read, with what its subscription knew once it arrived.
+#[derive(Clone, Debug)]
+pub struct EofRead {
+    pub(crate) envelope: Arc<DeliveredRecord<ChainPayload>>,
+    pub(crate) ends_reads: bool,
+    pub(crate) side_worst: Option<EofKind>,
+    pub(crate) frontier: ReaderFrontier,
+}
+
+impl EofRead {
+    pub(crate) fn new(
+        envelope: DeliveredRecord<ChainPayload>,
+        outcome: Option<EofOutcome>,
+        frontier: ReaderFrontier,
+    ) -> Self {
+        Self {
+            envelope: Arc::new(envelope),
+            ends_reads: outcome.as_ref().is_some_and(|outcome| outcome.is_final),
+            side_worst: outcome.and_then(|outcome| outcome.worst_kind),
+            frontier,
+        }
+    }
+
+    pub(crate) fn clock(&self) -> Option<VectorClock> {
+        match &self.envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { vector_clock, .. }) => {
+                vector_clock.clone()
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Events that trigger merge state transitions.
 #[derive(Clone, Debug, obzenflow_fsm::EventVariant)]
 pub enum MergeEvent {
@@ -92,13 +165,10 @@ pub enum MergeEvent {
     InitializationCompleted,
     Ready,
     ActivationCompleted,
-    /// Every first-phase producer authored natural EOF.
-    FirstPhaseCompleted,
-    /// Every first-phase producer ended, not all naturally; the merge drains
-    /// without reading its held producers.
-    FirstPhaseLeftOpen,
-    /// The held subscription ended.
-    ReceivedEOF,
+    /// The reading state's dispatch read a catch-up watermark.
+    WatermarkRead(WatermarkRead),
+    /// The reading state's dispatch read an EOF.
+    EofRead(EofRead),
     DrainComplete,
     FinalizationCompleted,
     TerminationSettled,
@@ -119,14 +189,19 @@ impl crate::supervised_base::with_external_events::ExternalControlEvent for Merg
     }
 }
 
-/// Actions that merge FSM transitions can emit.
 #[derive(Clone, Debug)]
-pub enum MergeAction {
+pub(crate) enum MergeAction {
     Host(SupervisorAction<MergeEvent>),
     AllocateResources,
     PublishRunning,
-    /// Author this stage's own EOF, with the worst kind among its inputs.
-    ForwardEOF,
+    CatchUp(CatchUpAction),
+    PromoteHeld(ReaderGeneration),
+    ForwardControl(Arc<DeliveredRecord<ChainPayload>>),
+    ReleaseInputs,
+    AuthorEof {
+        kind: EofKind,
+        clock: Option<VectorClock>,
+    },
     SendCompletion,
     SendFailure {
         message: String,
@@ -134,21 +209,20 @@ pub enum MergeAction {
     Cleanup,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Side {
-    FirstPhase,
-    Held,
-}
-
 pub(crate) struct PendingRow {
-    pub(crate) side: Side,
     pub(crate) parent: DeliveredRecord<ChainPayload>,
     pub(crate) upstream: Option<StageId>,
     pub(crate) outputs: VecDeque<PendingOutput>,
 }
 
-/// Everything merge actions and dispatch need.
-pub struct MergeContext {
+#[derive(Default)]
+pub(crate) struct MergeInput {
+    pub(crate) subscription: Option<UpstreamSubscription<ChainEvent>>,
+    pub(crate) contract_state: Vec<ReaderProgress>,
+    pub(crate) last_contract_check: Option<tokio::time::Instant>,
+}
+
+pub(crate) struct MergeResources {
     pub(crate) stage_id: StageId,
     pub(crate) stage_name: String,
     pub(crate) flow_name: String,
@@ -164,12 +238,8 @@ pub struct MergeContext {
 
     pub(crate) first_phase_subscription_factory: BoundSubscriptionFactory,
     pub(crate) held_subscription_factory: BoundSubscriptionFactory,
-    pub(crate) first_phase_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    pub(crate) held_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    pub(crate) first_phase_contract_state: Vec<ReaderProgress>,
-    pub(crate) first_phase_last_contract_check: Option<tokio::time::Instant>,
-    pub(crate) held_contract_state: Vec<ReaderProgress>,
-    pub(crate) held_last_contract_check: Option<tokio::time::Instant>,
+    pub(crate) first_phase: MergeInput,
+    pub(crate) held: MergeInput,
     pub(crate) held_producers: Vec<StageId>,
 
     pub(crate) backpressure_writer: BackpressureWriter,
@@ -180,15 +250,18 @@ pub struct MergeContext {
     pub(crate) backpressure_stall: StallEpisode,
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 
-    pub(crate) terminal_eof_kind: Option<EofKind>,
-    pub(crate) buffered_eof: Option<ChainEvent>,
-    pub(crate) pending_promotion: Option<ReaderGeneration>,
-    pub(crate) catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle,
+    pub(crate) catch_up: CatchUpContext,
+}
+
+/// A merge machine's context. A dispatch or an action holds the resources while it runs.
+pub struct MergeContext {
+    pub(crate) resources: Option<MergeResources>,
+    pub(crate) instrumentation: Arc<StageInstrumentation>,
 }
 
 impl FsmContext for MergeContext {}
 
-impl MergeContext {
+impl MergeResources {
     pub(crate) fn flow_context(&self) -> FlowContext {
         make_flow_context(
             &self.flow_name,
@@ -200,31 +273,109 @@ impl MergeContext {
     }
 }
 
+impl MergeContext {
+    pub(crate) fn new(resources: MergeResources) -> Self {
+        Self {
+            instrumentation: resources.instrumentation.clone(),
+            resources: Some(resources),
+        }
+    }
+
+    pub(crate) fn resources_mut(&mut self) -> Result<&mut MergeResources, FsmError> {
+        self.resources.as_mut().ok_or_else(|| {
+            FsmError::HandlerError("merge resources belong to a pending operation".into())
+        })
+    }
+
+    fn present(&self) -> &MergeResources {
+        self.resources
+            .as_ref()
+            .expect("a merge's resources are back before its machine handles a fact")
+    }
+
+    pub(crate) fn stage_name(&self) -> &str {
+        &self.present().stage_name
+    }
+
+    pub(crate) fn strategy(&self) -> MergeStrategyKind {
+        self.present().strategy
+    }
+
+    pub(crate) fn cross(
+        &self,
+        state: &MergeState,
+        generation: ReaderGeneration,
+        frontier: ReaderFrontier,
+    ) -> Result<(MergeInputs, Vec<MergeAction>), String> {
+        let (MergeState::FirstPhase(inputs) | MergeState::LastPhase(inputs)) = state else {
+            unreachable!()
+        };
+        let step = frontier_step(
+            &inputs.catch_up,
+            generation,
+            frontier,
+            &self.present().catch_up,
+        )
+        .into_result()
+        .map_err(|fatal| fatal.detail)?;
+        let mut actions: Vec<_> = step.actions.into_iter().map(MergeAction::CatchUp).collect();
+        if matches!(state, MergeState::FirstPhase(_)) {
+            actions.extend(step.crossed_into.map(MergeAction::PromoteHeld));
+        }
+        Ok((
+            MergeInputs {
+                catch_up: step.next,
+                ..inputs.clone()
+            },
+            actions,
+        ))
+    }
+
+    pub(crate) fn fail(&self, cause: String) -> Transition<MergeState, MergeAction> {
+        Transition {
+            next_state: MergeState::failure(cause.clone()),
+            actions: vec![
+                MergeAction::SendFailure { message: cause },
+                MergeAction::Cleanup,
+                MergeAction::Host(SupervisorAction::CloseMailbox),
+                MergeAction::Host(SupervisorAction::SettlePublications),
+                MergeAction::Host(SupervisorAction::Emit(MergeEvent::TerminationSettled)),
+            ],
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl FsmAction for MergeAction {
     type Context = MergeContext;
 
-    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), FsmError> {
+        self.execute_resources(ctx.resources_mut()?).await
+    }
+}
+
+impl MergeAction {
+    pub(crate) async fn execute_resources(&self, ctx: &mut MergeResources) -> Result<(), FsmError> {
         match self {
-            MergeAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
+            MergeAction::Host(_) => Err(FsmError::HandlerError(
                 "host action requires the supervised runner".into(),
             )),
             MergeAction::AllocateResources => {
                 let writer_id = WriterId::from(ctx.stage_id);
                 ctx.writer_id = Some(writer_id);
-                ctx.first_phase_contract_state = ctx
+                ctx.first_phase.contract_state = ctx
                     .first_phase_subscription_factory
                     .upstream_stage_ids()
                     .into_iter()
                     .map(ReaderProgress::new)
                     .collect();
-                ctx.held_contract_state = ctx
+                ctx.held.contract_state = ctx
                     .held_subscription_factory
                     .upstream_stage_ids()
                     .into_iter()
                     .map(ReaderProgress::new)
                     .collect();
-                let wiring = |ctx: &MergeContext| ContractsWiring {
+                let wiring = |ctx: &MergeResources| ContractsWiring {
                     writer_id,
                     contract_journal: ctx.data_journal.clone(),
                     config: ContractConfig::default(),
@@ -238,7 +389,7 @@ impl FsmAction for MergeAction {
                     .build_with_contracts(wiring(ctx))
                     .await
                     .map_err(|error| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
+                        FsmError::HandlerError(format!(
                             "Failed to create the merge's first-phase subscription: {error}"
                         ))
                     })?
@@ -248,39 +399,57 @@ impl FsmAction for MergeAction {
                     .build_with_contracts(wiring(ctx))
                     .await
                     .map_err(|error| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
+                        FsmError::HandlerError(format!(
                             "Failed to create the merge's held subscription: {error}"
                         ))
                     })?
                     .with_contract_flow_context(ctx.flow_context());
-                ctx.first_phase_subscription = Some(first_phase);
-                ctx.held_subscription = Some(held);
+                ctx.first_phase.subscription = Some(first_phase);
+                ctx.held.subscription = Some(held);
                 Ok(())
             }
             MergeAction::PublishRunning => {
                 lifecycle_actions::publish_running(&ctx.data_journal, ctx.flow_context()).await
             }
-            MergeAction::ForwardEOF => {
+            MergeAction::CatchUp(action) => action.execute(&mut ctx.catch_up).await,
+            MergeAction::PromoteHeld(generation) => {
+                let held = ctx.held.subscription.as_mut().ok_or_else(|| {
+                    FsmError::HandlerError(format!(
+                        "merge '{}' has no held subscription to promote",
+                        ctx.stage_name
+                    ))
+                })?;
+                held.promote_held_readers(*generation);
+                Ok(())
+            }
+            MergeAction::ForwardControl(envelope) => {
+                forward_control_event(
+                    envelope,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    StageType::Merge,
+                    &ctx.data_journal,
+                )
+                .await
+                .map_err(|error| FsmError::HandlerError(error.to_string()))?;
+                Ok(())
+            }
+            MergeAction::ReleaseInputs => {
+                for reader in ctx.backpressure_readers.values() {
+                    reader.release();
+                }
+                Ok(())
+            }
+            MergeAction::AuthorEof { kind, clock } => {
                 let writer_id = ctx.writer_id.ok_or_else(|| {
-                    obzenflow_fsm::FsmError::HandlerError(
+                    FsmError::HandlerError(
                         "No writer ID available to author the merge's EOF".to_string(),
                     )
                 })?;
-                let eof_kind = ctx.terminal_eof_kind.unwrap_or(EofKind::Natural);
                 let runtime_context = ctx.instrumentation.snapshot();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
-                let upstream_vector_clock =
-                    ctx.buffered_eof
-                        .take()
-                        .and_then(|buffered| match buffered.payload {
-                            ChainPayload::FlowControl(FlowControlPayload::Eof {
-                                vector_clock,
-                                ..
-                            }) => vector_clock,
-                            _ => None,
-                        });
-                let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
+                let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, *kind);
                 if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                     writer_id: ref mut eof_writer,
                     writer_seq,
@@ -295,8 +464,8 @@ impl FsmAction for MergeAction {
                     *writer_seq = Some(authored_writer_seq);
                     *eof_writer_seq_by_event_type = writer_seq_by_event_type;
                     *writer_seq_by_event_type_complete = true;
-                    if let Some(clock) = upstream_vector_clock {
-                        *vector_clock = Some(clock);
+                    if let Some(clock) = clock {
+                        *vector_clock = Some(clock.clone());
                     }
                     *last_event_id = authored_last_event_id;
                 }
@@ -309,9 +478,7 @@ impl FsmAction for MergeAction {
                 )
                 .await
                 .map_err(|error| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to author the merge's EOF: {error}"
-                    ))
+                    FsmError::HandlerError(format!("Failed to author the merge's EOF: {error}"))
                 })?;
                 Ok(())
             }
@@ -337,8 +504,8 @@ impl FsmAction for MergeAction {
                 .await
             }
             MergeAction::Cleanup => {
-                ctx.first_phase_subscription.take();
-                ctx.held_subscription.take();
+                ctx.first_phase.subscription.take();
+                ctx.held.subscription.take();
                 if let Some(heartbeat) = ctx.heartbeat.take() {
                     heartbeat.cancel();
                 }

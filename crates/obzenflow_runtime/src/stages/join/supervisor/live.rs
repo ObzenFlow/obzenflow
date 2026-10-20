@@ -7,19 +7,16 @@ use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ControlAction,
-};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::ChainEvent;
+use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -28,55 +25,55 @@ use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::messaging::upstream_subscription::{selection_failure, NamedHead, RecordedStep};
 use crate::stages::join::fsm::{
-    JoinEvent, JoinResources, JoinSubscriptionSide, PendingSubscriptionAck,
+    JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, LiveReads, PendingSubscriptionAck,
 };
-use crate::stages::join::phase::PhaseReads;
+
+type LiveDirective =
+    Result<EventLoopDirective<JoinEvent>, Box<dyn std::error::Error + Send + Sync>>;
+
+type LiveStep =
+    Result<Option<EventLoopDirective<JoinEvent>>, Box<dyn std::error::Error + Send + Sync>>;
 
 pub(super) async fn dispatch_live<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state: &JoinState,
+    reads: LiveReads,
     ctx: &mut JoinResources<H>,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveDirective {
     common::ensure_subscriptions(sup, ctx);
 
     ctx.instrumentation
         .event_loops_total
         .fetch_add(1, Ordering::Relaxed);
 
-    match common::flush_pending_outputs(sup, ctx).await? {
-        FlushOutcome::Blocked => return Ok(EventLoopDirective::Continue),
-        FlushOutcome::DrainCompleteReady => {
-            tracing::warn!(
-                stage_name = %ctx.stage_name,
-                "Join live observed DrainComplete-ready pending transition; ignoring"
-            );
-        }
-        FlushOutcome::Drained => {}
+    if let FlushOutcome::Blocked = common::flush_pending_outputs(sup, ctx).await? {
+        return Ok(EventLoopDirective::Continue);
     }
 
-    if ctx.recorded_order.is_some() {
-        return Box::pin(dispatch_live_recorded(sup, ctx)).await;
-    }
-    if ctx.deterministic_fan_in {
-        return dispatch_live_canonical(sup, ctx).await;
+    let state_name = state.variant_name();
+    match reads {
+        LiveReads::Recorded => return Box::pin(dispatch_live_recorded(sup, state_name, ctx)).await,
+        LiveReads::Canonical => return dispatch_live_canonical(sup, state_name, ctx).await,
+        LiveReads::Preference => {}
     }
 
     let cap = ctx.reference_batch_cap.unwrap_or(usize::MAX);
     let prefer_stream = ctx.reference_since_last_stream >= cap;
 
     if prefer_stream {
-        if let Some(directive) = poll_live_stream(sup, ctx).await? {
+        if let Some(directive) = poll_live_stream(sup, state_name, ctx).await? {
             return Ok(directive);
         }
-        if let Some(directive) = poll_live_reference(sup, ctx).await? {
+        if let Some(directive) = poll_live_reference(sup, state_name, ctx).await? {
             return Ok(directive);
         }
     } else {
-        if let Some(directive) = poll_live_reference(sup, ctx).await? {
+        if let Some(directive) = poll_live_reference(sup, state_name, ctx).await? {
             return Ok(directive);
         }
-        if let Some(directive) = poll_live_stream(sup, ctx).await? {
+        if let Some(directive) = poll_live_stream(sup, state_name, ctx).await? {
             return Ok(directive);
         }
     }
@@ -110,14 +107,15 @@ async fn poll_live_reference<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state_name: &str,
     ctx: &mut JoinResources<H>,
-) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveStep {
     let poll = {
         let Some(subscription) = sup.reference_subscription.as_mut() else {
             return Ok(None);
         };
         subscription
-            .poll_next_with_state("Live", Some(&mut ctx.reference_contract_state[..]))
+            .poll_next_with_state(state_name, Some(&mut ctx.reference_contract_state[..]))
             .await
     };
 
@@ -152,7 +150,7 @@ async fn handle_reference_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinResources<H>,
     envelope: DeliveredRecord<ChainPayload>,
-) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveStep {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
     };
@@ -174,113 +172,20 @@ async fn handle_reference_envelope<
         .store(ctx.reference_since_last_stream as u64, Ordering::Relaxed);
 
     let directive = match &envelope.payload {
-        ChainPayload::FlowControl(signal) => {
-            // FLOWIP-120n: consume the catch-up watermark before the generic
-            // control resolution; the join authors its own at the flip.
-            if let FlowControlPayload::CatchUpComplete {
-                generation: announced,
-                ..
-            } = signal
-            {
-                return Ok(Some(
-                    common::consume_join_catch_up_watermark(
-                        sup.reference_subscription.as_ref(),
-                        sup.stream_subscription.as_ref(),
-                        ctx,
-                        *announced,
-                        PhaseReads::Both,
-                    )
-                    .await,
-                ));
-            }
-
-            // FLOWIP-120n F17: an authored EOF can be the delivery that
-            // completes the caught-up frontier; no watermark follows, so
-            // re-run the flip before normal EOF handling.
-            if envelope.is_eof() {
-                if let Some(directive) = common::flip_join_caught_up_on_eof(
-                    Some(&*subscription),
-                    sup.stream_subscription.as_ref(),
-                    ctx,
-                    PhaseReads::Both,
-                )
-                .await
-                {
-                    return Ok(Some(directive));
-                }
-            }
-
-            let contract_reader_count = ctx.reference_contract_state.len();
-            let upstream_stage = subscription.last_delivered_upstream_stage();
-            let last_eof_outcome = subscription.last_eof_outcome().cloned();
-            // FLOWIP-095k: fold the reference side's terminal kind; the join's
-            // authored kind is the worst across both sides.
-            if envelope.is_eof() {
-                if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
-                    ctx.terminal_eof_kind = Some(
-                        ctx.terminal_eof_kind
-                            .map_or(kind, |current| current.worst(kind)),
-                    );
-                }
-            }
-            if let Some(signal_snapshot) = common::signal_snapshot(
+        ChainPayload::FlowControl(_) => {
+            match common::read_control(
+                ctx,
+                subscription,
+                JoinSubscriptionSide::Reference,
+                sup.stream_subscription.as_ref(),
                 Some(crate::stages::observer::JoinSide::Reference),
-                &envelope.authored(),
-            ) {
-                common::observe_join_input(
-                    ctx,
-                    ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        None,
-                        subscription.last_delivered_generation(),
-                    ),
-                    &envelope.authored(),
-                    None,
-                    Some(&signal_snapshot),
-                    Some(&envelope),
-                )
-                .await?;
-            }
-
-            let resolution = resolve_control_event_awaiting_pauses(
-                signal,
-                &envelope,
-                ctx.control_strategy.as_ref(),
-                &mut ctx.processing_context,
-                /* cycle_config */ None,
-                /* cycle_guard */ None,
-                last_eof_outcome.as_ref(),
-                upstream_stage,
-                contract_reader_count,
-                /* drain_is_terminal */ false,
-                &ctx.stage_name,
+                envelope,
             )
-            .await;
-
-            match resolution {
-                ControlAction::Forward | ControlAction::ForwardAndDrain => {
-                    common::forward_control_to_journal(ctx, &envelope).await?;
-                    if envelope.is_eof() {
-                        let _ = subscription.take_last_eof_outcome();
-                    }
-                }
-                ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_type = envelope.event_type(),
-                        "Join received cycle-only control resolution without cycle config"
-                    );
-                }
-                ControlAction::Skip => {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_type = envelope.event_type(),
-                        "Skipping control event (dangerous!) during Live (reference)"
-                    );
-                }
+            .await?
+            {
+                Some(fact) => Some(EventLoopDirective::Transition(fact)),
+                None => Some(EventLoopDirective::Continue),
             }
-
-            Some(EventLoopDirective::Continue)
         }
         payload if payload.consumes_data_credit() => {
             let event = envelope.authored();
@@ -489,14 +394,15 @@ async fn poll_live_stream<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state_name: &str,
     ctx: &mut JoinResources<H>,
-) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveStep {
     let poll = {
         let Some(subscription) = sup.stream_subscription.as_mut() else {
             return Ok(None);
         };
         subscription
-            .poll_next_with_state("Live", Some(&mut ctx.stream_contract_state[..]))
+            .poll_next_with_state(state_name, Some(&mut ctx.stream_contract_state[..]))
             .await
     };
 
@@ -531,7 +437,7 @@ async fn handle_stream_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinResources<H>,
     envelope: DeliveredRecord<ChainPayload>,
-) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveStep {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
     };
@@ -550,128 +456,19 @@ async fn handle_stream_envelope<
         .store(0, Ordering::Relaxed);
 
     let directive = match &envelope.payload {
-        ChainPayload::FlowControl(signal) => {
-            // FLOWIP-120n: consume the catch-up watermark before the generic
-            // control resolution; the join authors its own at the flip.
-            if let FlowControlPayload::CatchUpComplete {
-                generation: announced,
-                ..
-            } = signal
-            {
-                return Ok(Some(
-                    common::consume_join_catch_up_watermark(
-                        sup.reference_subscription.as_ref(),
-                        sup.stream_subscription.as_ref(),
-                        ctx,
-                        *announced,
-                        PhaseReads::Both,
-                    )
-                    .await,
-                ));
-            }
-
-            if envelope.is_eof() {
-                ctx.buffered_eof = Some(envelope.authored());
-                ctx.drain_parent = Some(envelope.clone());
-
-                // FLOWIP-120n F17: an authored EOF can be the delivery that
-                // completes the caught-up frontier; no watermark follows, so
-                // re-run the flip before normal EOF handling.
-                if let Some(directive) = common::flip_join_caught_up_on_eof(
-                    sup.reference_subscription.as_ref(),
-                    Some(&*subscription),
-                    ctx,
-                    PhaseReads::Both,
-                )
-                .await
-                {
-                    return Ok(Some(directive));
-                }
-            }
-
-            let contract_reader_count = ctx.stream_contract_state.len();
-            let upstream_stage = subscription.last_delivered_upstream_stage();
-            let last_eof_outcome = subscription.last_eof_outcome().cloned();
-            // FLOWIP-095k: fold the stream side's terminal kind.
-            if envelope.is_eof() {
-                if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
-                    ctx.terminal_eof_kind = Some(
-                        ctx.terminal_eof_kind
-                            .map_or(kind, |current| current.worst(kind)),
-                    );
-                }
-            }
-            if let Some(signal_snapshot) = common::signal_snapshot(
+        ChainPayload::FlowControl(_) => {
+            match common::read_control(
+                ctx,
+                subscription,
+                JoinSubscriptionSide::Stream,
+                sup.reference_subscription.as_ref(),
                 Some(crate::stages::observer::JoinSide::Stream),
-                &envelope.authored(),
-            ) {
-                common::observe_join_input(
-                    ctx,
-                    ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        None,
-                        subscription.last_delivered_generation(),
-                    ),
-                    &envelope.authored(),
-                    None,
-                    Some(&signal_snapshot),
-                    Some(&envelope),
-                )
-                .await?;
-            }
-
-            let resolution = resolve_control_event_awaiting_pauses(
-                signal,
-                &envelope,
-                ctx.control_strategy.as_ref(),
-                &mut ctx.processing_context,
-                /* cycle_config */ None,
-                /* cycle_guard */ None,
-                last_eof_outcome.as_ref(),
-                upstream_stage,
-                contract_reader_count,
-                /* drain_is_terminal */ false,
-                &ctx.stage_name,
+                envelope,
             )
-            .await;
-
-            match resolution {
-                ControlAction::Forward => {
-                    common::forward_control_to_journal(ctx, &envelope).await?;
-                    if envelope.is_eof() {
-                        let _ = subscription.take_last_eof_outcome();
-                    }
-                    Some(EventLoopDirective::Continue)
-                }
-                ControlAction::ForwardAndDrain => {
-                    common::forward_control_to_journal(ctx, &envelope).await?;
-                    if envelope.is_eof() {
-                        if last_eof_outcome
-                            .as_ref()
-                            .is_some_and(|outcome| outcome.is_final)
-                        {
-                            ctx.final_stream_eof = Some(envelope.clone());
-                        }
-                        let _ = subscription.take_last_eof_outcome();
-                    }
-                    Some(EventLoopDirective::Transition(JoinEvent::ReceivedEOF))
-                }
-                ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_type = envelope.event_type(),
-                        "Join received cycle-only control resolution without cycle config"
-                    );
-                    Some(EventLoopDirective::Continue)
-                }
-                ControlAction::Skip => {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_type = envelope.event_type(),
-                        "Skipping control event (dangerous!) during Live (stream)"
-                    );
-                    Some(EventLoopDirective::Continue)
-                }
+            .await?
+            {
+                Some(fact) => Some(EventLoopDirective::Transition(fact)),
+                None => Some(EventLoopDirective::Continue),
             }
         }
         payload if payload.consumes_data_credit() => {
@@ -998,13 +795,14 @@ async fn dispatch_live_canonical<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state_name: &str,
     ctx: &mut JoinResources<H>,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveDirective {
     {
         if let Some(subscription) = sup.reference_subscription.as_mut() {
             let mut progress = Some(&mut ctx.reference_contract_state[..]);
             match subscription
-                .ensure_merge_candidate("Live", &mut progress)
+                .ensure_merge_candidate(state_name, &mut progress)
                 .await
             {
                 Err(e) => {
@@ -1034,7 +832,7 @@ async fn dispatch_live_canonical<
         if let Some(subscription) = sup.stream_subscription.as_mut() {
             let mut progress = Some(&mut ctx.stream_contract_state[..]);
             match subscription
-                .ensure_merge_candidate("Live", &mut progress)
+                .ensure_merge_candidate(state_name, &mut progress)
                 .await
             {
                 Err(e) => {
@@ -1129,7 +927,7 @@ async fn dispatch_live_canonical<
                     return Ok(EventLoopDirective::Continue);
                 };
                 subscription
-                    .take_merge_candidate("Live", Some(&mut ctx.reference_contract_state[..]))
+                    .take_merge_candidate(state_name, Some(&mut ctx.reference_contract_state[..]))
             };
             match poll {
                 PollResult::Event(envelope) => {
@@ -1157,7 +955,8 @@ async fn dispatch_live_canonical<
                 let Some(subscription) = sup.stream_subscription.as_mut() else {
                     return Ok(EventLoopDirective::Continue);
                 };
-                subscription.take_merge_candidate("Live", Some(&mut ctx.stream_contract_state[..]))
+                subscription
+                    .take_merge_candidate(state_name, Some(&mut ctx.stream_contract_state[..]))
             };
             match poll {
                 PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope).await?,
@@ -1187,18 +986,23 @@ async fn dispatch_live_recorded<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state_name: &str,
     ctx: &mut JoinResources<H>,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveDirective {
     let step = ctx
         .recorded_order
         .as_mut()
         .expect("recorded join holds its order")
         .step();
     match step {
-        RecordedStep::Open { row } => Box::pin(follow_recorded(sup, ctx, row, true)).await,
-        RecordedStep::Continue { row } => Box::pin(follow_recorded(sup, ctx, row, false)).await,
-        RecordedStep::Canonical => Box::pin(dispatch_live_canonical(sup, ctx)).await,
-        RecordedStep::Record => Box::pin(select_and_record(sup, ctx)).await,
+        RecordedStep::Open { row } => {
+            Box::pin(follow_recorded(sup, state_name, ctx, row, true)).await
+        }
+        RecordedStep::Continue { row } => {
+            Box::pin(follow_recorded(sup, state_name, ctx, row, false)).await
+        }
+        RecordedStep::Canonical => Box::pin(dispatch_live_canonical(sup, state_name, ctx)).await,
+        RecordedStep::Record => Box::pin(select_and_record(sup, state_name, ctx)).await,
     }
 }
 
@@ -1254,23 +1058,26 @@ async fn deliver_recorded<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state_name: &str,
     ctx: &mut JoinResources<H>,
     side: JoinSide,
     index: usize,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveDirective {
     let poll = match side {
         JoinSide::Reference => match sup.reference_subscription.as_mut() {
             Some(subscription) => subscription.take_held_head(
                 index,
-                "Live",
+                state_name,
                 Some(&mut ctx.reference_contract_state[..]),
             ),
             None => return Ok(EventLoopDirective::Continue),
         },
         JoinSide::Stream => match sup.stream_subscription.as_mut() {
-            Some(subscription) => {
-                subscription.take_held_head(index, "Live", Some(&mut ctx.stream_contract_state[..]))
-            }
+            Some(subscription) => subscription.take_held_head(
+                index,
+                state_name,
+                Some(&mut ctx.stream_contract_state[..]),
+            ),
             None => return Ok(EventLoopDirective::Continue),
         },
     };
@@ -1302,10 +1109,11 @@ async fn follow_recorded<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state_name: &str,
     ctx: &mut JoinResources<H>,
     row: usize,
     opening: bool,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveDirective {
     let archived = ctx
         .recorded_order
         .as_ref()
@@ -1346,7 +1154,7 @@ async fn follow_recorded<
         };
         let subscription = subscription.expect("named side is subscribed");
         subscription
-            .ensure_named_head(index, "Live", &mut progress)
+            .ensure_named_head(index, state_name, &mut progress)
             .await
     };
     match ensured {
@@ -1416,15 +1224,16 @@ async fn follow_recorded<
         .as_mut()
         .expect("recorded join holds its order")
         .followed(ends_input);
-    deliver_recorded(sup, ctx, side, index).await
+    deliver_recorded(sup, state_name, ctx, side, index).await
 }
 
 async fn select_and_record<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
+    state_name: &str,
     ctx: &mut JoinResources<H>,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> LiveDirective {
     loop {
         let held = |sup: &JoinSupervisor<H>| {
             sup.reference_subscription
@@ -1452,7 +1261,7 @@ async fn select_and_record<
                     continue;
                 };
                 subscription
-                    .acquire_available_heads("Live", &mut progress)
+                    .acquire_available_heads(state_name, &mut progress)
                     .await
             };
             match acquired {
@@ -1541,7 +1350,7 @@ async fn select_and_record<
             .expect("recorded join holds its order")
             .selected(input);
     }
-    deliver_recorded(sup, ctx, side, index).await
+    deliver_recorded(sup, state_name, ctx, side, index).await
 }
 
 async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(

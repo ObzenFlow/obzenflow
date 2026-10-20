@@ -10,8 +10,11 @@ mod enriching;
 mod hydrating;
 mod live;
 
-use super::config::JoinReferenceMode;
-use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState};
+use super::fsm::{
+    DrainStep, JoinAction, JoinContext, JoinDrain, JoinEnrichment, JoinEvent, JoinHold, JoinLive,
+    JoinReading, JoinState, PlanShape, ThenLivePhases,
+};
+use super::phase::HoldOutcome;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::stages::common::handlers::UnifiedJoinHandler;
@@ -25,7 +28,7 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::execution_payload::JoinPhaseFact;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisorDescriptor, SupervisorKind,
 };
@@ -35,7 +38,6 @@ use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Tra
 use std::error::Error;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::sync::atomic::Ordering;
 
 /// Supervisor for join stages.
 pub(crate) struct JoinSupervisor<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> {
@@ -58,8 +60,8 @@ pub(crate) struct JoinSupervisor<H: UnifiedJoinHandler + Clone + Debug + Send + 
 impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
     for JoinSupervisor<H>
 {
-    type State = JoinState<H>;
-    type Event = JoinEvent<H>;
+    type State = JoinState;
+    type Event = JoinEvent;
     type Context = JoinContext<H>;
     type Action = JoinAction<H>;
 
@@ -68,407 +70,521 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
         initial_state: Self::State,
     ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         fsm! {
-            state:   JoinState<H>;
-            event:   JoinEvent<H>;
+            state:   JoinState;
+            event:   JoinEvent;
             context: JoinContext<H>;
             action:  JoinAction<H>;
             initial: initial_state;
 
             state JoinState::Created {
-                on JoinEvent::Initialize => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                on JoinEvent::Initialize => |state, _, _| {
                     Box::pin(async move {
-
+                        let JoinState::Created(plan) = state else { unreachable!() };
                         Ok(Transition {
-                            next_state: JoinState::Initializing,
-                            actions: vec![JoinAction::Host(SupervisorAction::Register), JoinAction::AllocateResources, JoinAction::Host(SupervisorAction::Emit(JoinEvent::InitializationCompleted))],
-                        })
-                    })
-                };
-
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let JoinEvent::Error(msg) = event {
-
-                            ctx.instrumentation
-                                .failures_total
-                                .fetch_add(1, Ordering::Relaxed);
-                            let failure_msg = msg.clone();
-                            Ok(Transition {
-                                next_state: JoinState::failure(failure_msg),
-                                actions: vec![JoinAction::SendFailure { message: msg },
-                                    JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))],
-                            })
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                };
-            }
-
-            state JoinState::Initialized {
-                on JoinEvent::Ready => |_state: &JoinState<H>, _event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    Box::pin(async move {
-                        let next_state = JoinState::Starting;
-                        Ok(Transition {
-                            next_state,
-                            actions: vec![JoinAction::InitializeHandlerState,
-                                JoinAction::PublishRunning, JoinAction::Host(SupervisorAction::Emit(JoinEvent::ActivationCompleted))],
-                        })
-                    })
-                };
-
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let JoinEvent::Error(msg) = event {
-
-                            ctx.instrumentation
-                                .failures_total
-                                .fetch_add(1, Ordering::Relaxed);
-                            let failure_msg = msg.clone();
-                            Ok(Transition {
-                                next_state: JoinState::failure(failure_msg),
-                                actions: vec![JoinAction::SendFailure { message: msg },
-                                    JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))],
-                            })
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                };
-            }
-
-            state JoinState::Hydrating {
-                on JoinEvent::Ready => |_state: &JoinState<H>, _event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    Box::pin(async move {
-                        tracing::info!("JoinSupervisor: received Ready in Hydrating; treating as no-op");
-                        Ok(Transition {
-                            next_state: JoinState::Hydrating,
-                            actions: vec![],
-                        })
-                    })
-                };
-
-                on JoinEvent::HoldCompleted => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let JoinEvent::HoldCompleted(completion) = event else { unreachable!() };
-                    let completion = completion.clone();
-                    let straight_to_live = ctx.reference_mode == JoinReferenceMode::FiniteThenLive
-                        && ctx.batch_phase_empty;
-                    Box::pin(async move {
-                        let (next_state, fact) = if straight_to_live {
-                            (
-                                JoinState::Live,
-                                JoinPhaseFact::LiveEntered {
-                                    generation: completion.generation,
-                                    ended_by: completion.ended_by,
-                                },
-                            )
-                        } else {
-                            (
-                                JoinState::Enriching,
-                                JoinPhaseFact::EnrichingEntered {
-                                    generation: completion.generation,
-                                    ended_by: completion.ended_by,
-                                },
-                            )
-                        };
-                        Ok(Transition {
-                            next_state,
+                            next_state: JoinState::Initializing(*plan),
                             actions: vec![
-                                JoinAction::EmitHydrationHeartbeat,
-                                JoinAction::RecordPhase(fact),
+                                JoinAction::Host(SupervisorAction::Register),
+                                JoinAction::AllocateResources,
+                                JoinAction::Host(SupervisorAction::Emit(
+                                    JoinEvent::InitializationCompleted,
+                                )),
                             ],
                         })
                     })
                 };
 
-                on JoinEvent::HoldLeftOpen => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                on JoinEvent::Error => |_, event, ctx| {
                     Box::pin(async move {
-                        Ok(Transition {
-                            next_state: JoinState::Draining,
-                            actions: vec![JoinAction::EmitHydrationHeartbeat],
-                        })
-                    })
-                };
-
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let JoinEvent::Error(msg) = event {
-
-                            ctx.instrumentation
-                                .failures_total
-                                .fetch_add(1, Ordering::Relaxed);
-                            let failure_msg = msg.clone();
-                            Ok(Transition {
-                                next_state: JoinState::failure(failure_msg),
-                                actions: vec![JoinAction::SendFailure { message: msg },
-                                    JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))],
-                            })
-                        } else {
-                            unreachable!()
-                        }
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
                     })
                 };
             }
 
-            state JoinState::Live {
-                on JoinEvent::Ready => |_state: &JoinState<H>, _event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
+            state JoinState::Initializing {
+                on JoinEvent::InitializationCompleted => |state, _, _| {
                     Box::pin(async move {
-                        tracing::info!("JoinSupervisor: received Ready in Live; treating as no-op");
+                        let JoinState::Initializing(plan) = state else { unreachable!() };
                         Ok(Transition {
-                            next_state: JoinState::Live,
-                            actions: vec![],
+                            next_state: JoinState::Initialized(*plan),
+                            actions: Vec::new(),
                         })
                     })
                 };
 
-                on JoinEvent::ReceivedEOF => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                on JoinEvent::Error => |_, event, ctx| {
                     Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail_uncounted(cause.clone()))
+                    })
+                };
+            }
 
+            state JoinState::Initialized {
+                on JoinEvent::Ready => |state, _, _| {
+                    Box::pin(async move {
+                        let JoinState::Initialized(plan) = state else { unreachable!() };
                         Ok(Transition {
-                            next_state: JoinState::Draining,
-                            actions: vec![],
+                            next_state: JoinState::Starting(*plan),
+                            actions: vec![
+                                JoinAction::PublishRunning,
+                                JoinAction::Host(SupervisorAction::Emit(
+                                    JoinEvent::ActivationCompleted,
+                                )),
+                            ],
                         })
                     })
                 };
 
-                on JoinEvent::BeginDrain => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                on JoinEvent::Error => |_, event, ctx| {
                     Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
+            }
 
+            state JoinState::Starting {
+                on JoinEvent::ActivationCompleted => |state, _, _| {
+                    Box::pin(async move {
+                        let JoinState::Starting(plan) = state else { unreachable!() };
+                        let reading = JoinReading::new(*plan);
+                        let next_state = match plan.shape() {
+                            PlanShape::Live(reads) => JoinState::Live(JoinLive { reading, reads }),
+                            PlanShape::FiniteEof | PlanShape::ThenLive(_) => {
+                                JoinState::Hydrating(JoinHold::new(reading))
+                            }
+                        };
                         Ok(Transition {
-                            next_state: JoinState::Draining,
-                            actions: vec![],
+                            next_state,
+                            actions: Vec::new(),
                         })
                     })
                 };
 
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let event = event.clone();
+                on JoinEvent::Error => |_, event, ctx| {
                     Box::pin(async move {
-                        if let JoinEvent::Error(msg) = event {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail_uncounted(cause.clone()))
+                    })
+                };
+            }
 
-                            ctx.instrumentation.failures_total.fetch_add(1, Ordering::Relaxed);
-                            let failure_msg = msg.clone();
-                            Ok(Transition {
-                                next_state: JoinState::failure(failure_msg),
-                                actions: vec![JoinAction::SendFailure { message: msg },
-                                    JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))],
-                            })
-                        } else {
-                            unreachable!()
-                        }
+            state JoinState::Hydrating {
+                on JoinEvent::WatermarkRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let JoinState::Hydrating(hold) = state else { unreachable!() };
+                        let JoinEvent::WatermarkRead(read) = event else { unreachable!() };
+                        let (reading, actions) =
+                            match ctx.cross(state, read.generation, read.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        Ok(Transition {
+                            next_state: JoinState::Hydrating(JoinHold {
+                                reading,
+                                witnessed: hold.witnessed.clone(),
+                            }),
+                            actions,
+                        })
+                    })
+                };
+
+                on JoinEvent::ReferenceEofRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let JoinState::Hydrating(hold) = state else { unreachable!() };
+                        let JoinEvent::ReferenceEofRead(eof) = event else { unreachable!() };
+                        let (reading, mut actions) =
+                            match ctx.cross(state, eof.frontier.highest(), eof.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
+                        let reading = reading.with_worst_of(eof);
+                        let (witnessed, outcome) = ctx.fold_catalog_witness(&hold.witnessed, eof);
+                        let next_state = match outcome {
+                            HoldOutcome::Holding => {
+                                JoinState::Hydrating(JoinHold { reading, witnessed })
+                            }
+                            HoldOutcome::LeftOpen => {
+                                tracing::info!(
+                                    stage_name = %ctx.stage_name(),
+                                    "Join hydration left open; draining without held inputs"
+                                );
+                                actions.push(JoinAction::EmitHydrationHeartbeat);
+                                actions.push(JoinAction::ReleaseInputs);
+                                JoinState::Draining(JoinDrain {
+                                    step: DrainStep::Flush,
+                                    worst_eof: reading.worst_eof,
+                                    clock: None,
+                                })
+                            }
+                            HoldOutcome::Completed(done) => {
+                                tracing::info!(
+                                    stage_name = %ctx.stage_name(),
+                                    ended_by = ?done.ended_by,
+                                    "Join hydration completed on natural EOFs"
+                                );
+                                actions.push(JoinAction::EmitHydrationHeartbeat);
+                                match reading.plan.shape() {
+                                    PlanShape::Live(reads)
+                                    | PlanShape::ThenLive(ThenLivePhases::LiveOnly(reads)) => {
+                                        actions.push(JoinAction::RecordPhase(done.live_entered()));
+                                        JoinState::Live(JoinLive { reading, reads })
+                                    }
+                                    PlanShape::FiniteEof => {
+                                        actions.push(JoinAction::RecordPhase(
+                                            done.enriching_entered(),
+                                        ));
+                                        JoinState::Enriching(JoinEnrichment::ToEnd(reading))
+                                    }
+                                    PlanShape::ThenLive(
+                                        ThenLivePhases::BatchThenLive(_) | ThenLivePhases::BatchOnly,
+                                    ) => {
+                                        actions.push(JoinAction::RecordPhase(
+                                            done.enriching_entered(),
+                                        ));
+                                        JoinState::Enriching(JoinEnrichment::Holding(
+                                            JoinHold::new(reading),
+                                        ))
+                                    }
+                                }
+                            }
+                        };
+                        Ok(Transition { next_state, actions })
+                    })
+                };
+
+                on JoinEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
                     })
                 };
             }
 
             state JoinState::Enriching {
-                on JoinEvent::Ready => |_state: &JoinState<H>, _event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
+                on JoinEvent::WatermarkRead => |state, event, ctx| {
                     Box::pin(async move {
-                        tracing::info!("JoinSupervisor: received Ready in Enriching; treating as no-op");
+                        let JoinState::Enriching(enrichment) = state else { unreachable!() };
+                        let JoinEvent::WatermarkRead(read) = event else { unreachable!() };
+                        let (reading, actions) =
+                            match ctx.cross(state, read.generation, read.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        let next_state = match enrichment {
+                            JoinEnrichment::Holding(hold) => {
+                                JoinState::Enriching(JoinEnrichment::Holding(JoinHold {
+                                    reading,
+                                    witnessed: hold.witnessed.clone(),
+                                }))
+                            }
+                            JoinEnrichment::ToEnd(_) => {
+                                JoinState::Enriching(JoinEnrichment::ToEnd(reading))
+                            }
+                        };
+                        Ok(Transition { next_state, actions })
+                    })
+                };
+
+                on JoinEvent::StreamEofRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let JoinState::Enriching(enrichment) = state else { unreachable!() };
+                        let JoinEvent::StreamEofRead(eof) = event else { unreachable!() };
+                        let (reading, mut actions) =
+                            match ctx.cross(state, eof.frontier.highest(), eof.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
+                        let reading = reading.with_worst_of(eof);
+                        let next_state = match enrichment {
+                            JoinEnrichment::ToEnd(_) if eof.ends_reads => {
+                                actions.push(JoinAction::ReleaseInputs);
+                                JoinState::Draining(JoinDrain {
+                                    step: DrainStep::Finalize {
+                                        final_eof: eof.envelope.clone(),
+                                    },
+                                    worst_eof: reading.worst_eof,
+                                    clock: eof.clock(),
+                                })
+                            }
+                            JoinEnrichment::ToEnd(_) => {
+                                JoinState::Enriching(JoinEnrichment::ToEnd(reading))
+                            }
+                            JoinEnrichment::Holding(hold) => {
+                                let (witnessed, outcome) =
+                                    ctx.fold_batch_witness(&hold.witnessed, eof);
+                                match (outcome, reading.plan.live_reads()) {
+                                    (HoldOutcome::Holding, _) => {
+                                        JoinState::Enriching(JoinEnrichment::Holding(JoinHold {
+                                            reading,
+                                            witnessed,
+                                        }))
+                                    }
+                                    (HoldOutcome::LeftOpen, _) => {
+                                        tracing::info!(
+                                            stage_name = %ctx.stage_name(),
+                                            "Join batch left open; draining without held inputs"
+                                        );
+                                        actions.push(JoinAction::ReleaseInputs);
+                                        JoinState::Draining(JoinDrain {
+                                            step: DrainStep::Flush,
+                                            worst_eof: reading.worst_eof,
+                                            clock: eof.clock(),
+                                        })
+                                    }
+                                    (HoldOutcome::Completed(done), Some(reads)) => {
+                                        tracing::info!(
+                                            stage_name = %ctx.stage_name(),
+                                            ended_by = ?done.ended_by,
+                                            "Join batch completed on natural EOFs; going live"
+                                        );
+                                        actions.push(JoinAction::RecordPhase(done.live_entered()));
+                                        JoinState::Live(JoinLive { reading, reads })
+                                    }
+                                    (HoldOutcome::Completed(_), None) if eof.ends_reads => {
+                                        actions.push(JoinAction::ReleaseInputs);
+                                        JoinState::Draining(JoinDrain {
+                                            step: DrainStep::Finalize {
+                                                final_eof: eof.envelope.clone(),
+                                            },
+                                            worst_eof: reading.worst_eof,
+                                            clock: eof.clock(),
+                                        })
+                                    }
+                                    (HoldOutcome::Completed(_), None) => {
+                                        return Ok(ctx.fail(format!(
+                                            "join '{}' completed its batch on an EOF that did not end its stream",
+                                            ctx.stage_name()
+                                        )));
+                                    }
+                                }
+                            }
+                        };
+                        Ok(Transition { next_state, actions })
+                    })
+                };
+
+                on JoinEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
+            }
+
+            state JoinState::Live {
+                on JoinEvent::WatermarkRead => |state, event, ctx| {
+                    Box::pin(async move {
+                        let JoinState::Live(live) = state else { unreachable!() };
+                        let JoinEvent::WatermarkRead(read) = event else { unreachable!() };
+                        let (reading, actions) =
+                            match ctx.cross(state, read.generation, read.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
                         Ok(Transition {
-                            next_state: JoinState::Enriching,
-                            actions: vec![],
+                            next_state: JoinState::Live(JoinLive { reading, reads: live.reads }),
+                            actions,
                         })
                     })
                 };
 
-                on JoinEvent::HoldCompleted => |_state: &JoinState<H>, event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
-                    let JoinEvent::HoldCompleted(completion) = event else { unreachable!() };
-                    let fact = JoinPhaseFact::LiveEntered {
-                        generation: completion.generation,
-                        ended_by: completion.ended_by.clone(),
-                    };
+                on JoinEvent::ReferenceEofRead => |state, event, ctx| {
                     Box::pin(async move {
+                        let JoinState::Live(live) = state else { unreachable!() };
+                        let JoinEvent::ReferenceEofRead(eof) = event else { unreachable!() };
+                        let (reading, mut actions) =
+                            match ctx.cross(state, eof.frontier.highest(), eof.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
                         Ok(Transition {
-                            next_state: JoinState::Live,
-                            actions: vec![JoinAction::RecordPhase(fact)],
+                            next_state: JoinState::Live(JoinLive {
+                                reading: reading.with_worst_of(eof),
+                                reads: live.reads,
+                            }),
+                            actions,
                         })
                     })
                 };
 
-                on JoinEvent::HoldLeftOpen => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                on JoinEvent::StreamEofRead => |state, event, ctx| {
                     Box::pin(async move {
-                        Ok(Transition {
-                            next_state: JoinState::Draining,
-                            actions: vec![],
-                        })
-                    })
-                };
-
-                on JoinEvent::ReceivedEOF => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
-                    Box::pin(async move {
-
-                        Ok(Transition {
-                            next_state: JoinState::Draining,
-                            actions: vec![],
-                        })
-                    })
-                };
-
-                on JoinEvent::BeginDrain => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
-                    Box::pin(async move {
-
-                        Ok(Transition {
-                            next_state: JoinState::Draining,
-                            actions: vec![],
-                        })
-                    })
-                };
-
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let JoinEvent::Error(msg) = event {
-
-                            ctx.instrumentation.failures_total.fetch_add(1, Ordering::Relaxed);
-                            let failure_msg = msg.clone();
-                            Ok(Transition {
-                                next_state: JoinState::failure(failure_msg),
-                                actions: vec![JoinAction::SendFailure { message: msg },
-                                    JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))],
+                        let JoinState::Live(live) = state else { unreachable!() };
+                        let JoinEvent::StreamEofRead(eof) = event else { unreachable!() };
+                        let (reading, mut actions) =
+                            match ctx.cross(state, eof.frontier.highest(), eof.frontier) {
+                                Ok(crossed) => crossed,
+                                Err(cause) => return Ok(ctx.fail(cause)),
+                            };
+                        actions.push(JoinAction::ForwardControl(eof.envelope.clone()));
+                        let reading = reading.with_worst_of(eof);
+                        let next_state = if eof.ends_reads {
+                            actions.push(JoinAction::ReleaseInputs);
+                            JoinState::Draining(JoinDrain {
+                                step: DrainStep::Finalize {
+                                    final_eof: eof.envelope.clone(),
+                                },
+                                worst_eof: reading.worst_eof,
+                                clock: eof.clock(),
                             })
                         } else {
-                            unreachable!()
-                        }
+                            JoinState::Live(JoinLive { reading, reads: live.reads })
+                        };
+                        Ok(Transition { next_state, actions })
+                    })
+                };
+
+                on JoinEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
                     })
                 };
             }
 
             state JoinState::Draining {
-                on JoinEvent::ReceivedEOF => |_state: &JoinState<H>, _event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: JoinState::Draining, actions: vec![] }) })
-                };
-                on JoinEvent::DrainComplete => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
+                on JoinEvent::DrainStepEnded => |state, _, ctx| {
                     Box::pin(async move {
-
+                        let JoinState::Draining(drain) = state else { unreachable!() };
+                        let step = match &drain.step {
+                            DrainStep::Finalize { .. } => DrainStep::Flush,
+                            DrainStep::Flush => {
+                                return Ok(ctx.fail(format!(
+                                    "join '{}' reported a drain step after its flush",
+                                    ctx.stage_name()
+                                )));
+                            }
+                        };
                         Ok(Transition {
-                            next_state: JoinState::Finalizing,
-                            actions: vec![JoinAction::ForwardEOF,
-                                JoinAction::SendCompletion,
-                                JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::FinalizationCompleted))],
+                            next_state: JoinState::Draining(JoinDrain { step, ..drain.clone() }),
+                            actions: Vec::new(),
                         })
                     })
                 };
 
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let event = event.clone();
+                on JoinEvent::DrainComplete => |state, _, ctx| {
                     Box::pin(async move {
-                        if let JoinEvent::Error(msg) = event {
-
-                            ctx.instrumentation
-                                .failures_total
-                                .fetch_add(1, Ordering::Relaxed);
-                            let failure_msg = msg.clone();
-                            Ok(Transition {
-                                next_state: JoinState::failure(failure_msg),
-                                actions: vec![JoinAction::SendFailure { message: msg },
-                                    JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))],
-                            })
-                        } else {
-                            unreachable!()
+                        let JoinState::Draining(drain) = state else { unreachable!() };
+                        if drain.step != DrainStep::Flush {
+                            return Ok(ctx.fail(format!(
+                                "join '{}' completed its drain before its flush",
+                                ctx.stage_name()
+                            )));
                         }
+                        Ok(Transition {
+                            next_state: JoinState::Finalizing,
+                            actions: vec![
+                                JoinAction::AuthorEof {
+                                    kind: drain.worst_eof.unwrap_or(EofKind::Natural),
+                                    clock: drain.clock.clone(),
+                                },
+                                JoinAction::SendCompletion,
+                                JoinAction::Cleanup,
+                                JoinAction::Host(SupervisorAction::CloseMailbox),
+                                JoinAction::Host(SupervisorAction::SettlePublications),
+                                JoinAction::Host(SupervisorAction::Emit(
+                                    JoinEvent::FinalizationCompleted,
+                                )),
+                            ],
+                        })
+                    })
+                };
+
+                on JoinEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail(cause.clone()))
+                    })
+                };
+            }
+
+            state JoinState::Finalizing {
+                on JoinEvent::FinalizationCompleted => |_, _, _| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JoinState::Drained,
+                            actions: Vec::new(),
+                        })
+                    })
+                };
+
+                on JoinEvent::Error => |_, event, ctx| {
+                    Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(ctx.fail_uncounted(cause.clone()))
+                    })
+                };
+            }
+
+            state JoinState::Failing {
+                on JoinEvent::TerminationSettled => |state, _, _| {
+                    Box::pin(async move {
+                        let JoinState::Failing(cause) = state else { unreachable!() };
+                        Ok(Transition {
+                            next_state: JoinState::Failed(cause.clone()),
+                            actions: Vec::new(),
+                        })
+                    })
+                };
+            }
+
+            state JoinState::Cancelling {
+                on JoinEvent::Error => |state, event, ctx| {
+                    Box::pin(async move {
+                        let JoinEvent::Error(cause) = event else { unreachable!() };
+                        Ok(match JoinState::failure(cause.clone()) {
+                            JoinState::Cancelling(_) => Transition {
+                                next_state: state.clone(),
+                                actions: Vec::new(),
+                            },
+                            _ => ctx.fail_uncounted(cause.clone()),
+                        })
+                    })
+                };
+
+                on JoinEvent::TerminationSettled => |state, _, _| {
+                    Box::pin(async move {
+                        let JoinState::Cancelling(cause) = state else { unreachable!() };
+                        Ok(Transition {
+                            next_state: JoinState::Cancelled(cause.clone()),
+                            actions: Vec::new(),
+                        })
                     })
                 };
             }
 
             state JoinState::Drained {}
-
             state JoinState::Failed {}
-
-            state JoinState::Initializing {
-                on JoinEvent::InitializationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let next_state = JoinState::Initialized;
-                    let _ = ctx;
-                    Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
-                };
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    let JoinEvent::Error(cause) = event else { unreachable!() };
-                    let cause = cause.clone();
-                    Box::pin(async move { Ok(Transition { next_state: JoinState::failure(cause.clone()), actions: vec![JoinAction::SendFailure { message: cause }, JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))] }) })
-                };
-            }
-
-            state JoinState::Starting {
-                on JoinEvent::ActivationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let next_state = match ctx.reference_mode {
-                        JoinReferenceMode::FiniteEof | JoinReferenceMode::FiniteThenLive => JoinState::Hydrating,
-                        JoinReferenceMode::Live => JoinState::Live,
-                    };
-                    let _ = ctx;
-                    Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
-                };
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    let JoinEvent::Error(cause) = event else { unreachable!() };
-                    let cause = cause.clone();
-                    Box::pin(async move { Ok(Transition { next_state: JoinState::failure(cause.clone()), actions: vec![JoinAction::SendFailure { message: cause }, JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))] }) })
-                };
-            }
-
-            state JoinState::Finalizing {
-                on JoinEvent::FinalizationCompleted => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
-                    let next_state = JoinState::Drained;
-                    let _ = ctx;
-                    Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
-                };
-                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    let JoinEvent::Error(cause) = event else { unreachable!() };
-                    let cause = cause.clone();
-                    Box::pin(async move { Ok(Transition { next_state: JoinState::failure(cause.clone()), actions: vec![JoinAction::SendFailure { message: cause }, JoinAction::Cleanup, JoinAction::Host(SupervisorAction::CloseMailbox), JoinAction::Host(SupervisorAction::SettlePublications), JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled))] }) })
-                };
-            }
-
-            state JoinState::Failing {
-                on JoinEvent::TerminationSettled => |state: &JoinState<H>, _event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    let JoinState::Failing(cause) = state else { unreachable!() };
-                    let cause = cause.clone();
-                    Box::pin(async move { Ok(Transition { next_state: JoinState::Failed(cause), actions: vec![] }) })
-                };
-            }
-
-            state JoinState::Cancelling {
-                on JoinEvent::Error => |state: &JoinState<H>, event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    let JoinEvent::Error(cause) = event else { unreachable!() };
-                    let cause = cause.clone();
-                    let next = JoinState::failure(cause.clone());
-                    let repeated_cancel = matches!(next, JoinState::Cancelling(_));
-                    let next_state = if repeated_cancel { state.clone() } else { next };
-                    Box::pin(async move { Ok(Transition { next_state, actions: if repeated_cancel { vec![] } else { vec![
-                        JoinAction::SendFailure { message: cause },
-                        JoinAction::Cleanup,
-                        JoinAction::Host(SupervisorAction::CloseMailbox),
-                        JoinAction::Host(SupervisorAction::SettlePublications),
-                        JoinAction::Host(SupervisorAction::Emit(JoinEvent::TerminationSettled)),
-                    ] } }) })
-                };
-
-                on JoinEvent::TerminationSettled => |state: &JoinState<H>, _event: &JoinEvent<H>, __ctx: &mut JoinContext<H>| {
-                    let JoinState::Cancelling(cause) = state else { unreachable!() };
-                    let cause = cause.clone();
-                    Box::pin(async move { Ok(Transition { next_state: JoinState::Cancelled(cause), actions: vec![] }) })
-                };
-            }
-
             state JoinState::Cancelled {}
 
-            unhandled => |state: &JoinState<H>, event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
-                let ignored = matches!(event, JoinEvent::Initialize | JoinEvent::Ready | JoinEvent::BeginDrain)
-                    || matches!(state, JoinState::Failing(_) | JoinState::Cancelling(_) | JoinState::Failed(_) | JoinState::Cancelled(_) | JoinState::Drained);
-                let state_name = state.variant_name().to_string();
-                let event_name = event.variant_name().to_string();
+            unhandled => |state, event, _| {
                 Box::pin(async move {
-                    if ignored { return Ok(()); }
-
+                    let ignored = matches!(event, JoinEvent::Initialize | JoinEvent::Ready)
+                        || matches!(
+                            state,
+                            JoinState::Failing(_)
+                                | JoinState::Cancelling(_)
+                                | JoinState::Failed(_)
+                                | JoinState::Cancelled(_)
+                                | JoinState::Drained
+                        );
+                    if ignored {
+                        return Ok(());
+                    }
                     tracing::error!(
                         supervisor = "JoinSupervisor",
-                        state = %state_name,
-                        event = %event_name,
+                        state = %state.variant_name(),
+                        event = %event.variant_name(),
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
                     Err(FsmError::UnhandledEvent {
-                        state: state_name,
-                        event: event_name,
+                        state: state.variant_name().to_string(),
+                        event: event.variant_name().to_string(),
                     })
                 })
             };
@@ -557,7 +673,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSuper
             Box::new(move |context: &mut JoinContext<H>| {
                 context.resources = resources;
                 result.map(|()| None).map_err(Into::into)
-            }) as ActionCompletion<JoinContext<H>, JoinEvent<H>>
+            }) as ActionCompletion<JoinContext<H>, JoinEvent>
         })))
     }
 
@@ -565,7 +681,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSuper
         WriterId::from(self.stage_id)
     }
 
-    fn event_for_action_error(&self, msg: String) -> JoinEvent<H> {
+    fn event_for_action_error(&self, msg: String) -> JoinEvent {
         JoinEvent::Error(msg)
     }
 
@@ -576,7 +692,10 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSuper
     ) -> Option<OwnedDispatch<Self>> {
         if !matches!(
             state,
-            JoinState::Hydrating | JoinState::Enriching | JoinState::Live | JoinState::Draining
+            JoinState::Hydrating(_)
+                | JoinState::Enriching(_)
+                | JoinState::Live(_)
+                | JoinState::Draining(_)
         ) {
             return None;
         }
@@ -613,24 +732,17 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSuper
         );
 
         match state {
-            JoinState::Initializing
-            | JoinState::Starting
-            | JoinState::Finalizing
-            | JoinState::Failing(_)
-            | JoinState::Cancelling(_) => Ok(EventLoopDirective::Continue),
-
-            JoinState::Created => Ok(EventLoopDirective::Continue),
-            JoinState::Initialized => Ok(EventLoopDirective::Continue),
-
-            JoinState::Hydrating => {
+            JoinState::Hydrating(_) => {
                 hydrating::dispatch_hydrating(self, state, ctx.resources_mut()?).await
             }
-            JoinState::Enriching => {
+            JoinState::Enriching(_) => {
                 enriching::dispatch_enriching(self, state, ctx.resources_mut()?).await
             }
-            JoinState::Live => live::dispatch_live(self, ctx.resources_mut()?).await,
-            JoinState::Draining => {
-                draining::dispatch_draining(self, state, ctx.resources_mut()?).await
+            JoinState::Live(live) => {
+                live::dispatch_live(self, state, live.reads, ctx.resources_mut()?).await
+            }
+            JoinState::Draining(drain) => {
+                draining::dispatch_draining(self, drain, ctx.resources_mut()?).await
             }
             JoinState::Drained | JoinState::Failed(_) | JoinState::Cancelled(_) => {
                 Ok(EventLoopDirective::Terminate)
@@ -644,7 +756,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> ExternalEven
     for JoinSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
-        if matches!(state, JoinState::Created | JoinState::Initialized) {
+        if matches!(state, JoinState::Created(_) | JoinState::Initialized(_)) {
             ExternalEventMode::Block
         } else {
             ExternalEventMode::Poll
@@ -652,8 +764,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> ExternalEven
     }
 
     fn defer_external_event(state: &Self::State, event: &Self::Event) -> bool {
-        matches!(state, JoinState::Initializing)
-            && matches!(event, JoinEvent::Ready | JoinEvent::BeginDrain)
+        matches!(state, JoinState::Initializing(_)) && matches!(event, JoinEvent::Ready)
     }
 
     fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event> {

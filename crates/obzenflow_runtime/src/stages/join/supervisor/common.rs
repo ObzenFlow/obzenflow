@@ -8,12 +8,13 @@ use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::catch_up::CatchUpDisposition;
+use crate::stages::common::supervision::control_resolution::await_signal_gate;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
-use crate::stages::join::fsm::{JoinEvent, JoinResources, JoinSubscriptionSide, PendingTransition};
-use crate::stages::join::phase::PhaseReads;
+use crate::stages::join::fsm::{
+    EofRead, JoinEvent, JoinResources, JoinSubscriptionSide, WatermarkRead,
+};
 use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
@@ -45,15 +46,6 @@ pub(super) fn ensure_subscriptions<
     if sup.stream_subscription.is_none() {
         sup.stream_subscription = ctx.stream_subscription.take();
     }
-    if let Some((side, generation)) = ctx.pending_promotion.take() {
-        let held = match side {
-            JoinSubscriptionSide::Reference => sup.reference_subscription.as_mut(),
-            JoinSubscriptionSide::Stream => sup.stream_subscription.as_mut(),
-        };
-        if let Some(subscription) = held {
-            subscription.promote_held_readers(generation);
-        }
-    }
     if let (Some(reference), Some(stream)) = (
         sup.reference_subscription.as_ref(),
         sup.stream_subscription.as_mut(),
@@ -64,72 +56,75 @@ pub(super) fn ensure_subscriptions<
     }
 }
 
-async fn join_flip<H: UnifiedJoinHandler>(
-    reference: Option<&UpstreamSubscription<ChainEvent>>,
-    stream: Option<&UpstreamSubscription<ChainEvent>>,
+pub(super) async fn read_control<H: UnifiedJoinHandler>(
     ctx: &mut JoinResources<H>,
-    target: obzenflow_core::ReaderGeneration,
-    reads: PhaseReads,
-) -> CatchUpDisposition {
-    let side_caught_up = |side: Option<&UpstreamSubscription<ChainEvent>>| {
-        side.is_some_and(|subscription| subscription.all_readers_caught_up(target))
+    subscription: &mut UpstreamSubscription<ChainEvent>,
+    side: JoinSubscriptionSide,
+    beside: Option<&UpstreamSubscription<ChainEvent>>,
+    observed: Option<JoinSide>,
+    envelope: DeliveredRecord<ChainPayload>,
+) -> Result<Option<JoinEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    let ChainPayload::FlowControl(signal) = &envelope.payload else {
+        return Ok(None);
     };
-    let caught_up = (!reads.reads_reference() || side_caught_up(reference))
-        && (!reads.reads_stream() || side_caught_up(stream));
-    let disposition = ctx
-        .catch_up
-        .join_frontier_reached(target, caught_up, reads)
-        .await;
-    if let CatchUpDisposition::Crossed(crossed) = disposition {
-        if let Some(held) = reads.held() {
-            ctx.pending_promotion = Some((held, crossed));
-        }
-    }
-    disposition
-}
-
-pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
-    reference: Option<&UpstreamSubscription<ChainEvent>>,
-    stream: Option<&UpstreamSubscription<ChainEvent>>,
-    ctx: &mut JoinResources<H>,
-    announced: obzenflow_core::ReaderGeneration,
-    reads: PhaseReads,
-) -> crate::supervised_base::EventLoopDirective<JoinEvent<H>> {
-    match join_flip(reference, stream, ctx, announced, reads).await {
-        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => {
-            crate::supervised_base::EventLoopDirective::Continue
-        }
-        CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => {
-            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail))
-        }
-    }
-}
-
-/// FLOWIP-120n F17: re-run the join's flip when an authored EOF is the
-/// delivery that completes the frontier (no watermark follows an
-/// EOF-exhausted reader). `None` when nothing failed; the caller continues
-/// normal EOF processing. `Some` is the fail-closed error transition.
-pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
-    reference: Option<&UpstreamSubscription<ChainEvent>>,
-    stream: Option<&UpstreamSubscription<ChainEvent>>,
-    ctx: &mut JoinResources<H>,
-    reads: PhaseReads,
-) -> Option<crate::supervised_base::EventLoopDirective<JoinEvent<H>>> {
-    let side_max = |side: Option<&UpstreamSubscription<ChainEvent>>| {
-        side.map(|subscription| subscription.max_reader_generation())
-            .unwrap_or_default()
+    let watermark = match signal {
+        FlowControlPayload::CatchUpComplete { generation, .. } => Some(*generation),
+        _ => None,
     };
-    let target = side_max(reference).max(side_max(stream));
-    // No watermark delivered yet on any input: nothing to cross.
-    if target == obzenflow_core::ReaderGeneration(0) {
-        return None;
+    if watermark.is_none() && observed.is_some() {
+        if let Some(signal_snapshot) = signal_snapshot(observed, &envelope.authored()) {
+            observe_join_input(
+                ctx,
+                ctx.runtime_execution.dispatch_scope(
+                    ctx.stage_id,
+                    None,
+                    subscription.last_delivered_generation(),
+                ),
+                &envelope.authored(),
+                None,
+                Some(&signal_snapshot),
+                Some(&envelope),
+            )
+            .await?;
+        }
     }
-    match join_flip(reference, stream, ctx, target, reads).await {
-        CatchUpDisposition::Consumed | CatchUpDisposition::Crossed(_) => None,
-        CatchUpDisposition::Failed(fatal) | CatchUpDisposition::Refused(fatal) => Some(
-            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(fatal.detail)),
-        ),
+    await_signal_gate(
+        signal,
+        &envelope,
+        ctx.control_strategy.as_ref(),
+        &mut ctx.processing_context,
+        &ctx.stage_name,
+    )
+    .await;
+
+    let frontier = beside.map_or(subscription.reader_frontier(), |beside| {
+        subscription.reader_frontier().and(beside.reader_frontier())
+    });
+    if let Some(generation) = watermark {
+        return Ok(Some(JoinEvent::WatermarkRead(WatermarkRead {
+            generation,
+            frontier,
+        })));
     }
+    if envelope.is_eof() {
+        let contract_state = match side {
+            JoinSubscriptionSide::Reference => &mut ctx.reference_contract_state,
+            JoinSubscriptionSide::Stream => &mut ctx.stream_contract_state,
+        };
+        subscription
+            .check_contracts(&mut contract_state[..])
+            .await
+            .into_result()?;
+        let outcome = subscription.take_last_eof_outcome();
+        let generation = subscription.last_delivered_generation();
+        let eof = EofRead::new(envelope, outcome, generation, frontier);
+        return Ok(Some(match side {
+            JoinSubscriptionSide::Reference => JoinEvent::ReferenceEofRead(eof),
+            JoinSubscriptionSide::Stream => JoinEvent::StreamEofRead(eof),
+        }));
+    }
+    forward_control_to_journal(ctx, &envelope).await?;
+    Ok(None)
 }
 
 pub(super) fn renew_held_inputs<H: UnifiedJoinHandler>(
@@ -234,15 +229,6 @@ pub(super) async fn flush_pending_outputs<
         }
     }
     ctx.pending_parent = None;
-
-    if ctx.pending_outputs.is_empty()
-        && matches!(
-            ctx.pending_transition,
-            Some(PendingTransition::DrainComplete)
-        )
-    {
-        return Ok(FlushOutcome::DrainCompleteReady);
-    }
 
     Ok(FlushOutcome::Drained)
 }
@@ -378,12 +364,9 @@ fn track_output_event_for_pending_source<
 }
 
 pub(super) enum FlushOutcome {
-    /// Pending outputs were drained and no terminal transition is due.
     Drained,
     /// Backpressure blocked draining; return early and retry later.
     Blocked,
-    /// Pending outputs are drained and a pending drain completion transition is ready.
-    DrainCompleteReady,
 }
 
 pub(in crate::stages::join) async fn emit_join_heartbeat_if_due<

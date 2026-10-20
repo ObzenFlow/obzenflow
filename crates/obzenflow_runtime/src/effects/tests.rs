@@ -9157,7 +9157,13 @@ async fn reconstruction_reauthors_a_recorded_crossing_before_the_action_it_ancho
     assert!(
         matches!(
             catch_up
-                .frontier_reached(obzenflow_core::ReaderGeneration(1), true)
+                .send(
+                    crate::stages::common::supervision::catch_up::CatchUpEvent::FrontierReached {
+                        generation: obzenflow_core::ReaderGeneration(1),
+                        frontier:
+                            crate::stages::common::supervision::catch_up::test_support::caught_up_through(1),
+                    }
+                )
                 .await,
             crate::stages::common::supervision::catch_up::CatchUpDisposition::Consumed
         ),

@@ -7,18 +7,14 @@ use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ControlAction,
-};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::{ChainEvent, StageKey};
+use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -29,36 +25,25 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{
     JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
 };
-use crate::stages::join::phase::{
-    enriching_holds_catalog, observe_hold_eof, HoldOutcome, PhaseReads,
-};
 
 pub(super) async fn dispatch_enriching<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    state: &JoinState<H>,
+    state: &JoinState,
     ctx: &mut JoinResources<H>,
-) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<EventLoopDirective<JoinEvent>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
-    let holds_catalog = enriching_holds_catalog(ctx.reference_mode);
-    if holds_catalog {
-        common::renew_held_inputs(ctx, JoinSubscriptionSide::Reference);
+    if let Some(held) = state.held_input() {
+        common::renew_held_inputs(ctx, held);
     }
 
     ctx.instrumentation
         .event_loops_total
         .fetch_add(1, Ordering::Relaxed);
 
-    match common::flush_pending_outputs(sup, ctx).await? {
-        FlushOutcome::Blocked => return Ok(EventLoopDirective::Continue),
-        FlushOutcome::DrainCompleteReady => {
-            tracing::warn!(
-                stage_name = %ctx.stage_name,
-                "Join enriching observed DrainComplete-ready pending transition; ignoring"
-            );
-        }
-        FlushOutcome::Drained => {}
+    if let FlushOutcome::Blocked = common::flush_pending_outputs(sup, ctx).await? {
+        return Ok(EventLoopDirective::Continue);
     }
 
     let Some(subscription) = sup.stream_subscription.as_mut() else {
@@ -84,200 +69,19 @@ pub(super) async fn dispatch_enriching<
                 .fetch_add(1, Ordering::Relaxed);
 
             let directive = match &envelope.payload {
-                ChainPayload::FlowControl(signal) => {
-                    // FLOWIP-120n: consume the catch-up watermark before the
-                    // generic control resolution; the join authors its own at
-                    // the flip.
-                    if let FlowControlPayload::CatchUpComplete {
-                        generation: announced,
-                        ..
-                    } = signal
-                    {
-                        return Ok(common::consume_join_catch_up_watermark(
-                            sup.reference_subscription.as_ref(),
-                            sup.stream_subscription.as_ref(),
-                            ctx,
-                            *announced,
-                            PhaseReads::Stream,
-                        )
-                        .await);
-                    }
-
-                    if envelope.is_eof() {
-                        ctx.buffered_eof = Some(envelope.authored());
-                        ctx.drain_parent = Some(envelope.clone());
-
-                        // FLOWIP-120n F17: an authored EOF can be the delivery
-                        // that completes the caught-up frontier; no watermark
-                        // follows, so re-run the flip before normal EOF
-                        // handling.
-                        if let Some(directive) = common::flip_join_caught_up_on_eof(
-                            sup.reference_subscription.as_ref(),
-                            Some(&*subscription),
-                            ctx,
-                            PhaseReads::Stream,
-                        )
-                        .await
-                        {
-                            return Ok(directive);
-                        }
-                    }
-
-                    let contract_reader_count = ctx.stream_contract_state.len();
-                    let upstream_stage = subscription.last_delivered_upstream_stage();
-                    let last_eof_outcome = subscription.last_eof_outcome().cloned();
-                    // FLOWIP-095k: fold the stream side's terminal kind.
-                    if envelope.is_eof() {
-                        if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
-                            ctx.terminal_eof_kind = Some(
-                                ctx.terminal_eof_kind
-                                    .map_or(kind, |current| current.worst(kind)),
-                            );
-                        }
-                    }
-                    if let Some(signal_snapshot) = common::signal_snapshot(
+                ChainPayload::FlowControl(_) => {
+                    match common::read_control(
+                        ctx,
+                        subscription,
+                        JoinSubscriptionSide::Stream,
+                        None,
                         Some(crate::stages::observer::JoinSide::Stream),
-                        &envelope.authored(),
-                    ) {
-                        common::observe_join_input(
-                            ctx,
-                            ctx.runtime_execution.dispatch_scope(
-                                ctx.stage_id,
-                                None,
-                                subscription.last_delivered_generation(),
-                            ),
-                            &envelope.authored(),
-                            None,
-                            Some(&signal_snapshot),
-                            Some(&envelope),
-                        )
-                        .await?;
-                    }
-
-                    let resolution = resolve_control_event_awaiting_pauses(
-                        signal,
-                        &envelope,
-                        ctx.control_strategy.as_ref(),
-                        &mut ctx.processing_context,
-                        /* cycle_config */ None,
-                        /* cycle_guard */ None,
-                        last_eof_outcome.as_ref(),
-                        upstream_stage,
-                        contract_reader_count,
-                        /* drain_is_terminal */ false,
-                        &ctx.stage_name,
+                        envelope,
                     )
-                    .await;
-
-                    if holds_catalog
-                        && envelope.is_eof()
-                        && matches!(
-                            resolution,
-                            ControlAction::Forward | ControlAction::ForwardAndDrain
-                        )
+                    .await?
                     {
-                        common::forward_control_to_journal(ctx, &envelope).await?;
-                        let _ = subscription.take_last_eof_outcome();
-                        let stream_final = last_eof_outcome
-                            .as_ref()
-                            .filter(|outcome| outcome.is_final)
-                            .map(|outcome| {
-                                (
-                                    outcome.worst_kind.unwrap_or(EofKind::Natural),
-                                    StageKey::from(outcome.stage_name.clone()),
-                                )
-                            });
-                        let generation =
-                            subscription.last_delivered_generation().unwrap_or_default();
-                        let directive = match observe_hold_eof(
-                            ctx,
-                            JoinSubscriptionSide::Stream,
-                            &envelope,
-                            stream_final,
-                            generation,
-                        ) {
-                            HoldOutcome::Holding => EventLoopDirective::Continue,
-                            HoldOutcome::Completed(completion) => {
-                                tracing::info!(
-                                    stage_name = %ctx.stage_name,
-                                    ended_by = ?completion.ended_by,
-                                    "Join batch completed on natural EOFs; going live"
-                                );
-                                EventLoopDirective::Transition(JoinEvent::HoldCompleted(completion))
-                            }
-                            HoldOutcome::LeftOpen => {
-                                tracing::info!(
-                                    stage_name = %ctx.stage_name,
-                                    "Join batch left open; draining without held inputs"
-                                );
-                                ctx.drain_without_held_inputs = true;
-                                EventLoopDirective::Transition(JoinEvent::HoldLeftOpen)
-                            }
-                        };
-                        subscription
-                            .maybe_check_contracts_tick(
-                                &mut ctx.stream_contract_state[..],
-                                &mut ctx.stream_last_contract_check,
-                            )
-                            .await
-                            .unwrap_or(
-                                crate::messaging::upstream_subscription::ContractStatus::Healthy,
-                            )
-                            .into_result()?;
-                        return Ok(directive);
-                    }
-
-                    match resolution {
-                        ControlAction::Forward => {
-                            common::forward_control_to_journal(ctx, &envelope).await?;
-                            if envelope.is_eof() {
-                                let _ = subscription.take_last_eof_outcome();
-                            }
-                            EventLoopDirective::Continue
-                        }
-                        ControlAction::ForwardAndDrain => {
-                            common::forward_control_to_journal(ctx, &envelope).await?;
-
-                            if envelope.is_eof() {
-                                if last_eof_outcome
-                                    .as_ref()
-                                    .is_some_and(|outcome| outcome.is_final)
-                                {
-                                    ctx.final_stream_eof = Some(envelope.clone());
-                                }
-                                if let Some(outcome) = subscription.take_last_eof_outcome() {
-                                    tracing::info!(
-                                        target: "flowip-080o",
-                                        stage_name = %ctx.stage_name,
-                                        upstream_stage_id = ?outcome.stage_id,
-                                        upstream_stage_name = %outcome.stage_name,
-                                        reader_index = outcome.reader_index,
-                                        eof_count = outcome.eof_count,
-                                        total_readers = outcome.total_readers,
-                                        is_final = outcome.is_final,
-                                        "Join (Enriching) evaluated EOF outcome for stream side"
-                                    );
-                                }
-                            }
-
-                            EventLoopDirective::Transition(JoinEvent::ReceivedEOF)
-                        }
-                        ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event_type(),
-                                "Join received cycle-only control resolution without cycle config"
-                            );
-                            EventLoopDirective::Continue
-                        }
-                        ControlAction::Skip => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event_type(),
-                                "Skipping control event (dangerous!) during Enriching"
-                            );
-                            EventLoopDirective::Continue
-                        }
+                        Some(fact) => EventLoopDirective::Transition(fact),
+                        None => EventLoopDirective::Continue,
                     }
                 }
                 payload if payload.consumes_data_credit() => {

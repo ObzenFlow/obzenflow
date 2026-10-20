@@ -61,9 +61,6 @@ pub enum SignalDecision {
     /// Hold the signal for the given duration, then re-resolve. Time is
     /// relative; the supervisor turns it into a deadline when it suspends.
     Pause(Duration),
-
-    /// Suppress this signal entirely (dangerous; the hook-local stop result).
-    SuppressSignal,
 }
 
 /// Mutable context passed to control event strategies

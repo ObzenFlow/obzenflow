@@ -131,7 +131,7 @@ impl BackpressurePlan {
 struct EdgeState {
     upstream: StageId,
     downstream: StageId,
-    window: u64,
+    window: AtomicU64,
     stall_timeout: Duration,
     reader_seq: AtomicU64,
     hold_renewals: AtomicU64,
@@ -140,6 +140,12 @@ struct EdgeState {
     upstream_waker: CreditWaker,
     #[cfg(any(test, feature = "test-support"))]
     ack_gate: Option<Arc<test_gate::BackpressureAckGateState>>,
+}
+
+impl EdgeState {
+    fn window(&self) -> u64 {
+        self.window.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug)]
@@ -216,7 +222,7 @@ impl BackpressureRegistry {
             let edge_state = Arc::new(EdgeState {
                 upstream,
                 downstream,
-                window,
+                window: AtomicU64::new(window),
                 stall_timeout,
                 reader_seq: AtomicU64::new(0),
                 hold_renewals: AtomicU64::new(0),
@@ -292,12 +298,13 @@ impl BackpressureRegistry {
                 let reader_seq = edge.reader_seq.load(Ordering::Acquire);
                 min_reader_seq = min_reader_seq.min(reader_seq);
 
-                let allowed = reader_seq.saturating_add(edge.window);
-                let credit = allowed.saturating_sub(effective_writer).min(edge.window);
+                let window = edge.window();
+                let allowed = reader_seq.saturating_add(window);
+                let credit = allowed.saturating_sub(effective_writer).min(window);
                 min_credit = min_credit.min(credit);
 
                 let edge_key = (edge.upstream, edge.downstream);
-                snapshot.edge_window.insert(edge_key, edge.window);
+                snapshot.edge_window.insert(edge_key, window);
                 snapshot
                     .edge_in_flight
                     .insert(edge_key, effective_writer.saturating_sub(reader_seq));
@@ -375,7 +382,7 @@ impl BackpressureWriter {
             state
                 .downstream_edges
                 .iter()
-                .any(|edge| edge.window != u64::MAX)
+                .any(|edge| edge.window() != u64::MAX)
         })
     }
 
@@ -384,7 +391,7 @@ impl BackpressureWriter {
             state
                 .downstream_edges
                 .iter()
-                .any(|edge| edge.window == u64::MAX)
+                .any(|edge| edge.window() == u64::MAX)
         })
     }
 
@@ -409,7 +416,7 @@ impl BackpressureWriter {
         let enforced = state
             .downstream_edges
             .iter()
-            .filter(|edge| edge.window != u64::MAX)
+            .filter(|edge| edge.window() != u64::MAX)
             .collect::<Vec<_>>();
         if enforced.is_empty() {
             return Ok(());
@@ -425,11 +432,14 @@ impl BackpressureWriter {
                 bound
             ));
         }
-        if let Some(edge) = enforced.iter().find(|edge| edge.window < bound.get()) {
+        if let Some(edge) = enforced.iter().find(|edge| edge.window() < bound.get()) {
             return Err(format!(
                 "generated {owner} requires {} live physical Data credits; edge to stage '{}' \
                  resolved enforced window {}; set runtime.backpressure.window to at least {}",
-                bound, edge.downstream, edge.window, bound
+                bound,
+                edge.downstream,
+                edge.window(),
+                bound
             ));
         }
         Ok(())
@@ -450,11 +460,12 @@ impl BackpressureWriter {
             .downstream_edges
             .iter()
             .map(|edge| {
+                let window = edge.window();
                 let allowed = edge
                     .reader_seq
                     .load(Ordering::Acquire)
-                    .saturating_add(edge.window);
-                allowed.saturating_sub(effective_writer).min(edge.window)
+                    .saturating_add(window);
+                allowed.saturating_sub(effective_writer).min(window)
             })
             .min()
             .unwrap_or(u64::MAX)
@@ -486,10 +497,11 @@ impl BackpressureWriter {
 
         for edge in &state.downstream_edges {
             let reader_seq = edge.reader_seq.load(Ordering::Acquire);
+            let window = edge.window();
             let credit = reader_seq
-                .saturating_add(edge.window)
+                .saturating_add(window)
                 .saturating_sub(effective_writer)
-                .min(edge.window);
+                .min(window);
             if credit >= n {
                 continue;
             }
@@ -530,7 +542,7 @@ impl BackpressureWriter {
                 let detail = LimitingEdgeDetail {
                     credit,
                     downstream: edge.downstream,
-                    window: edge.window,
+                    window,
                     stall_timeout: edge.stall_timeout,
                     in_flight: effective_writer.saturating_sub(reader_seq),
                 };
@@ -578,11 +590,12 @@ impl BackpressureWriter {
             .downstream_edges
             .iter()
             .map(|edge| {
+                let window = edge.window();
                 let allowed = edge
                     .reader_seq
                     .load(Ordering::Acquire)
-                    .saturating_add(edge.window);
-                let credit = allowed.saturating_sub(effective_writer).min(edge.window);
+                    .saturating_add(window);
+                let credit = allowed.saturating_sub(effective_writer).min(window);
                 (credit, edge.downstream)
             })
             .min_by_key(|(credit, _)| *credit)
@@ -674,11 +687,12 @@ impl BackpressureWriter {
                 .downstream_edges
                 .iter()
                 .map(|edge| {
+                    let window = edge.window();
                     edge.reader_seq
                         .load(Ordering::Acquire)
-                        .saturating_add(edge.window)
+                        .saturating_add(window)
                         .saturating_sub(effective_writer)
-                        .min(edge.window)
+                        .min(window)
                 })
                 .min()
                 .unwrap_or(u64::MAX);
@@ -1262,6 +1276,14 @@ impl BackpressureReader {
             state.hold_renewals.fetch_add(1, Ordering::AcqRel);
         }
     }
+
+    pub(crate) fn release(&self) {
+        if let Some(state) = &self.state {
+            if state.window.swap(u64::MAX, Ordering::AcqRel) != u64::MAX {
+                state.upstream_waker.notify();
+            }
+        }
+    }
 }
 
 fn publish_acknowledgements(state: &EdgeState, n: u64) {
@@ -1320,7 +1342,7 @@ mod direct_fact_tests {
         let edge = Arc::new(EdgeState {
             upstream,
             downstream,
-            window,
+            window: AtomicU64::new(window),
             stall_timeout: Duration::from_secs(1),
             reader_seq: AtomicU64::new(0),
             hold_renewals: AtomicU64::new(0),
@@ -1362,7 +1384,7 @@ mod direct_fact_tests {
         let enforced = Arc::new(EdgeState {
             upstream,
             downstream: enforced_downstream,
-            window: enforced_window,
+            window: AtomicU64::new(enforced_window),
             stall_timeout: Duration::from_secs(1),
             reader_seq: AtomicU64::new(0),
             hold_renewals: AtomicU64::new(0),
@@ -1372,7 +1394,7 @@ mod direct_fact_tests {
         let tracked = Arc::new(EdgeState {
             upstream,
             downstream: tracked_downstream,
-            window: u64::MAX,
+            window: AtomicU64::new(u64::MAX),
             stall_timeout: Duration::MAX,
             reader_seq: AtomicU64::new(0),
             hold_renewals: AtomicU64::new(0),
@@ -1781,7 +1803,7 @@ mod stall_clock_tests {
         EdgeState {
             upstream,
             downstream,
-            window,
+            window: AtomicU64::new(window),
             stall_timeout: Duration::from_secs(ceiling_secs),
             reader_seq: AtomicU64::new(0),
             hold_renewals: AtomicU64::new(0),
@@ -2022,5 +2044,73 @@ mod stall_clock_tests {
         w.readers[0].ack_consumed(10);
         assert!(relays(w.writer.look(&mut episode, 1, at(t0, 2))));
         assert_eq!(w.input.hold_renewals.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn a_released_edge_never_blocks_its_writer_or_runs_its_clock() {
+        let w = writer(&[(2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 2);
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, t0)), None);
+        w.readers[0].release();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, at(t0, 31))), None);
+        assert!(!episode.is_open());
+        fill(&w.writer, 100);
+    }
+
+    #[test]
+    fn a_writer_still_stalls_on_the_edge_beside_a_released_one() {
+        let w = writer(&[(2, 30), (2, 30)]);
+        let t0 = tokio::time::Instant::now();
+        fill(&w.writer, 2);
+        let reading = w.readers[1].edge_ids().unwrap().1;
+        w.readers[0].release();
+        let mut episode = StallEpisode::default();
+        assert_eq!(stalled_on(w.writer.look(&mut episode, 1, t0)), None);
+        assert_eq!(
+            stalled_on(w.writer.look(&mut episode, 1, at(t0, 30))),
+            Some((reading, Duration::from_secs(30)))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_wakes_the_writer_and_its_edge_keeps_counting_as_a_track_edge() {
+        let mut topology = obzenflow_topology::TopologyBuilder::new();
+        let catalog = topology.add_stage(Some("catalog".to_string()));
+        let join = topology.add_stage(Some("join".to_string()));
+        topology.set_current(catalog);
+        let sink = topology.add_stage(Some("sink".to_string()));
+        let topology = topology.build_unchecked().expect("fixture topology");
+        let catalog = StageId::from_topology_id(catalog);
+        let join = StageId::from_topology_id(join);
+        let sink = StageId::from_topology_id(sink);
+        let plan = BackpressurePlan::disabled().with_stage_enforced(
+            catalog,
+            NonZeroU64::new(2).expect("non-zero window"),
+            Duration::from_secs(30),
+        );
+        let registry = BackpressureRegistry::new(&topology, &plan);
+        let writer = registry.writer(catalog);
+        let waker = writer.credit_waker().expect("writer waker");
+        fill(&writer, 2);
+        assert!(writer.reserve(1).is_none());
+
+        registry.reader(catalog, join).release();
+        tokio::time::timeout(Duration::from_secs(1), waker.inner().notified())
+            .await
+            .expect("the release wakes the writer");
+        assert!(
+            writer.reserve(1).is_none(),
+            "the sink's edge still bounds the writer"
+        );
+
+        registry.reader(catalog, sink).ack_consumed(2);
+        fill(&writer, 2);
+        assert_eq!(registry.edge_in_flight(catalog, join), Some(4));
+        assert_eq!(registry.edge_in_flight(catalog, sink), Some(2));
+        let snapshot = registry.metrics_snapshot();
+        assert_eq!(snapshot.edge_window.get(&(catalog, join)), Some(&u64::MAX));
+        assert_eq!(snapshot.edge_window.get(&(catalog, sink)), Some(&2));
     }
 }

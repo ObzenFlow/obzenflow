@@ -37,8 +37,6 @@ pub(crate) enum ControlAction {
     BufferAtEntryPoint { is_drain: bool },
     /// Suppress the event entirely (e.g. internal cycle peer or non-terminal forwarded EOF).
     Suppress,
-    /// Skip the event entirely (dangerous, used by control strategies).
-    Skip,
 }
 
 /// Result of asking the signal strategy and deterministic control resolver.
@@ -99,6 +97,26 @@ pub(crate) async fn resolve_control_event_awaiting_pauses(
     }
 }
 
+pub(crate) async fn await_signal_gate(
+    signal: &FlowControlPayload,
+    envelope: &JournalRecord<ChainPayload>,
+    strategy: &dyn SignalGate,
+    processing_ctx: &mut ProcessingContext,
+    stage_name: &str,
+) {
+    while let SignalDecision::Pause(duration) =
+        dispatch_control_signal(strategy, signal, envelope, processing_ctx)
+    {
+        tracing::info!(
+            stage_name = %stage_name,
+            event_type = envelope.event_type(),
+            duration = ?duration,
+            "Delaying control event"
+        );
+        let _ = suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
+    }
+}
+
 /// Resolve a control event into a `ControlResolution`.
 ///
 /// This function performs the "resolve" phase (FLOWIP-051m): it computes the
@@ -120,7 +138,6 @@ pub(crate) fn resolve_control_event(
 
     match action {
         SignalDecision::Pause(duration) => ControlResolution::Pause(duration),
-        SignalDecision::SuppressSignal => ControlResolution::Ready(ControlAction::Skip),
         SignalDecision::Continue => ControlResolution::Ready(resolve_forward_control_event(
             signal,
             envelope,

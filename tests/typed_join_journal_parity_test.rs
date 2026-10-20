@@ -1003,3 +1003,218 @@ async fn test_flow_rejects_plain_join_input_before_journal_provider_evaluation()
     assert!(error.to_string().contains("plain edge"), "{error}");
     assert_eq!(providers.load(Ordering::SeqCst), 0);
 }
+
+#[derive(Clone, Debug)]
+struct HookCounts {
+    mode: obzenflow_runtime::stages::join::JoinReferenceMode,
+    stream_eofs: Arc<AtomicUsize>,
+    drains: Arc<AtomicUsize>,
+}
+
+fn hook_fact(phase: &str, ordinal: usize) -> JoinedFact {
+    JoinedFact {
+        phase: phase.to_string(),
+        key: "k1".to_string(),
+        reference_version: String::new(),
+        ordinal,
+    }
+}
+
+impl TypedJoinHandler for HookCounts {
+    type State = ();
+    type ReferenceKey = String;
+    type Reference = ReferenceItem;
+    type Stream = StreamItem;
+    type Output = JoinedFact;
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn reference_mode(&self) -> obzenflow_runtime::stages::join::JoinReferenceMode {
+        self.mode
+    }
+
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        Ok(reference.key.clone())
+    }
+
+    fn process_stream(
+        &self,
+        _state: &mut Self::State,
+        references: &mut JoinReferenceView<'_, String, ReferenceItem>,
+        stream: StreamItem,
+    ) -> Result<Vec<JoinedFact>, HandlerError> {
+        Ok(references
+            .select(&stream.key)
+            .map(|reference| JoinedFact {
+                phase: "stream".to_string(),
+                key: stream.key,
+                reference_version: reference.version,
+                ordinal: 0,
+            })
+            .into_iter()
+            .collect())
+    }
+
+    fn on_stream_eof(
+        &self,
+        _state: &mut Self::State,
+        _references: &mut JoinReferenceView<'_, String, ReferenceItem>,
+    ) -> Result<Vec<JoinedFact>, HandlerError> {
+        self.stream_eofs.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![hook_fact("hook", 0)])
+    }
+
+    fn drain(
+        &self,
+        _state: &Self::State,
+        _references: &mut JoinReferenceView<'_, String, ReferenceItem>,
+    ) -> Result<Vec<JoinedFact>, HandlerError> {
+        self.drains.fetch_add(1, Ordering::SeqCst);
+        Ok((0..3).map(|ordinal| hook_fact("drain", ordinal)).collect())
+    }
+}
+
+fn completed(records: &[JournalRecord<ChainPayload>]) -> bool {
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, StageLifecycleFact,
+    };
+    records.iter().any(|record| {
+        matches!(
+            record.payload,
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                StageLifecycleFact::Completed { .. }
+            ))
+        )
+    })
+}
+
+async fn hooks_under_enforce(
+    mode: obzenflow_runtime::stages::join::JoinReferenceMode,
+    batch_only: bool,
+) -> (HookCounts, Vec<JoinedFact>) {
+    use obzenflow::stages::merges;
+    use obzenflow::stages::sources::ChannelSource;
+    use obzenflow_dsl::dsl::backpressure_clause::enforced;
+    use obzenflow_dsl::{async_infinite_source, merge};
+    use obzenflow_runtime::run_context::FlowBuildContext;
+
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("hooks");
+    let handler = HookCounts {
+        mode,
+        stream_eofs: Arc::default(),
+        drains: Arc::default(),
+    };
+    let joined = handler.clone();
+    let (_live_tx, live_references) = tokio::sync::mpsc::channel::<ReferenceItem>(1);
+    let live_references = std::sync::Mutex::new(Some(live_references));
+    let handle = FlowDefinition::materialize(move |_| {
+        let references = ReferenceSource::new(Arc::new(AtomicUsize::new(0)));
+        let streams = StreamSource::new(Arc::new(AtomicUsize::new(0)));
+        let output = replay_testkit::Discard::<JoinedFact>::default();
+        if batch_only {
+            let live_references = ChannelSource::new(
+                live_references
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("the flow is built once"),
+            );
+            return Ok(flow! {
+                name: "join_hooks_under_enforce",
+                journals: disk_journals(journal_base),
+                backpressure: enforced(1).stall_timeout_ms(10_000),
+                stages: {
+                    batch_references = source!(ReferenceItem => references);
+                    live_references = async_infinite_source!(ReferenceItem => live_references);
+                    catalog = merge!(ReferenceItem => merges::then_live);
+                    streams = source!(StreamItem => streams);
+                    joined = join!(catalog catalog: ReferenceItem, StreamItem -> JoinedFact => joined);
+                    output = sink!(JoinedFact => output);
+                },
+                topology: {
+                    batch_references |> catalog;
+                    live_references |> catalog;
+                    (catalog, streams) |> joined;
+                    joined |> output;
+                }
+            });
+        }
+        Ok(flow! {
+            name: "join_hooks_under_enforce",
+            journals: disk_journals(journal_base),
+            backpressure: enforced(1).stall_timeout_ms(10_000),
+            stages: {
+                references = source!(ReferenceItem => references);
+                streams = source!(StreamItem => streams);
+                joined = join!(catalog references: ReferenceItem, StreamItem -> JoinedFact => joined);
+                output = sink!(JoinedFact => output);
+            },
+            topology: {
+                (references, streams) |> joined;
+                joined |> output;
+            }
+        })
+    })
+    .build(FlowBuildContext::for_tests())
+    .await
+    .unwrap();
+    let archive = handle
+        .run_substrate()
+        .locator()
+        .unwrap()
+        .path()
+        .to_path_buf();
+    if batch_only {
+        handle.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !completed(&read_stage_appended(&archive, "joined").await) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the join drains before any stop");
+        handle
+            .stop_graceful(std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            handle.wait_for_completion(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    } else {
+        tokio::time::timeout(std::time::Duration::from_secs(30), handle.run())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let records = read_stage_appended(&archive, "joined").await;
+    (handler, facts(&records))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_runs_each_end_of_input_hook_once_when_its_drain_backs_off() {
+    use obzenflow_runtime::stages::join::JoinReferenceMode;
+    for (mode, batch_only) in [
+        (JoinReferenceMode::FiniteEof, false),
+        (JoinReferenceMode::Live, false),
+        (JoinReferenceMode::FiniteThenLive, true),
+    ] {
+        let (handler, authored) = hooks_under_enforce(mode, batch_only).await;
+        assert_eq!(handler.stream_eofs.load(Ordering::SeqCst), 1, "{mode:?}");
+        assert_eq!(handler.drains.load(Ordering::SeqCst), 1, "{mode:?}");
+        let phases: Vec<(&str, usize)> = authored
+            .iter()
+            .filter(|fact| fact.phase != "stream")
+            .map(|fact| (fact.phase.as_str(), fact.ordinal))
+            .collect();
+        assert_eq!(
+            phases,
+            [("hook", 0), ("drain", 0), ("drain", 1), ("drain", 2)],
+            "{mode:?}"
+        );
+    }
+}

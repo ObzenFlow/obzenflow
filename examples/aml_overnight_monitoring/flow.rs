@@ -37,7 +37,9 @@ pub struct AmlApp {
     pub risk_ledger: PathBuf,
     pub case_ledger: PathBuf,
     pub cleared_register: PathBuf,
+    pub unscored_register: PathBuf,
     pub case_register: PathBuf,
+    pub unopened_register: PathBuf,
     pub rules: AmlRules,
 }
 
@@ -96,6 +98,31 @@ impl CsvProjection for ClearedRow {
 }
 
 #[derive(Clone, Debug)]
+struct UnscoredRow;
+
+#[derive(Serialize)]
+struct UnscoredRecord {
+    txn_id: u64,
+    bank: String,
+    account: String,
+    reason: String,
+}
+
+impl CsvProjection for UnscoredRow {
+    type Input = ScoreUnavailable;
+    type Row = UnscoredRecord;
+
+    fn project(&self, unscored: ScoreUnavailable) -> Result<UnscoredRecord, HandlerError> {
+        Ok(UnscoredRecord {
+            txn_id: unscored.txn_id.0,
+            bank: unscored.account.bank,
+            account: unscored.account.account,
+            reason: unscored.reason,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 struct CaseRow;
 
 #[derive(Serialize)]
@@ -125,6 +152,31 @@ impl CsvProjection for CaseRow {
             bank: case.account.bank,
             account: case.account.account,
             rules_version: case.rules_version.0,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct UnopenedRow;
+
+#[derive(Serialize)]
+struct UnopenedRecord {
+    alert_id: String,
+    bank: String,
+    account: String,
+    reason: String,
+}
+
+impl CsvProjection for UnopenedRow {
+    type Input = CaseUnavailable;
+    type Row = UnopenedRecord;
+
+    fn project(&self, unopened: CaseUnavailable) -> Result<UnopenedRecord, HandlerError> {
+        Ok(UnopenedRecord {
+            alert_id: unopened.alert_id.0,
+            bank: unopened.account.bank,
+            account: unopened.account.account,
+            reason: unopened.reason,
         })
     }
 }
@@ -192,6 +244,12 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             .columns(["txn_id", "rules_version"])
             .build()
             .map_err(resources_failed)?;
+        register_dir(&app.unscored_register).map_err(resources_failed)?;
+        let unscored_register = CsvSink::builder(UnscoredRow)
+            .path(&app.unscored_register)
+            .columns(["txn_id", "bank", "account", "reason"])
+            .build()
+            .map_err(resources_failed)?;
         register_dir(&app.case_register).map_err(resources_failed)?;
         let case_register = CsvSink::builder(CaseRow)
             .path(&app.case_register)
@@ -203,6 +261,12 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 "reasons",
                 "rules_version",
             ])
+            .build()
+            .map_err(resources_failed)?;
+        register_dir(&app.unopened_register).map_err(resources_failed)?;
+        let unopened_register = CsvSink::builder(UnopenedRow)
+            .path(&app.unopened_register)
+            .columns(["alert_id", "bank", "account", "reason"])
             .build()
             .map_err(resources_failed)?;
         let totals_report = ConsoleSink::new(console::format_totals);
@@ -227,6 +291,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                     => score
                 );
                 cleared         = sink!(TransactionCleared => cleared_register);
+                unscored        = sink!(ScoreUnavailable => unscored_register);
                 daily_profile   = stateful!(Transaction -> AlertRaised => daily_profile);
                 day_totals      = stateful!(PricedTransaction -> DayTotals => day_totals);
                 alerts          = merge!(first score: AlertRaised => merges::concat);
@@ -236,6 +301,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                     => open_case
                 );
                 case_register   = sink!(CaseOpened => case_register);
+                unopened_alerts = sink!(CaseUnavailable => unopened_register);
                 totals_report   = sink!(DayTotals => totals_report, delivery: idempotent);
             },
 
@@ -246,10 +312,12 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
                 price |> day_totals;
                 profile |> score;
                 score |> cleared;
+                score |> unscored;
                 score |> alerts;
                 daily_profile |> alerts;
                 alerts |> open_case;
                 open_case |> case_register;
+                open_case |> unopened_alerts;
                 day_totals |> totals_report;
             }
         })
