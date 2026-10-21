@@ -76,7 +76,6 @@ struct Window {
     execution: RuntimeExecution,
     flow_id: FlowId,
     stage_id: StageId,
-    ledger: System<dyn TransactionalLedger>,
     transactional: EffectDeclaration,
     ports: EffectPortRegistry,
     calls: Arc<AtomicUsize>,
@@ -121,7 +120,6 @@ impl Window {
             execution: RuntimeExecution::new(RuntimeMode::Live, None),
             flow_id: FlowId::new(),
             stage_id,
-            ledger,
             transactional,
             ports,
             calls,
@@ -207,7 +205,7 @@ impl Window {
             },
             Action::Capture => core.capture("window", input).await.map(drop),
             Action::Transactional => core
-                .call_request(&self.ledger, TransactionalCounting { value: input })
+                .call_request(TransactionalCounting { value: input })
                 .await
                 .map(drop),
         };

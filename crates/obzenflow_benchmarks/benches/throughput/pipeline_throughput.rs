@@ -285,7 +285,7 @@ impl EffectfulTransformHandler for SettleEach {
         input: Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        fx.call(&self.ledger, Settle { index: input.index })
+        fx.call(Settle { index: input.index })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
         Ok(fx.complete()?)

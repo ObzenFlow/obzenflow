@@ -221,7 +221,7 @@ impl EffectfulTransformHandler for RetryTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(&self.service, RetryOnce { value: input.value })
+            .call(RetryOnce { value: input.value })
             .await
             .map_err(|e| HandlerError::Timeout(e.to_string()))?;
 

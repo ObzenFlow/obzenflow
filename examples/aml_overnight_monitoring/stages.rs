@@ -190,7 +190,7 @@ impl EffectfulTransformHandler for ScoreHandler {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let request = ScoreRequest::for_transaction(&profiled);
-        if let Err(error) = fx.call(&self.risk_engine, request).await {
+        if let Err(error) = fx.call(request).await {
             let Some(reason) = unavailable_reason(&error, RISK_ENGINE_SOURCE) else {
                 return Err(error.into());
             };
@@ -234,7 +234,7 @@ impl EffectfulTransformHandler for OpenCaseHandler {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let request = CaseRequest::for_alert(&alert);
-        if let Err(error) = fx.call(&self.case_system, request).await {
+        if let Err(error) = fx.call(request).await {
             let Some(reason) = unavailable_reason(&error, CASE_SYSTEM_SOURCE) else {
                 return Err(error.into());
             };

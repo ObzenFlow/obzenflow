@@ -240,8 +240,7 @@ impl EffectfulStatefulHandler for BoundaryProbeHandler {
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        fx.call(&self.gate, BoundaryProbeRequest { value: input.value })
-            .await?;
+        fx.call(BoundaryProbeRequest { value: input.value }).await?;
         Ok(fx.complete()?)
     }
 

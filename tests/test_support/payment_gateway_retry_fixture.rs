@@ -284,10 +284,7 @@ impl EffectfulTransformHandler for ScriptedGatewayTransform {
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         self.pacing.prepare_invocation().await;
 
-        if let Err(error) = fx
-            .call(&self.gateway, ScriptedAuthorize::for_order(&order))
-            .await
-        {
+        if let Err(error) = fx.call(ScriptedAuthorize::for_order(&order)).await {
             fx.emit(PaymentAuthorizationUnavailable {
                 order_id: order.order_id,
                 customer_id: order.customer_id,

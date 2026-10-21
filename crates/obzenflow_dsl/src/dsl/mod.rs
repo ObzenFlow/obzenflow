@@ -48,10 +48,9 @@
 //! An effectful handler's `type AllowedEffects = effect_set![...]` declares the
 //! effects its stage performs, and the row never restates them. A handler
 //! whose effect set is empty is written `In -> Out => handler`. A named effect
-//! is answered by a system the handler holds in a `#[system]` field and passes
-//! to `fx.call`, and a paid at-least-once or transactional effect is
-//! acknowledged after the handler with `.at_least_once::<E>()` or
-//! `.transactional::<E>()`.
+//! is answered by a system the handler holds in a `#[system]` field, and a
+//! paid at-least-once or transactional effect is acknowledged after the
+//! handler with `.at_least_once::<E>()` or `.transactional::<E>()`.
 //!
 //! ```
 //! use async_trait::async_trait;

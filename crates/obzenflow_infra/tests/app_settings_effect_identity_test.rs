@@ -233,10 +233,9 @@ impl ScoreTransform {
         value: u64,
         fx: &mut Effects<ScoreOutput, ScoreEffects>,
     ) -> Result<Score, EffectError> {
-        let score = fx.call(&self.scorer, self.request(value)).await?;
+        let score = fx.call(self.request(value)).await?;
         if self.app.rescore {
-            fx.call(&self.scorer, self.request(value + RESCORE_OFFSET))
-                .await?;
+            fx.call(self.request(value + RESCORE_OFFSET)).await?;
         }
         Ok(score)
     }

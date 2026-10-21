@@ -261,9 +261,7 @@ impl EffectfulTransformHandler for GatewayTransform {
         // recovery exhausts or the breaker prevents an attempt, `fx.call`
         // returns the one recorded terminal error; resilience never
         // synthesizes a business fact to represent non-execution.
-        let outcome = fx
-            .call(&self.gateway, AuthorizeRequest::for_order(&order))
-            .await;
+        let outcome = fx.call(AuthorizeRequest::for_order(&order)).await;
 
         match outcome {
             // fx.call already recorded the gateway's decision as its named

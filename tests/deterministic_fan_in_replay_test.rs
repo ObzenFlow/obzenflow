@@ -252,7 +252,7 @@ impl EffectfulTransformHandler for EffectfulTail {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(&self.counter, Counting { value: input.value })
+            .call(Counting { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(FanInOutput {

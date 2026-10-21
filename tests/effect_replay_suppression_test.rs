@@ -303,7 +303,7 @@ impl EffectfulTransformHandler for ReplayTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(&self.counter, Counting { value: input.value })
+            .call(Counting { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
@@ -339,7 +339,7 @@ impl EffectfulTransformHandler for BlockingTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(&self.gate, Blocking { value: input.value })
+            .call(Blocking { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
@@ -380,7 +380,7 @@ impl EffectfulTransformHandler for PostPerformBlockingTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(&self.counter, Counting { value: input.value })
+            .call(Counting { value: input.value })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
 
@@ -474,7 +474,7 @@ impl EffectfulStatefulHandler for ReplayStateful {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect = fx
-            .call(&self.counter, Counting { value: input.value })
+            .call(Counting { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(ReplayOutput {
@@ -585,12 +585,9 @@ impl EffectfulStatefulHandler for PolicyStateful {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         match fx
-            .call(
-                &self.counter,
-                SlowReserve {
-                    request_id: input.value,
-                },
-            )
+            .call(SlowReserve {
+                request_id: input.value,
+            })
             .await
         {
             Ok(_) => Ok(fx.complete()?),
@@ -682,9 +679,7 @@ impl EffectfulStatefulHandler for DishonestOneFactStateful {
             .expect("decide inputs lock poisoned")
             .push(input.value);
 
-        let effect = fx
-            .call(&self.counter, Counting { value: input.value })
-            .await?;
+        let effect = fx.call(Counting { value: input.value }).await?;
         fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect.effect_value,
@@ -741,9 +736,7 @@ impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
             .expect("observed fact counts lock poisoned")
             .push(state.applied.len());
 
-        let effect = fx
-            .call(&self.counter, Counting { value: input.value })
-            .await?;
+        let effect = fx.call(Counting { value: input.value }).await?;
         fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect.effect_value,
@@ -818,9 +811,7 @@ impl EffectfulStatefulHandler for ApplyRejectingStateful {
             .expect("decide inputs lock poisoned")
             .push(input.value);
 
-        let effect = fx
-            .call(&self.counter, Counting { value: input.value })
-            .await?;
+        let effect = fx.call(Counting { value: input.value }).await?;
         fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect.effect_value,
@@ -956,7 +947,7 @@ impl EffectfulStatefulHandler for ProductStateful {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
-            .call(&self.counter, Product { value: input.value })
+            .call(Product { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(ReplayOutput {
@@ -3756,7 +3747,7 @@ impl EffectfulTransformHandler for PortedTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(&self.greeting, Greet { value: input.value })
+            .call(Greet { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
@@ -4029,7 +4020,7 @@ impl EffectfulTransformHandler for LedgerTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let committed = fx
-            .call(&self.ledger, LedgerPost { value: input.value })
+            .call(LedgerPost { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
@@ -4235,9 +4226,7 @@ impl EffectfulTransformHandler for FailFastTransform {
         input: ReplayInput,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let outcome = fx
-            .call(&self.counter, AlwaysFailing { value: input.value })
-            .await;
+        let outcome = fx.call(AlwaysFailing { value: input.value }).await;
 
         let output = match outcome {
             Ok(value) => ReplayOutput {
@@ -4285,9 +4274,7 @@ impl EffectfulTransformHandler for MultiEffectFailFastTransform {
         input: ReplayInput,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let outcome = fx
-            .call(&self.counter, AlwaysFailing { value: input.value })
-            .await;
+        let outcome = fx.call(AlwaysFailing { value: input.value }).await;
 
         let output = match outcome {
             Ok(value) => ReplayOutput {

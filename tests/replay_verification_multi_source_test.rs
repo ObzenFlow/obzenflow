@@ -168,12 +168,9 @@ impl EffectfulTransformHandler for ChargeOrders {
         order: OrderPlaced,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        fx.call(
-            &self.processor,
-            ChargeRequest {
-                order_id: order.order_id,
-            },
-        )
+        fx.call(ChargeRequest {
+            order_id: order.order_id,
+        })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
         Ok(fx.complete()?)

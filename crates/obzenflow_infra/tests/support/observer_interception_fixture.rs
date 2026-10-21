@@ -197,12 +197,9 @@ impl EffectfulTransformHandler for AuthoriseShipping {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let authorised = fx
-            .call(
-                &self.desk,
-                AuthoriseShippingRequest {
-                    order_id: order.order_id,
-                },
-            )
+            .call(AuthoriseShippingRequest {
+                order_id: order.order_id,
+            })
             .await?;
         fx.emit(ShippingReady {
             order_id: authorised.order_id,

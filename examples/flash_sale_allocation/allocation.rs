@@ -126,7 +126,7 @@ impl EffectfulStatefulHandler for Allocator {
                     order_id: placed.order_id.clone(),
                     sku: placed.sku.clone(),
                 };
-                match fx.call(&self.warehouse, reservation).await {
+                match fx.call(reservation).await {
                     Ok(_) => Ok(fx.complete()?),
                     Err(error) if is_reserve_policy_rejection(&error) => {
                         fx.emit(ReservationFailed {
@@ -156,7 +156,7 @@ impl EffectfulStatefulHandler for Allocator {
                     sku,
                     hold_id,
                 };
-                fx.call(&self.warehouse, release).await?;
+                fx.call(release).await?;
                 Ok(fx.complete()?)
             }
         }

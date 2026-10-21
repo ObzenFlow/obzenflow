@@ -11,8 +11,7 @@ use obzenflow_core::event::schema::EffectOutcomeFacts;
 use obzenflow_core::SystemBindingEvidence;
 use serde::Serialize;
 
-/// A request a system answers, performed by a handler with
-/// `fx.call(&system, request)`.
+/// A request a system answers, performed by a handler with `fx.call(request)`.
 #[async_trait]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a request",
@@ -207,7 +206,7 @@ impl<R> KeyRule<R> for Transactional {
 }
 
 /// The named effect that performs one request through the system its handler
-/// passes to `fx.call`.
+/// holds for the request's port.
 pub struct Call<R: CallRequest> {
     request: R,
     projection: EffectBindingUse<Call<R>>,

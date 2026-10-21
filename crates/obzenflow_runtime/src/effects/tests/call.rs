@@ -250,7 +250,7 @@ async fn a_request_records_what_an_equivalent_hand_written_effect_records() {
             None,
         ));
     let called = fx
-        .call(&system, LedgerWrite { value: 4 })
+        .call(LedgerWrite { value: 4 })
         .await
         .expect("the request succeeds");
 
@@ -331,82 +331,6 @@ fn a_request_records_the_safety_and_key_its_class_names() {
 }
 
 #[tokio::test]
-async fn a_call_through_a_system_the_stage_did_not_declare_is_refused_live_and_on_replay() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let declared: System<dyn LedgerPort> =
-        System::eager("ledger", counting_ledger(&calls)).expect("valid system");
-    let stranger: System<dyn LedgerPort> =
-        System::eager("ledger", counting_ledger(&calls)).expect("valid system");
-    let declaration = declaration_for::<Call<LedgerWrite>, _>(&declared);
-    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
-        .unwrap()
-        .into_run_registry();
-
-    let stage = StageId::new();
-    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
-    let mut live =
-        Effects::<LedgerWritten, crate::effect_set![Call<LedgerWrite>]>::new(ledger_context(
-            journal.clone(),
-            stage,
-            registry.clone(),
-            vec![declaration.runtime_projection()],
-            None,
-        ));
-    let refused = live
-        .call(&stranger, LedgerWrite { value: 5 })
-        .await
-        .expect_err("a system the stage did not declare is refused");
-    let EffectError::BindingAuthority { fault } = refused else {
-        panic!("expected a binding-authority fault, got {refused:?}");
-    };
-    assert_eq!(
-        fault.mismatch_kind(),
-        Some(BindingMismatchKind::ConstructionFamily)
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(effect_records(&journal).is_empty());
-
-    let answered_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
-    let mut answered =
-        Effects::<LedgerWritten, crate::effect_set![Call<LedgerWrite>]>::new(ledger_context(
-            answered_journal.clone(),
-            stage,
-            registry,
-            vec![declaration.runtime_projection()],
-            None,
-        ));
-    answered
-        .call(&declared, LedgerWrite { value: 5 })
-        .await
-        .expect("the declared system answers");
-    let records = effect_records(&answered_journal);
-    let history = Arc::new(
-        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
-            .expect("the live history indexes"),
-    );
-    let mut replay =
-        Effects::<LedgerWritten, crate::effect_set![Call<LedgerWrite>]>::new(ledger_context(
-            Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
-            stage,
-            EffectPortRegistry::new(),
-            vec![declaration.runtime_projection()],
-            Some(history),
-        ));
-    let replayed = replay
-        .call(&stranger, LedgerWrite { value: 5 })
-        .await
-        .expect_err("replay refuses the undeclared system the same way");
-    let EffectError::BindingAuthority { fault } = replayed else {
-        panic!("expected a binding-authority fault, got {replayed:?}");
-    };
-    assert_eq!(
-        fault.mismatch_kind(),
-        Some(BindingMismatchKind::ConstructionFamily)
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_answers() {
     let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -448,11 +372,11 @@ async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_
                 None,
             ));
             if check_instead {
-                fx.call(&system, LedgerCheck { value: 2 })
+                fx.call(LedgerCheck { value: 2 })
                     .await
                     .expect("the check succeeds");
             } else {
-                fx.call(&system, LedgerWrite { value: 1 })
+                fx.call(LedgerWrite { value: 1 })
                     .await
                     .expect("the write succeeds");
             }
@@ -677,7 +601,7 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
             None,
         ));
     let refused = fx
-        .call(&system, LedgerWrite { value: 3 })
+        .call(LedgerWrite { value: 3 })
         .await
         .expect_err("the outage refuses");
     assert_eq!(
@@ -703,7 +627,7 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
             Some(history),
         ));
     let recorded = replay
-        .call(&system, LedgerWrite { value: 3 })
+        .call(LedgerWrite { value: 3 })
         .await
         .expect_err("the recorded refusal replays");
     assert!(matches!(

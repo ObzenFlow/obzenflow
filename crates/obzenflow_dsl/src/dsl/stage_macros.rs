@@ -4473,7 +4473,7 @@ macro_rules! __obzenflow_stage_row {
     };
 
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt $acks:tt $delivery:tt . system $($rest:tt)*) => {
-        compile_error!("`.system(…)` was removed; the handler holds the system it calls in a `#[system]` field and passes it to `fx.call`")
+        compile_error!("`.system(…)` was removed; the handler holds the system it calls in a `#[system]` field, and `fx.call(request)` performs the request through it")
     };
     (@decorations $kind:ident $target:ident $sig:tt $mw:tt $handler:tt [$($acks:tt)*] $delivery:tt . at_least_once :: < $effect:ty > () $($rest:tt)*) => {
         $crate::__obzenflow_stage_row!(@decorations $kind $target $sig $mw $handler [$($acks)* $crate::__private::EffectAcknowledgement::at_least_once::<$effect>(stringify!($effect)),] $delivery $($rest)*)
@@ -4708,8 +4708,8 @@ macro_rules! effectful_stateful {
 /// ```
 ///
 /// A handler that performs a request holds the system that answers it in a
-/// `#[system]` field and passes it to `fx.call`, so the row names only the
-/// handler.
+/// `#[system]` field, so the row names only the handler and `fx.call` takes
+/// only the request.
 ///
 /// ```
 /// # use async_trait::async_trait;
@@ -4758,7 +4758,7 @@ macro_rules! effectful_stateful {
 ///         _: Order,
 ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
 ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-///         fx.call(&self.card, ChargeCardRequest).await?;
+///         fx.call(ChargeCardRequest).await?;
 ///         Ok(fx.complete()?)
 ///     }
 /// }
@@ -4810,7 +4810,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
@@ -4863,7 +4863,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
@@ -4914,7 +4914,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
@@ -4966,7 +4966,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
@@ -5013,7 +5013,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
@@ -5060,7 +5060,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
@@ -5108,7 +5108,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }
@@ -5158,7 +5158,7 @@ macro_rules! effectful_stateful {
 /// #     type Output = obzenflow_core::stage_fact_set![Charged];
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
 /// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
-/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         fx.call(ChargeCardRequest).await?;
 /// #         Ok(fx.complete()?)
 /// #     }
 /// # }

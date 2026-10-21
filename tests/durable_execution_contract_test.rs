@@ -400,7 +400,7 @@ impl EffectfulTransformHandler for Authorize {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         // `fx.call` records whichever payment fact happened.
-        fx.call(&self.gateway, AuthorizationRequest { order })
+        fx.call(AuthorizationRequest { order })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
         Ok(fx.complete()?)
@@ -2652,7 +2652,7 @@ mod then_live {
             fx: &mut Effects<Self::Output, Self::AllowedEffects>,
         ) -> Result<StageCompletion<Self::Output>, HandlerError> {
             if AUDITED.contains(&entry.note.as_str()) {
-                fx.call(&self.ledger, AuditEntry { entry })
+                fx.call(AuditEntry { entry })
                     .await
                     .map_err(|error| HandlerError::Other(error.to_string()))?;
             } else {
@@ -3941,12 +3941,9 @@ mod two_effects {
             order: ChargeOrder,
             fx: &mut Effects<Self::Output, Self::AllowedEffects>,
         ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-            fx.call(
-                &self.ledger,
-                AuthorizeCharge {
-                    order_id: order.order_id.clone(),
-                },
-            )
+            fx.call(AuthorizeCharge {
+                order_id: order.order_id.clone(),
+            })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
             if self.hold.as_deref() == Some(order.order_id.as_str()) {
@@ -3957,13 +3954,10 @@ mod two_effects {
             } else {
                 AMOUNT_CENTS
             };
-            fx.call(
-                &self.ledger,
-                CaptureCharge {
-                    order_id: order.order_id,
-                    amount_cents,
-                },
-            )
+            fx.call(CaptureCharge {
+                order_id: order.order_id,
+                amount_cents,
+            })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
             Ok(fx.complete()?)

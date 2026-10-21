@@ -199,10 +199,6 @@ impl SystemPort {
             recipe: PortRecipe::Deferred(erased),
         }
     }
-
-    pub(super) fn coordinate(&self) -> BindingCoordinate {
-        self.coordinate
-    }
 }
 
 enum PendingRegistrationState {

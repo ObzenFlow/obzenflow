@@ -258,13 +258,10 @@ impl EffectfulTransformHandler for AuthorizePayment {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
-            .call(
-                &self.gateway,
-                AuthorizeRequest {
-                    order_id: order.order_id,
-                    amount: order.amount,
-                },
-            )
+            .call(AuthorizeRequest {
+                order_id: order.order_id,
+                amount: order.amount,
+            })
             .await;
 
         match outcome {

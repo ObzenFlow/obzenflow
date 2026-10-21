@@ -153,8 +153,8 @@ impl EffectfulTransformHandler for PerformsBothEffects {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         for _ in 0..self.repetitions {
-            fx.call(&self.service, RequestA).await?;
-            fx.call(&self.service, RequestB).await?;
+            fx.call(RequestA).await?;
+            fx.call(RequestB).await?;
         }
         fx.emit(EffectFact {
             subject: "both-effects-completed".to_string(),

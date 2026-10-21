@@ -436,9 +436,7 @@ impl EffectfulTransformHandler for HookTransform {
         input: HookInput,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let result = fx
-            .call(&self.service, HookRequest { value: input.value })
-            .await;
+        let result = fx.call(HookRequest { value: input.value }).await;
 
         let path = match result {
             Ok(value) => format!("effect:{}", value.value),

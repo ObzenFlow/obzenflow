@@ -1163,20 +1163,16 @@ impl CallRequest for TransactionalCounting {
 type TransactionalCountingEffect = Call<TransactionalCounting>;
 
 trait CallRequests {
-    async fn call_request<R: CallRequest>(
-        &mut self,
-        system: &System<R::Port>,
-        request: R,
-    ) -> Result<R::Outcome, EffectError>;
+    async fn call_request<R: CallRequest>(&mut self, request: R)
+        -> Result<R::Outcome, EffectError>;
 }
 
 impl CallRequests for EffectsCore {
     async fn call_request<R: CallRequest>(
         &mut self,
-        system: &System<R::Port>,
         request: R,
     ) -> Result<R::Outcome, EffectError> {
-        let projection = self.project_named_effect_through::<Call<R>>(system.coordinate())?;
+        let projection = self.project_named_effect::<Call<R>>()?;
         self.perform(Call::new(request, projection)).await
     }
 }
@@ -1206,7 +1202,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for Transactional
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
     {
-        fx.call(&self.ledger, TransactionalCounting { value: input.value })
+        fx.call(TransactionalCounting { value: input.value })
             .await?;
         Ok(fx.complete()?)
     }
@@ -5581,7 +5577,7 @@ async fn transactional_effect_uses_registered_port_and_commits_once() {
     ));
 
     let output = effects
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect("transactional port should commit");
 
@@ -5610,7 +5606,7 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
     ));
 
     let live_output = live
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect("transactional effect should commit");
 
@@ -5636,7 +5632,7 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
     ));
 
     let replay_output = replay
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect("strict replay should reconstruct the committed value");
 
@@ -5668,7 +5664,7 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
         EffectPortRegistry::new(),
         &ledger,
     ));
-    live.call_request(&ledger, TransactionalCounting { value: 7 })
+    live.call_request(TransactionalCounting { value: 7 })
         .await
         .expect("live transactional effect should commit");
 
@@ -5687,7 +5683,7 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
     ));
 
     let output = replay
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect("strict replay should use recorded transactional output");
 
@@ -5713,7 +5709,7 @@ async fn transactional_effect_missing_commit_fails() {
     ));
 
     let err = effects
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("transactional port returning without commit must fail");
 
@@ -5746,7 +5742,7 @@ async fn transactional_effect_missing_port_fails_before_execute() {
     let mut effects = EffectsCore::new(context);
 
     let err = effects
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("missing transactional port must fail before execution");
 
@@ -5766,25 +5762,24 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     let declared_port_calls = Arc::new(AtomicUsize::new(0));
     let invocation_port_calls = Arc::new(AtomicUsize::new(0));
 
-    let declared = transactional_ledger(Arc::new(TransactionalCountingPort {
-        calls: declared_port_calls.clone(),
-        commit: true,
-    }));
-    let invocation = transactional_ledger(Arc::new(TransactionalCountingPort {
-        calls: invocation_port_calls.clone(),
-        commit: true,
-    }));
+    let declared = deferred_named_affine_binding(
+        91,
+        Arc::new(AtomicUsize::new(0)),
+        declared_port_calls.clone(),
+    );
+    let invocation = deferred_named_affine_binding(
+        91,
+        Arc::new(AtomicUsize::new(0)),
+        invocation_port_calls.clone(),
+    );
 
-    // Both constructions have the same public name and evidence, but each
-    // builder mints a distinct, opaque construction-family token. A binding
-    // from one family must never borrow another family's installed authority.
     assert_eq!(
-        transactional_declaration(&declared).binding_identity(),
-        transactional_declaration(&invocation).binding_identity(),
+        EffectDeclaration::named_at_least_once(&declared).binding_identity(),
+        EffectDeclaration::named_at_least_once(&invocation).binding_identity(),
         "durable descriptor identity is evidence-based, not process-family-based"
     );
 
-    let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
+    let mut effects = EffectsCore::new(named_affine_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -5794,7 +5789,9 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     ));
 
     let first_error = effects
-        .call_request(&invocation, TransactionalCounting { value: 7 })
+        .perform(NamedAffineCountingEffect {
+            binding: invocation.invocation(),
+        })
         .await
         .expect_err("an independently constructed binding must be rejected");
     let first_fault = match first_error {
@@ -5844,7 +5841,9 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     assert_eq!(emit_fault, first_fault);
 
     let later_perform_fault = match effects
-        .call_request(&declared, TransactionalCounting { value: 8 })
+        .perform(NamedAffineCountingEffect {
+            binding: declared.invocation(),
+        })
         .await
         .expect_err("even a valid later binding cannot reopen the invocation")
     {
@@ -8132,7 +8131,7 @@ async fn guarded_missing_transactional_settlement_records_uncertainty() {
         consults: Arc::new(AtomicUsize::new(0)),
     }));
     assert!(EffectsCore::new(ctx)
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -8572,7 +8571,7 @@ async fn transactional_boundary_executes_and_commits_the_single_use_operation_on
     let mut effects = EffectsCore::new(ctx);
 
     let output = effects
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect("single-use boundary execution should commit");
 
@@ -8610,7 +8609,7 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("the committed failure must override the port's success return");
 
@@ -8646,7 +8645,7 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     let mut replay = EffectsCore::new(replay_ctx);
 
     let replay_err = replay
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("strict replay must return the recorded committed failure");
 
@@ -8676,7 +8675,7 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     let mut effects = EffectsCore::new(ctx);
 
     let output = effects
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect("the supplied operation's committed outcome must remain terminal");
 
@@ -8714,7 +8713,7 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("a foreign execution report must fail closed");
 
@@ -8746,7 +8745,7 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     ));
 
     let replay_err = replay
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("strict replay returns the recorded provenance failure");
     assert!(matches!(replay_err, EffectError::RecordedFailure { .. }));
@@ -8774,7 +8773,7 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("boundary abort must reject the transactional effect");
 
@@ -8812,7 +8811,7 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     ));
 
     let replay_err = replay
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("strict replay returns the recorded rejection");
 
@@ -8885,7 +8884,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         ports_a,
     ));
     effects_a
-        .call_request(&ledger, TransactionalCounting { value: 7 })
+        .call_request(TransactionalCounting { value: 7 })
         .await
         .expect_err("boundary aborts the transactional effect");
     effects_a

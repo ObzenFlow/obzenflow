@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::binding::{is_system_name, BindingCoordinate};
+use super::binding::is_system_name;
 use super::call::{call_port_slot, Call, CallRequest};
 use super::declaration::EffectDeclarationSyntax;
 use super::ports::SystemPort;
@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// One system that answers requests through its port `P`. A handler holds it
-/// in a `#[system]` field and passes it to `fx.call`.
+/// in a `#[system]` field, and it answers each of the handler's requests for `P`.
 pub struct System<P: ?Sized + Send + Sync + 'static> {
     name: LogicalEffectBindingName,
     evidence: SystemBindingEvidence,
@@ -155,10 +155,6 @@ impl<P: ?Sized + Send + Sync + 'static> System<P> {
     /// The system's name, as its evidence and diagnostics record it.
     pub fn name(&self) -> &str {
         self.name.as_str()
-    }
-
-    pub(super) fn coordinate(&self) -> BindingCoordinate {
-        self.port.coordinate()
     }
 }
 

@@ -582,10 +582,6 @@ impl EffectDeclarationBinding {
         &self.logical_name
     }
 
-    pub(super) fn binds(&self, coordinate: BindingCoordinate) -> bool {
-        self.slots.iter().any(|slot| slot.coordinate == coordinate)
-    }
-
     pub(super) fn slots(&self) -> &[BoundEffectPortSlot] {
         self.slots.as_slice()
     }

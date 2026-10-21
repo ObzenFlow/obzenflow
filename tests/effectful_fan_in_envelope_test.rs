@@ -166,13 +166,10 @@ impl EffectfulTransformHandler for EffectfulMerge {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(
-                &self.counter,
-                Counting {
-                    channel: input.channel.clone(),
-                    value: input.value,
-                },
-            )
+            .call(Counting {
+                channel: input.channel.clone(),
+                value: input.value,
+            })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(EnvelopeOutput {

@@ -130,7 +130,7 @@ impl EffectfulTransformHandler for PerformTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .call(&self.values, ValueRequest { value: input.value })
+            .call(ValueRequest { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(ContainmentOutput {
@@ -433,7 +433,7 @@ impl EffectfulTransformHandler for CollidingTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let _ = fx
-            .call(&self.colliding, CollidingRequest)
+            .call(CollidingRequest)
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         Ok(fx.complete()?)

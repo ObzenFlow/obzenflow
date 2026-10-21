@@ -336,7 +336,7 @@ impl EffectfulTransformHandler for TransactionProbeHandler {
         _input: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        match fx.call(&self.ledger, TransactionProbeRequest).await {
+        match fx.call(TransactionProbeRequest).await {
             Ok(_) => Ok(fx.complete()?),
             Err(error) => {
                 *self.terminal_error.lock().unwrap() = Some(error);
