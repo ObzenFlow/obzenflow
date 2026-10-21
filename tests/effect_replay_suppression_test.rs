@@ -168,10 +168,12 @@ impl TypedTransformHandler for FanOutTransform {
 #[obzenflow::port]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
+    offset: u64,
 }
 
 fn call_counter(calls: Arc<AtomicUsize>) -> System<CallCounter> {
-    System::eager("call-counter", Arc::new(CallCounter { calls })).expect("a valid system name")
+    System::eager("call-counter", Arc::new(CallCounter { calls, offset: 100 }))
+        .expect("a valid system name")
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -193,7 +195,7 @@ impl CallRequest for Counting {
     ) -> Result<ReplayEffectValue, EffectError> {
         counter.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ReplayEffectValue {
-            effect_value: self.value + 100,
+            effect_value: self.value + counter.offset,
         })
     }
 }
@@ -1248,6 +1250,129 @@ fn build_stateful_flow(
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SiblingStages {
+    Transform,
+    Stateful,
+}
+
+struct SiblingSystems {
+    eager_calls: Arc<AtomicUsize>,
+    deferred_calls: Arc<AtomicUsize>,
+    deferred_resolutions: Arc<AtomicUsize>,
+    eager_outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+    deferred_outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+}
+
+impl SiblingSystems {
+    fn new() -> Self {
+        Self {
+            eager_calls: Arc::new(AtomicUsize::new(0)),
+            deferred_calls: Arc::new(AtomicUsize::new(0)),
+            deferred_resolutions: Arc::new(AtomicUsize::new(0)),
+            eager_outputs: Arc::new(Mutex::new(Vec::new())),
+            deferred_outputs: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn eager(&self) -> System<CallCounter> {
+        System::eager(
+            "eager-counter",
+            Arc::new(CallCounter {
+                calls: self.eager_calls.clone(),
+                offset: 100,
+            }),
+        )
+        .expect("a valid system name")
+    }
+
+    fn deferred(&self) -> System<CallCounter> {
+        let calls = self.deferred_calls.clone();
+        let resolutions = self.deferred_resolutions.clone();
+        System::deferred("deferred-counter", move || {
+            resolutions.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(CallCounter {
+                calls: calls.clone(),
+                offset: 200,
+            }))
+        })
+        .expect("a valid system name")
+    }
+}
+
+fn build_sibling_systems_flow(
+    journal_base: PathBuf,
+    stages: SiblingStages,
+    systems: &SiblingSystems,
+) -> FlowDefinition {
+    let eager = systems.eager();
+    let deferred = systems.deferred();
+    let eager_outputs = systems.eager_outputs.clone();
+    let deferred_outputs = systems.deferred_outputs.clone();
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let eager_collector_handler = CollectSink {
+            outputs: eager_outputs,
+        };
+        let deferred_collector_handler = CollectSink {
+            outputs: deferred_outputs,
+        };
+
+        match stages {
+            SiblingStages::Transform => {
+                let eager_handler = ReplayTransform { counter: eager };
+                let deferred_handler = ReplayTransform { counter: deferred };
+                Ok(flow! {
+                    name: "effect_replay_sibling_transforms",
+                    journals: disk_journals(journal_base),
+
+                    stages: {
+                        inputs = source!(ReplayInput => inputs_handler);
+                        eager_effectful = effectful_transform!(
+                            ReplayInput -> { ReplayOutput, ReplayEffectValue } => eager_handler);
+                        deferred_effectful = effectful_transform!(
+                            ReplayInput -> { ReplayOutput, ReplayEffectValue } => deferred_handler);
+                        eager_collector = sink!(ReplayOutput => eager_collector_handler);
+                        deferred_collector = sink!(ReplayOutput => deferred_collector_handler);
+                    },
+
+                    topology: {
+                        inputs |> eager_effectful;
+                        inputs |> deferred_effectful;
+                        eager_effectful |> eager_collector;
+                        deferred_effectful |> deferred_collector;
+                    }
+                })
+            }
+            SiblingStages::Stateful => {
+                let eager_handler = ReplayStateful { counter: eager };
+                let deferred_handler = ReplayStateful { counter: deferred };
+                Ok(flow! {
+                    name: "effect_replay_sibling_stateful",
+                    journals: disk_journals(journal_base),
+
+                    stages: {
+                        inputs = source!(ReplayInput => inputs_handler);
+                        eager_effectful = effectful_stateful!(
+                            ReplayInput -> { ReplayOutput, ReplayEffectValue } => eager_handler);
+                        deferred_effectful = effectful_stateful!(
+                            ReplayInput -> { ReplayOutput, ReplayEffectValue } => deferred_handler);
+                        eager_collector = sink!(ReplayOutput => eager_collector_handler);
+                        deferred_collector = sink!(ReplayOutput => deferred_collector_handler);
+                    },
+
+                    topology: {
+                        inputs |> eager_effectful;
+                        inputs |> deferred_effectful;
+                        eager_effectful |> eager_collector;
+                        deferred_effectful |> deferred_collector;
+                    }
+                })
+            }
+        }
+    })
+}
+
 fn build_policy_stateful_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
@@ -1512,6 +1637,30 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()
+}
+
+async fn stage_binding_identities(
+    run_dir: &Path,
+    stage_key: &str,
+) -> std::collections::HashSet<obzenflow_core::EffectBindingIdentity> {
+    read_stage_events(run_dir, stage_key)
+        .await
+        .iter()
+        .filter_map(|event| event.effect_provenance.as_ref())
+        .filter(|provenance| provenance.fact_owner.is_user())
+        .map(|provenance| provenance.descriptor.binding.clone())
+        .collect()
+}
+
+fn effect_values(outputs: &Mutex<Vec<ReplayOutput>>) -> Vec<u64> {
+    let mut values: Vec<u64> = outputs
+        .lock()
+        .expect("outputs lock poisoned")
+        .iter()
+        .map(|output| output.effect_value)
+        .collect();
+    values.sort_unstable();
+    values
 }
 
 async fn read_stage_error_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
@@ -2030,6 +2179,81 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
         completion_evidence,
         "replay must rematerialise each cursor's archived terminal evidence unchanged"
     );
+}
+
+async fn assert_sibling_stages_call_their_own_systems(stages: SiblingStages) {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live = SiblingSystems::new();
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_sibling_systems_flow(
+            journal_base.clone(),
+            stages,
+            &live,
+        ))
+        .await
+        .expect("live sibling flow should complete");
+
+    assert_eq!(
+        (
+            live.eager_calls.load(Ordering::SeqCst),
+            live.deferred_calls.load(Ordering::SeqCst),
+            live.deferred_resolutions.load(Ordering::SeqCst),
+        ),
+        (3, 3, 1),
+        "each system answers its own stage's inputs, and the deferred one resolves once"
+    );
+    assert_eq!(effect_values(&live.eager_outputs), vec![101, 102, 103]);
+    assert_eq!(effect_values(&live.deferred_outputs), vec![201, 202, 203]);
+
+    let archive_dir = latest_run_dir(&journal_base);
+    let eager_bindings = stage_binding_identities(&archive_dir, "eager_effectful").await;
+    let deferred_bindings = stage_binding_identities(&archive_dir, "deferred_effectful").await;
+    assert_eq!(
+        (eager_bindings.len(), deferred_bindings.len()),
+        (1, 1),
+        "every call in a stage records the stage's one system"
+    );
+    assert_ne!(
+        eager_bindings, deferred_bindings,
+        "sibling stages record the systems their own handlers hold"
+    );
+
+    let replay = SiblingSystems::new();
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive_dir.as_os_str().to_os_string(),
+        ])
+        .run_async(build_sibling_systems_flow(journal_base, stages, &replay))
+        .await
+        .expect("replay sibling flow should complete");
+
+    assert_eq!(
+        (
+            replay.eager_calls.load(Ordering::SeqCst),
+            replay.deferred_calls.load(Ordering::SeqCst),
+            replay.deferred_resolutions.load(Ordering::SeqCst),
+        ),
+        (0, 0, 0),
+        "replay must neither resolve nor call either system"
+    );
+    assert_eq!(effect_values(&replay.eager_outputs), vec![101, 102, 103]);
+    assert_eq!(effect_values(&replay.deferred_outputs), vec![201, 202, 203]);
+}
+
+#[tokio::test]
+async fn sibling_transform_stages_of_one_handler_type_call_their_own_systems() {
+    assert_sibling_stages_call_their_own_systems(SiblingStages::Transform).await;
+}
+
+#[tokio::test]
+async fn sibling_stateful_stages_of_one_handler_type_call_their_own_systems() {
+    assert_sibling_stages_call_their_own_systems(SiblingStages::Stateful).await;
 }
 
 #[tokio::test]

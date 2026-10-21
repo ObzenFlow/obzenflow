@@ -327,8 +327,8 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 ///
 /// `Output` is the stage's per-fact enum, one variant per committed fact type;
 /// deriving `EffectOutcomeFacts` on it generates exactly this shape. An effect
-/// outcome carrier never reaches `apply` (FLOWIP-120m): the carrier is
-/// transient `fx.perform` machinery, and a multi-fact product outcome folds
+/// outcome carrier never reaches `apply` (FLOWIP-120m): the carrier is the
+/// transient value `fx.call` returns, and a multi-fact product outcome folds
 /// as its individual member facts, one `apply` call per fact in ordinal
 /// (field) order.
 ///
@@ -348,10 +348,9 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// stage cannot acknowledge the input, process later input, or complete drain
 /// because its state no longer represents a fold of its durable history.
 ///
-/// The stage arrow and trailing `uses` clause are the canonical operator-facing
-/// contract. `Output` and `AllowedEffects` mirror them so Rust
-/// can check `decide` before the handler is erased. They carry no runtime
-/// metadata and are never journalled.
+/// The stage arrow is the operator-facing output contract, and `Output` mirrors
+/// it so Rust can check `decide` before the handler is erased. `AllowedEffects`
+/// declares the effects the stage performs, and the row never restates them.
 ///
 /// Unlike an effectful transform's zero-sized fact-set witness, stateful
 /// `Output` is inhabited because [`EffectfulStatefulHandler::apply`] receives

@@ -1594,7 +1594,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     }
 }
 
-/// The single control policy declared inline on one `uses` entry.
+/// One middleware value attached to one of a stage's effects, with the site it
+/// was written at.
 pub struct EffectPolicyAttachment {
     pub effect_type: &'static str,
     pub factory: Box<dyn MiddlewareFactory>,
