@@ -77,7 +77,7 @@ impl TypedFiniteSourceHandler for Numbers {
 /// A pure handler that either derives its output deterministically or, in
 /// the seeded-nondeterminism variant, reads the wall clock outside any
 /// effect, the exact mistake the verifier exists to catch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct Stamp {
     nondeterministic: bool,
 }
@@ -117,7 +117,7 @@ impl EffectfulTransformHandler for Stamp {
 
 /// The diff workflow: same stage, deliberately changed logic with a bumped
 /// stage logic version, replayed against the v1 recording.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct StampV2;
 
 #[async_trait]

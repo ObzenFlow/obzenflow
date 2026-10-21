@@ -2,14 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Compiler-host derives for Core-owned ObzenFlow contracts.
+//! Compiler-host macros for ObzenFlow contracts.
 //!
-//! Provides `#[derive(EffectOutcomeFacts)]` for effect outcome carriers
-//! (FLOWIP-120m) and `#[derive(StageOutputFacts)]` for pure stage output
-//! carriers (FLOWIP-120z). Use them through `obzenflow_core`, which
-//! re-exports each derive next to its trait, the same way serde re-exports
-//! its derives.
+//! Provides `#[derive(EffectOutcomeFacts)]` for effect outcome carriers and
+//! `#[derive(StageOutputFacts)]` for pure stage output carriers, which
+//! `obzenflow_core` re-exports next to their traits, and
+//! `#[derive(EffectHandler)]` and `#[port]`, which the runtime's effects module
+//! re-exports, the same way serde re-exports its derives.
 
+mod effect_handler;
+mod effects_path;
+mod port;
 mod stage_output;
 
 use proc_macro::TokenStream;
@@ -93,6 +96,34 @@ pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
 pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     stage_output::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Declare the systems an effectful handler calls. Each field marked
+/// `#[system]` holds a `System` or a typed binding, and the build matches each
+/// named effect the handler performs to one of them. A handler that calls no
+/// system derives it with no such field.
+///
+/// Generated code resolves `::obzenflow::effects`; code that depends on the
+/// runtime crate directly names its effects module with
+/// `#[effect_handler(effects = <path>)]`.
+#[proc_macro_derive(EffectHandler, attributes(system, effect_handler))]
+pub fn derive_effect_handler(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    effect_handler::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Mark a trait as a port, so a `System` takes its port type from the value it
+/// is built from. Generated code resolves `::obzenflow::effects`; code that
+/// depends on the runtime crate directly writes `#[port(effects = <path>)]`.
+#[proc_macro_attribute]
+pub fn port(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let effects = parse_macro_input!(attr as effects_path::EffectsPath);
+    let item = parse_macro_input!(item as syn::ItemTrait);
+    port::expand(&effects, &item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

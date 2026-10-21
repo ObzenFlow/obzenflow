@@ -280,7 +280,7 @@ impl Effect for BlockingEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ReplayTransform {
     calls: Arc<AtomicUsize>,
 }
@@ -318,7 +318,7 @@ impl EffectfulTransformHandler for ReplayTransform {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct BlockingTransform {
     calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
@@ -365,7 +365,7 @@ impl EffectfulTransformHandler for BlockingTransform {
 /// Completes the physical effect and then deliberately keeps the handler alive.
 /// `perform()` returning is the synchronization point: terminal effect evidence
 /// must already be durable before cancellation can reach this second gate.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PostPerformBlockingTransform {
     calls: Arc<AtomicUsize>,
     performed: Arc<Semaphore>,
@@ -452,7 +452,7 @@ struct ReplayStatefulState {
     outputs: Vec<ReplayOutput>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ReplayStateful {
     calls: Arc<AtomicUsize>,
 }
@@ -572,7 +572,7 @@ enum PolicyStatefulFact {
     Failed(ReservationFailed),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PolicyStateful {
     calls: Arc<AtomicUsize>,
 }
@@ -667,7 +667,7 @@ struct DishonestReplayStatefulOutput {
 
 impl obzenflow_core::OneFactStageOutput for DishonestReplayStatefulOutput {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct DishonestOneFactStateful {
     calls: Arc<AtomicUsize>,
     decide_inputs: Arc<Mutex<Vec<u64>>>,
@@ -728,7 +728,7 @@ struct ErrorAfterCommitState {
     applied: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ErrorAfterCommitStateful {
     calls: Arc<AtomicUsize>,
     observed_fact_counts: Arc<Mutex<Vec<usize>>>,
@@ -806,7 +806,7 @@ struct ApplyRejectionState {
 /// B2 proof handler. The live failure and strict replay use the same handler
 /// surface and logic version; the completed replay fixture disables only the
 /// deliberate `apply` rejection so it can provide a sealed effect history.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ApplyRejectingStateful {
     calls: Arc<AtomicUsize>,
     decide_inputs: Arc<Mutex<Vec<u64>>>,
@@ -958,7 +958,7 @@ enum ProductStatefulFact {
 #[derive(Clone, Debug, Default)]
 struct ProductStatefulState;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ProductStateful {
     calls: Arc<AtomicUsize>,
     applied: Arc<Mutex<Vec<String>>>,
@@ -3702,13 +3702,10 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
 }
 
 // ============================================================================
-// FLOWIP-133e: end-to-end package collection from lexical `via` bindings.
-//
-// FLOWIP-120a implemented typed and transactional effect ports in the runtime
-// but left explicit registry plumbing on the authoring surface. These tests
-// prove that the ordinary flow builder collects the pending package carried by
-// each lexical binding, while preserving live typed `EffectContext::port(slot)`
-// access for ordinary and transactional effects.
+// End-to-end package collection from the bindings handlers hold in `#[system]`
+// fields. The ordinary flow builder collects the pending package each binding
+// carries, and live typed `EffectContext::port(slot)` access stays available
+// for ordinary and transactional effects.
 // ============================================================================
 
 /// A host-provided port. The ordinary ported effect resolves it through
@@ -3785,10 +3782,11 @@ impl NamedEffect for PortedEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PortedTransform {
     calls: Arc<AtomicUsize>,
-    binding: EffectBindingUse<PortedEffect>,
+    #[system]
+    binding: EffectBinding<PortedEffect>,
 }
 
 #[async_trait]
@@ -3806,7 +3804,7 @@ impl EffectfulTransformHandler for PortedTransform {
             .perform(PortedEffect {
                 value: input.value,
                 calls: self.calls.clone(),
-                binding: self.binding.clone(),
+                binding: self.binding.invocation(),
             })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -3836,7 +3834,7 @@ fn build_ported_flow(
         let inputs_handler = ReplaySource::counted(source_calls);
         let ported_handler = PortedTransform {
             calls,
-            binding: ported_binding.invocation(),
+            binding: ported_binding,
         };
         let collector_handler = CollectSink { outputs };
 
@@ -3846,7 +3844,7 @@ fn build_ported_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ported = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ported_handler.system(ported_binding)
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ported_handler
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4042,11 +4040,11 @@ async fn reusing_a_collected_binding_package_fails_closed_before_stage_work() {
     );
 }
 
-// --- Transactional execute-and-record port collected from `via` -------------
+// --- Transactional execute-and-record port collected from a `#[system]` field
 
 /// A transactional effect whose commit runs through a flow-supplied
-/// `TransactionalEffectPort`. The macro `transactional(..)` entry adds the port
-/// requirement, and the runtime reads the executor name from the descriptor.
+/// `TransactionalEffectPort`, and the runtime reads the executor name from the
+/// descriptor.
 #[derive(Clone, Debug)]
 struct LedgerEffect {
     value: u64,
@@ -4124,9 +4122,10 @@ impl TransactionalEffectPort<LedgerEffect> for LedgerPort {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct LedgerTransform {
-    binding: EffectBindingUse<LedgerEffect>,
+    #[system]
+    binding: EffectBinding<LedgerEffect>,
 }
 
 #[async_trait]
@@ -4143,7 +4142,7 @@ impl EffectfulTransformHandler for LedgerTransform {
         let committed = fx
             .perform(LedgerEffect {
                 value: input.value,
-                binding: self.binding.clone(),
+                binding: self.binding.invocation(),
             })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -4171,7 +4170,7 @@ fn build_transactional_flow(
         let resilience = circuit_breaker().consecutive_failures(2);
         let inputs_handler = SingleReplaySource::new();
         let ledger_handler = LedgerTransform {
-            binding: ledger_binding.invocation(),
+            binding: ledger_binding,
         };
         let collector_handler = CollectSink { outputs };
 
@@ -4181,7 +4180,7 @@ fn build_transactional_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => ledger_handler.system(ledger_binding).transactional::<LedgerEffect>()
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => ledger_handler.transactional::<LedgerEffect>()
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4355,7 +4354,7 @@ fn is_breaker_rejection(err: &EffectError) -> bool {
         .starts_with("circuit breaker rejected effect execution")
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct FailFastTransform {
     calls: Arc<AtomicUsize>,
 }
@@ -4407,7 +4406,7 @@ impl EffectfulTransformHandler for FailFastTransform {
 /// Same authoring behaviour with the wider manifest used by the
 /// per-effect-policy binding test. A distinct handler type keeps the static
 /// capability set honest for each stage declaration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct MultiEffectFailFastTransform {
     calls: Arc<AtomicUsize>,
 }

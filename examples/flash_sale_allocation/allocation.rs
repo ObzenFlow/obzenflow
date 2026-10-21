@@ -8,9 +8,9 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderId, ReservationFailed, Sku, SoldOut,
     StockReleased, StockReserved,
 };
-use super::warehouse::{ReleaseStock, ReserveStock, StockRelease, StockReservation};
+use super::warehouse::{ReleaseStock, ReserveStock, StockRelease, StockReservation, WarehousePort};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectError, Effects, StageCompletion};
+use obzenflow::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
 use obzenflow::error::HandlerError;
 use obzenflow::schema::StageOutputFacts;
 use obzenflow::stages::stateful::EffectfulStatefulHandler;
@@ -58,16 +58,19 @@ pub enum AllocationOutput {
 
 type AllocationEffects = obzenflow::effects::effect_set![ReserveStock, ReleaseStock];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
 pub struct Allocator {
+    #[system]
+    warehouse: System<dyn WarehousePort>,
     capacity_per_sku: u32,
     reservation_pace: Duration,
 }
 
 impl Allocator {
-    pub fn new(capacity_per_sku: u32) -> Self {
+    pub fn new(warehouse: System<dyn WarehousePort>, capacity_per_sku: u32) -> Self {
         assert!(capacity_per_sku > 0, "allocation capacity must be non-zero");
         Self {
+            warehouse,
             capacity_per_sku,
             reservation_pace: Duration::ZERO,
         }
@@ -119,13 +122,11 @@ impl EffectfulStatefulHandler for Allocator {
                     return Ok(fx.complete()?);
                 }
 
-                match fx
-                    .call(StockReservation {
-                        order_id: placed.order_id.clone(),
-                        sku: placed.sku.clone(),
-                    })
-                    .await
-                {
+                let reservation = StockReservation {
+                    order_id: placed.order_id.clone(),
+                    sku: placed.sku.clone(),
+                };
+                match fx.call(&self.warehouse, reservation).await {
                     Ok(_) => Ok(fx.complete()?),
                     Err(error) if is_reserve_policy_rejection(&error) => {
                         fx.emit(ReservationFailed {
@@ -150,12 +151,12 @@ impl EffectfulStatefulHandler for Allocator {
                     return Ok(fx.complete()?);
                 };
 
-                fx.call(StockRelease {
+                let release = StockRelease {
                     order_id: cancelled.order_id.clone(),
                     sku,
                     hold_id,
-                })
-                .await?;
+                };
+                fx.call(&self.warehouse, release).await?;
                 Ok(fx.complete()?)
             }
         }
@@ -218,10 +219,12 @@ impl EffectfulStatefulHandler for Allocator {
 
 #[cfg(test)]
 mod tests {
+    use super::super::warehouse::{warehouse_system, WarehouseConfig, WarehouseStats};
     use super::*;
     use obzenflow::effects::{
         EffectFailureCause, EffectFailureCode, EffectFailureSource, RetryDisposition,
     };
+    use std::sync::Arc;
 
     fn order(value: &str) -> OrderId {
         OrderId::from(value)
@@ -283,7 +286,12 @@ mod tests {
 
     #[test]
     fn failed_reservation_is_a_noop_for_capacity_and_holds() {
-        let mut allocator = Allocator::new(1);
+        let warehouse = warehouse_system(
+            &WarehouseConfig::default(),
+            Arc::new(WarehouseStats::default()),
+        )
+        .expect("the demo warehouse is a valid system");
+        let mut allocator = Allocator::new(warehouse, 1);
         let mut state = AllocationState::default();
         allocator
             .apply(

@@ -16,7 +16,7 @@ use obzenflow_core::{BoundedBindingEvidence, FlowId, JournalId, JournalOwner, Ty
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
     transactional_effect_port_slot, CurrentRunHistory, Effect, EffectBindingEvidence,
-    EffectBindingUse, EffectCommitHandle, EffectContext, EffectDeclaration,
+    EffectBindingUse, EffectCommitHandle, EffectContext, EffectDeclaration, EffectHandler,
     EffectInvocationContext, EffectPortRegistry, EffectPortSlotSet, EffectRegistrationBuilder,
     Effects, LogicalEffectBindingName, Named, NamedEffect, TransactionalEffectPort,
 };
@@ -347,7 +347,8 @@ async fn effect_context(
     (context, invocation)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct TransactionProbeHandler {
     terminal_error: Arc<Mutex<Option<EffectError>>>,
     binding: EffectBindingUse<TransactionProbe>,

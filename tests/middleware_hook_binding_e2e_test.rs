@@ -409,7 +409,7 @@ impl RuntimeEffect for HookEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct HookTransform {
     effect_calls: Arc<AtomicUsize>,
 }

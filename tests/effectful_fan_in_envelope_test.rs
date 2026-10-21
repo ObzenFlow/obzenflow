@@ -141,7 +141,7 @@ impl Effect for CountingEffect {
 
 /// The effectful stage is itself the multi-inbound fan-in, so its effect
 /// cursors key directly on canonical-merge delivered positions.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct EffectfulMerge {
     calls: Arc<AtomicUsize>,
 }

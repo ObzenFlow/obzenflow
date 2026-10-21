@@ -9,7 +9,7 @@ use async_trait::async_trait;
 #[cfg(test)]
 use obzenflow::effects::EffectPortResolutionError;
 use obzenflow::effects::{
-    Call, CallRequest, EffectContext, EffectError, EffectSafety, System, SystemError,
+    Call, CallRequest, EffectContext, EffectError, Idempotent, System, SystemError,
 };
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,6 +95,7 @@ pub enum WarehousePortError {
 
 /// The physical integration port. Capacity is intentionally not implemented
 /// here: the allocator is the domain authority and sends only authorised work.
+#[obzenflow::port]
 #[async_trait]
 pub trait WarehousePort: Send + Sync {
     async fn reserve(&self, order_id: &OrderId, sku: &Sku) -> Result<HoldId, WarehousePortError>;
@@ -156,15 +157,20 @@ pub fn warehouse_system(
 ) -> Result<System<dyn WarehousePort>, SystemError> {
     #[cfg(test)]
     if config.reserve_test_fault == Some(WarehouseTestFault::BindingResolution) {
-        return System::deferred(&config.warehouse_id, || {
-            Err(EffectPortResolutionError::CredentialUnavailable)
-        });
+        return System::deferred(
+            &config.warehouse_id,
+            || -> Result<Arc<SimulatedWarehouse>, EffectPortResolutionError> {
+                Err(EffectPortResolutionError::CredentialUnavailable)
+            },
+        );
     }
-    let warehouse: Arc<dyn WarehousePort> = Arc::new(SimulatedWarehouse {
-        config: config.clone(),
-        stats,
-    });
-    System::eager(&config.warehouse_id, warehouse)
+    System::eager(
+        &config.warehouse_id,
+        Arc::new(SimulatedWarehouse {
+            config: config.clone(),
+            stats,
+        }),
+    )
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -178,7 +184,7 @@ pub type ReserveStock = Call<StockReservation>;
 #[async_trait]
 impl CallRequest for StockReservation {
     const EFFECT_TYPE: &'static str = "allocation.reserve_stock";
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type Safety = Idempotent;
     type Port = dyn WarehousePort;
     type Outcome = StockReserved;
 
@@ -211,7 +217,7 @@ pub type ReleaseStock = Call<StockRelease>;
 #[async_trait]
 impl CallRequest for StockRelease {
     const EFFECT_TYPE: &'static str = "allocation.release_stock";
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type Safety = Idempotent;
     type Port = dyn WarehousePort;
     type Outcome = StockReleased;
 

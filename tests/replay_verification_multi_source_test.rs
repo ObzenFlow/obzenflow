@@ -141,7 +141,7 @@ impl TypedTransformHandler for Intake {
 
 /// The effectful merge: charging sits directly at the fan-in, so the build
 /// marks the merge itself as a deterministic orderer (canonical merge).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ChargeOrders {
     calls: Arc<AtomicUsize>,
 }

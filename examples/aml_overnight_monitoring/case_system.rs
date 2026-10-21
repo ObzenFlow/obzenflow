@@ -49,6 +49,7 @@ impl CaseSystemError {
     }
 }
 
+#[obzenflow::port]
 #[async_trait]
 pub trait CaseSystemPort: Send + Sync {
     async fn open(

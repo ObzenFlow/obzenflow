@@ -8,8 +8,8 @@ use super::ledger::LedgerError;
 use super::risk_engine::{RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine};
 use async_trait::async_trait;
 use obzenflow::effects::{
-    Call, CallRequest, EffectContext, EffectError, EffectPortResolutionError, EffectSafety,
-    IdempotencyKey,
+    Call, CallRequest, EffectContext, EffectError, EffectPortResolutionError, IdempotencyKey,
+    Keyed, RequiresKey, System, SystemError,
 };
 use obzenflow::schema::EffectOutcomeFacts;
 use std::path::Path;
@@ -52,13 +52,9 @@ impl ScoreOutcome {
 #[async_trait]
 impl CallRequest for ScoreRequest {
     const EFFECT_TYPE: &'static str = "aml.score_transaction";
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type Safety = RequiresKey;
     type Port = dyn RiskEnginePort;
     type Outcome = ScoreOutcome;
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(score_key(self))
-    }
 
     async fn call(
         &self,
@@ -66,23 +62,25 @@ impl CallRequest for ScoreRequest {
         ctx: &mut EffectContext,
     ) -> Result<ScoreOutcome, EffectError> {
         let verdict = engine
-            .score(&score_key(self), ctx.flow_id(), self)
+            .score(&self.idempotency_key(), ctx.flow_id(), self)
             .await
             .map_err(|error| EffectError::unavailable(RISK_ENGINE_SOURCE, error.code(), error))?;
         Ok(ScoreOutcome::from_verdict(self, verdict))
     }
 }
 
+impl Keyed for ScoreRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("aml-score:{}", self.txn_id))
+    }
+}
+
 #[async_trait]
 impl CallRequest for CaseRequest {
     const EFFECT_TYPE: &'static str = "aml.open_case";
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type Safety = RequiresKey;
     type Port = dyn CaseSystemPort;
     type Outcome = CaseOpened;
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(case_key(self))
-    }
 
     async fn call(
         &self,
@@ -90,7 +88,7 @@ impl CallRequest for CaseRequest {
         ctx: &mut EffectContext,
     ) -> Result<CaseOpened, EffectError> {
         let case_number = cases
-            .open(&case_key(self), ctx.flow_id(), self)
+            .open(&self.idempotency_key(), ctx.flow_id(), self)
             .await
             .map_err(|error| EffectError::unavailable(CASE_SYSTEM_SOURCE, error.code(), error))?;
         Ok(CaseOpened {
@@ -103,12 +101,10 @@ impl CallRequest for CaseRequest {
     }
 }
 
-fn score_key(request: &ScoreRequest) -> IdempotencyKey {
-    IdempotencyKey(format!("aml-score:{}", request.txn_id))
-}
-
-fn case_key(request: &CaseRequest) -> IdempotencyKey {
-    IdempotencyKey(format!("aml-case:{}", request.alert_id))
+impl Keyed for CaseRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("aml-case:{}", self.alert_id))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -128,32 +124,30 @@ impl VendorStats {
     }
 }
 
-pub fn open_risk_engine(
+pub fn simulated_risk_engine(
     ledger: &Path,
     stats: &Arc<VendorStats>,
-) -> impl Fn() -> Result<Arc<dyn RiskEnginePort>, EffectPortResolutionError> + Send + Sync + 'static
-{
+) -> Result<System<dyn RiskEnginePort>, SystemError> {
     let ledger = ledger.to_path_buf();
     let stats = stats.clone();
-    move || {
+    System::deferred("simulated-risk-engine", move || {
         stats.engines_built.fetch_add(1, Ordering::SeqCst);
         let engine = SimulatedRiskEngine::open(&ledger).map_err(construction_failed)?;
         Ok(Arc::new(engine))
-    }
+    })
 }
 
-pub fn open_case_system(
+pub fn simulated_case_system(
     ledger: &Path,
     stats: &Arc<VendorStats>,
-) -> impl Fn() -> Result<Arc<dyn CaseSystemPort>, EffectPortResolutionError> + Send + Sync + 'static
-{
+) -> Result<System<dyn CaseSystemPort>, SystemError> {
     let ledger = ledger.to_path_buf();
     let stats = stats.clone();
-    move || {
+    System::deferred("simulated-case-system", move || {
         stats.case_systems_built.fetch_add(1, Ordering::SeqCst);
         let cases = SimulatedCaseSystem::open(&ledger).map_err(construction_failed)?;
         Ok(Arc::new(cases))
-    }
+    })
 }
 
 fn construction_failed(error: LedgerError) -> EffectPortResolutionError {
@@ -201,10 +195,10 @@ mod tests {
             alert_id: AlertId("day:2022/09/05:70/8000A1B2C".to_owned()),
             ..case.clone()
         };
-        assert_eq!(score_key(&score).0, "aml-score:2817341");
-        assert_eq!(case_key(&case).0, "aml-case:txn:2817341");
+        assert_eq!(score.idempotency_key().0, "aml-score:2817341");
+        assert_eq!(case.idempotency_key().0, "aml-case:txn:2817341");
         assert_eq!(
-            case_key(&day_case).0,
+            day_case.idempotency_key().0,
             "aml-case:day:2022/09/05:70/8000A1B2C"
         );
     }

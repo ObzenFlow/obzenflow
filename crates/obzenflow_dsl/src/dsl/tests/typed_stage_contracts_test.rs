@@ -12,7 +12,7 @@ mod tests {
     use obzenflow_core::journal::archive::DeliveryOrder;
     use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
-    use obzenflow_runtime::effects::{Effects, StageCompletion};
+    use obzenflow_runtime::effects::{EffectHandler, Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{FactVisibility, FeedRole};
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -333,7 +333,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulExactTransform;
 
     #[async_trait]
@@ -354,7 +355,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulMultiOutputTransform;
 
     #[async_trait]
@@ -426,7 +428,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulProductStateful;
 
     #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
@@ -464,7 +467,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulExactStateful;
 
     #[async_trait]

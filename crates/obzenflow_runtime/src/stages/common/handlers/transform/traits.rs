@@ -170,16 +170,17 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 
 /// Async transform surface for replay-safe effects.
 ///
-/// The stage arrow and trailing `uses` clause are the canonical operator-facing
-/// contract. `Output` and `AllowedEffects` mirror them so Rust
+/// The stage arrow is the canonical operator-facing contract. `Output` mirrors
+/// it and `AllowedEffects` declares the effects the handler performs, so Rust
 /// can reject an undeclared [`Effects::emit`] or [`Effects::perform`] inside
 /// this handler before the handler is erased for execution. They carry no
 /// runtime metadata and are never journalled.
 ///
 /// A single output fact may be named directly. For a multi-fact arrow, use
-/// [`obzenflow_core::stage_fact_set!`]. Always mirror effect types with
-/// [`crate::effect_set!`]; middleware and policy values remain only in the
-/// stage's `uses` clause.
+/// [`obzenflow_core::stage_fact_set!`]. Declare effect types with
+/// [`crate::effect_set!`]. The handler derives
+/// [`EffectHandler`](crate::effects::EffectHandler) and holds each system it
+/// calls in a `#[system]` field.
 ///
 /// ```ignore
 /// # use async_trait::async_trait;
@@ -222,12 +223,11 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulTransformHandler` for this stage",
     label = "this handler does not match the effectful transform contract",
-    note = "implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, \
-            and `process`; `Input` must match the arrow input, while `Output` and \
-            `AllowedEffects` mirror the canonical arrow and `uses` clause (FLOWIP-120z B9)"
+    note = "implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects` \
+            and `process`; `Input` must match the arrow input, and `Output` mirrors the arrow"
 )]
 #[async_trait]
-pub trait EffectfulTransformHandler: Send + Sync {
+pub trait EffectfulTransformHandler: crate::effects::EffectHandler + Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: obzenflow_core::StageFactSet;
     type AllowedEffects: crate::effects::EffectSet;

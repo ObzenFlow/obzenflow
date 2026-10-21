@@ -48,16 +48,16 @@
 //! An effectful handler's `type AllowedEffects = effect_set![...]` declares the
 //! effects its stage performs, and the row never restates them. A handler
 //! whose effect set is empty is written `In -> Out => handler`. A named effect
-//! is answered by a system named after the handler, as in
-//! `=> score.system(risk_engine)`, and a paid at-least-once or transactional
-//! effect is acknowledged after the handler with `.at_least_once::<E>()` or
+//! is answered by a system the handler holds in a `#[system]` field and passes
+//! to `fx.call`, and a paid at-least-once or transactional effect is
+//! acknowledged after the handler with `.at_least_once::<E>()` or
 //! `.transactional::<E>()`.
 //!
 //! ```
 //! use async_trait::async_trait;
 //! use obzenflow_core::TypedPayload;
 //! use obzenflow_dsl::effectful_transform;
-//! use obzenflow_runtime::effects::{Effects, StageCompletion};
+//! use obzenflow_runtime::effects::{EffectHandler, Effects, StageCompletion};
 //! use obzenflow_runtime::stages::common::{
 //!     handlers::EffectfulTransformHandler,
 //!     HandlerError,
@@ -76,7 +76,8 @@
 //!     const EVENT_TYPE: &'static str = "docs.effectful-transform.output";
 //! }
 //!
-//! #[derive(Clone, Debug)]
+//! #[derive(Clone, Debug, EffectHandler)]
+//! # #[effect_handler(effects = obzenflow_runtime::effects)]
 //! struct Handler;
 //!
 //! #[async_trait]

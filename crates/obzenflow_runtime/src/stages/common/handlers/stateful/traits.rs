@@ -410,18 +410,19 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// }
 /// ```
 ///
-/// Middleware and policy values stay solely in the stage's `uses` clause;
-/// `AllowedEffects` mirrors effect types only.
+/// `AllowedEffects` declares effect types only, and middleware stays in the
+/// stage's `with` clause. The handler derives
+/// [`EffectHandler`](crate::effects::EffectHandler) and holds each system it
+/// calls in a `#[system]` field.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
     label = "this handler does not match the effectful stateful contract",
     note = "implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, \
-            `AllowedEffects`, `initial_state`, `decide`, and `apply`; `Input` must match the \
-            arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and \
-            `uses` clause (FLOWIP-120z B9)"
+            `AllowedEffects`, `initial_state`, `decide` and `apply`; `Input` must match the \
+            arrow input, and `Output` mirrors the arrow"
 )]
 #[async_trait]
-pub trait EffectfulStatefulHandler: Send + Sync {
+pub trait EffectfulStatefulHandler: crate::effects::EffectHandler + Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: obzenflow_core::OneFactStageOutput + Send + Sync + 'static;
@@ -729,7 +730,8 @@ mod tests {
         assert!(message.contains("stateful.second"));
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, crate::effects::EffectHandler)]
+    #[effect_handler(effects = crate::effects)]
     struct DecideOnly;
 
     #[async_trait]

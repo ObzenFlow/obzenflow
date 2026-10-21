@@ -129,7 +129,7 @@ impl TypedFiniteSourceHandler for OneInputSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PerformsBothEffects {
     repetitions: usize,
 }

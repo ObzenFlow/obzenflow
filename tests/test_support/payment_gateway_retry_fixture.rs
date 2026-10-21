@@ -213,7 +213,7 @@ type GatewayOutput =
     obzenflow_core::stage_fact_set![PaymentAuthorized, PaymentAuthorizationUnavailable];
 type GatewayEffects = obzenflow_runtime::effect_set![ScriptedAuthorizePayment];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, obzenflow::effects::EffectHandler)]
 struct ScriptedGatewayTransform {
     gateway: Arc<ScriptedGateway>,
 }

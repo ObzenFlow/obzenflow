@@ -177,7 +177,8 @@ impl Effect for AuthoriseShippingEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct AuthoriseShipping {
     calls: Arc<AtomicUsize>,
 }

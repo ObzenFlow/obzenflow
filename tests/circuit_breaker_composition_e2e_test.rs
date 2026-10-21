@@ -194,7 +194,7 @@ impl Effect for RetryOnceEffect {
 }
 
 /// Performs the retry-once effect and emits the recovered outcome.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct RetryTransform {
     calls: Arc<Mutex<BTreeMap<u64, usize>>>,
 }

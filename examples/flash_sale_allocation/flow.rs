@@ -159,7 +159,7 @@ fn allocation_flow(
 
     let allocation_feed = sources::ValuesSource::new(inputs);
     let phone_feed = sources::ValuesSource::new(phone_reservations());
-    let allocator = Allocator::new(1).with_reservation_pace(reservation_pace);
+    let allocator = Allocator::new(warehouse, 1).with_reservation_pace(reservation_pace);
     let desk = ReservationDesk;
     let record_confirmation = TracingSink::new(|confirmed: &ReservationConfirmed| {
         tracing::info!(
@@ -194,7 +194,7 @@ fn allocation_flow(
                     CancelIgnored,
                 }
                 with reserve_resilience
-                => allocator.system(warehouse),
+                => allocator,
             );
 
             reservations = sink!(StockReserved => record_reservation.idempotent());

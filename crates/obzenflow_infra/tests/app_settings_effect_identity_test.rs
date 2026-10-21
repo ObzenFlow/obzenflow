@@ -214,7 +214,8 @@ type ScoreEffects = obzenflow_runtime::effect_set![ScoreEffect];
 
 const RESCORE_OFFSET: u64 = 1_000;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct ScoreTransform {
     app: App,
     executed: Executed,

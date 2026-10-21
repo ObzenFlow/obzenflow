@@ -625,13 +625,15 @@ enum AdapterSettlement {
     Fatal,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct ConsumeOneEffectThenSettle {
     calls: Arc<AtomicUsize>,
     settlement: AdapterSettlement,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct CatchBindingFaultThenSettle {
     invocation_binding: EffectBinding<ZeroSlotNamedEffect>,
     calls: Arc<AtomicUsize>,
@@ -685,7 +687,8 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchBinding
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct FoldThenCatchBindingFault {
     invocation_binding: EffectBinding<ZeroSlotNamedEffect>,
     valid_calls: Arc<AtomicUsize>,
@@ -837,7 +840,8 @@ impl Effect for AffineCountingEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct RepeatableBoundaryStateful {
     calls: Arc<AtomicUsize>,
 }
@@ -879,7 +883,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for RepeatableBou
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct AffineBoundaryStateful {
     calls: Arc<AtomicUsize>,
 }
@@ -1036,7 +1041,8 @@ impl NamedEffect for TransactionalCountingEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct TransactionalBoundaryStateful {
     normal_calls: Arc<AtomicUsize>,
     binding: EffectBindingUse<TransactionalCountingEffect>,
@@ -1228,7 +1234,8 @@ enum PolicyTranslationOutput {
     Failed(SecondOutput),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct PolicyTranslationStateful {
     effect_calls: Arc<AtomicUsize>,
 }
@@ -1293,7 +1300,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTransla
 // implementation proves the fatal runtime backstop for a trusted manual claim.
 impl obzenflow_core::OneFactStageOutput for MultiFactOutcome {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct DishonestProductStateful {
     apply_calls: Arc<AtomicUsize>,
 }
@@ -1333,7 +1341,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for DishonestProd
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct EmitThenErrorStateful;
 
 #[async_trait]
@@ -1377,7 +1386,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenError
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct SingleFactErrorStateful {
     emit: bool,
     fail_apply: bool,
@@ -1426,7 +1436,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SingleFactErr
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct SecondFactApplyErrorStateful;
 
 #[async_trait]
@@ -6334,7 +6345,8 @@ async fn an_in_doubt_attempt_the_declaration_cannot_follow_refuses() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = crate::effects)]
 struct CatchRefusalThenSettle {
     label: &'static str,
     calls: Arc<AtomicUsize>,

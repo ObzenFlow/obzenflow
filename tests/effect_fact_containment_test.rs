@@ -105,7 +105,7 @@ impl TypedFiniteSourceHandler for OneShotSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PerformTransform;
 
 #[async_trait]
@@ -136,7 +136,7 @@ impl EffectfulTransformHandler for PerformTransform {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct EmitOnlyTransform;
 
 #[async_trait]
@@ -396,7 +396,7 @@ impl Effect for CollidingEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct CollidingTransform;
 
 #[async_trait]

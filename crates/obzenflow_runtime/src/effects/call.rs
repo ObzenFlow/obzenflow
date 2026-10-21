@@ -11,7 +11,8 @@ use obzenflow_core::event::schema::EffectOutcomeFacts;
 use obzenflow_core::SystemBindingEvidence;
 use serde::Serialize;
 
-/// A request a system answers, performed by a handler with `fx.call(request)`.
+/// A request a system answers, performed by a handler with
+/// `fx.call(&system, request)`.
 #[async_trait]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a request",
@@ -21,17 +22,15 @@ use serde::Serialize;
 pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'static {
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety;
+
+    /// How a repeated call behaves: `Idempotent`, `RequiresKey` or `AtLeastOnce`.
+    type Safety: CallSafety + KeyRule<Self>;
 
     /// The port a system implements to answer this request.
     type Port: ?Sized + Send + Sync + 'static;
 
     /// The facts a successful call records.
     type Outcome: EffectOutcomeFacts + Clone + Send + Sync + 'static;
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        None
-    }
 
     async fn call(
         &self,
@@ -40,7 +39,159 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
     ) -> Result<Self::Outcome, EffectError>;
 }
 
-/// The named effect that performs one request through the system the stage names.
+/// The idempotency key of a request whose safety class is `RequiresKey`.
+///
+/// ```
+/// # use async_trait::async_trait;
+/// # use obzenflow_runtime::effects::{CallRequest, EffectContext, EffectError, IdempotencyKey, Keyed, RequiresKey};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Scored;
+/// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.keyed.scored"; }
+/// # trait RiskEnginePort: Send + Sync {}
+/// #[derive(Clone, Debug, serde::Serialize)]
+/// struct ScoreRequest {
+///     txn_id: u64,
+/// }
+///
+/// #[async_trait]
+/// impl CallRequest for ScoreRequest {
+///     const EFFECT_TYPE: &'static str = "docs.keyed.score";
+///     type Safety = RequiresKey;
+///     type Port = dyn RiskEnginePort;
+///     type Outcome = Scored;
+///
+///     async fn call(
+///         &self,
+///         _: &dyn RiskEnginePort,
+///         _: &mut EffectContext,
+///     ) -> Result<Scored, EffectError> {
+///         Ok(Scored)
+///     }
+/// }
+///
+/// impl Keyed for ScoreRequest {
+///     fn idempotency_key(&self) -> IdempotencyKey {
+///         IdempotencyKey(format!("score:{}", self.txn_id))
+///     }
+/// }
+/// ```
+///
+/// A `RequiresKey` request without it does not compile at its own impl:
+///
+/// ```compile_fail,E0277
+/// # use async_trait::async_trait;
+/// # use obzenflow_runtime::effects::{CallRequest, EffectContext, EffectError, RequiresKey};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Scored;
+/// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.keyed.scored"; }
+/// # trait RiskEnginePort: Send + Sync {}
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct ScoreRequest { txn_id: u64 }
+/// #[async_trait]
+/// impl CallRequest for ScoreRequest {
+///     const EFFECT_TYPE: &'static str = "docs.keyed.score";
+///     type Safety = RequiresKey;
+///     type Port = dyn RiskEnginePort;
+///     type Outcome = Scored;
+///
+///     async fn call(
+///         &self,
+///         _: &dyn RiskEnginePort,
+///         _: &mut EffectContext,
+///     ) -> Result<Scored, EffectError> {
+///         Ok(Scored)
+///     }
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not idempotent, so it needs an idempotency key",
+    label = "`{Self}` declares `type Safety = RequiresKey`",
+    note = "implement `Keyed` for `{Self}`, deriving the key from the request's business identity"
+)]
+pub trait Keyed {
+    fn idempotency_key(&self) -> IdempotencyKey;
+}
+
+mod sealed {
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` is not a request safety class",
+        note = "a request's `Safety` is `Idempotent`, `RequiresKey` or `AtLeastOnce`"
+    )]
+    pub trait CallSafety {}
+}
+
+/// A request's safety class: [`Idempotent`], [`RequiresKey`] or
+/// [`AtLeastOnce`]. No request is transactional, and no other class can be
+/// declared:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::effects::{CallSafety, EffectSafety};
+/// struct Transactional;
+///
+/// impl CallSafety for Transactional {
+///     # const SAFETY: EffectSafety = EffectSafety::Transactional;
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a request safety class",
+    note = "a request's `Safety` is `Idempotent`, `RequiresKey` or `AtLeastOnce`"
+)]
+pub trait CallSafety: sealed::CallSafety {
+    #[doc(hidden)]
+    const SAFETY: EffectSafety;
+}
+
+/// A request a repeated call answers the same way.
+pub struct Idempotent;
+
+/// A request a system deduplicates by the key its `Keyed` impl derives.
+pub struct RequiresKey;
+
+/// A paid request a repeat may perform again, acknowledged after its stage's
+/// handler with `.at_least_once::<E>()`.
+pub struct AtLeastOnce;
+
+impl sealed::CallSafety for Idempotent {}
+impl sealed::CallSafety for RequiresKey {}
+impl sealed::CallSafety for AtLeastOnce {}
+
+impl CallSafety for Idempotent {
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+}
+
+impl CallSafety for RequiresKey {
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+}
+
+impl CallSafety for AtLeastOnce {
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+}
+
+#[doc(hidden)]
+pub trait KeyRule<R> {
+    fn key(request: &R) -> Option<IdempotencyKey>;
+}
+
+impl<R> KeyRule<R> for Idempotent {
+    fn key(_: &R) -> Option<IdempotencyKey> {
+        None
+    }
+}
+
+impl<R: Keyed> KeyRule<R> for RequiresKey {
+    fn key(request: &R) -> Option<IdempotencyKey> {
+        Some(request.idempotency_key())
+    }
+}
+
+impl<R> KeyRule<R> for AtLeastOnce {
+    fn key(_: &R) -> Option<IdempotencyKey> {
+        None
+    }
+}
+
+/// The named effect that performs one request through the system its handler
+/// passes to `fx.call`.
 pub struct Call<R: CallRequest> {
     request: R,
     projection: EffectBindingUse<Call<R>>,
@@ -82,7 +233,7 @@ impl<R: CallRequest> std::fmt::Debug for Call<R> {
 impl<R: CallRequest> Effect for Call<R> {
     const EFFECT_TYPE: &'static str = R::EFFECT_TYPE;
     const SCHEMA_VERSION: u32 = R::SCHEMA_VERSION;
-    const SAFETY: EffectSafety = R::SAFETY;
+    const SAFETY: EffectSafety = <R::Safety as CallSafety>::SAFETY;
     type BindingMode = Named<SystemBindingEvidence>;
     type Outcome = R::Outcome;
     type OutcomeSemantics = DomainFacts;
@@ -101,7 +252,7 @@ impl<R: CallRequest> Effect for Call<R> {
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        self.request.idempotency_key()
+        <R::Safety as KeyRule<R>>::key(&self.request)
     }
 }
 

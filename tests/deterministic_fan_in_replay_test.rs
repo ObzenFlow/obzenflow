@@ -224,7 +224,7 @@ impl Effect for CountingEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct EffectfulTail {
     calls: Arc<AtomicUsize>,
 }

@@ -30,6 +30,7 @@ tokio-console = ["tokio/tracing"]
 [dependencies]
 # Internal dependencies
 obzenflow_core = { workspace = true }
+obzenflow_core_derive = { workspace = true }
 obzenflow-topology = { workspace = true }
 obzenflow-fsm = { workspace = true }
 

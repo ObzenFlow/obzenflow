@@ -507,8 +507,11 @@ fn build_user_handler_flow(
     })
 }
 
-#[derive(Clone, Debug)]
-struct HandwrittenBriefReview;
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+struct HandwrittenBriefReview {
+    #[system]
+    chat: EffectBinding<ChatCompletion>,
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for HandwrittenBriefReview {
@@ -558,7 +561,7 @@ fn build_shared_domain_operation_flow(
         let evidence =
             obzenflow::stages::sources::ValuesSource::new([ReducedEvidence { value: 7 }]);
         let generate_brief = FunctionalBriefHandler;
-        let reviewed = HandwrittenBriefReview;
+        let reviewed = HandwrittenBriefReview { chat: chat.clone() };
         let collected = CollectBrief { outputs };
 
         Ok(flow! {
@@ -576,7 +579,7 @@ fn build_shared_domain_operation_flow(
                 reviewed = effectful_transform!(
                     DecisionBrief -> DecisionBrief
                     with ai_resilience()
-                    => reviewed.system(chat).at_least_once::<ChatCompletion>(),
+                    => reviewed.at_least_once::<ChatCompletion>(),
                 );
                 collected = sink!(DecisionBrief => collected);
             },

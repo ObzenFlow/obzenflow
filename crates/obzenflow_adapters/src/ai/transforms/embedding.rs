@@ -6,7 +6,7 @@ use crate::ai::{effect_error_to_handler_error, EmbeddingEffects, EmbeddingGenera
 use async_trait::async_trait;
 use obzenflow_core::ai::{EmbeddingParams, EmbeddingRequestSpec, EmbeddingResponse};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::effects::{EffectBinding, EffectHandler, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -20,7 +20,11 @@ type ResponseMapper<In, Out> =
     dyn Fn(In, EmbeddingResponse) -> Result<Out, HandlerError> + Send + Sync + 'static;
 
 /// Typed standalone embedding handler using the declaration-scoped embedding operation.
+#[derive(EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 pub struct EmbeddingTransform<In, Out> {
+    #[system]
+    embedding: EffectBinding<EmbeddingGeneration>,
     params: EmbeddingParams,
     input_to_inputs: Arc<InputsMapper<In>>,
     response_to_output: Arc<ResponseMapper<In, Out>>,
@@ -30,12 +34,14 @@ pub struct EmbeddingTransform<In, Out> {
 
 impl<In, Out> EmbeddingTransform<In, Out> {
     pub(crate) fn from_parts(
+        embedding: EffectBinding<EmbeddingGeneration>,
         params: EmbeddingParams,
         input_to_inputs: Arc<InputsMapper<In>>,
         response_to_output: Arc<ResponseMapper<In, Out>>,
         logic_version: String,
     ) -> Self {
         Self {
+            embedding,
             params,
             input_to_inputs,
             response_to_output,
@@ -48,6 +54,7 @@ impl<In, Out> EmbeddingTransform<In, Out> {
 impl<In, Out> Clone for EmbeddingTransform<In, Out> {
     fn clone(&self) -> Self {
         Self {
+            embedding: self.embedding.clone(),
             params: self.params.clone(),
             input_to_inputs: Arc::clone(&self.input_to_inputs),
             response_to_output: Arc::clone(&self.response_to_output),

@@ -171,6 +171,7 @@ fn empty_authority() -> AiAuthority {
 }
 
 fn handlers(
+    authority: &AiAuthority,
     mapper_failure: MapperFailure,
     mapper_counters: MapperCounters,
     embedding_dimensions: EmbeddingDimensions,
@@ -181,6 +182,7 @@ fn handlers(
         .logic_version("gap-proof-chat-v1")
         .system("Summarise support tickets concisely.")
         .build_typed::<TicketRaised, TicketSummarised>(
+            authority.chat.clone(),
             move |ticket| {
                 request_calls.fetch_add(1, Ordering::SeqCst);
                 if mapper_failure == MapperFailure::BeforeEffect {
@@ -208,6 +210,7 @@ fn handlers(
         .logic_version("gap-proof-embedding-v1")
         .dimensions(embedding_dimensions)
         .build_typed::<TicketSummarised, TicketEmbedded>(
+            authority.embedding.clone(),
             move |ticket| {
                 if mapper_failure == MapperFailure::EmptyEmbeddingInputs {
                     Ok(Vec::new())
@@ -236,9 +239,8 @@ fn finite_flow(
     embedding_dimensions: EmbeddingDimensions,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = authority.chat.clone();
-        let embedding = authority.embedding.clone();
         let (chat_handler, embedding_handler) = handlers(
+            &authority,
             mapper_failure,
             mapper_counters.clone(),
             embedding_dimensions,
@@ -257,12 +259,12 @@ fn finite_flow(
                 chat = effectful_transform!(
                     TicketRaised -> TicketSummarised
                     with ai_resilience()
-                    => chat_handler.system(chat).at_least_once::<ChatCompletion>(),
+                    => chat_handler.at_least_once::<ChatCompletion>(),
                 );
                 embedding = effectful_transform!(
                     TicketSummarised -> TicketEmbedded
                     with ai_resilience()
-                    => embedding_handler.system(embedding).at_least_once::<EmbeddingGeneration>(),
+                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
                 );
                 collected = sink!(TicketEmbedded => collected);
             },
@@ -316,9 +318,8 @@ fn resumable_flow(
     authority: AiAuthority,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = authority.chat.clone();
-        let embedding = authority.embedding.clone();
         let (chat_handler, embedding_handler) = handlers(
+            &authority,
             MapperFailure::None,
             MapperCounters::default(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -338,12 +339,12 @@ fn resumable_flow(
                 chat = effectful_transform!(
                     TicketRaised -> TicketSummarised
                     with ai_resilience()
-                    => chat_handler.system(chat).at_least_once::<ChatCompletion>(),
+                    => chat_handler.at_least_once::<ChatCompletion>(),
                 );
                 embedding = effectful_transform!(
                     TicketSummarised -> TicketEmbedded
                     with ai_resilience()
-                    => embedding_handler.system(embedding).at_least_once::<EmbeddingGeneration>(),
+                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
                 );
                 collected = sink!(TicketEmbedded => collected);
             },
@@ -389,9 +390,8 @@ fn control_interleaving_flow(
     mapper_counters: MapperCounters,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = authority.chat.clone();
-        let embedding = authority.embedding.clone();
         let (chat_handler, embedding_handler) = handlers(
+            &authority,
             MapperFailure::None,
             mapper_counters.clone(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -410,12 +410,12 @@ fn control_interleaving_flow(
                 chat = effectful_transform!(
                     TicketRaised -> TicketSummarised
                     with ai_resilience()
-                    => chat_handler.system(chat).at_least_once::<ChatCompletion>(),
+                    => chat_handler.at_least_once::<ChatCompletion>(),
                 );
                 embedding = effectful_transform!(
                     TicketSummarised -> TicketEmbedded
                     with ai_resilience()
-                    => embedding_handler.system(embedding).at_least_once::<EmbeddingGeneration>(),
+                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
                 );
                 collected = sink!(TicketEmbedded => collected);
             },

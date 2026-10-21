@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::binding::BindingCoordinate;
 use super::boundary::PhysicalCallOutcome;
 use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
@@ -377,6 +378,20 @@ impl EffectsCore {
     pub(crate) fn project_named_effect<E: NamedEffect>(
         &mut self,
     ) -> Result<EffectBindingUse<E>, EffectError> {
+        self.project_declared_effect::<E>(None)
+    }
+
+    pub(super) fn project_named_effect_through<E: NamedEffect>(
+        &mut self,
+        system: BindingCoordinate,
+    ) -> Result<EffectBindingUse<E>, EffectError> {
+        self.project_declared_effect::<E>(Some(system))
+    }
+
+    fn project_declared_effect<E: NamedEffect>(
+        &mut self,
+        system: Option<BindingCoordinate>,
+    ) -> Result<EffectBindingUse<E>, EffectError> {
         self.gate_authoring()?;
         let declaration = match self.ctx.effect_declaration(E::EFFECT_TYPE) {
             Ok(declaration) => declaration,
@@ -390,6 +405,14 @@ impl EffectsCore {
             }
         };
         let logical_name = declaration.binding().logical_name().cloned();
+        if system.is_some_and(|coordinate| !declaration.binding().binds(coordinate)) {
+            let fault = BindingAuthorityFault::binding_mismatch(
+                E::EFFECT_TYPE,
+                logical_name,
+                BindingMismatchKind::ConstructionFamily,
+            );
+            return Err(self.latch_binding_fault(fault));
+        }
         match declaration.binding().typed_projection::<E>() {
             Some(projection) => Ok(projection),
             None => {

@@ -13,9 +13,9 @@ mod tests {
     use obzenflow_core::{BoundedBindingEvidence, ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
         transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
-        EffectBindingUse, EffectContext, EffectError, EffectPortResolutionError, EffectPortSlotSet,
-        EffectRegistrationBuilder, EffectSafety, Effects, LogicalEffectBindingName, Named,
-        NamedEffect, SinkRedeliverySafety, StageCompletion,
+        EffectBindingUse, EffectContext, EffectError, EffectHandler, EffectPortResolutionError,
+        EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, Effects,
+        LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety, StageCompletion,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -145,7 +145,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct FxTr;
     #[async_trait]
     impl EffectfulTransformHandler for FxTr {
@@ -165,8 +166,12 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct TxFxTr;
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
+    struct TxFxTr {
+        #[system]
+        tx: EffectBinding<TxEffect>,
+    }
 
     #[async_trait]
     impl EffectfulTransformHandler for TxFxTr {
@@ -204,7 +209,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct FxSt;
     #[async_trait]
     impl EffectfulStatefulHandler for FxSt {
@@ -258,7 +264,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct FxPolicySt;
 
     #[async_trait]
@@ -575,8 +582,9 @@ mod tests {
     fn effectful_transform_transactional_effect_clause_declares_executor() {
         let tx = tx_binding();
         assert_eq!(tx.logical_name().as_str(), "tx");
+        let handler = TxFxTr { tx };
         let descriptor = crate::effectful_transform!(
-            In -> Out => TxFxTr.system(tx).transactional::<TxEffect>());
+            In -> Out => handler.transactional::<TxEffect>());
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);

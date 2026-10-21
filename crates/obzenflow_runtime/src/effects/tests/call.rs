@@ -3,13 +3,16 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::effects::{AnswersEffect, StageEffectsError, System, SystemError};
+use crate::effects::{
+    AnswersEffect, AtLeastOnce, Idempotent, Keyed, RequiresKey, System, SystemError,
+};
 use obzenflow_core::SystemBindingEvidence;
 
 #[derive(Debug, thiserror::Error)]
 #[error("the ledger refused the write")]
 struct LedgerRefused;
 
+#[crate::effects::port(effects = crate::effects)]
 #[async_trait]
 trait LedgerPort: Send + Sync {
     async fn write(&self, value: u64) -> Result<u64, LedgerRefused>;
@@ -53,13 +56,9 @@ struct LedgerWrite {
 #[async_trait]
 impl CallRequest for LedgerWrite {
     const EFFECT_TYPE: &'static str = "test.ledger_write";
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type Safety = RequiresKey;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("ledger:{}", self.value)))
-    }
 
     async fn call(
         &self,
@@ -71,6 +70,12 @@ impl CallRequest for LedgerWrite {
             .await
             .map_err(|error| EffectError::unavailable("ledger", "refused", error))?;
         Ok(LedgerWritten { value })
+    }
+}
+
+impl Keyed for LedgerWrite {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("ledger:{}", self.value))
     }
 }
 
@@ -82,7 +87,7 @@ struct LedgerCheck {
 #[async_trait]
 impl CallRequest for LedgerCheck {
     const EFFECT_TYPE: &'static str = "test.ledger_check";
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type Safety = Idempotent;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
 
@@ -100,21 +105,27 @@ impl CallRequest for LedgerCheck {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct LedgerCommit;
+struct LedgerCharge {
+    value: u64,
+}
 
 #[async_trait]
-impl CallRequest for LedgerCommit {
-    const EFFECT_TYPE: &'static str = "test.ledger_commit";
-    const SAFETY: EffectSafety = EffectSafety::Transactional;
+impl CallRequest for LedgerCharge {
+    const EFFECT_TYPE: &'static str = "test.ledger_charge";
+    type Safety = AtLeastOnce;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
 
     async fn call(
         &self,
-        _: &dyn LedgerPort,
+        ledger: &dyn LedgerPort,
         _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
-        Ok(LedgerWritten { value: 0 })
+        let value = ledger
+            .write(self.value)
+            .await
+            .map_err(|error| EffectError::unavailable("ledger", "refused", error))?;
+        Ok(LedgerWritten { value })
     }
 }
 
@@ -153,7 +164,7 @@ impl Effect for HandWrittenLedgerWrite {
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        self.request.idempotency_key()
+        Some(self.request.idempotency_key())
     }
 }
 
@@ -169,7 +180,7 @@ impl NamedEffect for HandWrittenLedgerWrite {
     }
 }
 
-fn counting_ledger(calls: &Arc<AtomicUsize>) -> Arc<dyn LedgerPort> {
+fn counting_ledger(calls: &Arc<AtomicUsize>) -> Arc<CountingLedger> {
     Arc::new(CountingLedger {
         calls: calls.clone(),
     })
@@ -239,17 +250,18 @@ async fn a_request_records_what_an_equivalent_hand_written_effect_records() {
             None,
         ));
     let called = fx
-        .call(LedgerWrite { value: 4 })
+        .call(&system, LedgerWrite { value: 4 })
         .await
         .expect("the request succeeds");
 
     let hand_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let hand_stage = StageId::new();
+    let hand_ledger: Arc<dyn LedgerPort> = counting_ledger(&calls);
     let binding = EffectRegistrationBuilder::<HandWrittenLedgerWrite>::new(
         LogicalEffectBindingName::new("simulated-ledger").unwrap(),
         SystemBindingEvidence::named("simulated-ledger").unwrap(),
     )
-    .bind_eager(LEDGER_PORT, counting_ledger(&calls))
+    .bind_eager(LEDGER_PORT, hand_ledger)
     .unwrap()
     .finish()
     .unwrap();
@@ -290,6 +302,110 @@ async fn a_request_records_what_an_equivalent_hand_written_effect_records() {
     );
 }
 
+#[test]
+fn a_request_records_the_safety_and_key_its_class_names() {
+    assert_eq!(
+        <Call<LedgerWrite> as Effect>::SAFETY,
+        EffectSafety::NonIdempotentRequiresKey
+    );
+    assert_eq!(
+        <Call<LedgerCheck> as Effect>::SAFETY,
+        EffectSafety::Idempotent
+    );
+    assert_eq!(
+        <Call<LedgerCharge> as Effect>::SAFETY,
+        EffectSafety::NonIdempotentAtLeastOnce
+    );
+    assert_eq!(
+        <RequiresKey as KeyRule<LedgerWrite>>::key(&LedgerWrite { value: 4 }),
+        Some(IdempotencyKey("ledger:4".to_string()))
+    );
+    assert_eq!(
+        <Idempotent as KeyRule<LedgerCheck>>::key(&LedgerCheck { value: 4 }),
+        None
+    );
+    assert_eq!(
+        <AtLeastOnce as KeyRule<LedgerCharge>>::key(&LedgerCharge { value: 4 }),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_call_through_a_system_the_stage_did_not_declare_is_refused_live_and_on_replay() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let declared: System<dyn LedgerPort> =
+        System::eager("ledger", counting_ledger(&calls)).expect("valid system");
+    let stranger: System<dyn LedgerPort> =
+        System::eager("ledger", counting_ledger(&calls)).expect("valid system");
+    let declaration = declaration_for::<Call<LedgerWrite>, _>(&declared);
+    let registry = EffectPortRegistry::collect_from_declarations([&declaration])
+        .unwrap()
+        .into_run_registry();
+
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let mut live =
+        Effects::<LedgerWritten, crate::effect_set![Call<LedgerWrite>]>::new(ledger_context(
+            journal.clone(),
+            stage,
+            registry.clone(),
+            vec![declaration.runtime_projection()],
+            None,
+        ));
+    let refused = live
+        .call(&stranger, LedgerWrite { value: 5 })
+        .await
+        .expect_err("a system the stage did not declare is refused");
+    let EffectError::BindingAuthority { fault } = refused else {
+        panic!("expected a binding-authority fault, got {refused:?}");
+    };
+    assert_eq!(
+        fault.mismatch_kind(),
+        Some(BindingMismatchKind::ConstructionFamily)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(effect_records(&journal).is_empty());
+
+    let answered_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let mut answered =
+        Effects::<LedgerWritten, crate::effect_set![Call<LedgerWrite>]>::new(ledger_context(
+            answered_journal.clone(),
+            stage,
+            registry,
+            vec![declaration.runtime_projection()],
+            None,
+        ));
+    answered
+        .call(&declared, LedgerWrite { value: 5 })
+        .await
+        .expect("the declared system answers");
+    let records = effect_records(&answered_journal);
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("the live history indexes"),
+    );
+    let mut replay =
+        Effects::<LedgerWritten, crate::effect_set![Call<LedgerWrite>]>::new(ledger_context(
+            Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
+            stage,
+            EffectPortRegistry::new(),
+            vec![declaration.runtime_projection()],
+            Some(history),
+        ));
+    let replayed = replay
+        .call(&stranger, LedgerWrite { value: 5 })
+        .await
+        .expect_err("replay refuses the undeclared system the same way");
+    let EffectError::BindingAuthority { fault } = replayed else {
+        panic!("expected a binding-authority fault, got {replayed:?}");
+    };
+    assert_eq!(
+        fault.mismatch_kind(),
+        Some(BindingMismatchKind::ConstructionFamily)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_answers() {
     let resolutions = Arc::new(AtomicUsize::new(0));
@@ -308,7 +424,7 @@ async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_
     let another_stage_write = declaration_for::<Call<LedgerWrite>, _>(&system);
     let registry =
         EffectPortRegistry::collect_from_declarations([&write, &check, &another_stage_write])
-            .expect("stages that name one system share its registration");
+            .expect("stages that hold one system share its registration");
 
     let first_stage = vec![write.runtime_projection(), check.runtime_projection()];
     let second_stage = vec![another_stage_write.runtime_projection()];
@@ -332,11 +448,11 @@ async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_
                 None,
             ));
             if check_instead {
-                fx.call(LedgerCheck { value: 2 })
+                fx.call(&system, LedgerCheck { value: 2 })
                     .await
                     .expect("the check succeeds");
             } else {
-                fx.call(LedgerWrite { value: 1 })
+                fx.call(&system, LedgerWrite { value: 1 })
                     .await
                     .expect("the write succeeds");
             }
@@ -370,6 +486,20 @@ fn independently_built_systems_with_one_name_fail_collection() {
 }
 
 #[test]
+fn a_system_takes_its_port_type_from_a_concrete_or_an_erased_port() -> Result<(), SystemError> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let erased_port: Arc<dyn LedgerPort> = counting_ledger(&calls);
+    let concrete = System::eager("concrete-ledger", counting_ledger(&calls))?;
+    let erased = System::eager("erased-ledger", erased_port)?;
+    let deferred = System::deferred("deferred-ledger", || Ok(Arc::new(RefusingLedger)))?;
+    assert_eq!(
+        [concrete.name(), erased.name(), deferred.name()],
+        ["concrete-ledger", "erased-ledger", "deferred-ledger"]
+    );
+    Ok(())
+}
+
+#[test]
 fn system_constructors_refuse_names_that_could_carry_a_location_or_credential() {
     let calls = Arc::new(AtomicUsize::new(0));
     for name in [
@@ -379,16 +509,19 @@ fn system_constructors_refuse_names_that_could_carry_a_location_or_credential() 
         "https://user:secret@vendor.example",
         &"s".repeat(65),
     ] {
-        let eager = System::<dyn LedgerPort>::eager(name, counting_ledger(&calls));
+        let eager: Result<System<dyn LedgerPort>, _> = System::eager(name, counting_ledger(&calls));
         assert_eq!(
             eager.expect_err("an invalid name is refused"),
             SystemError::InvalidName {
                 system: name.to_string()
             }
         );
-        let deferred = System::<dyn LedgerPort>::deferred(name, || {
-            Err(EffectPortResolutionError::CredentialUnavailable)
-        });
+        let deferred: Result<System<dyn LedgerPort>, _> = System::deferred(
+            name,
+            || -> Result<Arc<RefusingLedger>, EffectPortResolutionError> {
+                Err(EffectPortResolutionError::CredentialUnavailable)
+            },
+        );
         assert!(matches!(
             deferred,
             Err(SystemError::InvalidName { system }) if system == name
@@ -400,8 +533,8 @@ fn system_constructors_refuse_names_that_could_carry_a_location_or_credential() 
         "ledger.v2",
         "0ledger",
     ] {
-        let system = System::<dyn LedgerPort>::eager(name, counting_ledger(&calls))
-            .expect("a valid name is accepted");
+        let system: System<dyn LedgerPort> =
+            System::eager(name, counting_ledger(&calls)).expect("a valid name is accepted");
         assert_eq!(system.name(), name);
     }
     assert_eq!(
@@ -410,25 +543,6 @@ fn system_constructors_refuse_names_that_could_carry_a_location_or_credential() 
         }
         .to_string(),
         "system names must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}"
-    );
-}
-
-#[test]
-fn a_stage_refuses_a_transactional_request() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let system: System<dyn LedgerPort> =
-        System::eager("ledger", counting_ledger(&calls)).expect("valid system");
-    let error = AnswersEffect::<Call<LedgerCommit>>::declaration(&system, None)
-        .expect_err("transactional requests have no executor slot");
-    assert_eq!(
-        error,
-        StageEffectsError::TransactionalRequest {
-            effect_type: "test.ledger_commit"
-        }
-    );
-    assert_eq!(
-        error.for_stage("ledger"),
-        "stage `ledger`: `test.ledger_commit` is transactional and cannot be performed as a request"
     );
 }
 
@@ -490,7 +604,7 @@ struct ScoreLike;
 #[async_trait]
 impl CallRequest for ScoreLike {
     const EFFECT_TYPE: &'static str = "aml.score_transaction";
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type Safety = RequiresKey;
     type Port = dyn LedgerPort;
     type Outcome = LedgerWritten;
 
@@ -500,6 +614,12 @@ impl CallRequest for ScoreLike {
         _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
         Ok(LedgerWritten { value: 0 })
+    }
+}
+
+impl Keyed for ScoreLike {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey("aml-score:0".to_string())
     }
 }
 
@@ -542,11 +662,8 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
 
     let stage = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
-    let system: System<dyn LedgerPort> = System::eager(
-        "ledger-outage",
-        Arc::new(RefusingLedger) as Arc<dyn LedgerPort>,
-    )
-    .expect("valid system");
+    let system: System<dyn LedgerPort> =
+        System::eager("ledger-outage", Arc::new(RefusingLedger)).expect("valid system");
     let declaration = declaration_for::<Call<LedgerWrite>, _>(&system);
     let registry = EffectPortRegistry::collect_from_declarations([&declaration])
         .unwrap()
@@ -560,7 +677,7 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
             None,
         ));
     let refused = fx
-        .call(LedgerWrite { value: 3 })
+        .call(&system, LedgerWrite { value: 3 })
         .await
         .expect_err("the outage refuses");
     assert_eq!(
@@ -586,7 +703,7 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
             Some(history),
         ));
     let recorded = replay
-        .call(LedgerWrite { value: 3 })
+        .call(&system, LedgerWrite { value: 3 })
         .await
         .expect_err("the recorded refusal replays");
     assert!(matches!(

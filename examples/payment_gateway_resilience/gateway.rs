@@ -21,7 +21,7 @@ use super::domain::{
 };
 use async_trait::async_trait;
 use obzenflow::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Effect, EffectContext, EffectError, EffectHandler, EffectSafety, Effects, IdempotencyKey,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::schema::EffectOutcomeFacts;
@@ -159,7 +159,7 @@ impl Effect for AuthorizePayment {
 /// fact happened and returns the transient carrier, so the handler never
 /// re-emits them. The handler emits only the non-performance fact
 /// (`PaymentAuthorizationUnavailable`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EffectHandler)]
 pub struct GatewayTransform {
     first_recovery_pause: Option<Duration>,
     recovery_pause_claimed: Arc<AtomicBool>,

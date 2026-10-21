@@ -54,14 +54,14 @@ macro_rules! flow {
         journals: $journals:expr,
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("flow! has no effect_ports slot; a stage names the systems its handler calls, as in `=> score.system(risk_engine)`");
+        compile_error!("flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
     }};
 
     {
         journals: $journals:expr,
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("flow! has no effect_ports slot; a stage names the systems its handler calls, as in `=> score.system(risk_engine)`");
+        compile_error!("flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
     }};
 
     {
@@ -219,7 +219,7 @@ macro_rules! test_flow {
         journals: $journals:expr,
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("test_flow! has no effect_ports slot; a stage names the systems its handler calls, as in `=> score.system(risk_engine)`");
+        compile_error!("test_flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
     }};
 
     {
@@ -227,7 +227,7 @@ macro_rules! test_flow {
         journals: $journals:expr,
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("test_flow! has no effect_ports slot; a stage names the systems its handler calls, as in `=> score.system(risk_engine)`");
+        compile_error!("test_flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
     }};
 
     {

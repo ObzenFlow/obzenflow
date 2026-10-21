@@ -213,7 +213,7 @@ impl Effect for BoundaryProbeEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct BoundaryProbeHandler {
     gate: Arc<EffectGate>,
 }

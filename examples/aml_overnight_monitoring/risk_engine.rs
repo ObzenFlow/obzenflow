@@ -79,6 +79,7 @@ impl RiskEngineError {
     }
 }
 
+#[obzenflow::port]
 #[async_trait]
 pub trait RiskEnginePort: Send + Sync {
     async fn score(

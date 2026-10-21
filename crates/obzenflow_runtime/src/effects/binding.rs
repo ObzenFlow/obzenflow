@@ -46,8 +46,8 @@ pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Portless;
 
-/// An effect answered by a named binding that carries typed evidence. A stage
-/// names that binding after its handler with `.system(…)`.
+/// An effect answered by a named binding that carries typed evidence, which
+/// the stage's handler holds in a `#[system]` field.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Named<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
 
@@ -372,8 +372,8 @@ pub(super) struct BoundEffectPortSlot {
     pub(super) coordinate: BindingCoordinate,
 }
 
-/// A named binding for one effect, which a stage names after its handler with
-/// `.system(…)`.
+/// A named binding for one effect, which a stage's handler holds in a
+/// `#[system]` field.
 #[derive(Clone)]
 pub struct EffectBinding<E: NamedEffect> {
     logical_name: LogicalEffectBindingName,
@@ -636,6 +636,12 @@ impl EffectDeclarationBinding {
             Self::Portless => None,
             Self::Named(named) => Some(&named.logical_name),
         }
+    }
+
+    pub(super) fn binds(&self, coordinate: BindingCoordinate) -> bool {
+        self.slots()
+            .iter()
+            .any(|slot| slot.coordinate == coordinate)
     }
 
     pub(super) fn slots(&self) -> &[BoundEffectPortSlot] {

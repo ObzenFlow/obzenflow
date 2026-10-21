@@ -98,7 +98,7 @@ impl Effect for EffectB {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct OneEffectHandler;
 
 #[async_trait]
@@ -116,7 +116,7 @@ impl EffectfulTransformHandler for OneEffectHandler {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct TwoEffectHandler;
 
 #[async_trait]
@@ -134,7 +134,7 @@ impl EffectfulTransformHandler for TwoEffectHandler {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct StatefulOneEffectHandler;
 
 #[async_trait]
@@ -714,7 +714,7 @@ impl Effect for PaidEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PaidHandler;
 
 #[async_trait]
@@ -732,7 +732,7 @@ impl EffectfulTransformHandler for PaidHandler {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct NoEffectHandler;
 
 #[async_trait]

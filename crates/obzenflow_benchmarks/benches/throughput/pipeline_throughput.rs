@@ -273,7 +273,8 @@ impl Effect for Settle {
         Ok(Settled { index: self.index })
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct SettleEach;
 #[async_trait]
 impl EffectfulTransformHandler for SettleEach {

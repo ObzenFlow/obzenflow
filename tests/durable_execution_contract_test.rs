@@ -385,7 +385,7 @@ impl Effect for AuthorizePayment {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct Authorize {
     gateway: Gateway,
 }
@@ -2638,7 +2638,7 @@ mod then_live {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Vet {
         ledger: PathBuf,
     }
@@ -3924,7 +3924,7 @@ mod two_effects {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Charge {
         ledger: PathBuf,
         hold: Option<String>,
@@ -4137,7 +4137,7 @@ mod emit_only {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Stamp;
 
     #[async_trait]

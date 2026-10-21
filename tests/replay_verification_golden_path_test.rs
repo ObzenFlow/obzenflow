@@ -134,7 +134,7 @@ impl TypedFiniteSourceHandler for OrderSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ValidateOrder;
 
 #[async_trait]
@@ -214,7 +214,7 @@ impl Effect for AuthorizeEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct AuthorizePayment {
     calls: Arc<AtomicUsize>,
 }

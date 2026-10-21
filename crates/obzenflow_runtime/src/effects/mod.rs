@@ -86,21 +86,24 @@ pub use boundary::{
     PreparedRepeatableEffectCall, PreparedSingleUseEffectCall, RepeatableEffectOperation,
     SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
 };
-pub use call::{Call, CallRequest};
+#[doc(hidden)]
+pub use call::KeyRule;
+pub use call::{AtLeastOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey};
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
 pub use context::{EffectContext, EffectInvocationContext, EffectPortMetadataContext};
 pub(crate) use current_run::CurrentRunFailure;
 pub use current_run::CurrentRunHistory;
 pub use obzenflow_core::SystemBindingEvidence;
+pub use obzenflow_core_derive::{port, EffectHandler};
 #[doc(hidden)]
 pub use system::{
     effectful_stateful_effects, effectful_transform_effects, AcknowledgedSafety, AnswersEffect,
     DeclareByMode, DeclareEffects, EffectAcknowledgement, EverySystemAnswers, FindSystem,
-    MarkSystemUsed, StageEffectsError, StatefulHandlerKind, SystemAfter, SystemAnswersAnEffect,
-    SystemFound, SystemList, SystemMark, TransformHandlerKind, Unused, Used,
+    MarkSystemUsed, PortImpl, ServesPort, StageEffectsError, SystemAfter, SystemAnswersAnEffect,
+    SystemFound, SystemList, SystemMark, Unused, Used,
 };
-pub use system::{HandlerSystems, StageSystem, System, SystemError, WithSystems};
+pub use system::{EffectHandler, StageSystem, System, SystemError};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;

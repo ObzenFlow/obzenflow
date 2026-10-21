@@ -8,6 +8,10 @@
 pub use obzenflow_core::{BindingEvidenceError, BoundedBindingEvidence, SystemBindingEvidence};
 pub use obzenflow_runtime::effect_set;
 pub use obzenflow_runtime::effects::{
+    port, AtLeastOnce, Call, CallRequest, CallSafety, EffectHandler, Idempotent, Keyed,
+    RequiresKey, StageSystem, System, SystemError,
+};
+pub use obzenflow_runtime::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectAttemptOrdinal, EffectCursor,
     EffectDescriptorHash, EffectInputPosition, EffectLabel, EffectOrdinal, EffectStageKey,
     EffectType, RecordedFlowId,
@@ -23,9 +27,9 @@ pub use obzenflow_runtime::effects::{
     IdempotencyKeyPolicy, LogicalEffectBindingName, Named, NamedEffect, NoPortMetadata, Portless,
     RecordedReply, ResolvedEffectPort, RetryDisposition, StageCompletion, TransactionalEffectPort,
 };
-pub use obzenflow_runtime::effects::{
-    Call, CallRequest, HandlerSystems, StageSystem, System, SystemError, WithSystems,
-};
+
+#[doc(hidden)]
+pub use obzenflow_runtime::effects::{PortImpl, ServesPort};
 
 // Proof bounds needed by application-owned typed effect helpers.
 #[doc(hidden)]

@@ -2,14 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::binding::is_system_name;
+use super::binding::{is_system_name, BindingCoordinate};
 use super::call::{call_port_slot, Call, CallRequest};
 use super::declaration::EffectDeclarationSyntax;
 use super::ports::SystemPort;
 use super::{
     Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectPortResolutionError,
-    EffectRegistrationBuilder, EffectSafety, EffectSet, LogicalEffectBindingName, Named,
-    NamedEffect, Portless,
+    EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName, Named, NamedEffect, Portless,
 };
 use crate::stages::common::handlers::{EffectfulStatefulHandler, EffectfulTransformHandler};
 use obzenflow_core::event::schema::{EmptySet, WithMember};
@@ -17,8 +16,8 @@ use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// One system that answers requests through its port `P`, named in a stage
-/// row after the handler with `.system(x)`.
+/// One system that answers requests through its port `P`. A handler holds it
+/// in a `#[system]` field and passes it to `fx.call`.
 pub struct System<P: ?Sized + Send + Sync + 'static> {
     name: LogicalEffectBindingName,
     evidence: SystemBindingEvidence,
@@ -27,17 +26,81 @@ pub struct System<P: ?Sized + Send + Sync + 'static> {
 }
 
 impl<P: ?Sized + Send + Sync + 'static> System<P> {
-    /// A system whose port is already built.
-    pub fn eager(name: &str, port: Arc<P>) -> Result<Self, SystemError> {
-        Self::with_port(name, SystemPort::eager(port))
+    /// A system whose port is already built. The port's trait comes from the
+    /// `#[obzenflow::port]` trait that `T` implements, so the system needs no
+    /// annotation, whether `T` is the port's implementation or its trait
+    /// object.
+    ///
+    /// ```
+    /// # use obzenflow_runtime::effects::{System, SystemError};
+    /// # use std::sync::Arc;
+    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # trait RiskEnginePort: Send + Sync {}
+    /// # struct RiskEngineOutage;
+    /// # impl RiskEnginePort for RiskEngineOutage {}
+    /// # fn main() -> Result<(), SystemError> {
+    /// let outage = System::eager("risk-engine-outage", Arc::new(RiskEngineOutage))?;
+    /// let erased: Arc<dyn RiskEnginePort> = Arc::new(RiskEngineOutage);
+    /// let spare = System::eager("spare-risk-engine", erased)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// A port trait left unmarked does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::effects::{System, SystemError};
+    /// # use std::sync::Arc;
+    /// trait RiskEnginePort: Send + Sync {}
+    /// struct RiskEngineOutage;
+    /// impl RiskEnginePort for RiskEngineOutage {}
+    /// # fn main() -> Result<(), SystemError> {
+    /// let outage = System::eager("risk-engine-outage", Arc::new(RiskEngineOutage))?;
+    /// # let system: System<dyn RiskEnginePort> = outage;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn eager<T>(name: &str, port: Arc<T>) -> Result<Self, SystemError>
+    where
+        T: ?Sized + Send + Sync + 'static,
+        PortImpl<T>: ServesPort<P, T>,
+    {
+        Self::with_port(
+            name,
+            SystemPort::eager(<PortImpl<T> as ServesPort<P, T>>::coerce(port)),
+        )
     }
 
-    /// A system whose port is built only when a live call needs it.
-    pub fn deferred<F>(name: &str, resolver: F) -> Result<Self, SystemError>
+    /// A system whose port is built only when a live call needs it. The
+    /// port's trait comes from the `#[obzenflow::port]` trait that the
+    /// resolver's port implements.
+    ///
+    /// ```
+    /// # use obzenflow_runtime::effects::{System, SystemError};
+    /// # use std::sync::Arc;
+    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # trait RiskEnginePort: Send + Sync {}
+    /// # struct SimulatedRiskEngine;
+    /// # impl RiskEnginePort for SimulatedRiskEngine {}
+    /// # fn main() -> Result<(), SystemError> {
+    /// let engine = System::deferred("simulated-risk-engine", || {
+    ///     Ok(Arc::new(SimulatedRiskEngine))
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn deferred<T, F>(name: &str, resolver: F) -> Result<Self, SystemError>
     where
-        F: Fn() -> Result<Arc<P>, EffectPortResolutionError> + Send + Sync + 'static,
+        T: ?Sized + Send + Sync + 'static,
+        F: Fn() -> Result<Arc<T>, EffectPortResolutionError> + Send + Sync + 'static,
+        PortImpl<T>: ServesPort<P, T>,
     {
-        Self::with_port(name, SystemPort::deferred::<P>(Arc::new(resolver)))
+        Self::with_port(
+            name,
+            SystemPort::deferred::<P>(Arc::new(move || {
+                resolver().map(<PortImpl<T> as ServesPort<P, T>>::coerce)
+            })),
+        )
     }
 
     fn with_port(name: &str, port: SystemPort) -> Result<Self, SystemError> {
@@ -66,6 +129,27 @@ impl<P: ?Sized + Send + Sync + 'static> System<P> {
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
+
+    pub(super) fn coordinate(&self) -> BindingCoordinate {
+        self.port.coordinate()
+    }
+}
+
+/// The type a port implementation is looked up under. The port attribute
+/// implements [`ServesPort`] for it.
+#[doc(hidden)]
+pub struct PortImpl<T: ?Sized>(PhantomData<fn() -> Arc<T>>);
+
+/// Turns a port implementation `T` into the trait object `P` of the port it
+/// serves, generated for each trait marked `#[obzenflow::port]`.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this port implements no trait marked `#[obzenflow::port]`",
+    label = "the port this system is built from",
+    note = "mark the port trait it implements with `#[obzenflow::port]`"
+)]
+pub trait ServesPort<P: ?Sized, T: ?Sized> {
+    fn coerce(port: Arc<T>) -> Arc<P>;
 }
 
 impl<P: ?Sized + Send + Sync + 'static> Clone for System<P> {
@@ -114,12 +198,12 @@ mod sealed {
     pub trait StageSystem {}
 }
 
-/// A value `.system(x)` accepts: a [`System`], or a typed binding of a
+/// A value a `#[system]` field holds: a [`System`], or a typed binding of a
 /// hand-written named effect.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a system",
-    label = "`.system(…)` names a system the handler calls",
-    note = "pass a `System` value, or a typed binding such as `EffectBinding<ChatCompletion>`"
+    label = "a `#[system]` field holds a system the handler calls",
+    note = "hold a `System` value, or a typed binding such as `EffectBinding<ChatCompletion>`"
 )]
 pub trait StageSystem: sealed::StageSystem {}
 
@@ -128,55 +212,61 @@ impl<P: ?Sized + Send + Sync + 'static> StageSystem for System<P> {}
 impl<E: NamedEffect> sealed::StageSystem for EffectBinding<E> {}
 impl<E: NamedEffect> StageSystem for EffectBinding<E> {}
 
-/// Names the systems an effectful handler calls, as `handler.system(x)`.
-pub trait HandlerSystems<Kind>: Sized {
-    fn system<S: StageSystem>(self, system: S) -> WithSystems<Self, (S, ())>;
-}
-
-#[doc(hidden)]
-pub struct TransformHandlerKind;
-
-#[doc(hidden)]
-pub struct StatefulHandlerKind;
-
-impl<H: EffectfulTransformHandler> HandlerSystems<TransformHandlerKind> for H {
-    fn system<S: StageSystem>(self, system: S) -> WithSystems<Self, (S, ())> {
-        WithSystems {
-            handler: self,
-            systems: (system, ()),
-        }
-    }
-}
-
-impl<H: EffectfulStatefulHandler> HandlerSystems<StatefulHandlerKind> for H {
-    fn system<S: StageSystem>(self, system: S) -> WithSystems<Self, (S, ())> {
-        WithSystems {
-            handler: self,
-            systems: (system, ()),
-        }
-    }
-}
-
-/// An effectful handler and the systems named after it. It is not itself a
-/// handler, so a stage row names its systems where it names its handler.
-pub struct WithSystems<H, L> {
-    handler: H,
-    systems: L,
-}
-
-impl<H, L> WithSystems<H, L> {
-    /// Name another system after the handler.
-    pub fn system<S: StageSystem>(self, system: S) -> WithSystems<H, (S, L)> {
-        WithSystems {
-            handler: self.handler,
-            systems: (system, self.systems),
-        }
-    }
+/// A handler that declares the systems it calls. Derive it with
+/// `#[derive(EffectHandler)]` and mark each field that holds a system
+/// `#[system]`; a handler that calls no system derives it with no such field.
+///
+/// ```
+/// # use obzenflow_runtime::effects::{EffectHandler, System};
+/// # trait RiskEnginePort: Send + Sync {}
+/// #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// struct ScoreHandler {
+///     #[system]
+///     risk_engine: System<dyn RiskEnginePort>,
+/// }
+/// ```
+///
+/// An effectful handler without it does not compile at its impl:
+///
+/// ```compile_fail,E0277
+/// # use async_trait::async_trait;
+/// # use obzenflow_runtime::effects::{Effects, StageCompletion};
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Order;
+/// # impl obzenflow_core::TypedPayload for Order { const EVENT_TYPE: &'static str = "docs.handler.order"; }
+/// #[derive(Clone, Debug)]
+/// struct Checkout;
+///
+/// #[async_trait]
+/// impl EffectfulTransformHandler for Checkout {
+///     type Input = Order;
+///     type Output = Order;
+///     type AllowedEffects = obzenflow_runtime::effect_set![];
+///
+///     async fn process(
+///         &self,
+///         order: Order,
+///         fx: &mut Effects<Order, Self::AllowedEffects>,
+///     ) -> Result<StageCompletion<Order>, HandlerError> {
+///         fx.emit(order).await?;
+///         Ok(fx.complete()?)
+///     }
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not an effect handler",
+    label = "an effectful stage's handler declares the systems it calls",
+    note = "add `#[derive(EffectHandler)]` to `{Self}`, with a `#[system]` field for each system it calls"
+)]
+pub trait EffectHandler {
+    #[doc(hidden)]
+    type Systems: SystemList;
 
     #[doc(hidden)]
-    pub fn into_parts(self) -> (H, L) {
-        (self.handler, self.systems)
-    }
+    fn systems(&self) -> Self::Systems;
 }
 
 /// How a stage row acknowledges a paid at-least-once or transactional effect.
@@ -233,9 +323,6 @@ fn declaration_syntax(acknowledged: Option<AcknowledgedSafety>) -> EffectDeclara
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageEffectsError {
-    TransactionalRequest {
-        effect_type: &'static str,
-    },
     UnperformedAcknowledgement {
         effect_type: &'static str,
         decoration: String,
@@ -251,9 +338,6 @@ pub enum StageEffectsError {
 impl StageEffectsError {
     pub fn for_stage(&self, stage: &str) -> String {
         match self {
-            Self::TransactionalRequest { effect_type } => format!(
-                "stage `{stage}`: `{effect_type}` is transactional and cannot be performed as a request"
-            ),
             Self::UnperformedAcknowledgement {
                 effect_type,
                 decoration,
@@ -297,11 +381,6 @@ where
     ) -> Result<EffectDeclaration, StageEffectsError> {
         super::binding::validate_effect_type(R::EFFECT_TYPE)
             .map_err(|_| EffectBindingBuildError::InvalidEffectType)?;
-        if matches!(R::SAFETY, EffectSafety::Transactional) {
-            return Err(StageEffectsError::TransactionalRequest {
-                effect_type: R::EFFECT_TYPE,
-            });
-        }
         let binding =
             EffectRegistrationBuilder::<Call<R>>::new(self.name.clone(), self.evidence.clone())
                 .bind_system(call_port_slot::<R>(), &self.port)?
@@ -333,12 +412,12 @@ pub struct SystemFound;
 #[doc(hidden)]
 pub struct SystemAfter<Index>(PhantomData<fn() -> Index>);
 
-/// Proof that exactly one system named after the handler answers `E`.
+/// Proof that exactly one of the handler's systems answers `E`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "this stage's handler performs `{E}`, which needs a system",
-    label = "no system named after the handler answers `{E}`",
-    note = "name one after the handler, as in `=> score.system(risk_engine)`"
+    message = "this handler performs `{E}`, which needs a system",
+    label = "no `#[system]` field of the handler answers `{E}`",
+    note = "add a `#[system]` field whose port the request names"
 )]
 pub trait FindSystem<E: Effect, Index> {
     #[doc(hidden)]
@@ -407,7 +486,6 @@ impl<M, Rest: MarkSystemUsed<Index>, Index> MarkSystemUsed<SystemAfter<Index>> f
     type Marked = (M, Rest::Marked);
 }
 
-/// The systems named after a handler, each still to answer an effect.
 #[doc(hidden)]
 pub trait SystemList {
     type Unmarked;
@@ -423,9 +501,9 @@ impl<S: StageSystem, Rest: SystemList> SystemList for (S, Rest) {
 
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "a system named after this handler answers none of its effects",
+    message = "a `#[system]` field of this handler answers none of its effects",
     label = "`{Self}` answers nothing this handler performs",
-    note = "remove that `.system(…)`, or name the system that answers one of the handler's effects"
+    note = "remove that field, or perform a request whose port it serves"
 )]
 pub trait SystemAnswersAnEffect {}
 
@@ -484,8 +562,6 @@ where
     }
 }
 
-/// Every effect in a handler's effect set, declared from the systems named
-/// after the handler.
 #[doc(hidden)]
 pub trait DeclareEffects<Systems, Mask, Index> {
     type Marked;
@@ -580,44 +656,44 @@ where
     Ok(declarations)
 }
 
-/// Declare an effectful transform's effects from its handler's effect set and
-/// the systems named after it.
 #[doc(hidden)]
-pub fn effectful_transform_effects<H, Systems, Index>(
-    _: &H,
-    systems: &Systems,
+pub fn effectful_transform_effects<H, Index>(
+    handler: &H,
     acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
 where
     H: EffectfulTransformHandler,
-    Systems: SystemList,
-    <H::AllowedEffects as EffectSet>::Members: DeclareEffects<Systems, Systems::Unmarked, Index>,
+    <H::AllowedEffects as EffectSet>::Members:
+        DeclareEffects<H::Systems, <H::Systems as SystemList>::Unmarked, Index>,
     <<H::AllowedEffects as EffectSet>::Members as DeclareEffects<
-        Systems,
-        Systems::Unmarked,
+        H::Systems,
+        <H::Systems as SystemList>::Unmarked,
         Index,
     >>::Marked: EverySystemAnswers,
 {
-    declare_stage_effects::<H::AllowedEffects, Systems, Index>(systems, acknowledgements)
+    declare_stage_effects::<H::AllowedEffects, H::Systems, Index>(
+        &handler.systems(),
+        acknowledgements,
+    )
 }
 
-/// Declare an effectful stateful stage's effects from its handler's effect
-/// set and the systems named after it.
 #[doc(hidden)]
-pub fn effectful_stateful_effects<H, Systems, Index>(
-    _: &H,
-    systems: &Systems,
+pub fn effectful_stateful_effects<H, Index>(
+    handler: &H,
     acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
 where
     H: EffectfulStatefulHandler,
-    Systems: SystemList,
-    <H::AllowedEffects as EffectSet>::Members: DeclareEffects<Systems, Systems::Unmarked, Index>,
+    <H::AllowedEffects as EffectSet>::Members:
+        DeclareEffects<H::Systems, <H::Systems as SystemList>::Unmarked, Index>,
     <<H::AllowedEffects as EffectSet>::Members as DeclareEffects<
-        Systems,
-        Systems::Unmarked,
+        H::Systems,
+        <H::Systems as SystemList>::Unmarked,
         Index,
     >>::Marked: EverySystemAnswers,
 {
-    declare_stage_effects::<H::AllowedEffects, Systems, Index>(systems, acknowledgements)
+    declare_stage_effects::<H::AllowedEffects, H::Systems, Index>(
+        &handler.systems(),
+        acknowledgements,
+    )
 }

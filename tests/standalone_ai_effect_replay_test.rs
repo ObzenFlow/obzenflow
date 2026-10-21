@@ -306,9 +306,6 @@ fn build_flow(
             scenario.chat_endpoint.clone(),
             scenario.live_authority.clone(),
         )?;
-        let chat = authority.chat;
-        let embedding = authority.embedding;
-
         let suffix = scenario.prompt_suffix.clone();
         let chat_builder = ChatTransformBuilder::new()
             .logic_version(scenario.chat_logic_version.clone())
@@ -321,6 +318,7 @@ fn build_flow(
         };
         let chat_handler = chat_builder
             .build_typed::<TicketRaised, TicketSummarised>(
+                authority.chat,
                 move |ticket| Ok(format!("{}{}", ticket.description, suffix)),
                 |ticket, response| {
                     Ok(TicketSummarised {
@@ -334,6 +332,7 @@ fn build_flow(
             .logic_version("ticket-embedding-v1")
             .dimensions(scenario.embedding_dimensions)
             .build_typed::<TicketSummarised, TicketEmbedded>(
+                authority.embedding,
                 |ticket| Ok(vec![ticket.summary.clone()]),
                 |ticket, response| {
                     Ok(TicketEmbedded {
@@ -357,12 +356,12 @@ fn build_flow(
                 chat = effectful_transform!(
                     TicketRaised -> TicketSummarised
                     with ai_resilience()
-                    => chat_handler.system(chat).at_least_once::<ChatCompletion>(),
+                    => chat_handler.at_least_once::<ChatCompletion>(),
                 );
                 embedding = effectful_transform!(
                     TicketSummarised -> TicketEmbedded
                     with ai_resilience()
-                    => embedding_handler.system(embedding).at_least_once::<EmbeddingGeneration>(),
+                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
                 );
                 collected = sink!(TicketEmbedded => collected);
             },

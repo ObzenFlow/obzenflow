@@ -7,21 +7,20 @@
 //! Standalone chat and embedding handlers are ordinary typed effectful
 //! transforms. Their deterministic builders live in the adapters layer;
 //! infrastructure-owned bindings carry credential-free request identity and a
-//! pending provider package that the flow builder collects from the bindings a
-//! row names after its handler. A materialised flow constructs them in this
-//! order:
+//! pending provider package that the flow builder collects from the binding
+//! each transform holds. A materialised flow constructs them in this order:
 //!
 //! ```ignore
 //! let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
 //! let chat_handler = ChatTransformBuilder::new()
 //!     .logic_version("ticket-summary-v1")
 //!     .system("Summarise the ticket concisely.")
-//!     .build_typed::<TicketRaised, TicketSummarised>(prompt, map_response)?;
+//!     .build_typed::<TicketRaised, TicketSummarised>(chat, prompt, map_response)?;
 //!
 //! let stage = effectful_transform!(
 //!     TicketRaised -> TicketSummarised
 //!     with ai_resilience()
-//!     => chat_handler.system(chat).at_least_once::<ChatCompletion>(),
+//!     => chat_handler.at_least_once::<ChatCompletion>(),
 //! );
 //! ```
 //!

@@ -3,12 +3,13 @@
 // https://obzenflow.dev
 
 use super::transforms::ChatTransformSettings;
-use super::{ChatTransform, EmbeddingTransform};
+use super::{ChatCompletion, ChatTransform, EmbeddingGeneration, EmbeddingTransform};
 use obzenflow_core::ai::{
     ChatParams, ChatResponse, ChatResponseFormat, EmbeddingDimensions, EmbeddingParams,
     EmbeddingResponse, ToolDefinition,
 };
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::EffectBinding;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde_json::Value;
 use std::sync::Arc;
@@ -81,8 +82,10 @@ impl ChatTransformBuilder {
         self
     }
 
+    /// Build the transform that calls `chat` once per input.
     pub fn build_typed<In, Out>(
         self,
+        chat: EffectBinding<ChatCompletion>,
         input_to_prompt: impl Fn(&In) -> Result<String, HandlerError> + Send + Sync + 'static,
         response_to_output: impl Fn(In, ChatResponse) -> Result<Out, HandlerError>
             + Send
@@ -98,6 +101,7 @@ impl ChatTransformBuilder {
             "ChatTransformBuilder::build_typed: missing required logic_version",
         )?;
         Ok(ChatTransform::from_parts(
+            chat,
             ChatTransformSettings {
                 system: self.system,
                 params: self.params,
@@ -139,8 +143,10 @@ impl EmbeddingTransformBuilder {
         self
     }
 
+    /// Build the transform that calls `embedding` once per input.
     pub fn build_typed<In, Out>(
         self,
+        embedding: EffectBinding<EmbeddingGeneration>,
         input_to_inputs: impl Fn(&In) -> Result<Vec<String>, HandlerError> + Send + Sync + 'static,
         response_to_output: impl Fn(In, EmbeddingResponse) -> Result<Out, HandlerError>
             + Send
@@ -156,6 +162,7 @@ impl EmbeddingTransformBuilder {
             "EmbeddingTransformBuilder::build_typed: missing required logic_version",
         )?;
         Ok(EmbeddingTransform::from_parts(
+            embedding,
             EmbeddingParams {
                 dimensions: self.dimensions,
             },
@@ -178,6 +185,57 @@ fn required_logic_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::{ChatBindingEvidence, EmbeddingBindingEvidence, CHAT_CLIENT, EMBEDDING_CLIENT};
+    use obzenflow_core::ai::{
+        embedding_binding_fingerprint, AiProvider, ChatTarget, EmbeddingTarget,
+        HeuristicTokenEstimator, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
+        TokenEstimatorResolutionInfo,
+    };
+    use obzenflow_runtime::effects::{
+        EffectPortResolutionError, EffectRegistrationBuilder, LogicalEffectBindingName,
+    };
+
+    fn chat_binding() -> EffectBinding<ChatCompletion> {
+        let estimator = ResolvedTokenEstimator::new(
+            Arc::new(HeuristicTokenEstimator::default()),
+            TokenEstimatorResolutionInfo::heuristic(
+                "test-model",
+                TokenEstimatorFallbackReason::ExplicitHeuristic,
+                None,
+            ),
+        );
+        EffectRegistrationBuilder::<ChatCompletion>::new(
+            LogicalEffectBindingName::new("chat").unwrap(),
+            ChatBindingEvidence::new(ChatTarget::new("ollama", "test-model"), estimator).unwrap(),
+        )
+        .bind_deferred_with_metadata(
+            CHAT_CLIENT,
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
+
+    fn embedding_binding() -> EffectBinding<EmbeddingGeneration> {
+        let provider = AiProvider::new("ollama");
+        let target = EmbeddingTarget::new(
+            provider.clone(),
+            "nomic-embed-text",
+            embedding_binding_fingerprint(&provider, "nomic-embed-text", "http://localhost:11434"),
+        );
+        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
+            LogicalEffectBindingName::new("embedding").unwrap(),
+            EmbeddingBindingEvidence::new(target).unwrap(),
+        )
+        .bind_deferred_with_metadata(
+            EMBEDDING_CLIENT,
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct Input;
@@ -194,7 +252,11 @@ mod tests {
     #[test]
     fn chat_logic_version_is_required_with_the_locked_diagnostic() {
         let error = ChatTransformBuilder::new()
-            .build_typed::<Input, Output>(|_| Ok("prompt".into()), |_, _| Ok(Output))
+            .build_typed::<Input, Output>(
+                chat_binding(),
+                |_| Ok("prompt".into()),
+                |_, _| Ok(Output),
+            )
             .unwrap_err();
         assert!(matches!(
             error,
@@ -206,7 +268,11 @@ mod tests {
     #[test]
     fn embedding_logic_version_is_required_with_the_locked_diagnostic() {
         let error = EmbeddingTransformBuilder::new()
-            .build_typed::<Input, Output>(|_| Ok(vec!["input".into()]), |_, _| Ok(Output))
+            .build_typed::<Input, Output>(
+                embedding_binding(),
+                |_| Ok(vec!["input".into()]),
+                |_, _| Ok(Output),
+            )
             .unwrap_err();
         assert!(matches!(
             error,
