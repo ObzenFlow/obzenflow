@@ -25,7 +25,8 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -34,7 +35,6 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::sink::DeliveryProvenance;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -182,33 +182,26 @@ impl EffectfulTransformHandler for ValidateOrder {
 // Authorization: effect succeeds, declines, or times out per order
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-struct AuthorizeEffect {
-    order_id: u64,
-    amount: u64,
+#[obzenflow::port]
+struct Gateway {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct AuthorizeRequest {
+    order_id: u64,
+    amount: u64,
+}
+
 #[async_trait]
-impl Effect for AuthorizeEffect {
+impl CallRequest for AuthorizeRequest {
     const EFFECT_TYPE: &'static str = "replay_provenance.authorize";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = Gateway;
     type Outcome = AuthGrant;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "authorize"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "order_id": self.order_id, "amount": self.amount })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(&self, gateway: &Gateway, _ctx: &mut EffectContext) -> Result<AuthGrant, EffectError> {
+        gateway.calls.fetch_add(1, Ordering::SeqCst);
         if self.order_id.is_multiple_of(2) {
             return Err(EffectError::Execution(
                 "gateway_timeout_simulated".to_string(),
@@ -219,15 +212,29 @@ impl Effect for AuthorizeEffect {
             auth_code: self.order_id + 9000,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("authorize:{}", self.order_id)))
+impl Keyed for AuthorizeRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("authorize:{}", self.order_id))
     }
 }
 
+type AuthorizeEffect = Call<AuthorizeRequest>;
+
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct AuthorizePayment {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    gateway: System<Gateway>,
+}
+
+impl AuthorizePayment {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            gateway: System::eager("gateway", Arc::new(Gateway { calls }))
+                .expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -247,11 +254,13 @@ impl EffectfulTransformHandler for AuthorizePayment {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
-            .perform(AuthorizeEffect {
-                order_id: order.order_id,
-                amount: order.amount,
-                calls: self.calls.clone(),
-            })
+            .call(
+                &self.gateway,
+                AuthorizeRequest {
+                    order_id: order.order_id,
+                    amount: order.amount,
+                },
+            )
             .await;
 
         match outcome {
@@ -375,7 +384,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>, probes: &Probes) -
     FlowDefinition::materialize(move |_runtime_config| {
         let order_source = OrderSource::new();
         let validate_order = ValidateOrder;
-        let authorize_payment = AuthorizePayment { calls };
+        let authorize_payment = AuthorizePayment::new(calls);
         let paid_orders = DeliveryProbe { deliveries: paid };
         let cancelled_orders = DeliveryProbe {
             deliveries: cancelled,

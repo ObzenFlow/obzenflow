@@ -45,6 +45,7 @@ pub struct EffectContext {
     pub(super) stage_key: String,
     pub(super) input_seq: StageInputPosition,
     pub(super) ports: super::ports::EffectPortView,
+    pub(super) transaction: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl EffectContext {
@@ -104,6 +105,24 @@ impl EffectContext {
 
     pub fn sleep(&self, duration: Duration) -> impl std::future::Future<Output = ()> + Send {
         tokio::time::sleep(duration)
+    }
+
+    /// The commit handle of a [`Transactional`] request. Its port commits the
+    /// outcome through it, and the committed record is the outcome.
+    pub fn transaction<R>(
+        &self,
+        _request: &R,
+    ) -> Result<EffectCommitHandle<R::Outcome>, EffectError>
+    where
+        R: CallRequest<Safety = Transactional>,
+    {
+        self.transaction
+            .as_ref()
+            .and_then(|handle| handle.downcast_ref::<EffectCommitHandle<R::Outcome>>())
+            .cloned()
+            .ok_or_else(|| EffectError::TransactionalCommitMissing {
+                effect_type: R::EFFECT_TYPE.to_string(),
+            })
     }
 }
 

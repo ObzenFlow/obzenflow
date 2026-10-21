@@ -42,16 +42,11 @@ pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static 
     fn invocation_binding(effect: &E) -> EffectInvocationBinding;
 }
 
-/// An effect with no named binding contract.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Portless;
-
 /// An effect answered by a named binding that carries typed evidence, which
 /// the stage's handler holds in a `#[system]` field.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Named<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
 
-impl private::Sealed for Portless {}
 impl<B: EffectBindingEvidence> private::Sealed for Named<B> {}
 
 /// Observable name of a binding, such as the system a stage names, chosen by
@@ -437,7 +432,7 @@ impl<E: NamedEffect> EffectBinding<E> {
     }
 
     pub(crate) fn declaration_binding(&self) -> EffectDeclarationBinding {
-        EffectDeclarationBinding::Named(NamedEffectDeclarationBinding {
+        EffectDeclarationBinding {
             logical_name: self.logical_name.clone(),
             family: self.projection.family.clone(),
             identity: binding_identity::<E>(self.projection.evidence()),
@@ -445,7 +440,7 @@ impl<E: NamedEffect> EffectBinding<E> {
             registration: self.registration,
             slots: Arc::clone(&self.slots),
             package: Some(Arc::clone(&self.package)),
-        })
+        }
     }
 }
 
@@ -484,10 +479,8 @@ impl<E: NamedEffect> EffectBindingUse<E> {
 
     fn erased(&self) -> EffectInvocationBinding {
         EffectInvocationBinding {
-            kind: EffectInvocationBindingKind::Named {
-                family: self.family.clone(),
-                identity: binding_identity::<E>(&self.evidence),
-            },
+            family: self.family.clone(),
+            identity: binding_identity::<E>(&self.evidence),
         }
     }
 }
@@ -515,40 +508,21 @@ pub trait NamedEffect: Effect<BindingMode = Named<Self::BindingEvidence>> {
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct EffectInvocationBinding {
-    pub(super) kind: EffectInvocationBindingKind,
-}
-
-#[derive(Clone)]
-pub(super) enum EffectInvocationBindingKind {
-    Portless,
-    Named {
-        family: BindingFamily,
-        identity: EffectBindingIdentity,
-    },
+    family: BindingFamily,
+    identity: EffectBindingIdentity,
 }
 
 impl std::fmt::Debug for EffectInvocationBinding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            EffectInvocationBindingKind::Portless => {
-                formatter.write_str("EffectInvocationBinding::Portless")
-            }
-            EffectInvocationBindingKind::Named { .. } => formatter
-                .debug_struct("EffectInvocationBinding::Named")
-                .field("authority", &"<not disclosed>")
-                .finish(),
-        }
+        formatter
+            .debug_struct("EffectInvocationBinding")
+            .field("authority", &"<not disclosed>")
+            .finish()
     }
 }
 
 #[derive(Clone)]
-pub(crate) enum EffectDeclarationBinding {
-    Portless,
-    Named(NamedEffectDeclarationBinding),
-}
-
-#[derive(Clone)]
-pub(crate) struct NamedEffectDeclarationBinding {
+pub(crate) struct EffectDeclarationBinding {
     pub(crate) logical_name: LogicalEffectBindingName,
     pub(super) family: BindingFamily,
     pub(crate) identity: EffectBindingIdentity,
@@ -560,40 +534,25 @@ pub(crate) struct NamedEffectDeclarationBinding {
 
 impl std::fmt::Debug for EffectDeclarationBinding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Portless => formatter.write_str("EffectDeclarationBinding::Portless"),
-            Self::Named(named) => formatter
-                .debug_struct("EffectDeclarationBinding::Named")
-                .field("logical_name", &named.logical_name)
-                .field("identity", &named.identity)
-                .field(
-                    "slots",
-                    &named
-                        .slots
-                        .iter()
-                        .map(|slot| slot.requirement.label)
-                        .collect::<Vec<_>>(),
-                )
-                .field("family", &"<not disclosed>")
-                .finish(),
-        }
-    }
-}
-
-impl<E> EffectBindingMode<E> for Portless
-where
-    E: Effect<BindingMode = Portless>,
-{
-    fn invocation_binding(_effect: &E) -> EffectInvocationBinding {
-        EffectInvocationBinding {
-            kind: EffectInvocationBindingKind::Portless,
-        }
+        formatter
+            .debug_struct("EffectDeclarationBinding")
+            .field("logical_name", &self.logical_name)
+            .field("identity", &self.identity)
+            .field(
+                "slots",
+                &self
+                    .slots
+                    .iter()
+                    .map(|slot| slot.requirement.label)
+                    .collect::<Vec<_>>(),
+            )
+            .field("family", &"<not disclosed>")
+            .finish()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BindingMatchError {
-    Mode,
     Family,
     Evidence,
 }
@@ -601,75 +560,38 @@ pub(crate) enum BindingMatchError {
 impl EffectDeclarationBinding {
     pub(super) fn runtime_projection(&self) -> Self {
         let mut projection = self.clone();
-        if let Self::Named(named) = &mut projection {
-            named.package = None;
-        }
+        projection.package = None;
         projection
     }
 
     pub(super) fn typed_projection<E: NamedEffect>(&self) -> Option<EffectBindingUse<E>> {
-        let Self::Named(named) = self else {
-            return None;
-        };
-        named
-            .projection
+        self.projection
             .downcast_ref::<EffectBindingUse<E>>()
             .cloned()
     }
 
     pub(super) fn pending_package(&self) -> Option<&Arc<PendingRegistrationPackage>> {
-        match self {
-            Self::Portless => None,
-            Self::Named(named) => named.package.as_ref(),
-        }
+        self.package.as_ref()
     }
 
     pub(crate) fn identity(&self) -> EffectBindingIdentity {
-        match self {
-            Self::Portless => EffectBindingIdentity::Portless,
-            Self::Named(named) => named.identity.clone(),
-        }
+        self.identity.clone()
     }
 
-    pub(crate) fn logical_name(&self) -> Option<&LogicalEffectBindingName> {
-        match self {
-            Self::Portless => None,
-            Self::Named(named) => Some(&named.logical_name),
-        }
+    pub(crate) fn logical_name(&self) -> &LogicalEffectBindingName {
+        &self.logical_name
     }
 
     pub(super) fn binds(&self, coordinate: BindingCoordinate) -> bool {
-        self.slots()
-            .iter()
-            .any(|slot| slot.coordinate == coordinate)
+        self.slots.iter().any(|slot| slot.coordinate == coordinate)
     }
 
     pub(super) fn slots(&self) -> &[BoundEffectPortSlot] {
-        match self {
-            Self::Portless => &[],
-            Self::Named(named) => named.slots.as_slice(),
-        }
-    }
-
-    pub(super) fn named_parts(
-        &self,
-    ) -> Option<(
-        &LogicalEffectBindingName,
-        BindingCoordinate,
-        &[BoundEffectPortSlot],
-    )> {
-        match self {
-            Self::Portless => None,
-            Self::Named(named) => Some((
-                &named.logical_name,
-                named.registration,
-                named.slots.as_slice(),
-            )),
-        }
+        self.slots.as_slice()
     }
 
     pub(crate) fn declared_slot_label(&self, label: &str) -> Option<&'static str> {
-        self.slots()
+        self.slots
             .iter()
             .find(|slot| slot.requirement.label == label)
             .map(|slot| slot.requirement.label)
@@ -679,19 +601,13 @@ impl EffectDeclarationBinding {
         &self,
         invocation: &EffectInvocationBinding,
     ) -> Result<(), BindingMatchError> {
-        match (self, &invocation.kind) {
-            (Self::Portless, EffectInvocationBindingKind::Portless) => Ok(()),
-            (Self::Named(declaration), EffectInvocationBindingKind::Named { family, identity }) => {
-                if !declaration.family.same_as(family) {
-                    return Err(BindingMatchError::Family);
-                }
-                if &declaration.identity != identity {
-                    return Err(BindingMatchError::Evidence);
-                }
-                Ok(())
-            }
-            _ => Err(BindingMatchError::Mode),
+        if !self.family.same_as(&invocation.family) {
+            return Err(BindingMatchError::Family);
         }
+        if self.identity != invocation.identity {
+            return Err(BindingMatchError::Evidence);
+        }
+        Ok(())
     }
 }
 

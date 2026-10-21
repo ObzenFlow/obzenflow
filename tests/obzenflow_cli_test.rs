@@ -661,7 +661,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         gateway_demo::flow::assemble_flow(
             vec![valid, invalid, declined],
             Vec::new(),
-            gateway_demo::gateway::GatewayTransform::default(),
+            None,
             1_000.0,
             root,
         )

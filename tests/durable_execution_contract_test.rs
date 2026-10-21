@@ -36,7 +36,8 @@ use gateway_demo::gateway::AuthorizePaymentOutcome;
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
 use obzenflow::application::FlowApplication;
 use obzenflow::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, StageCompletion,
+    CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    StageCompletion,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{
@@ -265,6 +266,7 @@ async fn hold_until(release: &Path) {
 /// Appends every physical call to the ledger with one unbuffered write, which
 /// survives SIGKILL. Holds `hold` after recording its call until `release`
 /// exists.
+#[obzenflow::port]
 #[derive(Clone, Debug)]
 struct Gateway {
     ledger: PathBuf,
@@ -348,46 +350,39 @@ fn read_lines<T: DeserializeOwned>(path: &Path) -> Vec<T> {
 }
 
 /// Authorizes one order at the gateway, keyed by its order id.
-#[derive(Clone, Debug)]
-struct AuthorizePayment {
+#[derive(Clone, Debug, Serialize)]
+struct AuthorizationRequest {
     order: CustomerOrderPlaced,
-    gateway: Gateway,
 }
 
 #[async_trait]
-impl Effect for AuthorizePayment {
+impl CallRequest for AuthorizationRequest {
     const EFFECT_TYPE: &'static str = "payment.authorize";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow::effects::Portless;
+    type Safety = RequiresKey;
+    type Port = Gateway;
     type Outcome = AuthorizePaymentOutcome;
-    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "authorize_payment"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({
-            "order_id": self.order.order_id,
-            "customer_id": self.order.customer_id,
-            "amount_cents": self.order.amount_cents,
-            "payment_method_state": self.order.payment_method_state,
-        })
-    }
-
-    async fn execute(&self, _: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.gateway.authorize(&self.order).await
-    }
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(idempotency_key(&self.order.order_id)))
+    async fn call(
+        &self,
+        gateway: &Gateway,
+        _: &mut EffectContext,
+    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+        gateway.authorize(&self.order).await
     }
 }
 
+impl Keyed for AuthorizationRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(idempotency_key(&self.order.order_id))
+    }
+}
+
+type AuthorizePayment = obzenflow::effects::Call<AuthorizationRequest>;
+
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct Authorize {
-    gateway: Gateway,
+    #[system]
+    gateway: obzenflow::effects::System<Gateway>,
 }
 
 type Authorization = obzenflow::schema::stage_fact_set![PaymentAuthorized, PaymentDeclined];
@@ -404,12 +399,9 @@ impl EffectfulTransformHandler for Authorize {
         order: CustomerOrderPlaced,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        // `perform` records whichever payment fact happened.
-        fx.perform(AuthorizePayment {
-            order,
-            gateway: self.gateway.clone(),
-        })
-        .await
+        // `fx.call` records whichever payment fact happened.
+        fx.call(&self.gateway, AuthorizationRequest { order })
+            .await
         .map_err(|error| HandlerError::Other(error.to_string()))?;
         Ok(fx.complete()?)
     }
@@ -510,12 +502,14 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
         Some(Hold::ReceiptAndGateway { receipt, gateway }) => (Some(gateway), Some(receipt)),
         Some(Hold::BetweenEffects(_)) | None => (None, None),
     };
+    let gateway = Gateway {
+        ledger: scenario.ledger(),
+        hold: gateway_hold,
+        release: scenario.release(),
+    };
     let authorize = Authorize {
-        gateway: Gateway {
-            ledger: scenario.ledger(),
-            hold: gateway_hold,
-            release: scenario.release(),
-        },
+        gateway: obzenflow::effects::System::eager("payment-gateway", std::sync::Arc::new(gateway))
+            .expect("a valid system name"),
     };
     let receipt_file = ReceiptFile {
         path: scenario.receipts(),
@@ -2604,43 +2598,42 @@ mod then_live {
         scenario.root.join("audit-ledger.jsonl")
     }
 
-    #[derive(Clone, Debug)]
-    struct Audit {
+    #[obzenflow::port]
+    struct AuditLedger {
+        path: PathBuf,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct AuditEntry {
         entry: Entry,
-        ledger: PathBuf,
     }
 
     #[async_trait]
-    impl Effect for Audit {
+    impl CallRequest for AuditEntry {
         const EFFECT_TYPE: &'static str = "durable_contract.then_live.audit";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-        type BindingMode = obzenflow::effects::Portless;
+        type Safety = RequiresKey;
+        type Port = AuditLedger;
         type Outcome = Entry;
-        type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "audit"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({ "note": self.entry.note })
-        }
-
-        async fn execute(&self, _: &mut EffectContext) -> Result<Entry, EffectError> {
-            append_line(&self.ledger, &self.entry.note)
+        async fn call(&self, ledger: &AuditLedger, _: &mut EffectContext) -> Result<Entry, EffectError> {
+            append_line(&ledger.path, &self.entry.note)
                 .map_err(|error| EffectError::Transport(error.to_string()))?;
             Ok(self.entry.clone())
         }
+    }
 
-        fn idempotency_key(&self) -> Option<IdempotencyKey> {
-            Some(IdempotencyKey(format!("audit:{}", self.entry.note)))
+    impl Keyed for AuditEntry {
+        fn idempotency_key(&self) -> IdempotencyKey {
+            IdempotencyKey(format!("audit:{}", self.entry.note))
         }
     }
 
+    type Audit = obzenflow::effects::Call<AuditEntry>;
+
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Vet {
-        ledger: PathBuf,
+        #[system]
+        ledger: obzenflow::effects::System<AuditLedger>,
     }
 
     #[async_trait]
@@ -2655,11 +2648,8 @@ mod then_live {
             fx: &mut Effects<Self::Output, Self::AllowedEffects>,
         ) -> Result<StageCompletion<Self::Output>, HandlerError> {
             if AUDITED.contains(&entry.note.as_str()) {
-                fx.perform(Audit {
-                    entry,
-                    ledger: self.ledger.clone(),
-                })
-                .await
+                fx.call(&self.ledger, AuditEntry { entry })
+                    .await
                 .map_err(|error| HandlerError::Other(error.to_string()))?;
             } else {
                 fx.emit(entry).await?;
@@ -2684,8 +2674,12 @@ mod then_live {
         let graph = scenario.graph;
         let slow_tx_input = (graph == Graph::ThenLiveTwoBatch)
             .then(|| yaml(EntryYaml, slow_entries_input(scenario), "/entries"));
+        let audit = AuditLedger {
+            path: audit_ledger(scenario),
+        };
         let vet = Vet {
-            ledger: audit_ledger(scenario),
+            ledger: obzenflow::effects::System::eager("audit-ledger", std::sync::Arc::new(audit))
+                .expect("a valid system name"),
         };
         FlowDefinition::materialize(move |_runtime_config| {
             let post_entry = joins::inner_then_live(
@@ -3548,7 +3542,6 @@ mod payment_demo {
     use super::*;
     use gateway_demo::domain::{PaymentAuthorizationUnavailable, TrafficPhase};
     use gateway_demo::fixtures;
-    use gateway_demo::gateway::GatewayTransform;
     use obzenflow::application::{Banner, Presentation};
 
     const BANNER: &str = "Durable execution contract: payment demo";
@@ -3572,7 +3565,7 @@ mod payment_demo {
         gateway_demo::flow::assemble_flow(
             fixtures::scripted_web_orders(),
             fixtures::scripted_store_orders(),
-            GatewayTransform::with_first_recovery_pause(FIRST_RECOVERY_PAUSE),
+            Some(FIRST_RECOVERY_PAUSE),
             GATEWAY_CALLS_PER_SECOND,
             scenario.journals(),
         )
@@ -3838,32 +3831,31 @@ mod two_effects {
         append_line(ledger, &call).map_err(|error| EffectError::Transport(error.to_string()))
     }
 
-    #[derive(Clone, Debug)]
-    struct AuthorizeOrder {
+    /// The ledger both requests write to, one system answering both.
+    #[obzenflow::port]
+    struct ChargeLedger {
+        path: PathBuf,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct AuthorizeCharge {
         order_id: String,
-        ledger: PathBuf,
     }
 
     #[async_trait]
-    impl Effect for AuthorizeOrder {
+    impl CallRequest for AuthorizeCharge {
         const EFFECT_TYPE: &'static str = "durable_contract.two_effects.authorize";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-        type BindingMode = obzenflow::effects::Portless;
+        type Safety = RequiresKey;
+        type Port = ChargeLedger;
         type Outcome = Authorized;
-        type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "authorize"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({ "order_id": self.order_id })
-        }
-
-        async fn execute(&self, _: &mut EffectContext) -> Result<Authorized, EffectError> {
+        async fn call(
+            &self,
+            ledger: &ChargeLedger,
+            _: &mut EffectContext,
+        ) -> Result<Authorized, EffectError> {
             record_call(
-                &self.ledger,
+                &ledger.path,
                 LedgerCall {
                     order_id: self.order_id.clone(),
                     call: "authorize".into(),
@@ -3874,39 +3866,36 @@ mod two_effects {
                 order_id: self.order_id.clone(),
             })
         }
+    }
 
-        fn idempotency_key(&self) -> Option<IdempotencyKey> {
-            Some(IdempotencyKey(format!("authorize:{}", self.order_id)))
+    impl Keyed for AuthorizeCharge {
+        fn idempotency_key(&self) -> IdempotencyKey {
+            IdempotencyKey(format!("authorize:{}", self.order_id))
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct CaptureOrder {
+    type AuthorizeOrder = obzenflow::effects::Call<AuthorizeCharge>;
+
+    #[derive(Clone, Debug, Serialize)]
+    struct CaptureCharge {
         order_id: String,
         amount_cents: u64,
-        ledger: PathBuf,
     }
 
     #[async_trait]
-    impl Effect for CaptureOrder {
+    impl CallRequest for CaptureCharge {
         const EFFECT_TYPE: &'static str = "durable_contract.two_effects.capture";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-        type BindingMode = obzenflow::effects::Portless;
+        type Safety = RequiresKey;
+        type Port = ChargeLedger;
         type Outcome = Captured;
-        type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "capture"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({ "order_id": self.order_id, "amount_cents": self.amount_cents })
-        }
-
-        async fn execute(&self, _: &mut EffectContext) -> Result<Captured, EffectError> {
+        async fn call(
+            &self,
+            ledger: &ChargeLedger,
+            _: &mut EffectContext,
+        ) -> Result<Captured, EffectError> {
             record_call(
-                &self.ledger,
+                &ledger.path,
                 LedgerCall {
                     order_id: self.order_id.clone(),
                     call: "capture".into(),
@@ -3918,15 +3907,20 @@ mod two_effects {
                 amount_cents: self.amount_cents,
             })
         }
+    }
 
-        fn idempotency_key(&self) -> Option<IdempotencyKey> {
-            Some(IdempotencyKey(format!("capture:{}", self.order_id)))
+    impl Keyed for CaptureCharge {
+        fn idempotency_key(&self) -> IdempotencyKey {
+            IdempotencyKey(format!("capture:{}", self.order_id))
         }
     }
 
+    type CaptureOrder = obzenflow::effects::Call<CaptureCharge>;
+
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Charge {
-        ledger: PathBuf,
+        #[system]
+        ledger: obzenflow::effects::System<ChargeLedger>,
         hold: Option<String>,
         release: PathBuf,
         fix: bool,
@@ -3943,10 +3937,12 @@ mod two_effects {
             order: ChargeOrder,
             fx: &mut Effects<Self::Output, Self::AllowedEffects>,
         ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-            fx.perform(AuthorizeOrder {
-                order_id: order.order_id.clone(),
-                ledger: self.ledger.clone(),
-            })
+            fx.call(
+                &self.ledger,
+                AuthorizeCharge {
+                    order_id: order.order_id.clone(),
+                },
+            )
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
             if self.hold.as_deref() == Some(order.order_id.as_str()) {
@@ -3957,11 +3953,13 @@ mod two_effects {
             } else {
                 AMOUNT_CENTS
             };
-            fx.perform(CaptureOrder {
-                order_id: order.order_id,
-                amount_cents,
-                ledger: self.ledger.clone(),
-            })
+            fx.call(
+                &self.ledger,
+                CaptureCharge {
+                    order_id: order.order_id,
+                    amount_cents,
+                },
+            )
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
             Ok(fx.complete()?)
@@ -3979,8 +3977,15 @@ mod two_effects {
             .batch_size(1)
             .build()
             .expect("the order channel is configured");
+        let charge_ledger = ChargeLedger {
+            path: ledger(scenario),
+        };
         let charge = Charge {
-            ledger: ledger(scenario),
+            ledger: obzenflow::effects::System::eager(
+                "charge-ledger",
+                std::sync::Arc::new(charge_ledger),
+            )
+            .expect("a valid system name"),
             hold: match hold {
                 Some(Hold::BetweenEffects(order)) => Some(order),
                 _ => None,

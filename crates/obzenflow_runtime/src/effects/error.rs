@@ -121,13 +121,8 @@ pub enum EffectError {
         boundary_retry: RetryDisposition,
     },
 
-    #[error(
-        "transactional effect '{effect_type}' using executor '{executor}' returned without committing an effect result"
-    )]
-    TransactionalCommitMissing {
-        effect_type: String,
-        executor: String,
-    },
+    #[error("transactional effect '{effect_type}' returned without committing an effect result")]
+    TransactionalCommitMissing { effect_type: String },
 
     /// Legacy opaque call failure. Circuit-breaker recovery treats it as
     /// permanent and ineligible; effect ports should author a typed variant.

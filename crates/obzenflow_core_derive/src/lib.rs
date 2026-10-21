@@ -116,13 +116,14 @@ pub fn derive_effect_handler(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Mark a trait as a port, so a `System` takes its port type from the value it
-/// is built from. Generated code resolves `::obzenflow::effects`; code that
-/// depends on the runtime crate directly writes `#[port(effects = <path>)]`.
+/// Mark a trait as a port, or a struct as its own port, so a `System` takes its
+/// port type from the value it is built from. Generated code resolves
+/// `::obzenflow::effects`; code that depends on the runtime crate directly
+/// writes `#[port(effects = <path>)]`.
 #[proc_macro_attribute]
 pub fn port(attr: TokenStream, item: TokenStream) -> TokenStream {
     let effects = parse_macro_input!(attr as effects_path::EffectsPath);
-    let item = parse_macro_input!(item as syn::ItemTrait);
+    let item = parse_macro_input!(item as syn::Item);
     port::expand(&effects, &item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()

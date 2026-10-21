@@ -76,7 +76,8 @@ struct Window {
     execution: RuntimeExecution,
     flow_id: FlowId,
     stage_id: StageId,
-    binding: EffectBinding<TransactionalCountingEffect>,
+    ledger: System<dyn TransactionalLedger>,
+    transactional: EffectDeclaration,
     ports: EffectPortRegistry,
     calls: Arc<AtomicUsize>,
     injected_failure: bool,
@@ -105,11 +106,14 @@ impl Window {
         let journal = Arc::new(journal);
         let erased: Arc<dyn Journal<ChainEvent>> = journal.clone();
         let calls = Arc::new(AtomicUsize::new(0));
-        let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        let ledger = transactional_ledger(Arc::new(TransactionalCountingPort {
             calls: calls.clone(),
             commit: true,
         }));
-        let ports = registry_with_binding(&binding);
+        let transactional = transactional_declaration(&ledger);
+        let ports = fixtures()
+            .registry
+            .merged_with(&EffectPortRegistry::collect_from_declarations([&transactional]).unwrap());
         Self {
             history: CurrentRunHistory::new(erased.clone()),
             journal,
@@ -117,7 +121,8 @@ impl Window {
             execution: RuntimeExecution::new(RuntimeMode::Live, None),
             flow_id: FlowId::new(),
             stage_id,
-            binding,
+            ledger,
+            transactional,
             ports,
             calls,
             injected_failure,
@@ -144,10 +149,10 @@ impl Window {
             runtime_execution: self.execution.clone(),
             effect_ports: self.ports.clone(),
             effect_declarations: vec![
-                EffectDeclaration::of::<CountingEffect>(),
-                EffectDeclaration::at_least_once::<AffineCountingEffect>(),
-                EffectDeclaration::at_least_once::<InvariantAffineEffect>(),
-                EffectDeclaration::transactional(&self.binding),
+                EffectDeclaration::named(&fixtures().counting),
+                EffectDeclaration::named_at_least_once(&fixtures().affine_counting),
+                EffectDeclaration::named_at_least_once(&fixtures().invariant_affine),
+                self.transactional.clone(),
             ],
             output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
@@ -176,6 +181,7 @@ impl Window {
         let result = match action {
             Action::Repeatable => core
                 .perform(CountingEffect {
+                    binding: bound(),
                     value: input,
                     label: "window",
                     calls: self.calls.clone(),
@@ -184,12 +190,14 @@ impl Window {
                 .map(drop),
             Action::Affine => core
                 .perform(AffineCountingEffect {
+                    binding: bound(),
                     calls: self.calls.clone(),
                 })
                 .await
                 .map(drop),
             Action::EscapeControls => match core
                 .perform(InvariantAffineEffect {
+                    binding: bound(),
                     calls: self.calls.clone(),
                 })
                 .await
@@ -199,11 +207,7 @@ impl Window {
             },
             Action::Capture => core.capture("window", input).await.map(drop),
             Action::Transactional => core
-                .perform(TransactionalCountingEffect {
-                    value: input,
-                    normal_calls: self.calls.clone(),
-                    binding: self.binding.invocation(),
-                })
+                .call_request(&self.ledger, TransactionalCounting { value: input })
                 .await
                 .map(drop),
         };
@@ -361,6 +365,7 @@ async fn current_run_history_answers_a_resumed_recovery_as_the_full_scan_does() 
         let mut core = EffectsCore::new(ctx);
         let outcome = core
             .perform(AffineCountingEffect {
+                binding: bound(),
                 calls: Arc::new(AtomicUsize::new(0)),
             })
             .await;
@@ -404,6 +409,7 @@ async fn a_lookup_for_a_settled_input_halts_authoring_without_executing() {
     let mut late = EffectsCore::new(window.context(1));
     let error = late
         .perform(CountingEffect {
+            binding: bound(),
             value: 1,
             label: "late",
             calls: window.calls.clone(),
@@ -521,6 +527,7 @@ async fn an_uncommitted_journal_tail_fails_the_lookup_before_any_call() {
     let mut second = EffectsCore::new(context(2));
     let error = second
         .perform(CountingEffect {
+            binding: bound(),
             value: 2,
             label: "after-torn-tail",
             calls: window.calls.clone(),
@@ -545,6 +552,7 @@ async fn current_run_history_answers_only_for_the_journal_it_folds() {
     let mut core = EffectsCore::new(ctx);
     let error = core
         .perform(CountingEffect {
+            binding: bound(),
             value: 1,
             label: "mismatched",
             calls: window.calls.clone(),
@@ -568,6 +576,7 @@ async fn another_stages_outcome_fact_passes_through_unclaimed() {
     ));
     upstream_core
         .perform(CountingEffect {
+            binding: bound(),
             value: 1,
             label: "upstream",
             calls: Arc::new(AtomicUsize::new(0)),
@@ -609,6 +618,7 @@ async fn another_stages_outcome_fact_passes_through_unclaimed() {
             None,
         ));
         core.perform(AffineCountingEffect {
+            binding: bound(),
             calls: Arc::new(AtomicUsize::new(0)),
         })
         .await
@@ -661,6 +671,7 @@ async fn corrupt_current_run_history_halts_authoring() {
     let calls_before = window.calls.load(Ordering::SeqCst);
     let error = core
         .perform(CountingEffect {
+            binding: bound(),
             value: 2,
             label: "after-duplicate-start",
             calls: window.calls.clone(),

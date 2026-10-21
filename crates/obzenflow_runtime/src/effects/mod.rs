@@ -71,12 +71,12 @@ mod tests;
 pub(crate) use actions::{
     ActionCheck, ActionDeparture, ActionRow, RecordedAction, RecordedActions,
 };
+pub use binding::{BindingIdentifierError, EffectBinding};
 #[doc(hidden)]
-pub use binding::EffectInvocationBinding;
 pub use binding::{
-    BindingIdentifierError, EffectBinding, EffectBindingEvidence, EffectBindingMode,
-    EffectBindingUse, EffectPortSlot, EffectPortSlotLabel, EffectPortSlotSet,
-    LogicalEffectBindingName, Named, NamedEffect, NoPortMetadata, Portless,
+    EffectBindingEvidence, EffectBindingMode, EffectBindingUse, EffectInvocationBinding,
+    EffectPortSlot, EffectPortSlotLabel, EffectPortSlotSet, LogicalEffectBindingName, Named,
+    NamedEffect, NoPortMetadata,
 };
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
@@ -88,7 +88,9 @@ pub use boundary::{
 };
 #[doc(hidden)]
 pub use call::KeyRule;
-pub use call::{AtLeastOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey};
+pub use call::{
+    AtLeastOnce, Call, CallRequest, CallSafety, Idempotent, Keyed, RequiresKey, Transactional,
+};
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
 pub use context::{EffectContext, EffectInvocationContext, EffectPortMetadataContext};
@@ -99,19 +101,22 @@ pub use obzenflow_core_derive::{port, EffectHandler};
 #[doc(hidden)]
 pub use system::{
     effectful_stateful_effects, effectful_transform_effects, AcknowledgedSafety, AnswersEffect,
-    DeclareByMode, DeclareEffects, EffectAcknowledgement, EverySystemAnswers, FindSystem,
-    MarkSystemUsed, PortImpl, ServesPort, StageEffectsError, SystemAfter, SystemAnswersAnEffect,
-    SystemFound, SystemList, SystemMark, Unused, Used,
+    DeclareEffects, EffectAcknowledgement, EverySystemAnswers, FindSystem, MarkSystemUsed,
+    PortImpl, ServesPort, StageEffectsError, SystemAfter, SystemAnswersAnEffect, SystemFound,
+    SystemList, SystemMark, Unused, Used,
 };
 pub use system::{EffectHandler, StageSystem, System, SystemError};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
+#[doc(hidden)]
 pub use declaration::{
-    declare_named_at_least_once_effect, transactional_effect_port_slot, DomainFacts, Effect,
-    EffectBindingFor, EffectDeclaration, EffectOutcomeKind, EffectOutcomeSemantics, EffectSafety,
-    IdempotencyKey, IdempotencyKeyPolicy, PreparedEffectSuccess, RecordedReply,
-    SinkRedeliverySafety, TransactionalEffectPort,
+    declare_named_at_least_once_effect, DomainFacts, Effect, EffectBindingFor,
+    EffectOutcomeSemantics, RecordedReply,
+};
+pub use declaration::{
+    EffectDeclaration, EffectOutcomeKind, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
+    PreparedEffectSuccess, SinkRedeliverySafety,
 };
 // FLOWIP-120z effect capability sets; the list traits are doc(hidden)
 // plumbing that must stay reachable for the public `DeclaredEffectSet` impl.
@@ -133,9 +138,10 @@ pub use identity::{
 };
 pub use ports::{
     EffectBindingBuildError, EffectPortRegistry, EffectPortResolutionError, EffectPortResolver,
-    EffectPortResolverWithMetadata, EffectRegistrationBuilder, EffectRegistrationCollectionError,
-    ResolvedEffectPort,
+    EffectRegistrationCollectionError,
 };
+#[doc(hidden)]
+pub use ports::{EffectPortResolverWithMetadata, EffectRegistrationBuilder, ResolvedEffectPort};
 pub(crate) use runtime::EffectsCore;
 // FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can
 // report failures in handler vocabulary without weakening the underlying set

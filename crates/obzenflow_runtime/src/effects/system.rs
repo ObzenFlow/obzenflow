@@ -8,7 +8,7 @@ use super::declaration::EffectDeclarationSyntax;
 use super::ports::SystemPort;
 use super::{
     Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectPortResolutionError,
-    EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName, Named, NamedEffect, Portless,
+    EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName, NamedEffect,
 };
 use crate::stages::common::handlers::{EffectfulStatefulHandler, EffectfulTransformHandler};
 use obzenflow_core::event::schema::{EmptySet, WithMember};
@@ -146,7 +146,7 @@ pub struct PortImpl<T: ?Sized>(PhantomData<fn() -> Arc<T>>);
 #[diagnostic::on_unimplemented(
     message = "this port implements no trait marked `#[obzenflow::port]`",
     label = "the port this system is built from",
-    note = "mark the port trait it implements with `#[obzenflow::port]`"
+    note = "mark the port trait it implements, or a struct that serves as its own port, with `#[obzenflow::port]`"
 )]
 pub trait ServesPort<P: ?Sized, T: ?Sized> {
     fn coerce(port: Arc<T>) -> Arc<P>;
@@ -516,52 +516,6 @@ impl EverySystemAnswers for () {}
 
 impl<M: SystemAnswersAnEffect, Rest: EverySystemAnswers> EverySystemAnswers for (M, Rest) {}
 
-/// One effect's declaration, chosen by its binding mode.
-#[doc(hidden)]
-pub trait DeclareByMode<E: Effect, Systems, Mask, Index> {
-    type Marked;
-
-    #[doc(hidden)]
-    fn declaration(
-        systems: &Systems,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError>;
-}
-
-impl<E, Systems, Mask> DeclareByMode<E, Systems, Mask, ()> for Portless
-where
-    E: Effect<BindingMode = Portless>,
-{
-    type Marked = Mask;
-
-    fn declaration(
-        _: &Systems,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError> {
-        Ok(EffectDeclaration::for_binding::<E>(
-            super::binding::EffectDeclarationBinding::Portless,
-            declaration_syntax(acknowledged),
-        ))
-    }
-}
-
-impl<E, B, Systems, Mask, Index> DeclareByMode<E, Systems, Mask, Index> for Named<B>
-where
-    E: Effect,
-    B: super::EffectBindingEvidence,
-    Systems: FindSystem<E, Index>,
-    Mask: MarkSystemUsed<Index>,
-{
-    type Marked = Mask::Marked;
-
-    fn declaration(
-        systems: &Systems,
-        acknowledged: Option<AcknowledgedSafety>,
-    ) -> Result<EffectDeclaration, StageEffectsError> {
-        systems.found_declaration(acknowledged)
-    }
-}
-
 #[doc(hidden)]
 pub trait DeclareEffects<Systems, Mask, Index> {
     type Marked;
@@ -590,18 +544,11 @@ impl<E, Rest, Systems, Mask, Index, RestIndex> DeclareEffects<Systems, Mask, (In
     for WithMember<E, Rest>
 where
     E: Effect,
-    E::BindingMode: DeclareByMode<E, Systems, Mask, Index>,
-    Rest: DeclareEffects<
-        Systems,
-        <E::BindingMode as DeclareByMode<E, Systems, Mask, Index>>::Marked,
-        RestIndex,
-    >,
+    Systems: FindSystem<E, Index>,
+    Mask: MarkSystemUsed<Index>,
+    Rest: DeclareEffects<Systems, Mask::Marked, RestIndex>,
 {
-    type Marked = <Rest as DeclareEffects<
-        Systems,
-        <E::BindingMode as DeclareByMode<E, Systems, Mask, Index>>::Marked,
-        RestIndex,
-    >>::Marked;
+    type Marked = <Rest as DeclareEffects<Systems, Mask::Marked, RestIndex>>::Marked;
 
     fn declarations(
         systems: &Systems,
@@ -612,12 +559,7 @@ where
             .iter()
             .find(|acknowledgement| acknowledgement.effect_type == E::EFFECT_TYPE)
             .map(|acknowledgement| acknowledgement.safety);
-        out.push(<E::BindingMode as DeclareByMode<
-            E,
-            Systems,
-            Mask,
-            Index,
-        >>::declaration(systems, acknowledged)?);
+        out.push(systems.found_declaration(acknowledged)?);
         Rest::declarations(systems, acknowledgements, out)
     }
 }

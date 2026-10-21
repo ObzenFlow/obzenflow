@@ -48,7 +48,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -203,47 +204,49 @@ impl TypedTransformHandler for MergeTransform {
     }
 }
 
-/// The effectful descendant that makes the fan-in a deterministic orderer.
-#[derive(Clone, Debug)]
-struct CountingEffect {
-    value: u64,
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
 
+/// The effectful descendant that makes the fan-in a deterministic orderer.
+#[derive(Clone, Debug, Serialize)]
+struct Counting {
+    value: u64,
+}
+
 #[async_trait]
-impl Effect for CountingEffect {
+impl CallRequest for Counting {
     const EFFECT_TYPE: &'static str = "resume_mixed.counting";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = CallCounter;
     type Outcome = EffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "counting"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        counter: &CallCounter,
+        _ctx: &mut EffectContext,
+    ) -> Result<EffectValue, EffectError> {
+        counter.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EffectValue {
             effect_value: self.value + 1000,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("resume-mixed:{}", self.value)))
+impl Keyed for Counting {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("resume-mixed:{}", self.value))
     }
 }
+
+type CountingEffect = Call<Counting>;
 
 #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
 #[effect_handler(effects = obzenflow_runtime::effects)]
 struct EffectfulTail {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    counter: System<CallCounter>,
 }
 
 #[async_trait]
@@ -258,10 +261,7 @@ impl EffectfulTransformHandler for EffectfulTail {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .perform(CountingEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-            })
+            .call(&self.counter, Counting { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(MixedOutput {
@@ -322,7 +322,9 @@ fn build_flow(
         let infinite_handler =
             ReattachingSource(InfiniteChannelSource::new("i", inf_first, inf_count));
         let merge_handler = MergeTransform::new();
-        let effectful_handler = EffectfulTail { calls };
+        let effectful_handler = EffectfulTail {
+            counter: System::eager("call-counter", Arc::new(CallCounter { calls }))?,
+        };
         let collect_handler = CountingSink { delivered };
 
         Ok(flow! {

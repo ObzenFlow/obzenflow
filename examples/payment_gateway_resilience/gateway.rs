@@ -5,8 +5,9 @@
 //! Gateway authorization for the payment-gateway resilience flow.
 //!
 //! The gateway call is the one place this flow touches the outside world, so it
-//! is expressed as an [`Effect`] (a value the stage returns) rather than inline
-//! I/O. The runtime owns one logical effect invocation, applies its configured
+//! is expressed as a request ([`AuthorizeRequest`]) the handler passes to
+//! `fx.call` with the gateway system, rather than inline I/O. The runtime owns
+//! one logical effect invocation, applies its configured
 //! retry policy to live physical calls, journals the one terminal outcome fact
 //! that happened (`payment.authorized` or `payment.declined`), and on
 //! replay reconstructs that recorded outcome without calling the gateway again.
@@ -21,41 +22,124 @@ use super::domain::{
 };
 use async_trait::async_trait;
 use obzenflow::effects::{
-    Effect, EffectContext, EffectError, EffectHandler, EffectSafety, Effects, IdempotencyKey,
+    Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, IdempotencyKey, Keyed,
+    RequiresKey, System,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::schema::EffectOutcomeFacts;
 use obzenflow::stages::transforms::EffectfulTransformHandler;
-use serde_json::json;
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The gateway authorization command, expressed as an effect.
-///
-/// Returning this command from a stage (instead of calling the gateway inline) is
-/// what lets the runtime own execution: run it once, record the outcome, and
-/// suppress it on replay. A real implementation would issue an HTTP request
-/// inside [`Effect::execute`]; here we simulate latency and a scripted outage so
-/// the behaviour is deterministic and easy to follow.
-#[derive(Debug, Clone)]
-pub struct AuthorizePayment {
-    pub order: ValidatedOrder,
+/// The payment gateway an authorization request calls.
+#[obzenflow::port]
+#[async_trait]
+pub trait PaymentGatewayPort: Send + Sync {
+    async fn authorize(
+        &self,
+        request: &AuthorizeRequest,
+        ctx: &EffectContext,
+    ) -> Result<AuthorizePaymentOutcome, EffectError>;
 }
 
-impl AuthorizePayment {
-    fn for_order(order: &ValidatedOrder) -> Self {
-        Self {
-            order: order.clone(),
+/// The tutorial's gateway. A real implementation would issue an HTTP request
+/// inside [`PaymentGatewayPort::authorize`]; here we simulate latency and a
+/// scripted outage so the behaviour is deterministic and easy to follow.
+pub struct ScriptedGateway;
+
+#[async_trait]
+impl PaymentGatewayPort for ScriptedGateway {
+    async fn authorize(
+        &self,
+        request: &AuthorizeRequest,
+        ctx: &EffectContext,
+    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+        // Latency comes from the deterministic, seeded RNG on the effect context
+        // rather than a wall clock, so a replay reconstructs the same timing.
+        let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
+        ctx.sleep(Duration::from_millis(latency_ms)).await;
+
+        if matches!(request.phase, TrafficPhase::Outage) {
+            // A degraded gateway hangs before timing out, so the enclosing
+            // authorization attempt is visibly slow (and the outcome is a failure).
+            // The hang is drawn from the same seeded RNG as the base latency.
+            let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
+            ctx.sleep(Duration::from_millis(timeout_ms)).await;
+            return Err(EffectError::Timeout(
+                "gateway_timeout_simulated".to_string(),
+            ));
+        }
+
+        match request.payment_method_state {
+            PaymentMethodState::Valid => {
+                Ok(AuthorizePaymentOutcome::Authorized(PaymentAuthorized {
+                    order_id: request.order_id.clone(),
+                    customer_id: request.customer_id.clone(),
+                    amount_cents: request.amount_cents,
+                    phase: request.phase.clone(),
+                    authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
+                }))
+            }
+            PaymentMethodState::InsufficientFunds => Ok(AuthorizePaymentOutcome::Declined(
+                request.declined(PaymentDeclineReason::InsufficientFunds),
+            )),
+            PaymentMethodState::AddressMismatch => Ok(AuthorizePaymentOutcome::Declined(
+                request.declined(PaymentDeclineReason::AddressMismatch),
+            )),
+            PaymentMethodState::InvalidNumber => Err(EffectError::Validation(
+                "invalid_payment_method_reached_gateway".to_string(),
+            )),
         }
     }
 }
+
+/// The gateway authorization request.
+///
+/// Passing this request to `fx.call` (instead of calling the gateway inline) is
+/// what lets the runtime own execution: run it once, record the outcome, and
+/// suppress it on replay.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthorizeRequest {
+    order_id: String,
+    customer_id: String,
+    amount_cents: u64,
+    payment_method_state: PaymentMethodState,
+    phase: TrafficPhase,
+}
+
+impl AuthorizeRequest {
+    /// The request that authorizes `order` at the gateway.
+    pub fn for_order(order: &ValidatedOrder) -> Self {
+        Self {
+            order_id: order.order_id.clone(),
+            customer_id: order.customer_id.clone(),
+            amount_cents: order.amount_cents,
+            payment_method_state: order.payment_method_state.clone(),
+            phase: order.phase.clone(),
+        }
+    }
+
+    fn declined(&self, reason: PaymentDeclineReason) -> PaymentDeclined {
+        PaymentDeclined {
+            order_id: self.order_id.clone(),
+            customer_id: self.customer_id.clone(),
+            amount_cents: self.amount_cents,
+            phase: self.phase.clone(),
+            reason,
+        }
+    }
+}
+
+/// The gateway authorization effect, which the stage's effect set names.
+pub type AuthorizePayment = Call<AuthorizeRequest>;
 
 /// Closed set of successful gateway authorization outcomes (FLOWIP-120m).
 ///
 /// The variants are the facts the journal records (`payment.authorized`,
 /// `payment.declined`); the derive writes the marshalling. The carrier
-/// itself is transient `fx.perform` machinery the handler matches
+/// itself is transient `fx.call` machinery the handler matches
 /// exhaustively. There is no persisted gateway-decision wrapper.
 #[derive(Debug, Clone, EffectOutcomeFacts)]
 #[effect_outcome(schema = obzenflow::schema)]
@@ -65,102 +149,40 @@ pub enum AuthorizePaymentOutcome {
 }
 
 #[async_trait]
-impl Effect for AuthorizePayment {
+impl CallRequest for AuthorizeRequest {
     const EFFECT_TYPE: &'static str = "payment.authorize";
-    const SCHEMA_VERSION: u32 = 1;
-    // A charge is never idempotent on its own, so the effect must carry a key
-    // the gateway can dedupe on. The runtime enforces this before any I/O.
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow::effects::Portless;
-
+    // A charge is never idempotent on its own, so the request must carry a key
+    // the gateway can dedupe on. It does not compile without its `Keyed` impl.
+    type Safety = RequiresKey;
+    type Port = dyn PaymentGatewayPort;
     type Outcome = AuthorizePaymentOutcome;
-    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "authorize_payment"
+    async fn call(
+        &self,
+        gateway: &dyn PaymentGatewayPort,
+        ctx: &mut EffectContext,
+    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+        gateway.authorize(self, ctx).await
     }
+}
 
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({
-            "order_id": self.order.order_id,
-            "customer_id": self.order.customer_id,
-            "amount_cents": self.order.amount_cents,
-            "payment_method_state": self.order.payment_method_state,
-            "phase": self.order.phase,
-        })
-    }
-
-    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        // Latency comes from the deterministic, seeded RNG on the effect context
-        // rather than a wall clock, so a replay reconstructs the same timing.
-        let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
-        ctx.sleep(std::time::Duration::from_millis(latency_ms))
-            .await;
-
-        if matches!(self.order.phase, TrafficPhase::Outage) {
-            // A degraded gateway hangs before timing out, so the enclosing
-            // authorization attempt is visibly slow (and the outcome is a failure).
-            // The hang is drawn from the same seeded RNG as the base latency.
-            let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
-            ctx.sleep(std::time::Duration::from_millis(timeout_ms))
-                .await;
-            return Err(EffectError::Timeout(
-                "gateway_timeout_simulated".to_string(),
-            ));
-        }
-
-        let order = &self.order;
-        match order.payment_method_state {
-            PaymentMethodState::Valid => {
-                Ok(AuthorizePaymentOutcome::Authorized(PaymentAuthorized {
-                    order_id: order.order_id.clone(),
-                    customer_id: order.customer_id.clone(),
-                    amount_cents: order.amount_cents,
-                    phase: order.phase.clone(),
-                    authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
-                }))
-            }
-            PaymentMethodState::InsufficientFunds => {
-                Ok(AuthorizePaymentOutcome::Declined(PaymentDeclined {
-                    order_id: order.order_id.clone(),
-                    customer_id: order.customer_id.clone(),
-                    amount_cents: order.amount_cents,
-                    phase: order.phase.clone(),
-                    reason: PaymentDeclineReason::InsufficientFunds,
-                }))
-            }
-            PaymentMethodState::AddressMismatch => {
-                Ok(AuthorizePaymentOutcome::Declined(PaymentDeclined {
-                    order_id: order.order_id.clone(),
-                    customer_id: order.customer_id.clone(),
-                    amount_cents: order.amount_cents,
-                    phase: order.phase.clone(),
-                    reason: PaymentDeclineReason::AddressMismatch,
-                }))
-            }
-            PaymentMethodState::InvalidNumber => Err(EffectError::Validation(
-                "invalid_payment_method_reached_gateway".to_string(),
-            )),
-        }
-    }
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!(
-            "payment-authorize:{}",
-            self.order.order_id
-        )))
+impl Keyed for AuthorizeRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("payment-authorize:{}", self.order_id))
     }
 }
 
 /// Effectful transform that turns a `ValidatedOrder` into named gateway outcome facts.
 ///
 /// The named payment facts (`PaymentAuthorized`, `PaymentDeclined`) ARE the
-/// recorded effect outcome group (FLOWIP-120m): `fx.perform` records whichever
+/// recorded effect outcome group (FLOWIP-120m): `fx.call` records whichever
 /// fact happened and returns the transient carrier, so the handler never
 /// re-emits them. The handler emits only the non-performance fact
 /// (`PaymentAuthorizationUnavailable`).
 #[derive(Debug, Clone, EffectHandler)]
 pub struct GatewayTransform {
+    #[system]
+    gateway: System<dyn PaymentGatewayPort>,
     first_recovery_pause: Option<Duration>,
     recovery_pause_claimed: Arc<AtomicBool>,
 }
@@ -173,6 +195,15 @@ type GatewayOutput = obzenflow::schema::stage_fact_set![
 type GatewayAllowedEffects = obzenflow::effects::effect_set![AuthorizePayment];
 
 impl GatewayTransform {
+    /// A gateway transform whose authorizations `gateway` answers.
+    pub fn new(gateway: System<dyn PaymentGatewayPort>) -> Self {
+        Self {
+            gateway,
+            first_recovery_pause: None,
+            recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Pace the first live recovery authorization after the scripted outage.
     ///
     /// A real order stream naturally has time between an outage and later
@@ -180,15 +211,13 @@ impl GatewayTransform {
     /// so its normal assembly adds that quiet period explicitly before breaker
     /// admission. Replay skips the wall-clock wait and reconstructs the
     /// recorded effect outcome as usual.
-    pub fn with_first_recovery_pause(pause: Duration) -> Self {
+    pub fn with_first_recovery_pause(mut self, pause: Duration) -> Self {
         assert!(
             !pause.is_zero(),
             "the scripted recovery pause must be greater than zero"
         );
-        Self {
-            first_recovery_pause: Some(pause),
-            recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
-        }
+        self.first_recovery_pause = Some(pause);
+        self
     }
 
     async fn pace_first_live_recovery(&self, order: &ValidatedOrder, is_replaying: bool) {
@@ -201,15 +230,6 @@ impl GatewayTransform {
         };
         if !self.recovery_pause_claimed.swap(true, Ordering::SeqCst) {
             tokio::time::sleep(pause).await;
-        }
-    }
-}
-
-impl Default for GatewayTransform {
-    fn default() -> Self {
-        Self {
-            first_recovery_pause: None,
-            recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -238,14 +258,15 @@ impl EffectfulTransformHandler for GatewayTransform {
             .await;
 
         // The configured resilience unit owns retry and breaker admission. If
-        // recovery exhausts or the breaker prevents an attempt, `perform`
+        // recovery exhausts or the breaker prevents an attempt, `fx.call`
         // returns the one recorded terminal error; resilience never
         // synthesizes a business fact to represent non-execution.
-        let authorization = AuthorizePayment::for_order(&order);
-        let outcome = fx.perform(authorization).await;
+        let outcome = fx
+            .call(&self.gateway, AuthorizeRequest::for_order(&order))
+            .await;
 
         match outcome {
-            // fx.perform already recorded the gateway's decision as its named
+            // fx.call already recorded the gateway's decision as its named
             // outcome fact, which reaches its own delivery; a decline is a
             // payment outcome, not an order cancellation.
             Ok(AuthorizePaymentOutcome::Authorized(_)) => {}

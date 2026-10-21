@@ -223,16 +223,6 @@ impl EffectDeclaration {
         declaration
     }
 
-    pub fn of<E>() -> Self
-    where
-        E: Effect<BindingMode = Portless>,
-    {
-        Self::for_binding::<E>(
-            EffectDeclarationBinding::Portless,
-            EffectDeclarationSyntax::Bare,
-        )
-    }
-
     /// Declare a named effect answered by `binding`.
     pub fn named<E>(binding: &EffectBinding<E>) -> Self
     where
@@ -347,18 +337,6 @@ impl EffectDeclaration {
         short_type_name(self.rust_type)
     }
 
-    /// Explicit acknowledgement for an effect whose only safe recovery is a
-    /// new at-least-once attempt after durable in-doubt evidence.
-    pub fn at_least_once<E>() -> Self
-    where
-        E: Effect<BindingMode = Portless>,
-    {
-        Self::for_binding::<E>(
-            EffectDeclarationBinding::Portless,
-            EffectDeclarationSyntax::AtLeastOnce,
-        )
-    }
-
     /// Explicit at-least-once acknowledgement for a named effect.
     pub fn named_at_least_once<E>(binding: &EffectBinding<E>) -> Self
     where
@@ -370,7 +348,7 @@ impl EffectDeclaration {
         )
     }
 
-    /// Select transactional execution through the named effect's reserved typed slot.
+    /// Explicit transactional acknowledgement for a named effect.
     pub fn transactional<E>(binding: &EffectBinding<E>) -> Self
     where
         E: NamedEffect,
@@ -423,22 +401,6 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     }
 }
 
-#[async_trait]
-pub trait TransactionalEffectPort<E: Effect>: Send + Sync {
-    async fn execute_and_commit(
-        &self,
-        effect: E,
-        ctx: &mut EffectContext,
-        commit: EffectCommitHandle<E::Outcome, E::OutcomeSemantics>,
-    ) -> Result<E::Outcome, EffectError>;
-}
-
-/// Reserved effect-local slot that executes a transactional effect.
-pub const fn transactional_effect_port_slot<E: Effect>(
-) -> EffectPortSlot<dyn TransactionalEffectPort<E>> {
-    EffectPortSlot::new("executor")
-}
-
 fn short_type_name(full: &str) -> String {
     let mut short = String::with_capacity(full.len());
     let mut segment = String::new();
@@ -459,31 +421,6 @@ fn short_type_name(full: &str) -> String {
 mod tests {
     use super::*;
 
-    #[derive(Clone, Debug)]
-    struct InvalidIdentifierEffect;
-
-    #[async_trait]
-    impl Effect for InvalidIdentifierEffect {
-        const EFFECT_TYPE: &'static str = "https://credential-canary.example";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = Portless;
-        type Outcome = ();
-        type OutcomeSemantics = RecordedReply;
-
-        fn label(&self) -> &str {
-            "invalid_identifier"
-        }
-
-        fn canonical_input(&self) -> Value {
-            Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn diagnostics_name_effect_types_without_module_paths() {
         assert_eq!(
@@ -497,18 +434,5 @@ mod tests {
             short_type_name("fixtures::Pair<a::Left, b::Right>"),
             "Pair<Left, Right>"
         );
-    }
-
-    #[test]
-    fn invalid_effect_identifier_cannot_become_a_declaration_or_diagnostic_value() {
-        let panic = std::panic::catch_unwind(EffectDeclaration::of::<InvalidIdentifierEffect>)
-            .expect_err("invalid identifiers must fail at construction");
-        let message = panic
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-            .expect("constructor panic has a static curated message");
-        assert!(!message.contains("credential-canary"));
-        assert!(message.contains("effect identifiers must contain dot-separated"));
     }
 }

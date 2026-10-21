@@ -17,13 +17,14 @@ use serde::Serialize;
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a request",
     label = "`fx.call` performs a request that a system answers",
-    note = "perform a portless or hand-written effect with `fx.perform`"
+    note = "declare the effect by implementing `CallRequest` on its request type"
 )]
 pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'static {
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32 = 1;
 
-    /// How a repeated call behaves: `Idempotent`, `RequiresKey` or `AtLeastOnce`.
+    /// How a repeated call behaves: `Idempotent`, `RequiresKey`, `AtLeastOnce` or
+    /// `Transactional`.
     type Safety: CallSafety + KeyRule<Self>;
 
     /// The port a system implements to answer this request.
@@ -115,26 +116,25 @@ pub trait Keyed {
 mod sealed {
     #[diagnostic::on_unimplemented(
         message = "`{Self}` is not a request safety class",
-        note = "a request's `Safety` is `Idempotent`, `RequiresKey` or `AtLeastOnce`"
+        note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce` or `Transactional`"
     )]
     pub trait CallSafety {}
 }
 
-/// A request's safety class: [`Idempotent`], [`RequiresKey`] or
-/// [`AtLeastOnce`]. No request is transactional, and no other class can be
-/// declared:
+/// A request's safety class: [`Idempotent`], [`RequiresKey`], [`AtLeastOnce`]
+/// or [`Transactional`]. No other class can be declared:
 ///
 /// ```compile_fail,E0277
 /// # use obzenflow_runtime::effects::{CallSafety, EffectSafety};
-/// struct Transactional;
+/// struct Batched;
 ///
-/// impl CallSafety for Transactional {
-///     # const SAFETY: EffectSafety = EffectSafety::Transactional;
+/// impl CallSafety for Batched {
+///     # const SAFETY: EffectSafety = EffectSafety::Idempotent;
 /// }
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a request safety class",
-    note = "a request's `Safety` is `Idempotent`, `RequiresKey` or `AtLeastOnce`"
+    note = "a request's `Safety` is `Idempotent`, `RequiresKey`, `AtLeastOnce` or `Transactional`"
 )]
 pub trait CallSafety: sealed::CallSafety {
     #[doc(hidden)]
@@ -151,9 +151,15 @@ pub struct RequiresKey;
 /// handler with `.at_least_once::<E>()`.
 pub struct AtLeastOnce;
 
+/// A request whose port commits its outcome through the handle
+/// `ctx.transaction(self)` returns, acknowledged after its stage's handler
+/// with `.transactional::<E>()`. The committed record is the outcome.
+pub struct Transactional;
+
 impl sealed::CallSafety for Idempotent {}
 impl sealed::CallSafety for RequiresKey {}
 impl sealed::CallSafety for AtLeastOnce {}
+impl sealed::CallSafety for Transactional {}
 
 impl CallSafety for Idempotent {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
@@ -165,6 +171,10 @@ impl CallSafety for RequiresKey {
 
 impl CallSafety for AtLeastOnce {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+}
+
+impl CallSafety for Transactional {
+    const SAFETY: EffectSafety = EffectSafety::Transactional;
 }
 
 #[doc(hidden)]
@@ -185,6 +195,12 @@ impl<R: Keyed> KeyRule<R> for RequiresKey {
 }
 
 impl<R> KeyRule<R> for AtLeastOnce {
+    fn key(_: &R) -> Option<IdempotencyKey> {
+        None
+    }
+}
+
+impl<R> KeyRule<R> for Transactional {
     fn key(_: &R) -> Option<IdempotencyKey> {
         None
     }

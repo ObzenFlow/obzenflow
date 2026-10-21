@@ -51,13 +51,15 @@ use super::domain::{
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
-use super::gateway::GatewayTransform;
+use super::gateway::{GatewayTransform, ScriptedGateway};
 use super::validation;
+use obzenflow::effects::System;
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
+use std::sync::Arc;
 use std::time::Duration;
 
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
@@ -79,7 +81,7 @@ pub fn build_flow() -> obzenflow::flow::FlowDefinition {
     assemble_flow(
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
-        GatewayTransform::with_first_recovery_pause(FIRST_RECOVERY_PAUSE),
+        Some(FIRST_RECOVERY_PAUSE),
         GATEWAY_CALLS_PER_SECOND,
         std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
     )
@@ -92,11 +94,16 @@ pub fn build_flow() -> obzenflow::flow::FlowDefinition {
 pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
-    gateway_transform: GatewayTransform,
+    first_recovery_pause: Option<Duration>,
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
 ) -> obzenflow::flow::FlowDefinition {
     obzenflow::flow::FlowDefinition::materialize(move |_runtime_config| {
+        let gateway = System::eager("scripted-gateway", Arc::new(ScriptedGateway))?;
+        let gateway_transform = match first_recovery_pause {
+            Some(pause) => GatewayTransform::new(gateway).with_first_recovery_pause(pause),
+            None => GatewayTransform::new(gateway),
+        };
         // One effect-only resilience attachment owns the gateway's health,
         // recovery policy, and per-physical-attempt admission. Its fixed ordering
         // keeps limiter wait outside the dependency clock and prevents a stale

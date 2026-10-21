@@ -10,12 +10,11 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use obzenflow_core::{BoundedBindingEvidence, ChainEvent, TypedPayload};
+    use obzenflow_core::{ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
-        transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
-        EffectBindingUse, EffectContext, EffectError, EffectHandler, EffectPortResolutionError,
-        EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, Effects,
-        LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety, StageCompletion,
+        Call, CallRequest, EffectContext, EffectError, EffectHandler, EffectPortResolutionError,
+        EffectSafety, Effects, Idempotent, SinkRedeliverySafety, StageCompletion, System,
+        Transactional,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -170,7 +169,7 @@ mod tests {
     #[effect_handler(effects = obzenflow_runtime::effects)]
     struct TxFxTr {
         #[system]
-        tx: EffectBinding<TxEffect>,
+        tx: System<TxPort>,
     }
 
     #[async_trait]
@@ -239,34 +238,38 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct PolicyEffect;
+    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    struct PolicyPort;
+
+    #[derive(Clone, Debug, Serialize)]
+    struct PolicyRequest;
 
     #[async_trait]
-    impl Effect for PolicyEffect {
+    impl CallRequest for PolicyRequest {
         const EFFECT_TYPE: &'static str = "test.stateful_policy_effect";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = obzenflow_runtime::effects::Portless;
+        type Safety = Idempotent;
+        type Port = PolicyPort;
         type Outcome = Out;
-        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "stateful_policy_effect"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        async fn call(&self, _: &PolicyPort, _: &mut EffectContext) -> Result<Out, EffectError> {
             Ok(Out)
         }
     }
 
+    type PolicyEffect = Call<PolicyRequest>;
+
     #[derive(Clone, Debug, EffectHandler)]
     #[effect_handler(effects = obzenflow_runtime::effects)]
-    struct FxPolicySt;
+    struct FxPolicySt {
+        #[system]
+        policy: System<PolicyPort>,
+    }
+
+    fn policy_handler() -> FxPolicySt {
+        FxPolicySt {
+            policy: System::eager("policy", std::sync::Arc::new(PolicyPort)).unwrap(),
+        }
+    }
 
     #[async_trait]
     impl EffectfulStatefulHandler for FxPolicySt {
@@ -339,68 +342,35 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct TxEffect {
-        binding: EffectBindingUse<Self>,
-    }
+    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    struct TxPort;
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct TxEvidence;
-
-    impl EffectBindingEvidence for TxEvidence {
-        const SCHEMA_VERSION: u32 = 1;
-
-        fn canonical_bytes(&self) -> BoundedBindingEvidence {
-            BoundedBindingEvidence::try_new(b"typed-decoration-tx".to_vec()).unwrap()
-        }
-    }
+    #[derive(Clone, Debug, Serialize)]
+    struct TxRequest;
 
     #[async_trait]
-    impl Effect for TxEffect {
+    impl CallRequest for TxRequest {
         const EFFECT_TYPE: &'static str = "test.tx_effect";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Transactional;
-        type BindingMode = Named<TxEvidence>;
-
+        type Safety = Transactional;
+        type Port = TxPort;
         type Outcome = Out;
-        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "tx_effect"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        async fn call(&self, _: &TxPort, ctx: &mut EffectContext) -> Result<Out, EffectError> {
+            let tx = ctx.transaction(self)?;
+            tx.commit_success(&Out).await?;
             Ok(Out)
         }
     }
 
-    impl NamedEffect for TxEffect {
-        type BindingEvidence = TxEvidence;
+    type TxEffect = Call<TxRequest>;
 
-        fn binding_use(&self) -> &EffectBindingUse<Self> {
-            &self.binding
-        }
-
-        fn required_slots() -> EffectPortSlotSet {
-            EffectPortSlotSet::single(transactional_effect_port_slot::<Self>())
-        }
-    }
-
-    fn tx_binding() -> EffectBinding<TxEffect> {
-        EffectRegistrationBuilder::<TxEffect>::new(
-            LogicalEffectBindingName::new("tx").unwrap(),
-            TxEvidence,
+    fn tx_system() -> System<TxPort> {
+        System::deferred(
+            "tx",
+            || -> Result<std::sync::Arc<TxPort>, EffectPortResolutionError> {
+                Err(EffectPortResolutionError::ClientConstructionFailed)
+            },
         )
-        .bind_deferred(
-            transactional_effect_port_slot::<TxEffect>(),
-            std::sync::Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
-        )
-        .unwrap()
-        .finish()
         .unwrap()
     }
 
@@ -579,16 +549,16 @@ mod tests {
         let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
-    fn effectful_transform_transactional_effect_clause_declares_executor() {
-        let tx = tx_binding();
-        assert_eq!(tx.logical_name().as_str(), "tx");
+    fn effectful_transform_transactional_acknowledgement_declares_the_request() {
+        let tx = tx_system();
+        assert_eq!(tx.name(), "tx");
         let handler = TxFxTr { tx };
         let descriptor = crate::effectful_transform!(
             In -> Out => handler.transactional::<TxEffect>());
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].effect_type(), TxEffect::EFFECT_TYPE);
+        assert_eq!(declarations[0].effect_type(), TxRequest::EFFECT_TYPE);
         assert_eq!(declarations[0].safety(), EffectSafety::Transactional);
     }
 
@@ -630,20 +600,21 @@ mod tests {
 
     #[test]
     fn effectful_stateful_accepts_and_retains_inline_effect_policy() {
+        let handler = policy_handler();
         let mut descriptor = crate::effectful_stateful!(
             In -> Out
             with obzenflow_adapters::middleware::rate_limit(1_000.0)
-            => FxPolicySt);
+            => handler);
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].effect_type(), PolicyEffect::EFFECT_TYPE);
+        assert_eq!(declarations[0].effect_type(), PolicyRequest::EFFECT_TYPE);
         descriptor
             .prepare_middleware()
             .expect("the policy guards the stage's one effect");
         let policies = descriptor.effect_policy_attachments();
         assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0].effect_type, PolicyEffect::EFFECT_TYPE);
+        assert_eq!(policies[0].effect_type, PolicyRequest::EFFECT_TYPE);
     }
 
     struct EffectAudit;
@@ -656,10 +627,11 @@ mod tests {
         };
         let limiter = rate_limit(10.0).for_effect::<PolicyEffect>();
         let audit = effect_observer("audit", EffectAudit).for_effect::<PolicyEffect>();
+        let handler = policy_handler();
         let mut descriptor = crate::effectful_stateful!(
             In -> Out
             with { limiter, audit, retry(), circuit_breaker().consecutive_failures(3), effect_observer("audit", EffectAudit) }
-            => FxPolicySt
+            => handler
         );
         descriptor
             .prepare_middleware()

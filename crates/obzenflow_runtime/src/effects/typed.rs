@@ -130,8 +130,10 @@ where
         self.core.emit(fact).await
     }
 
-    /// Perform one declared effect whose complete outcome fact set is a
-    /// subset of this handler's output set.
+    /// Runtime-owned integration SPI that performs one declared first-party
+    /// effect whose complete outcome fact set is a subset of this handler's
+    /// output set.
+    #[doc(hidden)]
     pub async fn perform<E, EffectAt, OutcomeProof>(
         &mut self,
         effect: E,
@@ -350,52 +352,34 @@ where
     /// }
     /// ```
     ///
-    /// A portless or hand-written effect is performed with `fx.perform`, not
-    /// `fx.call`:
+    /// A value that is not a request does not compile:
     ///
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
     /// # use obzenflow_core::TypedPayload;
-    /// # use obzenflow_runtime::effects::{DomainFacts, Effect, EffectContext, EffectError, EffectHandler, EffectSafety, Effects, Portless, StageCompletion, System};
+    /// # use obzenflow_runtime::effects::{EffectHandler, Effects, StageCompletion, System};
     /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
     /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
     /// # use serde::{Deserialize, Serialize};
     /// # #[derive(Clone, Debug, Serialize, Deserialize)]
     /// # struct Order;
     /// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "docs.call.order"; }
-    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
-    /// # struct Stamped;
-    /// # impl TypedPayload for Stamped { const EVENT_TYPE: &'static str = "docs.call.stamped"; }
     /// # trait StampPort: Send + Sync {}
-    /// # #[derive(Clone, Debug, Serialize)]
-    /// # struct StampOrder;
-    /// # #[async_trait]
-    /// # impl Effect for StampOrder {
-    /// #     const EFFECT_TYPE: &'static str = "docs.call.stamp_order";
-    /// #     const SCHEMA_VERSION: u32 = 1;
-    /// #     const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    /// #     type BindingMode = Portless;
-    /// #     type Outcome = Stamped;
-    /// #     type OutcomeSemantics = DomainFacts;
-    /// #     fn label(&self) -> &str { Self::EFFECT_TYPE }
-    /// #     fn canonical_input(&self) -> serde_json::Value { serde_json::Value::Null }
-    /// #     async fn execute(&self, _: &mut EffectContext) -> Result<Stamped, EffectError> { Ok(Stamped) }
-    /// # }
     /// # #[derive(Clone, Debug, EffectHandler)]
     /// # #[effect_handler(effects = obzenflow_runtime::effects)]
     /// # struct Stamper { stamps: System<dyn StampPort> }
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Stamper {
     ///     type Input = Order;
-    ///     type Output = obzenflow_core::stage_fact_set![Stamped];
-    ///     type AllowedEffects = obzenflow_runtime::effect_set![StampOrder];
+    ///     type Output = Order;
+    ///     type AllowedEffects = obzenflow_runtime::effect_set![];
     ///
     ///     async fn process(
     ///         &self,
-    ///         _: Order,
+    ///         order: Order,
     ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-    ///         fx.call(&self.stamps, StampOrder).await?;
+    ///         fx.call(&self.stamps, order).await?;
     ///         Ok(fx.complete()?)
     ///     }
     /// }

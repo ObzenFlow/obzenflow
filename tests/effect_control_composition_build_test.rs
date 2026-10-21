@@ -18,7 +18,8 @@ use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, Typ
 use obzenflow_dsl::{effectful_stateful, effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects,
+    effectful_transform_effects, AtLeastOnce, Call, CallRequest, EffectContext, EffectError,
+    Effects, Idempotent, System,
 };
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
@@ -28,7 +29,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::observer::EffectObserver;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -46,60 +46,68 @@ impl TypedPayload for CompositionFact {
     const EVENT_TYPE: &'static str = "effect_control_composition.fact";
 }
 
-#[derive(Clone, Debug)]
-struct EffectA;
+#[obzenflow::port]
+struct CompositionService;
+
+fn composition_service() -> System<CompositionService> {
+    System::eager("composition", Arc::new(CompositionService)).expect("a valid system name")
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RequestA;
 
 #[async_trait]
-impl Effect for EffectA {
+impl CallRequest for RequestA {
     const EFFECT_TYPE: &'static str = "effect_control_composition.a";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = Idempotent;
+    type Port = CompositionService;
     type Outcome = CompositionFact;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "effect-a"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({})
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn call(
+        &self,
+        _service: &CompositionService,
+        _ctx: &mut EffectContext,
+    ) -> Result<CompositionFact, EffectError> {
         Ok(CompositionFact)
     }
 }
 
-#[derive(Clone, Debug)]
-struct EffectB;
+type EffectA = Call<RequestA>;
+
+#[derive(Clone, Debug, Serialize)]
+struct RequestB;
 
 #[async_trait]
-impl Effect for EffectB {
+impl CallRequest for RequestB {
     const EFFECT_TYPE: &'static str = "effect_control_composition.b";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = Idempotent;
+    type Port = CompositionService;
     type Outcome = CompositionFact;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "effect-b"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({})
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn call(
+        &self,
+        _service: &CompositionService,
+        _ctx: &mut EffectContext,
+    ) -> Result<CompositionFact, EffectError> {
         Ok(CompositionFact)
     }
 }
+
+type EffectB = Call<RequestB>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
-struct OneEffectHandler;
+struct OneEffectHandler {
+    #[system]
+    service: System<CompositionService>,
+}
+
+impl OneEffectHandler {
+    fn new() -> Self {
+        Self {
+            service: composition_service(),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for OneEffectHandler {
@@ -117,7 +125,18 @@ impl EffectfulTransformHandler for OneEffectHandler {
 }
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
-struct TwoEffectHandler;
+struct TwoEffectHandler {
+    #[system]
+    service: System<CompositionService>,
+}
+
+impl TwoEffectHandler {
+    fn new() -> Self {
+        Self {
+            service: composition_service(),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for TwoEffectHandler {
@@ -135,7 +154,18 @@ impl EffectfulTransformHandler for TwoEffectHandler {
 }
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
-struct StatefulOneEffectHandler;
+struct StatefulOneEffectHandler {
+    #[system]
+    service: System<CompositionService>,
+}
+
+impl StatefulOneEffectHandler {
+    fn new() -> Self {
+        Self {
+            service: composition_service(),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulStatefulHandler for StatefulOneEffectHandler {
@@ -357,7 +387,7 @@ impl EffectPolicy for OrdinaryControl {
 macro_rules! single_effect_flow {
     (observers: [], policy: $policy:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
-            let guarded_handler = OneEffectHandler;
+            let guarded_handler = OneEffectHandler::new();
             Ok(flow! {
                 name: "effect_control_composition_single",
                 journals: memory_journals(),
@@ -372,7 +402,7 @@ macro_rules! single_effect_flow {
     };
     (observers: [$($observer:expr),* $(,)?], policy: $policy:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
-            let guarded_handler = OneEffectHandler;
+            let guarded_handler = OneEffectHandler::new();
 
             Ok(flow! {
                 name: "effect_control_composition_single",
@@ -397,7 +427,7 @@ macro_rules! single_effect_flow {
 macro_rules! two_effect_flow {
     (effect_a: $effect_a:expr, effect_b: $effect_b:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
-            let guarded_handler = TwoEffectHandler;
+            let guarded_handler = TwoEffectHandler::new();
             let effect_a_policy = $effect_a.for_effect::<EffectA>();
             let effect_b_policy = $effect_b.for_effect::<EffectB>();
 
@@ -426,7 +456,7 @@ macro_rules! two_effect_flow {
 macro_rules! stateful_single_effect_flow {
     (observers: [$($observer:expr),* $(,)?], policy: $policy:expr) => {
         FlowDefinition::materialize(move |_runtime_config| {
-            let guarded_handler = StatefulOneEffectHandler;
+            let guarded_handler = StatefulOneEffectHandler::new();
 
             Ok(flow! {
                 name: "effect_control_composition_stateful",
@@ -454,10 +484,12 @@ fn malformed_effect_policy_attachment_flow(
     policy_materializations: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
+        let handler = OneEffectHandler::new();
+        let effects = effectful_transform_effects(&handler, &[]);
         let guarded: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
             "guarded",
-            OneEffectHandler,
-            Ok(vec![EffectDeclaration::of::<EffectA>()]),
+            handler,
+            effects,
             vec![Box::new(
                 OrdinaryControlFactory {
                     materializations: policy_materializations.clone(),
@@ -498,10 +530,12 @@ fn duplicate_effect_policy_attachment_flow(
     second_materializations: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
+        let handler = OneEffectHandler::new();
+        let effects = effectful_transform_effects(&handler, &[]);
         let guarded: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
             "guarded",
-            OneEffectHandler,
-            Ok(vec![EffectDeclaration::of::<EffectA>()]),
+            handler,
+            effects,
             vec![
                 Box::new(
                     OrdinaryControlFactory {
@@ -562,7 +596,7 @@ async fn undeclared_policy_effect_fails_build_before_materialization() {
     assert!(
         rendered.contains("stage 'guarded'")
             && rendered.contains("undeclared effect")
-            && rendered.contains(EffectB::EFFECT_TYPE),
+            && rendered.contains(RequestB::EFFECT_TYPE),
         "unexpected malformed attachment diagnostic: {rendered}"
     );
     assert_eq!(policy_materializations.load(Ordering::SeqCst), 0);
@@ -651,7 +685,7 @@ async fn independent_custom_controls_without_composition_contract_fail_before_ma
         rendered.contains("control") || rendered.contains("composition"),
         "{rendered}"
     );
-    assert!(rendered.contains(EffectA::EFFECT_TYPE), "{rendered}");
+    assert!(rendered.contains(RequestA::EFFECT_TYPE), "{rendered}");
     assert_eq!(first_materializations.load(Ordering::SeqCst), 0);
     assert_eq!(second_materializations.load(Ordering::SeqCst), 0);
 }
@@ -688,34 +722,40 @@ async fn materialization_cannot_swap_the_declaration_that_passed_structural_vali
     assert!(rendered.contains("circuit_breaker"), "{rendered}");
 }
 
-#[derive(Clone, Debug)]
-struct PaidEffect;
+#[derive(Clone, Debug, Serialize)]
+struct PaidRequest;
 
 #[async_trait]
-impl Effect for PaidEffect {
+impl CallRequest for PaidRequest {
     const EFFECT_TYPE: &'static str = "effect_control_composition.paid";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = AtLeastOnce;
+    type Port = CompositionService;
     type Outcome = CompositionFact;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "paid"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({})
-    }
-
-    async fn execute(&self, _: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn call(
+        &self,
+        _service: &CompositionService,
+        _ctx: &mut EffectContext,
+    ) -> Result<CompositionFact, EffectError> {
         Ok(CompositionFact)
     }
 }
 
+type PaidEffect = Call<PaidRequest>;
+
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
-struct PaidHandler;
+struct PaidHandler {
+    #[system]
+    service: System<CompositionService>,
+}
+
+impl PaidHandler {
+    fn new() -> Self {
+        Self {
+            service: composition_service(),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for PaidHandler {
@@ -787,7 +827,7 @@ where
 #[tokio::test]
 async fn an_acknowledged_paid_effect_builds() {
     build(row_flow(|| {
-        let paid = PaidHandler;
+        let paid = PaidHandler::new();
         effectful_transform!(CompositionInput -> CompositionFact => paid.at_least_once::<PaidEffect>())
     }))
     .await
@@ -797,14 +837,14 @@ async fn an_acknowledged_paid_effect_builds() {
 #[tokio::test]
 async fn a_paid_effect_without_its_acknowledgement_fails_build() {
     let rendered = row_refusal(|| {
-        let paid = PaidHandler;
+        let paid = PaidHandler::new();
         effectful_transform!(CompositionInput -> CompositionFact => paid)
     })
     .await;
     assert!(
         rendered.contains(
             "performs paid non-idempotent effect 'effect_control_composition.paid' without \
-             acknowledging it; add `.at_least_once::<PaidEffect>()` after the handler"
+             acknowledging it; add `.at_least_once::<Call<PaidRequest>>()` after the handler"
         ),
         "{rendered}"
     );
@@ -813,7 +853,7 @@ async fn a_paid_effect_without_its_acknowledgement_fails_build() {
 #[tokio::test]
 async fn an_acknowledgement_for_an_effect_the_handler_does_not_perform_fails_build() {
     let rendered = row_refusal(|| {
-        let guarded_handler = OneEffectHandler;
+        let guarded_handler = OneEffectHandler::new();
         effectful_transform!(
             CompositionInput -> CompositionFact => guarded_handler.at_least_once::<PaidEffect>()
         )
@@ -829,7 +869,7 @@ async fn an_acknowledgement_for_an_effect_the_handler_does_not_perform_fails_bui
 #[tokio::test]
 async fn an_acknowledgement_of_the_wrong_kind_fails_build() {
     let rendered = row_refusal(|| {
-        let paid = PaidHandler;
+        let paid = PaidHandler::new();
         effectful_transform!(CompositionInput -> CompositionFact => paid.transactional::<PaidEffect>())
     })
     .await;
@@ -845,15 +885,15 @@ async fn an_acknowledgement_of_the_wrong_kind_fails_build() {
 #[tokio::test]
 async fn a_control_naming_no_effect_on_a_stage_with_several_effects_fails_build() {
     let rendered = row_refusal(|| {
-        let guarded_handler = TwoEffectHandler;
+        let guarded_handler = TwoEffectHandler::new();
         effectful_transform!(CompositionInput -> CompositionFact with rate_limit(10.0) => guarded_handler)
     })
     .await;
     assert!(
         rendered
             .contains("requires exactly one declared effect; build it with `.for_effect::<E>()`")
-            && rendered.contains(EffectA::EFFECT_TYPE)
-            && rendered.contains(EffectB::EFFECT_TYPE),
+            && rendered.contains(RequestA::EFFECT_TYPE)
+            && rendered.contains(RequestB::EFFECT_TYPE),
         "{rendered}"
     );
 }
@@ -861,7 +901,7 @@ async fn a_control_naming_no_effect_on_a_stage_with_several_effects_fails_build(
 #[tokio::test]
 async fn middleware_for_an_effect_the_handler_does_not_perform_fails_build() {
     let rendered = row_refusal(|| {
-        let guarded_handler = OneEffectHandler;
+        let guarded_handler = OneEffectHandler::new();
         let effect_b_limit = rate_limit(10.0).for_effect::<EffectB>();
         effectful_transform!(CompositionInput -> CompositionFact with effect_b_limit => guarded_handler)
     })
@@ -869,7 +909,7 @@ async fn middleware_for_an_effect_the_handler_does_not_perform_fails_build() {
     assert!(
         rendered.contains(&format!(
             "undeclared effect '{}'; `.for_effect::<E>()` must name an effect its handler performs",
-            EffectB::EFFECT_TYPE
+            RequestB::EFFECT_TYPE
         )),
         "{rendered}"
     );

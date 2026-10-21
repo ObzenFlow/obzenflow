@@ -13,7 +13,8 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects,
+    effectful_transform_effects, Call, CallRequest, EffectContext, EffectDeclaration, EffectError,
+    Effects, Idempotent, StageEffectsError, System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -22,8 +23,8 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ContainmentInput {
@@ -54,33 +55,31 @@ impl TypedPayload for ContainmentEffectValue {
     const EVENT_TYPE: &'static str = "containment.effect_value";
 }
 
-#[derive(Clone, Debug)]
-struct ValueEffect {
+#[obzenflow::port]
+struct ValueService;
+
+#[derive(Clone, Debug, Serialize)]
+struct ValueRequest {
     value: u64,
 }
 
 #[async_trait]
-impl Effect for ValueEffect {
+impl CallRequest for ValueRequest {
     const EFFECT_TYPE: &'static str = "containment.value";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = Idempotent;
+    type Port = ValueService;
     type Outcome = ContainmentEffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "containment_value"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn call(
+        &self,
+        _service: &ValueService,
+        _ctx: &mut EffectContext,
+    ) -> Result<ContainmentEffectValue, EffectError> {
         Ok(ContainmentEffectValue { value: self.value })
     }
 }
+
+type ValueEffect = Call<ValueRequest>;
 
 #[derive(Clone, Debug)]
 struct OneShotSource {
@@ -106,7 +105,18 @@ impl TypedFiniteSourceHandler for OneShotSource {
 }
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
-struct PerformTransform;
+struct PerformTransform {
+    #[system]
+    values: System<ValueService>,
+}
+
+impl PerformTransform {
+    fn new() -> Self {
+        Self {
+            values: System::eager("values", Arc::new(ValueService)).expect("a valid system name"),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for PerformTransform {
@@ -120,7 +130,7 @@ impl EffectfulTransformHandler for PerformTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .perform(ValueEffect { value: input.value })
+            .call(&self.values, ValueRequest { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(ContainmentOutput {
@@ -195,7 +205,7 @@ where
 fn erased_effectful_descriptor<H>(
     name: &str,
     handler: H,
-    effects: Vec<EffectDeclaration>,
+    effects: Result<Vec<EffectDeclaration>, StageEffectsError>,
     output_type: TypeHint,
     output_contract: Vec<TypeHint>,
 ) -> Box<dyn StageDescriptor>
@@ -205,7 +215,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
         name,
         handler,
-        Ok(effects),
+        effects,
         Vec::new(),
     ));
     let metadata = StageTypingMetadata::transform(
@@ -219,10 +229,12 @@ where
 }
 
 fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
+    let handler = PerformTransform::new();
+    let effects = effectful_transform_effects(&handler, &[]);
     erased_effectful_descriptor(
         "effectful",
-        PerformTransform,
-        vec![EffectDeclaration::of::<ValueEffect>()],
+        handler,
+        effects,
         TypeHint::exact_payload::<ContainmentOutput>(),
         vec![TypeHint::exact_payload::<ContainmentOutput>()],
     )
@@ -368,36 +380,46 @@ impl obzenflow_core::StageFactSet for CollidingOutcome {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CollidingEffect;
+#[obzenflow::port]
+struct CollidingService;
+
+#[derive(Clone, Debug, Serialize)]
+struct CollidingRequest;
 
 #[async_trait]
-impl Effect for CollidingEffect {
+impl CallRequest for CollidingRequest {
     const EFFECT_TYPE: &'static str = "containment.colliding";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = Idempotent;
+    type Port = CollidingService;
     type Outcome = CollidingOutcome;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "colliding"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({})
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn call(
+        &self,
+        _service: &CollidingService,
+        _ctx: &mut EffectContext,
+    ) -> Result<CollidingOutcome, EffectError> {
         Ok(CollidingOutcome {
             primary: ColliderA { value: 1 },
         })
     }
 }
 
+type CollidingEffect = Call<CollidingRequest>;
+
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
-struct CollidingTransform;
+struct CollidingTransform {
+    #[system]
+    colliding: System<CollidingService>,
+}
+
+impl CollidingTransform {
+    fn new() -> Self {
+        Self {
+            colliding: System::eager("colliding", Arc::new(CollidingService))
+                .expect("a valid system name"),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for CollidingTransform {
@@ -411,7 +433,7 @@ impl EffectfulTransformHandler for CollidingTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let _ = fx
-            .perform(CollidingEffect)
+            .call(&self.colliding, CollidingRequest)
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         Ok(fx.complete()?)
@@ -423,10 +445,12 @@ impl EffectfulTransformHandler for CollidingTransform {
 }
 
 fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
+    let handler = CollidingTransform::new();
+    let effects = effectful_transform_effects(&handler, &[]);
     erased_effectful_descriptor(
         "effectful",
-        CollidingTransform,
-        vec![EffectDeclaration::of::<CollidingEffect>()],
+        handler,
+        effects,
         TypeHint::exact_payload::<ColliderA>(),
         vec![
             TypeHint::exact_payload::<ColliderA>(),

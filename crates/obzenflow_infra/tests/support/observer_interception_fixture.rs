@@ -13,7 +13,8 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, StageCompletion,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    StageCompletion, System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -26,7 +27,6 @@ use obzenflow_runtime::stages::observer::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -140,47 +140,49 @@ impl TypedFiniteSourceHandler for OrderSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct AuthoriseShippingEffect {
-    order_id: u64,
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+struct ShippingDesk {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct AuthoriseShippingRequest {
+    order_id: u64,
+}
+
 #[async_trait]
-impl Effect for AuthoriseShippingEffect {
+impl CallRequest for AuthoriseShippingRequest {
     const EFFECT_TYPE: &'static str = "shipping.authorise";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = ShippingDesk;
     type Outcome = ShippingAuthorised;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "authorise-shipping"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "order_id": self.order_id })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        desk: &ShippingDesk,
+        _ctx: &mut EffectContext,
+    ) -> Result<ShippingAuthorised, EffectError> {
+        desk.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ShippingAuthorised {
             order_id: self.order_id,
             authorisation_id: format!("shipping-auth-{}", self.order_id),
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("shipping:{}", self.order_id)))
+impl Keyed for AuthoriseShippingRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("shipping:{}", self.order_id))
     }
 }
+
+type AuthoriseShippingEffect = Call<AuthoriseShippingRequest>;
 
 #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
 #[effect_handler(effects = obzenflow_runtime::effects)]
 struct AuthoriseShipping {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    desk: System<ShippingDesk>,
 }
 
 #[async_trait]
@@ -195,10 +197,12 @@ impl EffectfulTransformHandler for AuthoriseShipping {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let authorised = fx
-            .perform(AuthoriseShippingEffect {
-                order_id: order.order_id,
-                calls: self.calls.clone(),
-            })
+            .call(
+                &self.desk,
+                AuthoriseShippingRequest {
+                    order_id: order.order_id,
+                },
+            )
             .await?;
         fx.emit(ShippingReady {
             order_id: authorised.order_id,
@@ -238,7 +242,7 @@ struct EffectProbeObserver {
 
 impl EffectObserver for EffectProbeObserver {
     fn after_effect(&self, ctx: &EffectObserverContext<'_>) {
-        assert_eq!(ctx.effect_type(), AuthoriseShippingEffect::EFFECT_TYPE);
+        assert_eq!(ctx.effect_type(), AuthoriseShippingRequest::EFFECT_TYPE);
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -312,8 +316,11 @@ pub(crate) fn build_flow(
         let shipping_handoff = ShippingHandoff {
             writes: probe.sink_writes.clone(),
         };
-        let authorise_shipping = AuthoriseShipping {
+        let desk = ShippingDesk {
             calls: probe.effect_calls.clone(),
+        };
+        let authorise_shipping = AuthoriseShipping {
+            desk: System::eager("shipping-desk", Arc::new(desk))?,
         };
         let authorised = match treatment {
             ObserverTreatment::WithoutObservers => effectful_transform!(
