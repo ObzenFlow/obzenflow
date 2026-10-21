@@ -402,7 +402,7 @@ impl EffectfulTransformHandler for Authorize {
         // `fx.call` records whichever payment fact happened.
         fx.call(&self.gateway, AuthorizationRequest { order })
             .await
-        .map_err(|error| HandlerError::Other(error.to_string()))?;
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
         Ok(fx.complete()?)
     }
 
@@ -2615,7 +2615,11 @@ mod then_live {
         type Port = AuditLedger;
         type Outcome = Entry;
 
-        async fn call(&self, ledger: &AuditLedger, _: &mut EffectContext) -> Result<Entry, EffectError> {
+        async fn call(
+            &self,
+            ledger: &AuditLedger,
+            _: &mut EffectContext,
+        ) -> Result<Entry, EffectError> {
             append_line(&ledger.path, &self.entry.note)
                 .map_err(|error| EffectError::Transport(error.to_string()))?;
             Ok(self.entry.clone())
@@ -2650,7 +2654,7 @@ mod then_live {
             if AUDITED.contains(&entry.note.as_str()) {
                 fx.call(&self.ledger, AuditEntry { entry })
                     .await
-                .map_err(|error| HandlerError::Other(error.to_string()))?;
+                    .map_err(|error| HandlerError::Other(error.to_string()))?;
             } else {
                 fx.emit(entry).await?;
             }

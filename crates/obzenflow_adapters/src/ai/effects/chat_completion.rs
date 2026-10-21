@@ -11,10 +11,12 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::effects::{
-    Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
-    EffectPortMetadataContext, EffectPortSlot, EffectPortSlotSet, EffectSafety, Named, NamedEffect,
-    RecordedReply,
+    Effect, EffectBinding, EffectBindingBuildError, EffectBindingEvidence, EffectBindingUse,
+    EffectContext, EffectError, EffectPortMetadataContext, EffectPortResolver,
+    EffectPortResolverWithMetadata, EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder,
+    EffectSafety, LogicalEffectBindingName, Named, NamedEffect, RecordedReply, ResolvedEffectPort,
 };
+use std::sync::Arc;
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
 
@@ -72,6 +74,28 @@ impl ChatBindingEvidence {
 
     pub fn estimator(&self) -> &ResolvedTokenEstimator {
         &self.estimator
+    }
+
+    /// The chat binding this evidence identifies, whose client `resolver`
+    /// builds when a live call first needs it. The resolved client's own
+    /// target, not the requested one, becomes the binding's metadata.
+    pub fn into_binding(
+        self,
+        resolver: EffectPortResolver<dyn ChatClient>,
+    ) -> Result<EffectBinding<ChatCompletion>, EffectBindingBuildError> {
+        let resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> =
+            Arc::new(move || {
+                let client = resolver()?;
+                let metadata = Arc::new(client.target().clone());
+                Ok(ResolvedEffectPort::new(client, metadata))
+            });
+        EffectRegistrationBuilder::<ChatCompletion>::new(
+            LogicalEffectBindingName::new("chat")
+                .expect("framework chat binding name is a valid public identifier"),
+            self,
+        )
+        .bind_deferred_with_metadata(CHAT_CLIENT, resolver)?
+        .finish()
     }
 }
 

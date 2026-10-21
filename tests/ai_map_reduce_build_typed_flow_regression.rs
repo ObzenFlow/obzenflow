@@ -19,9 +19,7 @@
 //! validation without driving the runtime.
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{
-    ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
-};
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion};
 use obzenflow_core::ai::{
     AiClientError, AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
     ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
@@ -32,9 +30,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{
-    EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
-};
+use obzenflow_runtime::effects::EffectBinding;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -170,19 +166,10 @@ fn test_binding(estimator_model: &str) -> EffectBinding<ChatCompletion> {
     let client: Arc<dyn ChatClient> = Arc::new(DeterministicChatClient {
         target: test_target(),
     });
-    let evidence = ChatBindingEvidence::new(test_target(), test_estimator(estimator_model))
-        .expect("test chat target and estimator models agree");
-    EffectRegistrationBuilder::<ChatCompletion>::new(
-        LogicalEffectBindingName::new("chat").unwrap(),
-        evidence,
-    )
-    .bind_eager_with_metadata(
-        CHAT_CLIENT,
-        ResolvedEffectPort::new(client.clone(), Arc::new(client.target().clone())),
-    )
-    .unwrap()
-    .finish()
-    .unwrap()
+    ChatBindingEvidence::new(test_target(), test_estimator(estimator_model))
+        .expect("test chat target and estimator models agree")
+        .into_binding(Arc::new(move || Ok(client.clone())))
+        .unwrap()
 }
 
 fn test_estimator(model: &str) -> ResolvedTokenEstimator {

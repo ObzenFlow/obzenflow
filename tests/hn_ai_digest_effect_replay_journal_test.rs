@@ -32,7 +32,7 @@ mod util;
 
 use async_trait::async_trait;
 use obzenflow::ai::ChatEffectBinding;
-use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion};
 use obzenflow_adapters::middleware::control::{
     ai_recovery_rejecting_resilience_for_test, ai_resilience,
 };
@@ -64,8 +64,7 @@ use obzenflow_infra::application::{FlowApplication, FlowApplicationBuilder};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortResolutionError, EffectPortResolver, EffectRegistrationBuilder,
-    LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety,
+    EffectBinding, EffectPortResolutionError, EffectPortResolver, SinkRedeliverySafety,
     EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -396,11 +395,6 @@ enum ChatPortRecipe {
     Missing,
 }
 
-fn resolved_chat_port(port: Arc<dyn ChatClient>) -> ResolvedEffectPort<dyn ChatClient, ChatTarget> {
-    let metadata = Arc::new(port.target().clone());
-    ResolvedEffectPort::new(port, metadata)
-}
-
 // Keep fixture materialisation on FlowDefinition's concrete build-error API.
 #[allow(clippy::result_large_err)]
 fn materialise_chat_authority(
@@ -408,40 +402,21 @@ fn materialise_chat_authority(
     binding_estimator: ResolvedTokenEstimator,
     recipe: ChatPortRecipe,
 ) -> Result<EffectBinding<ChatCompletion>, FlowBuildError> {
-    let evidence =
-        ChatBindingEvidence::new(binding_target, binding_estimator).map_err(|error| {
-            FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            }
-        })?;
-    let builder = EffectRegistrationBuilder::<ChatCompletion>::new(
-        LogicalEffectBindingName::new("chat").expect("valid fixture binding name"),
-        evidence,
-    );
-    let builder = match recipe {
-        ChatPortRecipe::Eager(port) => {
-            builder.bind_eager_with_metadata(CHAT_CLIENT, resolved_chat_port(port))
-        }
-        ChatPortRecipe::Deferred(resolver) => builder.bind_deferred_with_metadata(
-            CHAT_CLIENT,
-            Arc::new(move || resolver().map(resolved_chat_port)),
-        ),
-        ChatPortRecipe::Missing => builder.bind_deferred_with_metadata(
-            CHAT_CLIENT,
-            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
-        ),
-    }
-    .map_err(|error| FlowBuildError::BindingConfiguration {
+    let binding_error = |detail: String| FlowBuildError::BindingConfiguration {
         binding: "chat".to_string(),
-        detail: error.to_string(),
-    })?;
-    builder
-        .finish()
-        .map_err(|error| FlowBuildError::BindingConfiguration {
-            binding: "chat".to_string(),
-            detail: error.to_string(),
-        })
+        detail,
+    };
+    let resolver: EffectPortResolver<dyn ChatClient> = match recipe {
+        ChatPortRecipe::Eager(port) => Arc::new(move || Ok(port.clone())),
+        ChatPortRecipe::Deferred(resolver) => resolver,
+        ChatPortRecipe::Missing => {
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed))
+        }
+    };
+    ChatBindingEvidence::new(binding_target, binding_estimator)
+        .map_err(|error| binding_error(error.to_string()))?
+        .into_binding(resolver)
+        .map_err(|error| binding_error(error.to_string()))
 }
 
 fn deferred_chat_port(

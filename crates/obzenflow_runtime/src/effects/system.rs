@@ -60,6 +60,33 @@ impl<P: ?Sized + Send + Sync + 'static> System<P> {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// A struct marked `#[obzenflow::port]` serves as its own port:
+    ///
+    /// ```
+    /// # use obzenflow_runtime::effects::{System, SystemError};
+    /// # use std::sync::Arc;
+    /// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// struct AuditLedger;
+    /// # fn main() -> Result<(), SystemError> {
+    /// let ledger = System::eager("audit-ledger", Arc::new(AuditLedger))?;
+    /// # let system: System<AuditLedger> = ledger;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// A struct left unmarked does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use obzenflow_runtime::effects::{System, SystemError};
+    /// # use std::sync::Arc;
+    /// struct AuditLedger;
+    /// # fn main() -> Result<(), SystemError> {
+    /// let ledger = System::eager("audit-ledger", Arc::new(AuditLedger))?;
+    /// # let system: System<AuditLedger> = ledger;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn eager<T>(name: &str, port: Arc<T>) -> Result<Self, SystemError>
     where
         T: ?Sized + Send + Sync + 'static,

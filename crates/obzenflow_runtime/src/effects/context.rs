@@ -109,6 +109,70 @@ impl EffectContext {
 
     /// The commit handle of a [`Transactional`] request. Its port commits the
     /// outcome through it, and the committed record is the outcome.
+    ///
+    /// ```
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_runtime::effects::{CallRequest, EffectCommitHandle, EffectContext, EffectError, Transactional};
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Entry;
+    /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }
+    /// #[async_trait]
+    /// trait LedgerPort: Send + Sync {
+    ///     async fn append(&self, tx: EffectCommitHandle<Entry>) -> Result<Entry, EffectError>;
+    /// }
+    ///
+    /// #[derive(Clone, Debug, serde::Serialize)]
+    /// struct AppendEntry;
+    ///
+    /// #[async_trait]
+    /// impl CallRequest for AppendEntry {
+    ///     const EFFECT_TYPE: &'static str = "docs.transaction.append";
+    ///     type Safety = Transactional;
+    ///     type Port = dyn LedgerPort;
+    ///     type Outcome = Entry;
+    ///
+    ///     async fn call(
+    ///         &self,
+    ///         ledger: &dyn LedgerPort,
+    ///         ctx: &mut EffectContext,
+    ///     ) -> Result<Entry, EffectError> {
+    ///         let tx = ctx.transaction(self)?;
+    ///         ledger.append(tx).await
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// A request of another safety class has no commit handle:
+    ///
+    /// ```compile_fail,E0271
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_runtime::effects::{CallRequest, EffectCommitHandle, EffectContext, EffectError, Idempotent};
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Entry;
+    /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }
+    /// # #[async_trait]
+    /// # trait LedgerPort: Send + Sync {
+    /// #     async fn append(&self, tx: EffectCommitHandle<Entry>) -> Result<Entry, EffectError>;
+    /// # }
+    /// # #[derive(Clone, Debug, serde::Serialize)]
+    /// # struct AppendEntry;
+    /// #[async_trait]
+    /// impl CallRequest for AppendEntry {
+    ///     const EFFECT_TYPE: &'static str = "docs.transaction.append";
+    ///     type Safety = Idempotent;
+    ///     type Port = dyn LedgerPort;
+    ///     type Outcome = Entry;
+    ///
+    ///     async fn call(
+    ///         &self,
+    ///         ledger: &dyn LedgerPort,
+    ///         ctx: &mut EffectContext,
+    ///     ) -> Result<Entry, EffectError> {
+    ///         let tx = ctx.transaction(self)?;
+    ///         ledger.append(tx).await
+    ///     }
+    /// }
+    /// ```
     pub fn transaction<R>(
         &self,
         _request: &R,

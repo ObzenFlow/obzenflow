@@ -200,7 +200,11 @@ impl CallRequest for AuthorizeRequest {
     type Port = Gateway;
     type Outcome = AuthGrant;
 
-    async fn call(&self, gateway: &Gateway, _ctx: &mut EffectContext) -> Result<AuthGrant, EffectError> {
+    async fn call(
+        &self,
+        gateway: &Gateway,
+        _ctx: &mut EffectContext,
+    ) -> Result<AuthGrant, EffectError> {
         gateway.calls.fetch_add(1, Ordering::SeqCst);
         if self.order_id.is_multiple_of(2) {
             return Err(EffectError::Execution(

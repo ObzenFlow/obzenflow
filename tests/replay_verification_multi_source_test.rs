@@ -99,7 +99,11 @@ impl CallRequest for ChargeRequest {
     type Port = Processor;
     type Outcome = Charged;
 
-    async fn call(&self, processor: &Processor, _ctx: &mut EffectContext) -> Result<Charged, EffectError> {
+    async fn call(
+        &self,
+        processor: &Processor,
+        _ctx: &mut EffectContext,
+    ) -> Result<Charged, EffectError> {
         processor.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Charged {
             order_id: self.order_id,

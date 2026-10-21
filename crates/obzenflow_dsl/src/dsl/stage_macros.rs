@@ -4610,84 +4610,101 @@ macro_rules! effectful_stateful {
 /// guards or watches only `E`.
 ///
 /// ```
+/// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::{rate_limit, MiddlewareFactory};
-/// # use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects, Portless, DomainFacts, StageCompletion};
+/// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "group.fact"; }
-/// # #[derive(Clone, Debug)]
-/// # struct TestEffect<const SECOND: bool>;
-/// # #[async_trait::async_trait]
-/// # impl<const SECOND: bool> Effect for TestEffect<SECOND> {
-/// #     const EFFECT_TYPE: &'static str = if SECOND { "group.second" } else { "group.first" };
-/// #     const SCHEMA_VERSION: u32 = 1;
-/// #     const SAFETY: EffectSafety = EffectSafety::Idempotent;
-/// #     type BindingMode = Portless;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait GroupPort: Send + Sync {}
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct FirstRequest;
+/// # #[async_trait]
+/// # impl CallRequest for FirstRequest {
+/// #     const EFFECT_TYPE: &'static str = "group.first";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn GroupPort;
 /// #     type Outcome = Fact;
-/// #     type OutcomeSemantics = DomainFacts;
-/// #     fn label(&self) -> &str { Self::EFFECT_TYPE }
-/// #     fn canonical_input(&self) -> serde_json::Value { serde_json::Value::Null }
-/// #     async fn execute(&self, _: &mut EffectContext) -> Result<Fact, EffectError> { Ok(Fact) }
+/// #     async fn call(&self, _: &dyn GroupPort, _: &mut EffectContext) -> Result<Fact, EffectError> { Ok(Fact) }
 /// # }
-/// # type First = TestEffect<false>;
-/// # type Second = TestEffect<true>;
-/// # #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct SecondRequest;
+/// # #[async_trait]
+/// # impl CallRequest for SecondRequest {
+/// #     const EFFECT_TYPE: &'static str = "group.second";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn GroupPort;
+/// #     type Outcome = Fact;
+/// #     async fn call(&self, _: &dyn GroupPort, _: &mut EffectContext) -> Result<Fact, EffectError> { Ok(Fact) }
+/// # }
+/// # type First = Call<FirstRequest>;
+/// # type Second = Call<SecondRequest>;
+/// # #[derive(Clone, Debug, EffectHandler)]
 /// # #[effect_handler(effects = obzenflow_runtime::effects)]
-/// # struct Handler;
-/// # #[async_trait::async_trait]
+/// # struct Handler {
+/// #     #[system]
+/// #     group: System<dyn GroupPort>,
+/// # }
+/// # #[async_trait]
 /// # impl EffectfulTransformHandler for Handler {
 /// #     type Input = Fact;
 /// #     type Output = Fact;
 /// #     type AllowedEffects = obzenflow_runtime::effect_set![First, Second];
 /// #     async fn process(&self, _: Fact, _: &mut Effects<Fact, Self::AllowedEffects>) -> Result<StageCompletion<Fact>, HandlerError> { unimplemented!() }
 /// # }
+/// # fn build(handler: Handler) {
 /// let first_limit = rate_limit(10.0).for_effect::<First>();
 /// let stage = obzenflow_dsl::effectful_transform!(
-///     Fact -> Fact with first_limit => Handler
+///     Fact -> Fact with first_limit => handler
 /// );
+/// # }
 /// ```
 ///
 /// Middleware groups are flat; a nested group does not compile.
 ///
 /// ```compile_fail
+/// # use async_trait::async_trait;
 /// # use obzenflow_adapters::middleware::rate_limit;
-/// # use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects, Portless, DomainFacts, StageCompletion};
+/// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
 /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "group.fact"; }
-/// # #[derive(Clone, Debug)]
-/// # struct TestEffect<const SECOND: bool>;
-/// # #[async_trait::async_trait]
-/// # impl<const SECOND: bool> Effect for TestEffect<SECOND> {
-/// #     const EFFECT_TYPE: &'static str = if SECOND { "group.second" } else { "group.first" };
-/// #     const SCHEMA_VERSION: u32 = 1;
-/// #     const SAFETY: EffectSafety = EffectSafety::Idempotent;
-/// #     type BindingMode = Portless;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait GroupPort: Send + Sync {}
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct FirstRequest;
+/// # #[async_trait]
+/// # impl CallRequest for FirstRequest {
+/// #     const EFFECT_TYPE: &'static str = "group.first";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn GroupPort;
 /// #     type Outcome = Fact;
-/// #     type OutcomeSemantics = DomainFacts;
-/// #     fn label(&self) -> &str { Self::EFFECT_TYPE }
-/// #     fn canonical_input(&self) -> serde_json::Value { serde_json::Value::Null }
-/// #     async fn execute(&self, _: &mut EffectContext) -> Result<Fact, EffectError> { Ok(Fact) }
+/// #     async fn call(&self, _: &dyn GroupPort, _: &mut EffectContext) -> Result<Fact, EffectError> { Ok(Fact) }
 /// # }
-/// # type First = TestEffect<false>;
-/// # type Second = TestEffect<true>;
-/// # #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+/// # type First = Call<FirstRequest>;
+/// # #[derive(Clone, Debug, EffectHandler)]
 /// # #[effect_handler(effects = obzenflow_runtime::effects)]
-/// # struct Handler;
-/// # #[async_trait::async_trait]
+/// # struct Handler {
+/// #     #[system]
+/// #     group: System<dyn GroupPort>,
+/// # }
+/// # #[async_trait]
 /// # impl EffectfulTransformHandler for Handler {
 /// #     type Input = Fact;
 /// #     type Output = Fact;
-/// #     type AllowedEffects = obzenflow_runtime::effect_set![First, Second];
+/// #     type AllowedEffects = obzenflow_runtime::effect_set![First];
 /// #     async fn process(&self, _: Fact, _: &mut Effects<Fact, Self::AllowedEffects>) -> Result<StageCompletion<Fact>, HandlerError> { unimplemented!() }
 /// # }
+/// # fn build(handler: Handler) {
 /// let stage = obzenflow_dsl::effectful_transform!(
-///     Fact -> Fact with { { rate_limit(10.0) } } => Handler
+///     Fact -> Fact with { { rate_limit(10.0) } } => handler
 /// );
+/// # }
 /// ```
 ///
 /// A handler that performs a request holds the system that answers it in a
@@ -4912,23 +4929,242 @@ macro_rules! effectful_stateful {
 /// takes a name, not construction.
 ///
 /// ```compile_fail
+/// # use async_trait::async_trait;
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Order;
+/// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # #[derive(Clone, Debug, Serialize)]
+/// # struct ChargeCardRequest;
+/// # #[async_trait]
+/// # impl CallRequest for ChargeCardRequest {
+/// #     const EFFECT_TYPE: &'static str = "row_doc.charge_card";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn CardPort;
+/// #     type Outcome = Charged;
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// # }
+/// # type ChargeCard = Call<ChargeCardRequest>;
+/// # #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # struct Checkout {
+/// #     #[system]
+/// #     card: System<dyn CardPort>,
+/// # }
+/// # #[async_trait]
+/// # impl EffectfulTransformHandler for Checkout {
+/// #     type Input = Order;
+/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
+/// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
+/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         Ok(fx.complete()?)
+/// #     }
+/// # }
+/// # fn build(checkout: Checkout) {
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged uses ChargeCard => checkout);
+/// # }
 /// ```
 ///
 /// ```compile_fail
+/// # use async_trait::async_trait;
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Order;
+/// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # #[derive(Clone, Debug, Serialize)]
+/// # struct ChargeCardRequest;
+/// # #[async_trait]
+/// # impl CallRequest for ChargeCardRequest {
+/// #     const EFFECT_TYPE: &'static str = "row_doc.charge_card";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn CardPort;
+/// #     type Outcome = Charged;
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// # }
+/// # type ChargeCard = Call<ChargeCardRequest>;
+/// # #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # struct Checkout {
+/// #     #[system]
+/// #     card: System<dyn CardPort>,
+/// # }
+/// # #[async_trait]
+/// # impl EffectfulTransformHandler for Checkout {
+/// #     type Input = Order;
+/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
+/// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
+/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         Ok(fx.complete()?)
+/// #     }
+/// # }
+/// # fn build(checkout: Checkout, card: System<dyn CardPort>) {
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged via card => checkout);
+/// # }
 /// ```
 ///
 /// ```compile_fail
+/// # use async_trait::async_trait;
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Order;
+/// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # #[derive(Clone, Debug, Serialize)]
+/// # struct ChargeCardRequest;
+/// # #[async_trait]
+/// # impl CallRequest for ChargeCardRequest {
+/// #     const EFFECT_TYPE: &'static str = "row_doc.charge_card";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn CardPort;
+/// #     type Outcome = Charged;
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// # }
+/// # type ChargeCard = Call<ChargeCardRequest>;
+/// # #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # struct Checkout {
+/// #     #[system]
+/// #     card: System<dyn CardPort>,
+/// # }
+/// # #[async_trait]
+/// # impl EffectfulTransformHandler for Checkout {
+/// #     type Input = Order;
+/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
+/// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
+/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         Ok(fx.complete()?)
+/// #     }
+/// # }
+/// # fn build(checkout: Checkout, card: System<dyn CardPort>) {
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout.system(card));
+/// # }
 /// ```
 ///
 /// ```compile_fail
+/// # use async_trait::async_trait;
+/// # use obzenflow_adapters::middleware::retry;
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Order;
+/// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # #[derive(Clone, Debug, Serialize)]
+/// # struct ChargeCardRequest;
+/// # #[async_trait]
+/// # impl CallRequest for ChargeCardRequest {
+/// #     const EFFECT_TYPE: &'static str = "row_doc.charge_card";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn CardPort;
+/// #     type Outcome = Charged;
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// # }
+/// # type ChargeCard = Call<ChargeCardRequest>;
+/// # #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # struct Checkout {
+/// #     #[system]
+/// #     card: System<dyn CardPort>,
+/// # }
+/// # #[async_trait]
+/// # impl EffectfulTransformHandler for Checkout {
+/// #     type Input = Order;
+/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
+/// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
+/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         Ok(fx.complete()?)
+/// #     }
+/// # }
+/// # fn build(checkout: Checkout) {
 /// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => checkout with retry());
+/// # }
 /// ```
 ///
 /// ```compile_fail
-/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => Checkout::new());
+/// # use async_trait::async_trait;
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Order;
+/// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "row_doc.order"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # #[derive(Clone, Debug, Serialize)]
+/// # struct ChargeCardRequest;
+/// # #[async_trait]
+/// # impl CallRequest for ChargeCardRequest {
+/// #     const EFFECT_TYPE: &'static str = "row_doc.charge_card";
+/// #     type Safety = Idempotent;
+/// #     type Port = dyn CardPort;
+/// #     type Outcome = Charged;
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// # }
+/// # type ChargeCard = Call<ChargeCardRequest>;
+/// # #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// # struct Checkout {
+/// #     #[system]
+/// #     card: System<dyn CardPort>,
+/// # }
+/// # impl Checkout {
+/// #     fn new(card: System<dyn CardPort>) -> Self { Self { card } }
+/// # }
+/// # #[async_trait]
+/// # impl EffectfulTransformHandler for Checkout {
+/// #     type Input = Order;
+/// #     type Output = obzenflow_core::stage_fact_set![Charged];
+/// #     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
+/// #     async fn process(&self, _: Order, fx: &mut Effects<Self::Output, Self::AllowedEffects>) -> Result<StageCompletion<Self::Output>, HandlerError> {
+/// #         fx.call(&self.card, ChargeCardRequest).await?;
+/// #         Ok(fx.complete()?)
+/// #     }
+/// # }
+/// # fn build(card: System<dyn CardPort>) {
+/// let stage = obzenflow_dsl::effectful_transform!(Order -> Charged => Checkout::new(card));
+/// # }
 /// ```
 #[macro_export]
 macro_rules! effectful_transform {
@@ -5042,9 +5278,20 @@ macro_rules! join {
 /// The `delivery:` clause was removed.
 ///
 /// ```compile_fail
+/// # use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+/// # use obzenflow_runtime::stages::common::handlers::{InlineSink, SinkDescription, SinkWriteFailure};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "sink_doc.fact"; }
+/// # #[derive(Clone, Debug)]
+/// # struct Ledger;
+/// # #[async_trait::async_trait]
+/// # impl InlineSink for Ledger {
+/// #     type Input = Fact;
+/// #     fn describe(&self) -> SinkDescription { SinkDescription::method(DeliveryMethod::Noop) }
+/// #     async fn write(&mut self, _: Fact) -> Result<(), SinkWriteFailure> { Ok(()) }
+/// # }
+/// let ledger = Ledger;
 /// let sink = obzenflow_dsl::sink!(Fact => ledger, delivery: idempotent);
 /// ```
 #[macro_export]
@@ -5149,10 +5396,47 @@ macro_rules! source {
 /// Declares a typed stateful stage. Its handler declares any emit interval
 /// through `emit_interval_hint()`; the row takes no interval clause.
 ///
-/// ```compile_fail
+/// ```
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::{StatefulEmission, TypedStatefulHandler};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
 /// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "stateful_doc.fact"; }
+/// # #[derive(Clone, Debug)]
+/// # struct Totals;
+/// # impl TypedStatefulHandler for Totals {
+/// #     type State = ();
+/// #     type Input = Fact;
+/// #     type Output = Fact;
+/// #     fn accumulate(&self, _: &mut (), _: Fact) {}
+/// #     fn initial_state(&self) {}
+/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<(), Fact>, HandlerError> {
+/// #         Ok(StatefulEmission::RetainEpoch { next_state: (), outputs: Vec::new() })
+/// #     }
+/// # }
+/// let totals = Totals;
+/// let stage = obzenflow_dsl::stateful!(Fact -> Fact => totals);
+/// ```
+///
+/// ```compile_fail
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use obzenflow_runtime::stages::common::handlers::{StatefulEmission, TypedStatefulHandler};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Fact;
+/// # impl obzenflow_core::TypedPayload for Fact { const EVENT_TYPE: &'static str = "stateful_doc.fact"; }
+/// # #[derive(Clone, Debug)]
+/// # struct Totals;
+/// # impl TypedStatefulHandler for Totals {
+/// #     type State = ();
+/// #     type Input = Fact;
+/// #     type Output = Fact;
+/// #     fn accumulate(&self, _: &mut (), _: Fact) {}
+/// #     fn initial_state(&self) {}
+/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<(), Fact>, HandlerError> {
+/// #         Ok(StatefulEmission::RetainEpoch { next_state: (), outputs: Vec::new() })
+/// #     }
+/// # }
+/// let totals = Totals;
 /// let stage = obzenflow_dsl::stateful!(
 ///     Fact -> Fact => totals,
 ///     emit_interval = std::time::Duration::from_secs(5)

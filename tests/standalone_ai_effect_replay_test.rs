@@ -13,7 +13,6 @@ use obzenflow::ai::{
     EmbeddingTransformBuilder,
 };
 use obzenflow::stages::sources;
-use obzenflow_adapters::ai::{CHAT_CLIENT, EMBEDDING_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{
     AiClientError, ChatClient, ChatRequest, ChatTarget, EmbeddingClient, EmbeddingRequest,
@@ -31,8 +30,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortResolver, EffectRegistrationBuilder, LogicalEffectBindingName,
-    ResolvedEffectPort, SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+    EffectBinding, EffectPortResolver, SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -251,26 +249,16 @@ fn live_authority(
 
 fn eager_authority(chat: Arc<dyn ChatClient>, embedding: Arc<dyn EmbeddingClient>) -> AiAuthority {
     let (chat_seed, embedding_seed) = base_bindings(None).expect("fixture evidence");
-    let chat = EffectRegistrationBuilder::<ChatCompletion>::new(
-        LogicalEffectBindingName::new("chat").unwrap(),
-        chat_seed.evidence().clone(),
-    )
-    .bind_eager_with_metadata(
-        CHAT_CLIENT,
-        ResolvedEffectPort::new(chat.clone(), Arc::new(chat.target().clone())),
-    )
-    .and_then(|builder| builder.finish())
-    .unwrap();
-    let embedding = EffectRegistrationBuilder::<EmbeddingGeneration>::new(
-        LogicalEffectBindingName::new("embedding").unwrap(),
-        embedding_seed.evidence().clone(),
-    )
-    .bind_eager_with_metadata(
-        EMBEDDING_CLIENT,
-        ResolvedEffectPort::new(embedding.clone(), Arc::new(embedding.target().clone())),
-    )
-    .and_then(|builder| builder.finish())
-    .unwrap();
+    let chat = chat_seed
+        .evidence()
+        .clone()
+        .into_binding(Arc::new(move || Ok(chat.clone())))
+        .unwrap();
+    let embedding = embedding_seed
+        .evidence()
+        .clone()
+        .into_binding(Arc::new(move || Ok(embedding.clone())))
+        .unwrap();
     AiAuthority { chat, embedding }
 }
 

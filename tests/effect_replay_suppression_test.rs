@@ -3944,10 +3944,7 @@ async fn a_system_reused_by_a_second_flow_registers_its_port_again() {
     );
     assert_eq!(effect_calls.load(Ordering::SeqCst), 6);
     assert_eq!(
-        second_outputs
-            .lock()
-            .expect("outputs lock poisoned")
-            .len(),
+        second_outputs.lock().expect("outputs lock poisoned").len(),
         3
     );
 }

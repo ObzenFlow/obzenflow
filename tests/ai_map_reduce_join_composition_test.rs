@@ -8,7 +8,7 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{
     AiClientError, AiFinalizeRole, AiMapReduceFinalizeFailed, AiMapReducePlanningManifest,
@@ -28,9 +28,7 @@ use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
-use obzenflow_runtime::effects::{
-    EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
-};
+use obzenflow_runtime::effects::EffectBinding;
 use obzenflow_runtime::stages::common::handlers::{
     SinkWriteFailure, SourceError, TypedFiniteSourceHandler,
 };
@@ -141,13 +139,9 @@ fn chat_binding(counters: Arc<Counters>, forbidden: bool) -> EffectBinding<ChatC
             None,
         ),
     );
-    EffectRegistrationBuilder::<ChatCompletion>::new(
-        LogicalEffectBindingName::new("chat").unwrap(),
-        ChatBindingEvidence::new(target.clone(), estimator).unwrap(),
-    )
-    .bind_deferred_with_metadata(
-        CHAT_CLIENT,
-        Arc::new(move || {
+    ChatBindingEvidence::new(target.clone(), estimator)
+        .unwrap()
+        .into_binding(Arc::new(move || {
             counters.resolutions.fetch_add(1, Ordering::SeqCst);
             assert!(!forbidden, "replay resolved the chat client");
             let client: Arc<dyn ChatClient> = Arc::new(DummyChat {
@@ -155,12 +149,9 @@ fn chat_binding(counters: Arc<Counters>, forbidden: bool) -> EffectBinding<ChatC
                 counters: counters.clone(),
                 forbidden,
             });
-            Ok(ResolvedEffectPort::new(client, Arc::new(target.clone())))
-        }),
-    )
-    .unwrap()
-    .finish()
-    .unwrap()
+            Ok(client)
+        }))
+        .unwrap()
 }
 
 fn request(message: String) -> ChatRequestSpec {
