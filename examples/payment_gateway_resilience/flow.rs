@@ -53,12 +53,14 @@ use super::domain::{
 use super::fixtures;
 use super::gateway::{GatewayTransform, ScriptedGateway};
 use super::validation;
-use obzenflow::effects::System;
+use obzenflow::effects::simulated::CallLogError;
+use obzenflow::effects::{EffectPortResolutionError, System};
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -70,6 +72,9 @@ const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
 
 /// Where the demo binary journals its runs.
 pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
+
+/// Where the demo binary's scripted gateway keeps its calls.
+pub(super) const DEMO_GATEWAY_CALLS: &str = "target/gateway-calls.jsonl";
 
 /// Build the tutorial flow: the scripted three-phase order channels, the real
 /// gateway transform, and its breaker-retry-limiter policy.
@@ -83,23 +88,30 @@ pub fn build_flow() -> obzenflow::flow::FlowDefinition {
         fixtures::scripted_store_orders(),
         Some(FIRST_RECOVERY_PAUSE),
         GATEWAY_CALLS_PER_SECOND,
-        std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
+        PathBuf::from(DEMO_JOURNAL_ROOT),
+        PathBuf::from(DEMO_GATEWAY_CALLS),
     )
 }
 
 /// Assemble the tutorial flow from its variable ingredients.
 ///
 /// Journal tests reuse this entry point with their own orders, gateway pacing,
-/// and journal root while retaining the tutorial's configured resilience policy.
+/// journal root and gateway call log while retaining the tutorial's configured
+/// resilience policy.
 pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
     first_recovery_pause: Option<Duration>,
     gateway_calls_per_second: f64,
-    journal_root: std::path::PathBuf,
+    journal_root: PathBuf,
+    gateway_calls: PathBuf,
 ) -> obzenflow::flow::FlowDefinition {
     obzenflow::flow::FlowDefinition::materialize(move |_runtime_config| {
-        let gateway = System::eager("scripted-gateway", Arc::new(ScriptedGateway))?;
+        let calls = gateway_calls.clone();
+        let gateway = System::deferred("scripted-gateway", move || {
+            let gateway = ScriptedGateway::open(&calls).map_err(gateway_unavailable)?;
+            Ok(Arc::new(gateway))
+        })?;
         let gateway_transform = match first_recovery_pause {
             Some(pause) => GatewayTransform::new(gateway).with_first_recovery_pause(pause),
             None => GatewayTransform::new(gateway),
@@ -248,4 +260,9 @@ pub fn assemble_flow(
             }
         })
     })
+}
+
+fn gateway_unavailable(error: CallLogError) -> EffectPortResolutionError {
+    tracing::error!(%error, "the scripted gateway could not open its call log");
+    EffectPortResolutionError::ClientConstructionFailed
 }

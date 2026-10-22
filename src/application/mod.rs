@@ -51,3 +51,10 @@ pub use obzenflow_runtime::runtime_config::{
 pub use obzenflow_infra::verify::{
     render_verdict, verify_run_dirs, Verdict, VerifyOptions, VerifyOutcome, MATCHED_LINE,
 };
+
+/// The lineage check: judge simulated systems' call logs against the lineage
+/// their runs' manifests record.
+pub use obzenflow_infra::verify::{
+    render_call_log_check, verify_call_logs, CallLogCheck, CallLogJudgment, CallLogVerdict,
+    CallLogViolation,
+};

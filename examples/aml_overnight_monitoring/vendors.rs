@@ -4,9 +4,9 @@
 
 use super::case_system::{CaseRequest, CaseSystemPort, SimulatedCaseSystem};
 use super::domain::{AlertRaised, AlertSubject, CaseOpened, TransactionCleared};
-use super::ledger::LedgerError;
 use super::risk_engine::{RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine};
 use async_trait::async_trait;
+use obzenflow::effects::simulated::CallLogError;
 use obzenflow::effects::{
     Call, CallRequest, EffectContext, EffectError, EffectPortResolutionError, IdempotencyKey,
     Keyed, RequiresKey, System, SystemError,
@@ -150,8 +150,8 @@ pub fn simulated_case_system(
     })
 }
 
-fn construction_failed(error: LedgerError) -> EffectPortResolutionError {
-    tracing::error!(%error, "a simulated system could not open its ledger");
+fn construction_failed(error: CallLogError) -> EffectPortResolutionError {
+    tracing::error!(%error, "a simulated system could not open its call log");
     EffectPortResolutionError::ClientConstructionFailed
 }
 

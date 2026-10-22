@@ -3,13 +3,12 @@
 // https://obzenflow.dev
 
 use super::domain::{AccountKey, AlertId, AlertRaised, CaseNumber, Reasons, RulesVersion};
-use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
 use async_trait::async_trait;
+use obzenflow::effects::simulated::{CallLog, CallLogError};
 use obzenflow::effects::IdempotencyKey;
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CaseRequest {
@@ -35,13 +34,9 @@ pub struct CaseAnswer {
     pub case_number: CaseNumber,
 }
 
-impl LedgerAnswer for CaseAnswer {
-    const DECIDED: CallResult = CallResult::Opened;
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("the case system could not record the call: {0}")]
-pub struct CaseSystemError(#[from] std::io::Error);
+pub struct CaseSystemError(#[from] CallLogError);
 
 impl CaseSystemError {
     pub fn code(&self) -> &'static str {
@@ -60,25 +55,14 @@ pub trait CaseSystemPort: Send + Sync {
     ) -> Result<CaseNumber, CaseSystemError>;
 }
 
-struct CaseBook {
-    ledger: Ledger<CaseAnswer>,
-    last: CaseNumber,
-}
-
 pub struct SimulatedCaseSystem {
-    book: Mutex<CaseBook>,
+    calls: CallLog<CaseAnswer>,
 }
 
 impl SimulatedCaseSystem {
-    pub fn open(ledger: &Path) -> Result<Self, LedgerError> {
-        let ledger = Ledger::<CaseAnswer>::open(ledger)?;
-        let last = ledger
-            .answers()
-            .map(|answer| answer.case_number)
-            .max()
-            .unwrap_or(CaseNumber(0));
+    pub fn open(path: &Path) -> Result<Self, CallLogError> {
         Ok(Self {
-            book: Mutex::new(CaseBook { ledger, last }),
+            calls: CallLog::open(path)?,
         })
     }
 }
@@ -91,16 +75,10 @@ impl CaseSystemPort for SimulatedCaseSystem {
         flow_id: FlowId,
         _: &CaseRequest,
     ) -> Result<CaseNumber, CaseSystemError> {
-        let mut book = self.book.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(first) = book.ledger.first_answer(&key.0).cloned() {
-            book.ledger.record_repeat(&key.0, flow_id)?;
-            return Ok(first.case_number);
-        }
-        let case_number = CaseNumber(book.last.0 + 1);
-        book.ledger
-            .record_first(&key.0, flow_id, CaseAnswer { case_number })?;
-        book.last = case_number;
-        Ok(case_number)
+        let answer = self.calls.answer(key, flow_id, |decided| CaseAnswer {
+            case_number: CaseNumber(decided + 1),
+        })?;
+        Ok(answer.case_number)
     }
 }
 
@@ -132,7 +110,7 @@ mod tests {
     async fn cases_are_numbered_in_call_order_and_a_repeat_keeps_its_number() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cases.jsonl");
-        let cases = SimulatedCaseSystem::open(&path).expect("ledger opens");
+        let cases = SimulatedCaseSystem::open(&path).expect("the call log opens");
         let run = FlowId::new();
         assert_eq!(
             cases.open(&key(5), run, &request(5)).await.unwrap(),
@@ -148,27 +126,27 @@ mod tests {
         );
 
         let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
-            .expect("ledger is readable")
+            .expect("the call log is readable")
             .lines()
-            .map(|line| serde_json::from_str(line).expect("ledger line is JSON"))
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
             .collect();
         assert_eq!(
             lines,
             vec![
-                serde_json::json!({"key": "aml-case:txn:5", "result": "opened", "flow_id": run.to_string(), "case_number": 1}),
-                serde_json::json!({"key": "aml-case:txn:3", "result": "opened", "flow_id": run.to_string(), "case_number": 2}),
-                serde_json::json!({"key": "aml-case:txn:5", "result": "replayed", "flow_id": run.to_string()}),
+                serde_json::json!({"result": "decided", "key": "aml-case:txn:5", "flow_id": run.to_string(), "response": {"case_number": 1}}),
+                serde_json::json!({"result": "decided", "key": "aml-case:txn:3", "flow_id": run.to_string(), "response": {"case_number": 2}}),
+                serde_json::json!({"result": "replayed", "key": "aml-case:txn:5", "flow_id": run.to_string()}),
             ]
         );
     }
 
     #[tokio::test]
-    async fn a_reopened_case_system_keeps_numbers_and_numbers_on_from_the_highest() {
+    async fn a_reopened_case_system_keeps_numbers_and_numbers_on_from_the_decided_count() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cases.jsonl");
         let first_run = FlowId::new();
         {
-            let cases = SimulatedCaseSystem::open(&path).expect("ledger opens");
+            let cases = SimulatedCaseSystem::open(&path).expect("the call log opens");
             for txn_id in [11, 12, 13] {
                 cases
                     .open(&key(txn_id), first_run, &request(txn_id))
@@ -177,7 +155,7 @@ mod tests {
             }
         }
 
-        let reopened = SimulatedCaseSystem::open(&path).expect("ledger reopens");
+        let reopened = SimulatedCaseSystem::open(&path).expect("the call log reopens");
         let resumed = FlowId::new();
         assert_eq!(
             reopened

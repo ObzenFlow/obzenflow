@@ -25,3 +25,10 @@ pub use obzenflow_runtime::effects::{
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{PortImpl, ServesPort};
+
+/// Building blocks for simulated outside systems: a call log that answers a
+/// repeated idempotency key with its first decided response and records every
+/// call, across process kills.
+pub mod simulated {
+    pub use obzenflow_infra::simulated::{CallLog, CallLogError};
+}

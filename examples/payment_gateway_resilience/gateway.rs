@@ -21,6 +21,7 @@ use super::domain::{
     PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
+use obzenflow::effects::simulated::{CallLog, CallLogError};
 use obzenflow::effects::{
     Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, IdempotencyKey, Keyed,
     RequiresKey, System,
@@ -28,7 +29,8 @@ use obzenflow::effects::{
 use obzenflow::error::HandlerError;
 use obzenflow::schema::EffectOutcomeFacts;
 use obzenflow::stages::transforms::EffectfulTransformHandler;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,13 +43,75 @@ pub trait PaymentGatewayPort: Send + Sync {
         &self,
         request: &AuthorizeRequest,
         ctx: &EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError>;
+    ) -> Result<GatewayResponse, GatewayError>;
+}
+
+/// What the gateway decided for one authorization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authorization", rename_all = "snake_case")]
+pub enum GatewayResponse {
+    Charged { authorization_id: String },
+    Declined { reason: PaymentDeclineReason },
+}
+
+/// Why the gateway decided nothing for one attempt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum GatewayFailure {
+    TimedOut,
+    InvalidPaymentMethod,
+}
+
+/// A failed authorization attempt, as the gateway's port reports it.
+#[derive(Debug, thiserror::Error)]
+pub enum GatewayError {
+    #[error("gateway_timeout_simulated")]
+    TimedOut,
+    #[error("invalid_payment_method_reached_gateway")]
+    InvalidPaymentMethod,
+    #[error(transparent)]
+    CallLog(#[from] CallLogError),
+}
+
+impl From<GatewayFailure> for GatewayError {
+    fn from(failure: GatewayFailure) -> Self {
+        match failure {
+            GatewayFailure::TimedOut => Self::TimedOut,
+            GatewayFailure::InvalidPaymentMethod => Self::InvalidPaymentMethod,
+        }
+    }
+}
+
+impl From<GatewayError> for EffectError {
+    fn from(error: GatewayError) -> Self {
+        match error {
+            GatewayError::TimedOut => EffectError::Timeout("gateway_timeout_simulated".to_string()),
+            GatewayError::InvalidPaymentMethod => {
+                EffectError::Validation("invalid_payment_method_reached_gateway".to_string())
+            }
+            GatewayError::CallLog(error) => {
+                EffectError::unavailable("payment_gateway", "ledger_write_failed", error)
+            }
+        }
+    }
 }
 
 /// The tutorial's gateway. A real implementation would issue an HTTP request
 /// inside [`PaymentGatewayPort::authorize`]; here we simulate latency and a
-/// scripted outage so the behaviour is deterministic and easy to follow.
-pub struct ScriptedGateway;
+/// scripted outage so the behaviour is deterministic and easy to follow, and a
+/// call log answers a repeated order with the gateway's first decision.
+pub struct ScriptedGateway {
+    calls: CallLog<GatewayResponse>,
+}
+
+impl ScriptedGateway {
+    /// A gateway that keeps every call in the call log at `path`.
+    pub fn open(path: &Path) -> Result<Self, CallLogError> {
+        Ok(Self {
+            calls: CallLog::open(path)?,
+        })
+    }
+}
 
 #[async_trait]
 impl PaymentGatewayPort for ScriptedGateway {
@@ -55,7 +119,7 @@ impl PaymentGatewayPort for ScriptedGateway {
         &self,
         request: &AuthorizeRequest,
         ctx: &EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+    ) -> Result<GatewayResponse, GatewayError> {
         // Latency comes from the deterministic, seeded RNG on the effect context
         // rather than a wall clock, so a replay reconstructs the same timing.
         let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
@@ -65,33 +129,31 @@ impl PaymentGatewayPort for ScriptedGateway {
             // A degraded gateway hangs before timing out, so the enclosing
             // authorization attempt is visibly slow (and the outcome is a failure).
             // The hang is drawn from the same seeded RNG as the base latency.
-            let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
-            ctx.sleep(Duration::from_millis(timeout_ms)).await;
-            return Err(EffectError::Timeout(
-                "gateway_timeout_simulated".to_string(),
-            ));
+            let hang_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
+            ctx.sleep(Duration::from_millis(hang_ms)).await;
         }
+        self.calls
+            .try_answer(&request.idempotency_key(), ctx.flow_id(), |_| {
+                decide(request)
+            })
+    }
+}
 
-        match request.payment_method_state {
-            PaymentMethodState::Valid => {
-                Ok(AuthorizePaymentOutcome::Authorized(PaymentAuthorized {
-                    order_id: request.order_id.clone(),
-                    customer_id: request.customer_id.clone(),
-                    amount_cents: request.amount_cents,
-                    phase: request.phase.clone(),
-                    authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
-                }))
-            }
-            PaymentMethodState::InsufficientFunds => Ok(AuthorizePaymentOutcome::Declined(
-                request.declined(PaymentDeclineReason::InsufficientFunds),
-            )),
-            PaymentMethodState::AddressMismatch => Ok(AuthorizePaymentOutcome::Declined(
-                request.declined(PaymentDeclineReason::AddressMismatch),
-            )),
-            PaymentMethodState::InvalidNumber => Err(EffectError::Validation(
-                "invalid_payment_method_reached_gateway".to_string(),
-            )),
-        }
+fn decide(request: &AuthorizeRequest) -> Result<GatewayResponse, GatewayFailure> {
+    if matches!(request.phase, TrafficPhase::Outage) {
+        return Err(GatewayFailure::TimedOut);
+    }
+    match request.payment_method_state {
+        PaymentMethodState::Valid => Ok(GatewayResponse::Charged {
+            authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_owned(),
+        }),
+        PaymentMethodState::InsufficientFunds => Ok(GatewayResponse::Declined {
+            reason: PaymentDeclineReason::InsufficientFunds,
+        }),
+        PaymentMethodState::AddressMismatch => Ok(GatewayResponse::Declined {
+            reason: PaymentDeclineReason::AddressMismatch,
+        }),
+        PaymentMethodState::InvalidNumber => Err(GatewayFailure::InvalidPaymentMethod),
     }
 }
 
@@ -118,6 +180,16 @@ impl AuthorizeRequest {
             amount_cents: order.amount_cents,
             payment_method_state: order.payment_method_state.clone(),
             phase: order.phase.clone(),
+        }
+    }
+
+    fn authorized(&self, authorization_id: String) -> PaymentAuthorized {
+        PaymentAuthorized {
+            order_id: self.order_id.clone(),
+            customer_id: self.customer_id.clone(),
+            amount_cents: self.amount_cents,
+            phase: self.phase.clone(),
+            authorization_id,
         }
     }
 
@@ -162,7 +234,14 @@ impl CallRequest for AuthorizeRequest {
         gateway: &dyn PaymentGatewayPort,
         ctx: &mut EffectContext,
     ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        gateway.authorize(self, ctx).await
+        Ok(match gateway.authorize(self, ctx).await? {
+            GatewayResponse::Charged { authorization_id } => {
+                AuthorizePaymentOutcome::Authorized(self.authorized(authorization_id))
+            }
+            GatewayResponse::Declined { reason } => {
+                AuthorizePaymentOutcome::Declined(self.declined(reason))
+            }
+        })
     }
 }
 

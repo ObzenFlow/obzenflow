@@ -14,9 +14,6 @@ pub mod domain;
 #[path = "flow.rs"]
 pub mod flow;
 
-#[path = "ledger.rs"]
-pub mod ledger;
-
 #[path = "money.rs"]
 pub mod money;
 

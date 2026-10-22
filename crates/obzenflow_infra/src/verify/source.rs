@@ -57,82 +57,17 @@ pub struct DiskRunSource {
 
 impl DiskRunSource {
     pub(crate) fn open(run_dir: &Path) -> Result<Self, SourceOpenError> {
-        let refused = |reason: RefusalReason| SourceOpenError::Refused(Box::new(reason));
-
-        match std::fs::metadata(run_dir) {
-            Ok(metadata) if metadata.is_dir() => {}
-            _ => {
-                return Err(refused(RefusalReason::ArchiveUnavailable {
-                    path: run_dir.to_path_buf(),
-                }))
-            }
-        }
-
-        let manifest_path = run_dir.join(RUN_MANIFEST_FILENAME);
-        if !manifest_path.exists() {
-            return Err(refused(RefusalReason::ArchiveUnavailable {
-                path: manifest_path,
-            }));
-        }
-
-        let body = std::fs::read_to_string(&manifest_path).map_err(|source| {
-            SourceOpenError::Failed(VerifyError::Io {
-                path: manifest_path.clone(),
-                source,
-            })
-        })?;
-
-        // Version gate from the raw JSON before typed deserialization, so an
-        // old archive refuses cleanly instead of failing on missing fields.
-        let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-            SourceOpenError::Failed(VerifyError::Parse {
-                path: manifest_path.clone(),
-                message: e.to_string(),
-            })
-        })?;
-        if let Err(version) = require_current_journal_schema_version(&value) {
-            return Err(refused(RefusalReason::JournalSchemaVersion {
-                path: manifest_path,
-                found: version.found().to_string(),
-                supported: JOURNAL_SCHEMA_VERSION.to_string(),
-            }));
-        }
-        let binding_descriptor_version = value
-            .get("capabilities")
-            .and_then(|value| value.as_object())
-            .and_then(|capabilities| capabilities.get(EFFECT_BINDING_DESCRIPTOR_CAPABILITY))
-            .and_then(|value| value.as_u64());
-        if binding_descriptor_version != Some(1) {
-            return Err(SourceOpenError::Failed(VerifyError::Parse {
-                path: manifest_path.clone(),
-                message: format!(
-                    "unsupported archive capability {EFFECT_BINDING_DESCRIPTOR_CAPABILITY}={binding_descriptor_version:?} (supported: 1)"
-                ),
-            }));
-        }
-        crate::journal::disk::manifest_gate::require_observability_capture(&value).map_err(
-            |message| {
-                SourceOpenError::Failed(VerifyError::Parse {
-                    path: manifest_path.clone(),
-                    message,
-                })
-            },
-        )?;
-        let manifest: RunManifest = serde_json::from_value(value).map_err(|e| {
-            SourceOpenError::Failed(VerifyError::Parse {
-                path: manifest_path.clone(),
-                message: e.to_string(),
-            })
-        })?;
-
+        let manifest = read_manifest(run_dir)?;
         let system_log = run_dir.join(&manifest.system_journal_file);
         let status = match scan_system_log(&system_log) {
             Ok(scan) => scan.derivation.chosen,
             Err(err) => {
-                return Err(refused(RefusalReason::StatusGate {
-                    run: run_dir.to_path_buf(),
-                    status: format!("unknown ({err})"),
-                }))
+                return Err(SourceOpenError::Refused(Box::new(
+                    RefusalReason::StatusGate {
+                        run: run_dir.to_path_buf(),
+                        status: format!("unknown ({err})"),
+                    },
+                )))
             }
         };
 
@@ -142,6 +77,78 @@ impl DiskRunSource {
             status,
         })
     }
+}
+
+/// Reads a run directory's manifest through the archive's schema and
+/// capability gates, without deriving its terminal status.
+pub(crate) fn read_manifest(run_dir: &Path) -> Result<RunManifest, SourceOpenError> {
+    let refused = |reason: RefusalReason| SourceOpenError::Refused(Box::new(reason));
+
+    match std::fs::metadata(run_dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        _ => {
+            return Err(refused(RefusalReason::ArchiveUnavailable {
+                path: run_dir.to_path_buf(),
+            }))
+        }
+    }
+
+    let manifest_path = run_dir.join(RUN_MANIFEST_FILENAME);
+    if !manifest_path.exists() {
+        return Err(refused(RefusalReason::ArchiveUnavailable {
+            path: manifest_path,
+        }));
+    }
+
+    let body = std::fs::read_to_string(&manifest_path).map_err(|source| {
+        SourceOpenError::Failed(VerifyError::Io {
+            path: manifest_path.clone(),
+            source,
+        })
+    })?;
+
+    // Version gate from the raw JSON before typed deserialization, so an
+    // old archive refuses cleanly instead of failing on missing fields.
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        SourceOpenError::Failed(VerifyError::Parse {
+            path: manifest_path.clone(),
+            message: e.to_string(),
+        })
+    })?;
+    if let Err(version) = require_current_journal_schema_version(&value) {
+        return Err(refused(RefusalReason::JournalSchemaVersion {
+            path: manifest_path,
+            found: version.found().to_string(),
+            supported: JOURNAL_SCHEMA_VERSION.to_string(),
+        }));
+    }
+    let binding_descriptor_version = value
+        .get("capabilities")
+        .and_then(|value| value.as_object())
+        .and_then(|capabilities| capabilities.get(EFFECT_BINDING_DESCRIPTOR_CAPABILITY))
+        .and_then(|value| value.as_u64());
+    if binding_descriptor_version != Some(1) {
+        return Err(SourceOpenError::Failed(VerifyError::Parse {
+                path: manifest_path.clone(),
+                message: format!(
+                    "unsupported archive capability {EFFECT_BINDING_DESCRIPTOR_CAPABILITY}={binding_descriptor_version:?} (supported: 1)"
+                ),
+            }));
+    }
+    crate::journal::disk::manifest_gate::require_observability_capture(&value).map_err(
+        |message| {
+            SourceOpenError::Failed(VerifyError::Parse {
+                path: manifest_path.clone(),
+                message,
+            })
+        },
+    )?;
+    serde_json::from_value(value).map_err(|e| {
+        SourceOpenError::Failed(VerifyError::Parse {
+            path: manifest_path.clone(),
+            message: e.to_string(),
+        })
+    })
 }
 
 impl RunSource for DiskRunSource {

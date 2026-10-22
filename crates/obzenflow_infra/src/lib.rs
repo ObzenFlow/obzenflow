@@ -17,6 +17,7 @@ pub mod application;
 pub mod env;
 pub mod http_client;
 pub mod journal;
+pub mod simulated;
 #[cfg(feature = "test-support")]
 pub mod testing;
 pub mod verify;

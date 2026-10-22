@@ -89,6 +89,78 @@ fn inspect_is_a_direct_verb_and_the_journal_command_group_is_removed() {
 }
 
 #[test]
+fn verify_keeps_its_run_comparison_and_judges_call_logs_as_a_subcommand() {
+    let cli = Cli::try_parse_from(["obzenflow", "verify", "--baseline", "a", "--candidate", "b"])
+        .unwrap();
+    let Command::Verify(args) = cli.command else {
+        panic!("verify must select verification");
+    };
+    assert!(args.check.is_none());
+    assert_eq!(args.baseline, Some(PathBuf::from("a")));
+    assert_eq!(args.candidate, Some(PathBuf::from("b")));
+
+    let cli = Cli::try_parse_from([
+        "obzenflow",
+        "verify",
+        "calls",
+        "--run",
+        "resumed",
+        "--run",
+        "killed",
+        "target/aml-risk-calls.jsonl",
+        "target/aml-case-calls.jsonl",
+    ])
+    .unwrap();
+    let Command::Verify(args) = cli.command else {
+        panic!("verify must select verification");
+    };
+    let Some(VerifyCheck::Calls(calls)) = args.check else {
+        panic!("calls must select the lineage check");
+    };
+    assert_eq!(
+        calls.runs,
+        [PathBuf::from("resumed"), PathBuf::from("killed")]
+    );
+    assert_eq!(
+        calls.call_logs,
+        [
+            PathBuf::from("target/aml-risk-calls.jsonl"),
+            PathBuf::from("target/aml-case-calls.jsonl")
+        ]
+    );
+
+    let error = Cli::try_parse_from(["obzenflow", "verify", "calls", "risk.jsonl"])
+        .err()
+        .expect("a lineage check needs its runs");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+    assert!(error.to_string().contains("--run <RUN_DIR>"), "{error}");
+    for incomplete in [
+        vec!["obzenflow", "verify", "calls", "--run", "killed"],
+        vec!["obzenflow", "verify", "--baseline", "a"],
+        vec![
+            "obzenflow",
+            "verify",
+            "--baseline",
+            "a",
+            "--candidate",
+            "b",
+            "calls",
+            "--run",
+            "killed",
+            "risk.jsonl",
+        ],
+    ] {
+        assert!(
+            Cli::try_parse_from(&incomplete).is_err(),
+            "{incomplete:?} is refused"
+        );
+    }
+}
+
+#[test]
 fn control_origins_are_http_loopback_only() {
     for origin in [
         "http://localhost:9090",
