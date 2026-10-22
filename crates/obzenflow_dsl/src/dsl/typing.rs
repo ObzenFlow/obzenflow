@@ -223,59 +223,6 @@ where
 {
 }
 
-/// Diagnostic facade for the manifest-to-handler half of an effect capability
-/// equality proof.
-///
-/// Public only for exported macro expansion; it is not user-implemented API.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "the stage `uses` clause declares an effect missing from the handler's \
-               `AllowedEffects`",
-    label = "this effect manifest is not contained in the handler's `AllowedEffects` set",
-    note = "the stage `uses` clause is canonical: mirror its effects in `type \
-            AllowedEffects = obzenflow_runtime::effect_set![...]`, or change the clause \
-            first if the stage capability contract is wrong (FLOWIP-120z B9)"
-)]
-pub trait ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof>:
-    proof_sealed::DeclaredSubsetOf<HandlerMembers, Proof>
-{
-}
-
-#[diagnostic::do_not_recommend]
-impl<ManifestMembers, HandlerMembers, Proof>
-    ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof> for ManifestMembers
-where
-    ManifestMembers: obzenflow_core::SubsetOf<HandlerMembers, Proof>,
-{
-}
-
-/// Diagnostic facade for the handler-to-manifest half of an effect capability
-/// equality proof.
-///
-/// Public only for exported macro expansion; it is not user-implemented API.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "the handler's `AllowedEffects` permits an effect missing from the stage \
-               `uses` clause",
-    label = "the handler's `AllowedEffects` set is not contained in this effect manifest",
-    note = "the stage `uses` clause is canonical: remove the extra effect from \
-            `AllowedEffects`, or add it to the clause first when the stage needs the \
-            capability and then mirror the clause in `type AllowedEffects = \
-            obzenflow_runtime::effect_set![...]` (FLOWIP-120z B9)"
-)]
-pub trait HandlerEffectsAreDeclaredByManifest<ManifestMembers, Proof>:
-    proof_sealed::DeclaredSubsetOf<ManifestMembers, Proof>
-{
-}
-
-#[diagnostic::do_not_recommend]
-impl<HandlerMembers, ManifestMembers, Proof>
-    HandlerEffectsAreDeclaredByManifest<ManifestMembers, Proof> for HandlerMembers
-where
-    HandlerMembers: obzenflow_core::SubsetOf<ManifestMembers, Proof>,
-{
-}
-
 /// Two-way model for declared type positions.
 ///
 /// `Exact` carries a runtime fingerprint of the Rust type (`type_id`) plus a
