@@ -95,7 +95,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
 
             stages: {
                 guard_source = source!(GuardEvent => source_handler);
-                guarded = transform!(GuardEvent -> GuardEvent => transform_handler with { breaker(3) });
+                guarded = transform!(GuardEvent -> GuardEvent with { breaker(3) } => transform_handler);
                 guard_sink = sink!(GuardEvent => sink_handler);
             },
 

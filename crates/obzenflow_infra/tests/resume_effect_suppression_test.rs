@@ -34,7 +34,8 @@ use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -111,46 +112,49 @@ impl TypedInfiniteSourceHandler for BoundedReader {
 }
 
 /// Counts real executions via the shared counter; a suppressed catch-up
-/// replay never reaches `execute`.
-#[derive(Clone, Debug)]
-struct CountingEffect {
-    value: u64,
+/// replay never reaches the counter.
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct Counting {
+    value: u64,
+}
+
 #[async_trait]
-impl Effect for CountingEffect {
+impl CallRequest for Counting {
     const EFFECT_TYPE: &'static str = "resume_effects.counting";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = CallCounter;
     type Outcome = EffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "counting"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        counter: &CallCounter,
+        _ctx: &mut EffectContext,
+    ) -> Result<EffectValue, EffectError> {
+        counter.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EffectValue {
             effect_value: self.value + 100,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("resume-effects:{}", self.value)))
+impl Keyed for Counting {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("resume-effects:{}", self.value))
     }
 }
 
-#[derive(Clone, Debug)]
+type CountingEffect = Call<Counting>;
+
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct EnrichTransform {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    counter: System<CallCounter>,
 }
 
 #[async_trait]
@@ -165,10 +169,7 @@ impl EffectfulTransformHandler for EnrichTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .perform(CountingEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-            })
+            .call(Counting { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(Enriched {
@@ -214,7 +215,9 @@ fn build_flow(
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let reader = ReattachingSource(BoundedReader::new(first_value, count));
-        let enrich_transform = EnrichTransform { calls };
+        let enrich_transform = EnrichTransform {
+            counter: System::eager("call-counter", Arc::new(CallCounter { calls }))?,
+        };
         let counting_sink = CountingSink { delivered };
 
         Ok(flow! {
@@ -224,7 +227,7 @@ fn build_flow(
             stages: {
                 src = infinite_source!(Reading => reader);
                 enrich = effectful_transform!(
-                    Reading -> { Enriched, EffectValue } uses CountingEffect => enrich_transform);
+                    Reading -> { Enriched, EffectValue } => enrich_transform);
                 snk = sink!(Enriched => counting_sink);
             },
 

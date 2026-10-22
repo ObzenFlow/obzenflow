@@ -33,3 +33,8 @@ enabled = true
 phonebook_url = "http://127.0.0.1:7010"
 job_id = "prometheus"
 advertise_url = "http://127.0.0.1:9093"
+
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 64
+stall_timeout_ms = 30000

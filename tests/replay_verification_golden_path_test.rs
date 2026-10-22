@@ -27,7 +27,8 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, RefusalReason, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -35,7 +36,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -134,7 +134,7 @@ impl TypedFiniteSourceHandler for OrderSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ValidateOrder;
 
 #[async_trait]
@@ -171,33 +171,30 @@ impl EffectfulTransformHandler for ValidateOrder {
     }
 }
 
-#[derive(Clone, Debug)]
-struct AuthorizeEffect {
-    order_id: u64,
-    amount: u64,
+#[obzenflow::port]
+struct Gateway {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct AuthorizeRequest {
+    order_id: u64,
+    amount: u64,
+}
+
 #[async_trait]
-impl Effect for AuthorizeEffect {
+impl CallRequest for AuthorizeRequest {
     const EFFECT_TYPE: &'static str = "replay_verification.authorize";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = Gateway;
     type Outcome = AuthGrant;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "authorize"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "order_id": self.order_id, "amount": self.amount })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        gateway: &Gateway,
+        _ctx: &mut EffectContext,
+    ) -> Result<AuthGrant, EffectError> {
+        gateway.calls.fetch_add(1, Ordering::SeqCst);
         if self.order_id.is_multiple_of(2) {
             return Err(EffectError::Execution(
                 "gateway_timeout_simulated".to_string(),
@@ -208,15 +205,29 @@ impl Effect for AuthorizeEffect {
             auth_code: self.order_id + 9000,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("authorize:{}", self.order_id)))
+impl Keyed for AuthorizeRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("authorize:{}", self.order_id))
     }
 }
 
-#[derive(Clone, Debug)]
+type AuthorizeEffect = Call<AuthorizeRequest>;
+
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct AuthorizePayment {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    gateway: System<Gateway>,
+}
+
+impl AuthorizePayment {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            gateway: System::eager("gateway", Arc::new(Gateway { calls }))
+                .expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -236,10 +247,9 @@ impl EffectfulTransformHandler for AuthorizePayment {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
-            .perform(AuthorizeEffect {
+            .call(AuthorizeRequest {
                 order_id: order.order_id,
                 amount: order.amount,
-                calls: self.calls.clone(),
             })
             .await;
 
@@ -282,7 +292,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
     FlowDefinition::materialize(move |_runtime_config| {
         let orders_handler = OrderSource::new();
         let validate_handler = ValidateOrder;
-        let authorize_handler = AuthorizePayment { calls };
+        let authorize_handler = AuthorizePayment::new(calls);
         let paid_orders_handler = replay_testkit::Discard::<OrderAuthorized>::default();
         let cancelled_orders_handler = replay_testkit::Discard::<OrderCancelled>::default();
         let manual_review_handler = replay_testkit::Discard::<AuthorizationUnavailable>::default();
@@ -296,7 +306,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 validate = effectful_transform!(
                     OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler);
                 authorize = effectful_transform!(
-                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_handler);
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => authorize_handler);
                 paid_orders = sink!(OrderAuthorized => paid_orders_handler);
                 cancelled_orders = sink!(OrderCancelled => cancelled_orders_handler);
                 manual_review = sink!(AuthorizationUnavailable => manual_review_handler);

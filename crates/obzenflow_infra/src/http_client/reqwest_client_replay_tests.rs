@@ -27,6 +27,7 @@ use obzenflow_runtime::bootstrap::{
 };
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedAsyncFiniteSourceHandler,
 };
@@ -331,8 +332,6 @@ fn poll_flow(
         Ok(flow! {
             name: "flowip_133c_http_poll",
             journals: crate::journal::disk_journals(journal_base),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1)
-                .stall_timeout_ms(10_000),
 
             stages: {
                 src = async_infinite_source!(HttpFixtureEvent => source);
@@ -380,9 +379,38 @@ async fn bootstrap_from(
     }
 }
 
-async fn build_flow(definition: FlowDefinition) -> FlowHandle {
+fn poll_backpressure() -> FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    };
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(1)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(10_000),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .expect("the backpressure setting admits");
+    }
+    FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates)))
+}
+
+async fn build_flow(definition: FlowDefinition, context: FlowBuildContext) -> FlowHandle {
     definition
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .build(context)
         .await
         .unwrap_or_else(|failure| panic!("flow failed to build: {failure:?}"))
 }
@@ -540,7 +568,11 @@ async fn abort_during_initialization_cancels_the_waiter_before_request_send() {
     });
     let delivered = Arc::new(AtomicUsize::new(0));
     let (url, requests, observer_shutdown, observer) = spawn_http_observer().await;
-    let running = build_flow(poll_flow(journal_base, url, client, delivered.clone())).await;
+    let running = build_flow(
+        poll_flow(journal_base, url, client, delivered.clone()),
+        poll_backpressure(),
+    )
+    .await;
     wait_for_running(&running).await;
     wait_for_count(initializations.as_ref(), 1, "client initialization starts").await;
 
@@ -606,12 +638,15 @@ async fn strict_replay_keeps_the_default_source_client_cold() {
     let live_initializations = Arc::new(AtomicUsize::new(0));
     let live_delivered = Arc::new(AtomicUsize::new(0));
     let (live_url, live_requests, live_fixture) = spawn_http_fixture(1).await;
-    let live = build_flow(pull_flow(
-        journal_base.clone(),
-        live_url,
-        counted_client(live_initializations.clone()),
-        live_delivered.clone(),
-    ))
+    let live = build_flow(
+        pull_flow(
+            journal_base.clone(),
+            live_url,
+            counted_client(live_initializations.clone()),
+            live_delivered.clone(),
+        ),
+        FlowBuildContext::for_tests(),
+    )
     .await;
     wait_for_completion(live).await;
     live_fixture.await.expect("live HTTP fixture");
@@ -627,12 +662,15 @@ async fn strict_replay_keeps_the_default_source_client_cold() {
         let _bootstrap = install_bootstrap_config(
             bootstrap_from(live_archive.clone(), ReplayVerb::Replay, false).await,
         );
-        let replay = build_flow(pull_flow(
-            journal_base.clone(),
-            replay_url,
-            counted_client(replay_initializations.clone()),
-            replay_delivered.clone(),
-        ))
+        let replay = build_flow(
+            pull_flow(
+                journal_base.clone(),
+                replay_url,
+                counted_client(replay_initializations.clone()),
+                replay_delivered.clone(),
+            ),
+            FlowBuildContext::for_tests(),
+        )
         .await;
         wait_for_completion(replay).await;
     }
@@ -678,12 +716,15 @@ async fn resume_initializes_only_after_the_recorded_prefix_crosses_continue_live
     let live_initializations = Arc::new(AtomicUsize::new(0));
     let live_delivered = Arc::new(AtomicUsize::new(0));
     let (live_url, live_requests, live_fixture) = spawn_http_fixture(RECORDED).await;
-    let live = build_flow(poll_flow(
-        journal_base.clone(),
-        live_url,
-        counted_client(live_initializations.clone()),
-        live_delivered.clone(),
-    ))
+    let live = build_flow(
+        poll_flow(
+            journal_base.clone(),
+            live_url,
+            counted_client(live_initializations.clone()),
+            live_delivered.clone(),
+        ),
+        poll_backpressure(),
+    )
     .await;
     wait_for_running(&live).await;
     wait_for_count(live_delivered.as_ref(), RECORDED, "live deliveries").await;
@@ -705,12 +746,15 @@ async fn resume_initializes_only_after_the_recorded_prefix_crosses_continue_live
             journal_base.clone(),
         );
         assert!(!resume_client.is_initialized());
-        let resumed = build_flow(poll_flow(
-            journal_base.clone(),
-            resume_url,
-            resume_client,
-            resume_delivered.clone(),
-        ))
+        let resumed = build_flow(
+            poll_flow(
+                journal_base.clone(),
+                resume_url,
+                resume_client,
+                resume_delivered.clone(),
+            ),
+            poll_backpressure(),
+        )
         .await;
         wait_for_running(&resumed).await;
         wait_for_count(

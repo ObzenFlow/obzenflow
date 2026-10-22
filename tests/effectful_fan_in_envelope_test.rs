@@ -20,7 +20,8 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -29,7 +30,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -99,51 +99,59 @@ impl TypedFiniteSourceHandler for ChannelSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingEffect {
-    channel: String,
-    value: u64,
+#[obzenflow::port]
+struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct Counting {
+    channel: String,
+    value: u64,
+}
+
 #[async_trait]
-impl Effect for CountingEffect {
+impl CallRequest for Counting {
     const EFFECT_TYPE: &'static str = "envelope.counting";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = CallCounter;
     type Outcome = EnvelopeEffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "counting"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "channel": self.channel, "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        counter: &CallCounter,
+        _ctx: &mut EffectContext,
+    ) -> Result<EnvelopeEffectValue, EffectError> {
+        counter.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EnvelopeEffectValue {
             effect_value: self.value + 100,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!(
-            "envelope:{}:{}",
-            self.channel, self.value
-        )))
+impl Keyed for Counting {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("envelope:{}:{}", self.channel, self.value))
     }
 }
 
+type CountingEffect = Call<Counting>;
+
 /// The effectful stage is itself the multi-inbound fan-in, so its effect
 /// cursors key directly on canonical-merge delivered positions.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct EffectfulMerge {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    counter: System<CallCounter>,
+}
+
+impl EffectfulMerge {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            counter: System::eager("call-counter", Arc::new(CallCounter { calls }))
+                .expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -158,10 +166,9 @@ impl EffectfulTransformHandler for EffectfulMerge {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .perform(CountingEffect {
+            .call(Counting {
                 channel: input.channel.clone(),
                 value: input.value,
-                calls: self.calls.clone(),
             })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -203,7 +210,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
     FlowDefinition::materialize(move |_runtime_config| {
         let source_a = ChannelSource::new("a", 4);
         let source_b = ChannelSource::new("b", 3);
-        let effectful_merge = EffectfulMerge { calls };
+        let effectful_merge = EffectfulMerge::new(calls);
         let collector = DropSink;
 
         Ok(flow! {
@@ -214,7 +221,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 source_a = source!(EnvelopeInput => source_a);
                 source_b = source!(EnvelopeInput => source_b);
                 effectful_merge = effectful_transform!(
-                    EnvelopeInput -> { EnvelopeOutput, EnvelopeEffectValue } uses CountingEffect => effectful_merge);
+                    EnvelopeInput -> { EnvelopeOutput, EnvelopeEffectValue } => effectful_merge);
                 collector = sink!(EnvelopeOutput => collector);
             },
 

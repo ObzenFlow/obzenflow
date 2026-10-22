@@ -2,22 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed warehouse bindings, effects, and package-local domain operations.
+//! The warehouse port, its simulated system, and the requests it answers.
 
 use super::domain::{HoldId, OrderId, Sku, StockReleased, StockReserved};
 use async_trait::async_trait;
-use obzenflow::effects::{
-    AllowedEffectsAllowEffect, Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse,
-    EffectContext, EffectError, EffectOutcomeFitsOutput, EffectPortSlot, EffectPortSlotSet,
-    EffectRegistrationBuilder, EffectSafety, EffectSet, Effects, LogicalEffectBindingName, Named,
-    NamedEffect,
-};
-use obzenflow::effects::{BindingEvidenceError, BoundedBindingEvidence};
-use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 #[cfg(test)]
-use obzenflow::effects::{EffectPortResolutionError, EffectPortResolver};
-use obzenflow::schema::StageFactSet;
-use serde_json::json;
+use obzenflow::effects::EffectPortResolutionError;
+use obzenflow::effects::{
+    Call, CallRequest, EffectContext, EffectError, Idempotent, System, SystemError,
+};
+use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,6 +95,7 @@ pub enum WarehousePortError {
 
 /// The physical integration port. Capacity is intentionally not implemented
 /// here: the allocator is the domain authority and sends only authorised work.
+#[obzenflow::port]
 #[async_trait]
 pub trait WarehousePort: Send + Sync {
     async fn reserve(&self, order_id: &OrderId, sku: &Sku) -> Result<HoldId, WarehousePortError>;
@@ -156,68 +151,48 @@ impl WarehousePort for SimulatedWarehouse {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct WarehouseBindingEvidence {
-    canonical: BoundedBindingEvidence,
-}
-
-impl WarehouseBindingEvidence {
-    fn new(warehouse_id: &str) -> Result<Self, BindingEvidenceError> {
-        let canonical = BoundedBindingEvidence::try_new(
-            json!({ "warehouse_id": warehouse_id })
-                .to_string()
-                .into_bytes(),
-        )?;
-        Ok(Self { canonical })
+pub fn warehouse_system(
+    config: &WarehouseConfig,
+    stats: Arc<WarehouseStats>,
+) -> Result<System<dyn WarehousePort>, SystemError> {
+    #[cfg(test)]
+    if config.reserve_test_fault == Some(WarehouseTestFault::BindingResolution) {
+        return System::deferred(
+            &config.warehouse_id,
+            || -> Result<Arc<SimulatedWarehouse>, EffectPortResolutionError> {
+                Err(EffectPortResolutionError::CredentialUnavailable)
+            },
+        );
     }
+    System::eager(
+        &config.warehouse_id,
+        Arc::new(SimulatedWarehouse {
+            config: config.clone(),
+            stats,
+        }),
+    )
 }
 
-impl EffectBindingEvidence for WarehouseBindingEvidence {
-    const SCHEMA_VERSION: u32 = 1;
-
-    fn canonical_bytes(&self) -> BoundedBindingEvidence {
-        self.canonical.clone()
-    }
+#[derive(Clone, Debug, Serialize)]
+pub struct StockReservation {
+    pub order_id: OrderId,
+    pub sku: Sku,
 }
 
-pub const WAREHOUSE: EffectPortSlot<dyn WarehousePort> = EffectPortSlot::new("warehouse");
-
-#[derive(Clone, Debug)]
-pub struct ReserveStock {
-    order_id: OrderId,
-    sku: Sku,
-    binding: EffectBindingUse<Self>,
-}
-
-impl ReserveStock {
-    fn new(order_id: OrderId, sku: Sku, binding: EffectBindingUse<Self>) -> Self {
-        Self {
-            order_id,
-            sku,
-            binding,
-        }
-    }
-}
+pub type ReserveStock = Call<StockReservation>;
 
 #[async_trait]
-impl Effect for ReserveStock {
+impl CallRequest for StockReservation {
     const EFFECT_TYPE: &'static str = "allocation.reserve_stock";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = Named<WarehouseBindingEvidence>;
+    type Safety = Idempotent;
+    type Port = dyn WarehousePort;
     type Outcome = StockReserved;
-    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "reserve_stock"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "order_id": self.order_id, "sku": self.sku })
-    }
-
-    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        let warehouse = ctx.port(WAREHOUSE)?;
+    async fn call(
+        &self,
+        warehouse: &dyn WarehousePort,
+        _: &mut EffectContext,
+    ) -> Result<StockReserved, EffectError> {
         let hold_id = warehouse
             .reserve(&self.order_id, &self.sku)
             .await
@@ -230,60 +205,27 @@ impl Effect for ReserveStock {
     }
 }
 
-impl NamedEffect for ReserveStock {
-    type BindingEvidence = WarehouseBindingEvidence;
-
-    fn binding_use(&self) -> &EffectBindingUse<Self> {
-        &self.binding
-    }
-
-    fn required_slots() -> EffectPortSlotSet {
-        EffectPortSlotSet::single(WAREHOUSE)
-    }
+#[derive(Clone, Debug, Serialize)]
+pub struct StockRelease {
+    pub order_id: OrderId,
+    pub sku: Sku,
+    pub hold_id: HoldId,
 }
 
-#[derive(Clone, Debug)]
-pub struct ReleaseStock {
-    order_id: OrderId,
-    sku: Sku,
-    hold_id: HoldId,
-    binding: EffectBindingUse<Self>,
-}
-
-impl ReleaseStock {
-    fn new(order_id: OrderId, sku: Sku, hold_id: HoldId, binding: EffectBindingUse<Self>) -> Self {
-        Self {
-            order_id,
-            sku,
-            hold_id,
-            binding,
-        }
-    }
-}
+pub type ReleaseStock = Call<StockRelease>;
 
 #[async_trait]
-impl Effect for ReleaseStock {
+impl CallRequest for StockRelease {
     const EFFECT_TYPE: &'static str = "allocation.release_stock";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = Named<WarehouseBindingEvidence>;
+    type Safety = Idempotent;
+    type Port = dyn WarehousePort;
     type Outcome = StockReleased;
-    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "release_stock"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({
-            "order_id": self.order_id,
-            "sku": self.sku,
-            "hold_id": self.hold_id,
-        })
-    }
-
-    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        let warehouse = ctx.port(WAREHOUSE)?;
+    async fn call(
+        &self,
+        warehouse: &dyn WarehousePort,
+        _: &mut EffectContext,
+    ) -> Result<StockReleased, EffectError> {
         warehouse
             .release(&self.order_id, &self.sku, &self.hold_id)
             .await
@@ -296,26 +238,11 @@ impl Effect for ReleaseStock {
     }
 }
 
-impl NamedEffect for ReleaseStock {
-    type BindingEvidence = WarehouseBindingEvidence;
-
-    fn binding_use(&self) -> &EffectBindingUse<Self> {
-        &self.binding
-    }
-
-    fn required_slots() -> EffectPortSlotSet {
-        EffectPortSlotSet::single(WAREHOUSE)
-    }
-}
-
 fn warehouse_error(error: WarehousePortError) -> EffectError {
     match error {
-        WarehousePortError::Unavailable => EffectError::DependencyFailed {
-            failure_source: EffectFailureSource::new("warehouse"),
-            code: EffectFailureCode::new("unavailable"),
-            message: error.to_string(),
-            retry: RetryDisposition::Retryable,
-        },
+        WarehousePortError::Unavailable => {
+            EffectError::unavailable("warehouse", "unavailable", error)
+        }
         #[cfg(test)]
         WarehousePortError::Validation => EffectError::Validation(error.to_string()),
         #[cfg(test)]
@@ -324,149 +251,5 @@ fn warehouse_error(error: WarehousePortError) -> EffectError {
         WarehousePortError::Provenance => EffectError::EffectProvenanceMismatch(error.to_string()),
         #[cfg(test)]
         WarehousePortError::Journal => EffectError::Journal(error.to_string()),
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum WarehouseBindingsBuildError {
-    #[error("warehouse binding evidence is invalid: {0}")]
-    Evidence(#[source] BindingEvidenceError),
-    #[error("reserve warehouse binding is invalid: {0}")]
-    Reserve(#[source] obzenflow::effects::EffectBindingBuildError),
-    #[error("release warehouse binding is invalid: {0}")]
-    Release(#[source] obzenflow::effects::EffectBindingBuildError),
-}
-
-/// Composition-root bundle. Each field is the exact proof required by its
-/// lexical `via` declaration; this is not a multi-effect binding abstraction.
-pub struct WarehouseEffectBindings {
-    pub reserve: EffectBinding<ReserveStock>,
-    pub release: EffectBinding<ReleaseStock>,
-}
-
-impl WarehouseEffectBindings {
-    #[allow(dead_code)] // documented composition-root convenience constructor
-    pub fn from_config(config: &WarehouseConfig) -> Result<Self, WarehouseBindingsBuildError> {
-        Self::with_stats(config, Arc::new(WarehouseStats::default()))
-    }
-
-    pub fn with_stats(
-        config: &WarehouseConfig,
-        stats: Arc<WarehouseStats>,
-    ) -> Result<Self, WarehouseBindingsBuildError> {
-        let warehouse: Arc<dyn WarehousePort> = Arc::new(SimulatedWarehouse {
-            config: config.clone(),
-            stats,
-        });
-        let evidence = WarehouseBindingEvidence::new(&config.warehouse_id)
-            .map_err(WarehouseBindingsBuildError::Evidence)?;
-
-        let reserve_builder = EffectRegistrationBuilder::<ReserveStock>::new(
-            LogicalEffectBindingName::new("reserve_warehouse")
-                .expect("static binding name is valid"),
-            evidence.clone(),
-        );
-        #[cfg(test)]
-        let reserve = if config.reserve_test_fault == Some(WarehouseTestFault::BindingResolution) {
-            let resolver: EffectPortResolver<dyn WarehousePort> =
-                Arc::new(|| Err(EffectPortResolutionError::CredentialUnavailable));
-            reserve_builder
-                .bind_deferred(WAREHOUSE, resolver)
-                .map_err(WarehouseBindingsBuildError::Reserve)?
-                .finish()
-                .map_err(WarehouseBindingsBuildError::Reserve)?
-        } else {
-            reserve_builder
-                .bind_eager(WAREHOUSE, warehouse.clone())
-                .map_err(WarehouseBindingsBuildError::Reserve)?
-                .finish()
-                .map_err(WarehouseBindingsBuildError::Reserve)?
-        };
-        #[cfg(not(test))]
-        let reserve = reserve_builder
-            .bind_eager(WAREHOUSE, warehouse.clone())
-            .map_err(WarehouseBindingsBuildError::Reserve)?
-            .finish()
-            .map_err(WarehouseBindingsBuildError::Reserve)?;
-
-        let release = EffectRegistrationBuilder::<ReleaseStock>::new(
-            LogicalEffectBindingName::new("release_warehouse")
-                .expect("static binding name is valid"),
-            evidence,
-        )
-        .bind_eager(WAREHOUSE, warehouse)
-        .map_err(WarehouseBindingsBuildError::Release)?
-        .finish()
-        .map_err(WarehouseBindingsBuildError::Release)?;
-
-        Ok(Self { reserve, release })
-    }
-}
-
-/// Domain-named operations keep command construction and generic `perform`
-/// plumbing inside the package that owns the integration contract.
-#[allow(async_fn_in_trait)]
-pub trait WarehouseEffects<Output, AllowedEffects>
-where
-    Output: StageFactSet,
-    AllowedEffects: EffectSet,
-{
-    async fn reserve_stock<EffectAt, OutcomeProof>(
-        &mut self,
-        order_id: OrderId,
-        sku: Sku,
-    ) -> Result<StockReserved, EffectError>
-    where
-        ReserveStock: AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
-            + EffectOutcomeFitsOutput<Output, OutcomeProof>;
-
-    async fn release_stock<EffectAt, OutcomeProof>(
-        &mut self,
-        order_id: OrderId,
-        sku: Sku,
-        hold_id: HoldId,
-    ) -> Result<StockReleased, EffectError>
-    where
-        ReleaseStock: AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
-            + EffectOutcomeFitsOutput<Output, OutcomeProof>;
-}
-
-impl<Output, AllowedEffects> WarehouseEffects<Output, AllowedEffects>
-    for Effects<Output, AllowedEffects>
-where
-    Output: StageFactSet,
-    AllowedEffects: EffectSet,
-{
-    async fn reserve_stock<EffectAt, OutcomeProof>(
-        &mut self,
-        order_id: OrderId,
-        sku: Sku,
-    ) -> Result<StockReserved, EffectError>
-    where
-        ReserveStock: AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
-            + EffectOutcomeFitsOutput<Output, OutcomeProof>,
-    {
-        let binding = self.project_named_effect::<ReserveStock, EffectAt>()?;
-        self.perform::<ReserveStock, EffectAt, OutcomeProof>(ReserveStock::new(
-            order_id, sku, binding,
-        ))
-        .await
-    }
-
-    async fn release_stock<EffectAt, OutcomeProof>(
-        &mut self,
-        order_id: OrderId,
-        sku: Sku,
-        hold_id: HoldId,
-    ) -> Result<StockReleased, EffectError>
-    where
-        ReleaseStock: AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
-            + EffectOutcomeFitsOutput<Output, OutcomeProof>,
-    {
-        let binding = self.project_named_effect::<ReleaseStock, EffectAt>()?;
-        self.perform::<ReleaseStock, EffectAt, OutcomeProof>(ReleaseStock::new(
-            order_id, sku, hold_id, binding,
-        ))
-        .await
     }
 }

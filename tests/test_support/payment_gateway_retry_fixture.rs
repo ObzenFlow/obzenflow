@@ -14,16 +14,19 @@ use crate::payment_domain::{
 };
 use async_trait::async_trait;
 use obzenflow::stages::sources;
-use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, retry, Retry};
+use obzenflow_adapters::middleware::{
+    circuit_breaker, rate_limit, retry, MiddlewareFactory, Retry,
+};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use obzenflow_runtime::stages::sink::SinkWriteFailure;
-use serde_json::json;
+use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,8 +72,8 @@ struct InvocationPause {
 /// Shared deterministic dependency used to count actual physical calls.
 #[derive(Debug)]
 pub struct ScriptedGateway {
-    calls: AtomicUsize,
-    invocations: AtomicUsize,
+    calls: Arc<AtomicUsize>,
+    invocations: Arc<AtomicUsize>,
     panic_on_live_call: bool,
     behaviour: GatewayBehaviour,
     pause_before_invocation: Option<InvocationPause>,
@@ -91,8 +94,8 @@ impl ScriptedGateway {
 
     fn with_behaviour(behaviour: GatewayBehaviour) -> Self {
         Self {
-            calls: AtomicUsize::new(0),
-            invocations: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
+            invocations: Arc::new(AtomicUsize::new(0)),
             panic_on_live_call: false,
             behaviour,
             pause_before_invocation: None,
@@ -115,6 +118,40 @@ impl ScriptedGateway {
         self
     }
 
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    pub fn invocations(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
+    }
+
+    fn port(&self) -> GatewayPort {
+        GatewayPort {
+            calls: self.calls.clone(),
+            panic_on_live_call: self.panic_on_live_call,
+            behaviour: self.behaviour,
+        }
+    }
+
+    fn pacing(&self) -> InvocationPacing {
+        InvocationPacing {
+            invocations: self.invocations.clone(),
+            panic_on_live_call: self.panic_on_live_call,
+            pause_before_invocation: self.pause_before_invocation,
+        }
+    }
+}
+
+/// Counts logical invocations and delays one before breaker admission.
+#[derive(Debug, Clone)]
+struct InvocationPacing {
+    invocations: Arc<AtomicUsize>,
+    panic_on_live_call: bool,
+    pause_before_invocation: Option<InvocationPause>,
+}
+
+impl InvocationPacing {
     async fn prepare_invocation(&self) {
         let invocation = self.invocations.fetch_add(1, Ordering::SeqCst) + 1;
         if self.panic_on_live_call {
@@ -126,15 +163,18 @@ impl ScriptedGateway {
             }
         }
     }
+}
 
-    pub fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
+/// The scripted gateway's port, which counts the physical calls that reach it.
+#[obzenflow::port]
+#[derive(Debug)]
+struct GatewayPort {
+    calls: Arc<AtomicUsize>,
+    panic_on_live_call: bool,
+    behaviour: GatewayBehaviour,
+}
 
-    pub fn invocations(&self) -> usize {
-        self.invocations.load(Ordering::SeqCst)
-    }
-
+impl GatewayPort {
     fn record_call(&self) -> usize {
         assert!(
             !self.panic_on_live_call,
@@ -152,68 +192,83 @@ impl ScriptedGateway {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ScriptedAuthorizePayment {
-    order: ValidatedOrder,
-    gateway: Arc<ScriptedGateway>,
+#[derive(Debug, Clone, Serialize)]
+struct ScriptedAuthorize {
+    order_id: String,
+    customer_id: String,
+    amount_cents: u64,
+    payment_method_state: PaymentMethodState,
+    phase: TrafficPhase,
+}
+
+impl ScriptedAuthorize {
+    fn for_order(order: &ValidatedOrder) -> Self {
+        Self {
+            order_id: order.order_id.clone(),
+            customer_id: order.customer_id.clone(),
+            amount_cents: order.amount_cents,
+            payment_method_state: order.payment_method_state.clone(),
+            phase: order.phase.clone(),
+        }
+    }
 }
 
 #[async_trait]
-impl Effect for ScriptedAuthorizePayment {
+impl CallRequest for ScriptedAuthorize {
     const EFFECT_TYPE: &'static str = "payment.authorize";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = GatewayPort;
     type Outcome = PaymentAuthorized;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "authorize_payment"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({
-            "order_id": self.order.order_id,
-            "customer_id": self.order.customer_id,
-            "amount_cents": self.order.amount_cents,
-            "payment_method_state": self.order.payment_method_state,
-            "phase": self.order.phase,
-        })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        let call = self.gateway.record_call();
-        if self.gateway.should_timeout(call) {
+    async fn call(
+        &self,
+        gateway: &GatewayPort,
+        _ctx: &mut EffectContext,
+    ) -> Result<PaymentAuthorized, EffectError> {
+        let call = gateway.record_call();
+        if gateway.should_timeout(call) {
             return Err(EffectError::Timeout(
                 "gateway_timeout_simulated".to_string(),
             ));
         }
 
         Ok(PaymentAuthorized {
-            order_id: self.order.order_id.clone(),
-            customer_id: self.order.customer_id.clone(),
-            amount_cents: self.order.amount_cents,
-            phase: self.order.phase.clone(),
+            order_id: self.order_id.clone(),
+            customer_id: self.customer_id.clone(),
+            amount_cents: self.amount_cents,
+            phase: self.phase.clone(),
             authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!(
-            "payment-authorize:{}",
-            self.order.order_id
-        )))
+impl Keyed for ScriptedAuthorize {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("payment-authorize:{}", self.order_id))
     }
 }
+
+type ScriptedAuthorizePayment = Call<ScriptedAuthorize>;
 
 type GatewayOutput =
     obzenflow_core::stage_fact_set![PaymentAuthorized, PaymentAuthorizationUnavailable];
 type GatewayEffects = obzenflow_runtime::effect_set![ScriptedAuthorizePayment];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, obzenflow::effects::EffectHandler)]
 struct ScriptedGatewayTransform {
-    gateway: Arc<ScriptedGateway>,
+    #[system]
+    gateway: System<GatewayPort>,
+    pacing: InvocationPacing,
+}
+
+impl ScriptedGatewayTransform {
+    fn new(gateway: &ScriptedGateway) -> Self {
+        Self {
+            gateway: System::eager("payment-gateway", Arc::new(gateway.port()))
+                .expect("a valid system name"),
+            pacing: gateway.pacing(),
+        }
+    }
 }
 
 #[async_trait]
@@ -227,15 +282,9 @@ impl EffectfulTransformHandler for ScriptedGatewayTransform {
         order: ValidatedOrder,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        self.gateway.prepare_invocation().await;
+        self.pacing.prepare_invocation().await;
 
-        if let Err(error) = fx
-            .perform(ScriptedAuthorizePayment {
-                order: order.clone(),
-                gateway: self.gateway.clone(),
-            })
-            .await
-        {
+        if let Err(error) = fx.call(ScriptedAuthorize::for_order(&order)).await {
             fx.emit(PaymentAuthorizationUnavailable {
                 order_id: order.order_id,
                 customer_id: order.customer_id,
@@ -306,40 +355,41 @@ pub fn build_flow(
         let gateway_limiter = rate_limit(1.0);
 
         let order_feed = sources::ValuesSource::new(orders);
-        let authorize_payment_handler = ScriptedGatewayTransform { gateway };
+        let authorize_payment_handler = ScriptedGatewayTransform::new(&gateway);
         let authorize_payment_stage = match policy {
             ReleasePolicy::BreakerOnly => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with { gateway_breaker, gateway_limiter }
+                with { gateway_breaker, gateway_limiter }
                 => authorize_payment_handler
             ),
             ReleasePolicy::BreakerRecovery => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with {
-                    gateway_breaker, gateway_limiter, canonical_recovery()
-                }
+                with { gateway_breaker, gateway_limiter, canonical_recovery() }
                 => authorize_payment_handler
             ),
             ReleasePolicy::RetryOnly => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with canonical_recovery()
+                with canonical_recovery()
                 => authorize_payment_handler
             ),
             ReleasePolicy::RetryWithLimiter => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with { gateway_limiter, canonical_recovery() }
+                with { gateway_limiter, canonical_recovery() }
                 => authorize_payment_handler
             ),
             ReleasePolicy::RetryWithLimiterPermuted => effectful_transform!(
                 ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with { canonical_recovery(), gateway_limiter }
+                with { canonical_recovery(), gateway_limiter }
                 => authorize_payment_handler
             ),
-            ReleasePolicy::RetryWithLimiterSplit => effectful_transform!(
-                ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
-                uses ScriptedAuthorizePayment with canonical_recovery()
-                => authorize_payment_handler with gateway_limiter
-            ),
+            ReleasePolicy::RetryWithLimiterSplit => {
+                let effect_recovery = canonical_recovery().for_effect::<ScriptedAuthorizePayment>();
+                effectful_transform!(
+                    ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
+                    with { effect_recovery, gateway_limiter }
+                    => authorize_payment_handler
+                )
+            }
         };
         let record_authorized = Discard::<PaymentAuthorized> {
             input: std::marker::PhantomData,

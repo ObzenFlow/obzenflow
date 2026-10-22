@@ -45,6 +45,7 @@ pub struct EffectContext {
     pub(super) stage_key: String,
     pub(super) input_seq: StageInputPosition,
     pub(super) ports: super::ports::EffectPortView,
+    pub(super) transaction: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl EffectContext {
@@ -104,6 +105,88 @@ impl EffectContext {
 
     pub fn sleep(&self, duration: Duration) -> impl std::future::Future<Output = ()> + Send {
         tokio::time::sleep(duration)
+    }
+
+    /// The commit handle of a [`Transactional`] request. Its port commits the
+    /// outcome through it, and the committed record is the outcome.
+    ///
+    /// ```
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_runtime::effects::{CallRequest, EffectCommitHandle, EffectContext, EffectError, Transactional};
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Entry;
+    /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }
+    /// #[async_trait]
+    /// trait LedgerPort: Send + Sync {
+    ///     async fn append(&self, tx: EffectCommitHandle<Entry>) -> Result<Entry, EffectError>;
+    /// }
+    ///
+    /// #[derive(Clone, Debug, serde::Serialize)]
+    /// struct AppendEntry;
+    ///
+    /// #[async_trait]
+    /// impl CallRequest for AppendEntry {
+    ///     const EFFECT_TYPE: &'static str = "docs.transaction.append";
+    ///     type Safety = Transactional;
+    ///     type Port = dyn LedgerPort;
+    ///     type Outcome = Entry;
+    ///
+    ///     async fn call(
+    ///         &self,
+    ///         ledger: &dyn LedgerPort,
+    ///         ctx: &mut EffectContext,
+    ///     ) -> Result<Entry, EffectError> {
+    ///         let tx = ctx.transaction(self)?;
+    ///         ledger.append(tx).await
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// A request of another safety class has no commit handle:
+    ///
+    /// ```compile_fail,E0271
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_runtime::effects::{CallRequest, EffectCommitHandle, EffectContext, EffectError, Idempotent};
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct Entry;
+    /// # impl obzenflow_core::TypedPayload for Entry { const EVENT_TYPE: &'static str = "docs.transaction.entry"; }
+    /// # #[async_trait]
+    /// # trait LedgerPort: Send + Sync {
+    /// #     async fn append(&self, tx: EffectCommitHandle<Entry>) -> Result<Entry, EffectError>;
+    /// # }
+    /// # #[derive(Clone, Debug, serde::Serialize)]
+    /// # struct AppendEntry;
+    /// #[async_trait]
+    /// impl CallRequest for AppendEntry {
+    ///     const EFFECT_TYPE: &'static str = "docs.transaction.append";
+    ///     type Safety = Idempotent;
+    ///     type Port = dyn LedgerPort;
+    ///     type Outcome = Entry;
+    ///
+    ///     async fn call(
+    ///         &self,
+    ///         ledger: &dyn LedgerPort,
+    ///         ctx: &mut EffectContext,
+    ///     ) -> Result<Entry, EffectError> {
+    ///         let tx = ctx.transaction(self)?;
+    ///         ledger.append(tx).await
+    ///     }
+    /// }
+    /// ```
+    pub fn transaction<R>(
+        &self,
+        _request: &R,
+    ) -> Result<EffectCommitHandle<R::Outcome>, EffectError>
+    where
+        R: CallRequest<Safety = Transactional>,
+    {
+        self.transaction
+            .as_ref()
+            .and_then(|handle| handle.downcast_ref::<EffectCommitHandle<R::Outcome>>())
+            .cloned()
+            .ok_or_else(|| EffectError::TransactionalCommitMissing {
+                effect_type: R::EFFECT_TYPE.to_string(),
+            })
     }
 }
 

@@ -12,10 +12,12 @@ use obzenflow_core::ai::{
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::effects::{
-    Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
-    EffectPortMetadataContext, EffectPortSlot, EffectPortSlotSet, EffectSafety, Named, NamedEffect,
-    RecordedReply,
+    Effect, EffectBinding, EffectBindingBuildError, EffectBindingEvidence, EffectBindingUse,
+    EffectContext, EffectError, EffectPortMetadataContext, EffectPortResolver,
+    EffectPortResolverWithMetadata, EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder,
+    EffectSafety, LogicalEffectBindingName, Named, NamedEffect, RecordedReply, ResolvedEffectPort,
 };
+use std::sync::Arc;
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
 
@@ -57,6 +59,29 @@ impl EmbeddingBindingEvidence {
 
     pub fn target(&self) -> &EmbeddingTarget {
         &self.target
+    }
+
+    /// The embedding binding this evidence identifies, whose client
+    /// `resolver` builds when a live call first needs it. The resolved
+    /// client's own target, not the requested one, becomes the binding's
+    /// metadata.
+    pub fn into_binding(
+        self,
+        resolver: EffectPortResolver<dyn EmbeddingClient>,
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EffectBindingBuildError> {
+        let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
+            Arc::new(move || {
+                let client = resolver()?;
+                let metadata = Arc::new(client.target().clone());
+                Ok(ResolvedEffectPort::new(client, metadata))
+            });
+        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
+            LogicalEffectBindingName::new("embedding")
+                .expect("framework embedding binding name is a valid public identifier"),
+            self,
+        )
+        .bind_deferred_with_metadata(EMBEDDING_CLIENT, resolver)?
+        .finish()
     }
 }
 

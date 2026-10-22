@@ -1453,7 +1453,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
             name: "source_middleware_studio",
             journals: crate::journal::disk_journals(path.clone()),
             stages: {
-                input = source!(Item => input_handler with {
+                input = source!(Item with {
                     circuit_breaker()
                         .count_window(2)
                         .minimum_calls(2)
@@ -1462,7 +1462,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
                     // The initial burst funds all 1,000 admissions. Their
                     // utilisation produces a mode change without a long wait.
                     rate_limit(1.0).burst_capacity(2000.0)
-                });
+                } => input_handler);
                 output = sink!(Item => output_handler);
             },
             topology: { input |> output; }
@@ -1975,7 +1975,6 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
                 crate::journal::disk_journals(directory.path().to_owned()),
                 lowered,
                 context,
-                None,
             )
             .await
         } else {
@@ -1984,7 +1983,6 @@ async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
                 crate::journal::memory_journals(),
                 lowered,
                 context,
-                None,
             )
             .await
         }

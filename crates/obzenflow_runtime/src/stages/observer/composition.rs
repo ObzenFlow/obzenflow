@@ -1043,7 +1043,7 @@ impl fmt::Debug for StageObserverBundle {
 mod tests {
     use super::*;
     use crate::effects::{
-        Effect, EffectContext, EffectError, EffectSafety, Portless, RecordedReply,
+        AnswersEffect, Call, CallRequest, EffectContext, EffectError, Idempotent, System,
     };
     use crate::messaging::upstream_subscription::StageInputPosition;
     use crate::stages::observer::EffectObserverOutcome;
@@ -1207,62 +1207,66 @@ mod tests {
     impl SinkDeliveryObserver for NoopObserver {}
     impl StageLifecycleObserver for NoopObserver {}
 
-    #[derive(Clone, Debug)]
-    struct DeclaredEffectA;
+    #[crate::effects::port(effects = crate::effects)]
+    struct FixturePort;
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct FixtureFact;
+
+    impl obzenflow_core::TypedPayload for FixtureFact {
+        const EVENT_TYPE: &'static str = "observer.fixture_fact";
+    }
+
+    #[derive(Clone, Debug, serde::Serialize)]
+    struct DeclaredRequestA;
 
     #[async_trait::async_trait]
-    impl Effect for DeclaredEffectA {
+    impl CallRequest for DeclaredRequestA {
         const EFFECT_TYPE: &'static str = "effect.a";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = Portless;
-        type Outcome = ();
-        type OutcomeSemantics = RecordedReply;
+        type Safety = Idempotent;
+        type Port = FixturePort;
+        type Outcome = FixtureFact;
 
-        fn label(&self) -> &str {
-            "a"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(())
+        async fn call(
+            &self,
+            _: &FixturePort,
+            _: &mut EffectContext,
+        ) -> Result<FixtureFact, EffectError> {
+            Ok(FixtureFact)
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct DeclaredEffectB;
+    #[derive(Clone, Debug, serde::Serialize)]
+    struct DeclaredRequestB;
 
     #[async_trait::async_trait]
-    impl Effect for DeclaredEffectB {
+    impl CallRequest for DeclaredRequestB {
         const EFFECT_TYPE: &'static str = "effect.b";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = Portless;
-        type Outcome = ();
-        type OutcomeSemantics = RecordedReply;
+        type Safety = Idempotent;
+        type Port = FixturePort;
+        type Outcome = FixtureFact;
 
-        fn label(&self) -> &str {
-            "b"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(())
+        async fn call(
+            &self,
+            _: &FixturePort,
+            _: &mut EffectContext,
+        ) -> Result<FixtureFact, EffectError> {
+            Ok(FixtureFact)
         }
     }
 
     fn declared_effect(effect_type: &'static str) -> EffectDeclaration {
+        let system = System::eager("fixture", Arc::new(FixturePort)).expect("fixture system");
         match effect_type {
-            DeclaredEffectA::EFFECT_TYPE => EffectDeclaration::of::<DeclaredEffectA>(),
-            DeclaredEffectB::EFFECT_TYPE => EffectDeclaration::of::<DeclaredEffectB>(),
+            DeclaredRequestA::EFFECT_TYPE => {
+                AnswersEffect::<Call<DeclaredRequestA>>::declaration(&system, None)
+            }
+            DeclaredRequestB::EFFECT_TYPE => {
+                AnswersEffect::<Call<DeclaredRequestB>>::declaration(&system, None)
+            }
             _ => panic!("unknown observer fixture effect"),
         }
+        .expect("fixture declaration")
     }
 
     fn binding_for(surface: ObserverSurface) -> ObserverBinding {

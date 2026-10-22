@@ -21,23 +21,7 @@ fn flow_surviving_arm_matrix_compiles() {
     let definitions = [
         deferred_flow(move || {
             flow! {
-                name: "flow_named_without_backpressure",
-                journals: memory_journals(),
-                stages: {},
-                topology: {}
-            }
-        }),
-        deferred_flow(move || {
-            flow! {
-                name: "flow_named_with_backpressure",
-                journals: memory_journals(),
-                backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1),
-                stages: {},
-                topology: {}
-            }
-        }),
-        deferred_flow(move || {
-            flow! {
+                name: "flow_named",
                 journals: memory_journals(),
                 stages: {},
                 topology: {}
@@ -46,7 +30,6 @@ fn flow_surviving_arm_matrix_compiles() {
         deferred_flow(move || {
             flow! {
                 journals: memory_journals(),
-                backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1),
                 stages: {},
                 topology: {}
             }
@@ -60,15 +43,8 @@ fn flow_surviving_arm_matrix_compiles() {
 fn test_flow_surviving_arm_matrix_compiles() {
     let futures = (
         test_flow! {
-            name: "test_flow_named_without_backpressure",
+            name: "test_flow_named",
             journals: memory_journals(),
-            stages: {},
-            topology: {}
-        },
-        test_flow! {
-            name: "test_flow_named_with_backpressure",
-            journals: memory_journals(),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1),
             stages: {},
             topology: {}
         },
@@ -78,8 +54,15 @@ fn test_flow_surviving_arm_matrix_compiles() {
             topology: {}
         },
         test_flow! {
+            build_context: obzenflow_runtime::run_context::FlowBuildContext::for_tests(),
+            name: "test_flow_named_with_build_context",
             journals: memory_journals(),
-            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1),
+            stages: {},
+            topology: {}
+        },
+        test_flow! {
+            build_context: obzenflow_runtime::run_context::FlowBuildContext::for_tests(),
+            journals: memory_journals(),
             stages: {},
             topology: {}
         },

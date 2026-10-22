@@ -488,10 +488,10 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 // Source-boundary policies (FLOWIP-115a): the breaker protects
                 // the external HN HTTP dependency; the limiter paces API reads.
                 // Replay reconstructs archived stories and suppresses both.
-                hn_stories = async_source!(HnStory => hn_source with {
+                hn_stories = async_source!(HnStory with {
                     source_breaker,
                     source_limiter
-                });
+                } => hn_source);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
 

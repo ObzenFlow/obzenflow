@@ -34,25 +34,49 @@ macro_rules! parse_topology {
 
 /// Declare an ObzenFlow pipeline as a single expression.
 ///
-/// The optional sections are name and flow-level backpressure.
-/// Middleware is declared on individual stages only (FLOWIP-115r).
+/// The optional section is the flow's name. Middleware is declared on
+/// individual stages only, and backpressure comes from configuration, under
+/// `[runtime.backpressure.flow]` or `[runtime.backpressure.stages.<stage>]`.
+///
+/// ```compile_fail
+/// let _ = obzenflow_dsl::flow! {
+///     name: "retired_backpressure_field",
+///     journals: journals,
+///     backpressure: enforced(64),
+///     stages: {},
+///     topology: {}
+/// };
+/// ```
 #[macro_export]
 macro_rules! flow {
     {
         name: $flow_name:literal,
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+        compile_error!("flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
     }};
 
     {
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+        compile_error!("flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
+    }};
+
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        backpressure: $($rest:tt)*
+    } => {{
+        compile_error!("`backpressure:` was removed; set backpressure in configuration, under `[runtime.backpressure.flow]` or `[runtime.backpressure.stages.<stage>]`");
+    }};
+
+    {
+        journals: $journals:expr,
+        backpressure: $($rest:tt)*
+    } => {{
+        compile_error!("`backpressure:` was removed; set backpressure in configuration, under `[runtime.backpressure.flow]` or `[runtime.backpressure.stages.<stage>]`");
     }};
 
     // FLOWIP-115r: keep a deliberate diagnostic for both empty and non-empty
@@ -82,7 +106,6 @@ macro_rules! flow {
     {
         name: $flow_name:literal,
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -123,18 +146,12 @@ macro_rules! flow {
                 // Preserve the pre-substrate validation boundary: these
                 // expressions run only after composite lowering succeeds.
                 let journals = $journals;
-                #[allow(unused_mut)]
-                let mut flow_backpressure_clause = None;
-                $(
-                    flow_backpressure_clause = Some($flow_bp);
-                )?
 
                 $crate::dsl::flow_builder::build_flow(
                     $flow_name,
                     journals,
                     lowered,
                     __build_ctx,
-                    flow_backpressure_clause,
                 )
                 .await
                 .map($crate::dsl::flow_builder::FlowBuildOutput::into_handle)
@@ -145,7 +162,6 @@ macro_rules! flow {
     // Canonical default-name form.
     {
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -158,7 +174,6 @@ macro_rules! flow {
         $crate::flow! {
             name: "default",
             journals: $journals,
-            $(backpressure: $flow_bp,)?
             stages: {
                 $($stage_name = $descriptor;)*
             },
@@ -172,7 +187,6 @@ macro_rules! flow {
     {
         name: $flow_name:literal,
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         bindings: $($retired_bindings:tt)*
     } => {{
         compile_error!(
@@ -183,7 +197,6 @@ macro_rules! flow {
 
     {
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         bindings: $($retired_bindings:tt)*
     } => {{
         compile_error!(
@@ -204,19 +217,34 @@ macro_rules! test_flow {
         $(build_context: $build_ctx:expr,)?
         name: $flow_name:literal,
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("test_flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+        compile_error!("test_flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
     }};
 
     {
         $(build_context: $build_ctx:expr,)?
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         effect_ports $($rest:tt)*
     } => {{
-        compile_error!("test_flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+        compile_error!("test_flow! has no effect_ports slot; a stage's handler holds the systems it calls in `#[system]` fields");
+    }};
+
+    {
+        $(build_context: $build_ctx:expr,)?
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        backpressure: $($rest:tt)*
+    } => {{
+        compile_error!("`backpressure:` was removed; set backpressure in configuration, under `[runtime.backpressure.flow]` or `[runtime.backpressure.stages.<stage>]`");
+    }};
+
+    {
+        $(build_context: $build_ctx:expr,)?
+        journals: $journals:expr,
+        backpressure: $($rest:tt)*
+    } => {{
+        compile_error!("`backpressure:` was removed; set backpressure in configuration, under `[runtime.backpressure.flow]` or `[runtime.backpressure.stages.<stage>]`");
     }};
 
     {
@@ -247,7 +275,6 @@ macro_rules! test_flow {
         $(build_context: $build_ctx:expr,)?
         name: $flow_name:literal,
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -288,18 +315,12 @@ macro_rules! test_flow {
                 $crate::dsl::composites::lower_composites(members, connections)?;
 
             let journals = $journals;
-            #[allow(unused_mut)]
-            let mut flow_backpressure_clause = None;
-            $(
-                flow_backpressure_clause = Some($flow_bp);
-            )?
 
             let output = $crate::dsl::flow_builder::build_flow(
                 $flow_name,
                 journals,
                 lowered,
                 __build_ctx,
-                flow_backpressure_clause,
             )
             .await?;
             output.into_test_harness()
@@ -310,7 +331,6 @@ macro_rules! test_flow {
     {
         $(build_context: $build_ctx:expr,)?
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -324,7 +344,6 @@ macro_rules! test_flow {
             $(build_context: $build_ctx,)?
             name: "default",
             journals: $journals,
-            $(backpressure: $flow_bp,)?
             stages: {
                 $($stage_name = $descriptor;)*
             },
@@ -338,7 +357,6 @@ macro_rules! test_flow {
         $(build_context: $build_ctx:expr,)?
         name: $flow_name:literal,
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         bindings: $($retired_bindings:tt)*
     } => {{
         compile_error!(
@@ -350,7 +368,6 @@ macro_rules! test_flow {
     {
         $(build_context: $build_ctx:expr,)?
         journals: $journals:expr,
-        $(backpressure: $flow_bp:expr,)?
         bindings: $($retired_bindings:tt)*
     } => {{
         compile_error!(

@@ -1,0 +1,29 @@
+name: Advisories
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Verify lockfile
+        run: cargo fetch --locked
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo-deny advisories
+        run: cargo deny --all-features check advisories

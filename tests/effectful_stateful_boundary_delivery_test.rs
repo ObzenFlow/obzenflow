@@ -18,7 +18,9 @@ use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_infinite_source, effectful_stateful, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
+use obzenflow_runtime::effects::{
+    Call, CallRequest, EffectContext, EffectError, Effects, Idempotent, System,
+};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -27,7 +29,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,6 +143,7 @@ impl EffectPolicy for BoundaryProbePolicy {
     fn observe(&self, _attempt: &EffectAttemptOutcome<'_>, _ctx: &mut MiddlewareContext) {}
 }
 
+#[obzenflow::port]
 #[derive(Debug)]
 struct EffectGate {
     starts: Semaphore,
@@ -177,34 +179,26 @@ impl EffectGate {
     }
 }
 
-#[derive(Clone, Debug)]
-struct BoundaryProbeEffect {
+#[derive(Clone, Debug, Serialize)]
+struct BoundaryProbeRequest {
     value: u64,
-    gate: Arc<EffectGate>,
 }
 
 #[async_trait]
-impl Effect for BoundaryProbeEffect {
+impl CallRequest for BoundaryProbeRequest {
     const EFFECT_TYPE: &'static str = "effectful_stateful_boundary.probe";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = obzenflow_runtime::effects::Portless;
+    type Safety = Idempotent;
+    type Port = EffectGate;
     type Outcome = BoundaryProbeFact;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "boundary-probe"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.gate.calls.fetch_add(1, Ordering::SeqCst);
-        self.gate.starts.add_permits(1);
-        self.gate
-            .releases
+    async fn call(
+        &self,
+        gate: &EffectGate,
+        _ctx: &mut EffectContext,
+    ) -> Result<BoundaryProbeFact, EffectError> {
+        gate.calls.fetch_add(1, Ordering::SeqCst);
+        gate.starts.add_permits(1);
+        gate.releases
             .acquire()
             .await
             .expect("effect-release semaphore remains open")
@@ -213,9 +207,20 @@ impl Effect for BoundaryProbeEffect {
     }
 }
 
-#[derive(Clone, Debug)]
+type BoundaryProbeEffect = Call<BoundaryProbeRequest>;
+
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct BoundaryProbeHandler {
-    gate: Arc<EffectGate>,
+    #[system]
+    gate: System<EffectGate>,
+}
+
+impl BoundaryProbeHandler {
+    fn new(gate: Arc<EffectGate>) -> Self {
+        Self {
+            gate: System::eager("effect-gate", gate).expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -235,11 +240,7 @@ impl EffectfulStatefulHandler for BoundaryProbeHandler {
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        fx.perform(BoundaryProbeEffect {
-            value: input.value,
-            gate: self.gate.clone(),
-        })
-        .await?;
+        fx.call(BoundaryProbeRequest { value: input.value }).await?;
         Ok(fx.complete()?)
     }
 
@@ -305,7 +306,7 @@ fn build_probe_flow(
         let source = ChannelSource {
             receiver: Arc::new(Mutex::new(receiver)),
         };
-        let handler = BoundaryProbeHandler { gate };
+        let handler = BoundaryProbeHandler::new(gate);
         let policy: Box<dyn MiddlewareFactory> = Box::new(BoundaryProbeFactory { probe });
 
         Ok(flow! {
@@ -316,7 +317,7 @@ fn build_probe_flow(
                 input = async_infinite_source!(BoundaryProbeInput => source);
                 guarded = effectful_stateful!(
                     BoundaryProbeInput -> BoundaryProbeFact
-                    uses BoundaryProbeEffect with policy
+                    with policy
                     => handler,
                 );
                 output = sink!(BoundaryProbeFact => NoopSink);

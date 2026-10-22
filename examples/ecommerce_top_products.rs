@@ -309,9 +309,9 @@ fn main() -> Result<()> {
 
                 stages: {
                     // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-                    orders = source!(OrderEvent => orders_handler with {
+                    orders = source!(OrderEvent with {
                         rate_limit(3.0)
-                    }); // Pace source intake for demo visibility.
+                    } => orders_handler); // Pace source intake for demo visibility.
 
                     // Cumulative score and count per product.
                     top_products = stateful!(OrderEvent -> TopProductsUpdate => top_products_handler);

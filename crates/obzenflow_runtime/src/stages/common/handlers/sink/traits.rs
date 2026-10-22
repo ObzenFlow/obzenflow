@@ -36,7 +36,7 @@
 //! let shipping = ShippingConnector::new(queue_config);
 //! let production = sink!(PaymentAuthorized => shipping);
 //! let audit = RecordAuthorization;
-//! let audit_stage = sink!(PaymentAuthorized => audit, delivery: idempotent);
+//! let audit_stage = sink!(PaymentAuthorized => audit.idempotent());
 //! ```
 //!
 //! Buffered destinations use `SinkWriteContext::defer` and return typed commit

@@ -67,7 +67,7 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
 
             stages: {
                 src = source!(GuardEvent => placeholder!());
-                snk = sink!(GuardEvent => guard_sink, delivery: idempotent);
+                snk = sink!(GuardEvent => guard_sink.idempotent());
             },
 
             topology: {

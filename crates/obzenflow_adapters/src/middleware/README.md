@@ -55,9 +55,9 @@ Application diagnostics use ordinary Rust tools such as `tracing`.
 Control policies protect a concrete live-I/O operation: a source poll, effect
 invocation, sink delivery, or hosted ingress request. Use the corresponding
 inert `rate_limit(...)`, `circuit_breaker()`, and `retry()` values from
-`obzenflow::middleware` in an implementation's `with { ... }` group or a named
-effect's `uses Effect with { ... }` group. Flow construction validates the
-complete group and allocates each policy's runtime state.
+`obzenflow::middleware` in an implementation's `with { ... }` group, built with
+`.for_effect::<E>()` when the stage performs several effects. Flow construction
+validates the complete group and allocates each policy's runtime state.
 
 Retry protects a declared effect and can be used alone or alongside a limiter
 and breaker. The group resolves into one coordinated effect policy; declaration

@@ -2,18 +2,18 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::case_system::CaseRequest;
+use super::case_system::{CaseRequest, CaseSystemPort};
 use super::domain::{
     AccountHistory, AccountKey, AlertRaised, AlertSubject, CaseOpened, CaseUnavailable, Day,
     FxRate, PricedTransaction, ProfiledTransaction, ReasonCode, Reasons, RulesVersion,
     ScoreUnavailable, Transaction, TransactionCleared,
 };
 use super::money::Currency;
-use super::risk_engine::ScoreRequest;
+use super::risk_engine::{RiskEnginePort, ScoreRequest};
 use super::vendors::{OpenCase, ScoreTransaction, CASE_SYSTEM_SOURCE, RISK_ENGINE_SOURCE};
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
-use obzenflow::effects::{EffectError, Effects, StageCompletion};
+use obzenflow::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
 use obzenflow::error::HandlerError;
 use obzenflow::stages::joins::{
     AsOfReferenceView, JoinReferenceView, TypedAsOfJoinHandler, TypedJoinHandler,
@@ -172,8 +172,11 @@ pub type ScoreOutput =
     obzenflow::schema::stage_fact_set![TransactionCleared, AlertRaised, ScoreUnavailable];
 pub type ScoreEffects = obzenflow::effects::effect_set![ScoreTransaction];
 
-#[derive(Clone, Debug)]
-pub struct ScoreHandler;
+#[derive(Clone, Debug, EffectHandler)]
+pub struct ScoreHandler {
+    #[system]
+    pub risk_engine: System<dyn RiskEnginePort>,
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for ScoreHandler {
@@ -186,9 +189,8 @@ impl EffectfulTransformHandler for ScoreHandler {
         profiled: ProfiledTransaction,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        let binding = fx.project_named_effect::<ScoreTransaction, _>()?;
         let request = ScoreRequest::for_transaction(&profiled);
-        if let Err(error) = fx.perform(ScoreTransaction::new(request, binding)).await {
+        if let Err(error) = fx.call(request).await {
             let Some(reason) = unavailable_reason(&error, RISK_ENGINE_SOURCE) else {
                 return Err(error.into());
             };
@@ -214,8 +216,11 @@ impl EffectfulTransformHandler for ScoreHandler {
 pub type OpenCaseOutput = obzenflow::schema::stage_fact_set![CaseOpened, CaseUnavailable];
 pub type OpenCaseEffects = obzenflow::effects::effect_set![OpenCase];
 
-#[derive(Clone, Debug)]
-pub struct OpenCaseHandler;
+#[derive(Clone, Debug, EffectHandler)]
+pub struct OpenCaseHandler {
+    #[system]
+    pub case_system: System<dyn CaseSystemPort>,
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for OpenCaseHandler {
@@ -228,11 +233,8 @@ impl EffectfulTransformHandler for OpenCaseHandler {
         alert: AlertRaised,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        let binding = fx.project_named_effect::<OpenCase, _>()?;
-        if let Err(error) = fx
-            .perform(OpenCase::new(CaseRequest::for_alert(&alert), binding))
-            .await
-        {
+        let request = CaseRequest::for_alert(&alert);
+        if let Err(error) = fx.call(request).await {
             let Some(reason) = unavailable_reason(&error, CASE_SYSTEM_SOURCE) else {
                 return Err(error.into());
             };
@@ -267,7 +269,7 @@ mod tests {
     use super::super::domain::{AlertId, PaymentFormat, TxnId, AMLWORLD_TIME};
     use super::super::money::Money;
     use super::*;
-    use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
+    use obzenflow::effects::RetryDisposition;
 
     fn payment(txn_id: u64, timestamp: &str, from: &str, to: &str) -> Transaction {
         let amount = Money::parse(Currency::UsDollar, "250.00").expect("a booked amount");
@@ -387,12 +389,11 @@ mod tests {
     }
 
     fn refused(system: &str) -> EffectError {
-        EffectError::DependencyFailed {
-            failure_source: EffectFailureSource::new(system),
-            code: EffectFailureCode::new("ledger_write_failed"),
-            message: format!("the {system} could not record the call"),
-            retry: RetryDisposition::Retryable,
-        }
+        EffectError::unavailable(
+            system,
+            "unavailable",
+            format!("the {system} is unavailable"),
+        )
     }
 
     #[test]

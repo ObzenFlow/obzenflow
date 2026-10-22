@@ -5,8 +5,8 @@
 //! Compiler-checked effectful stage authoring facade (FLOWIP-120z).
 
 use super::{
-    assert_distinct_effect_set, Effect, EffectBindingUse, EffectError, EffectInvocationContext,
-    EffectSet, EffectsCore, NamedEffect, StageCompletion,
+    assert_distinct_effect_set, Call, CallRequest, Effect, EffectBindingUse, EffectError,
+    EffectInvocationContext, EffectSet, EffectsCore, NamedEffect, StageCompletion,
 };
 use obzenflow_core::{
     assert_distinct_stage_fact_set, ChainEvent, Member, StageFactSet, SubsetOf, TypedPayload,
@@ -43,15 +43,12 @@ where
 /// handler's declared capability set.
 ///
 /// Its blanket implementation preserves the existing [`Member`] proof while
-/// keeping effect permission errors in the vocabulary of the stage `uses` clause
-/// and `AllowedEffects`.
+/// keeping effect permission errors in the vocabulary of `AllowedEffects`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "effect `{Self}` is not declared in this handler's `AllowedEffects` set",
     label = "`{Self}` cannot be performed by this handler",
-    note = "add `{Self}` to the canonical stage `uses` clause (using `transactional(...)`, \
-            `via`, or bare `with` when required), then mirror its effect type in the handler's \
-            `AllowedEffects`, or remove this `perform` call (FLOWIP-120z)"
+    note = "add `{Self}` to the handler's `AllowedEffects`, or remove this call"
 )]
 pub trait AllowedEffectsAllowEffect<AllowedEffects, At> {}
 
@@ -133,8 +130,10 @@ where
         self.core.emit(fact).await
     }
 
-    /// Perform one declared effect whose complete outcome fact set is a
-    /// subset of this handler's output set.
+    /// Runtime-owned integration SPI that performs one declared first-party
+    /// effect whose complete outcome fact set is a subset of this handler's
+    /// output set.
+    #[doc(hidden)]
     pub async fn perform<E, EffectAt, OutcomeProof>(
         &mut self,
         effect: E,
@@ -150,6 +149,200 @@ where
         // support must not enlarge an ordinary transactional handler future
         // enough to overflow the executor's default worker stack.
         Box::pin(self.core.perform(effect)).await
+    }
+
+    /// Perform one request through the system the handler holds for its port.
+    ///
+    /// ```
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_core::TypedPayload;
+    /// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+    /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+    /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+    /// # use serde::{Deserialize, Serialize};
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Order;
+    /// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "docs.call.order"; }
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Charged;
+    /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.call.charged"; }
+    /// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+    /// #[derive(Clone, Debug, Serialize)]
+    /// struct ChargeCardRequest;
+    ///
+    /// #[async_trait]
+    /// impl CallRequest for ChargeCardRequest {
+    ///     const EFFECT_TYPE: &'static str = "docs.call.charge_card";
+    ///     type Safety = Idempotent;
+    ///     type Port = dyn CardPort;
+    ///     type Outcome = Charged;
+    ///
+    ///     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> {
+    ///         Ok(card.charge())
+    ///     }
+    /// }
+    ///
+    /// type ChargeCard = Call<ChargeCardRequest>;
+    ///
+    /// #[derive(Clone, Debug, EffectHandler)]
+    /// # #[effect_handler(effects = obzenflow_runtime::effects)]
+    /// struct Checkout {
+    ///     #[system]
+    ///     card: System<dyn CardPort>,
+    /// }
+    ///
+    /// #[async_trait]
+    /// impl EffectfulTransformHandler for Checkout {
+    ///     type Input = Order;
+    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
+    ///
+    ///     async fn process(
+    ///         &self,
+    ///         _: Order,
+    ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+    ///         fx.call(ChargeCardRequest).await?;
+    ///         Ok(fx.complete()?)
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// A request the handler's effect set does not declare does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_core::TypedPayload;
+    /// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+    /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+    /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+    /// # use serde::{Deserialize, Serialize};
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Order;
+    /// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "docs.call.order"; }
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Charged;
+    /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.call.charged"; }
+    /// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+    /// # #[derive(Clone, Debug, Serialize)]
+    /// # struct ChargeCardRequest;
+    /// # #[async_trait]
+    /// # impl CallRequest for ChargeCardRequest {
+    /// #     const EFFECT_TYPE: &'static str = "docs.call.charge_card";
+    /// #     type Safety = Idempotent;
+    /// #     type Port = dyn CardPort;
+    /// #     type Outcome = Charged;
+    /// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+    /// # }
+    /// # #[derive(Clone, Debug, EffectHandler)]
+    /// # #[effect_handler(effects = obzenflow_runtime::effects)]
+    /// # struct Checkout { card: System<dyn CardPort> }
+    /// #[async_trait]
+    /// impl EffectfulTransformHandler for Checkout {
+    ///     type Input = Order;
+    ///     type Output = obzenflow_core::stage_fact_set![Charged];
+    ///     type AllowedEffects = obzenflow_runtime::effect_set![];
+    ///
+    ///     async fn process(
+    ///         &self,
+    ///         _: Order,
+    ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+    ///         fx.call(ChargeCardRequest).await?;
+    ///         Ok(fx.complete()?)
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Neither does a request whose outcome is outside the handler's output set:
+    ///
+    /// ```compile_fail,E0277
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_core::TypedPayload;
+    /// # use obzenflow_runtime::effects::{Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, Idempotent, StageCompletion, System};
+    /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+    /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+    /// # use serde::{Deserialize, Serialize};
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Order;
+    /// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "docs.call.order"; }
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Charged;
+    /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.call.charged"; }
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Shipped;
+    /// # impl TypedPayload for Shipped { const EVENT_TYPE: &'static str = "docs.call.shipped"; }
+    /// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+    /// # #[derive(Clone, Debug, Serialize)]
+    /// # struct ChargeCardRequest;
+    /// # #[async_trait]
+    /// # impl CallRequest for ChargeCardRequest {
+    /// #     const EFFECT_TYPE: &'static str = "docs.call.charge_card";
+    /// #     type Safety = Idempotent;
+    /// #     type Port = dyn CardPort;
+    /// #     type Outcome = Charged;
+    /// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+    /// # }
+    /// # type ChargeCard = Call<ChargeCardRequest>;
+    /// # #[derive(Clone, Debug, EffectHandler)]
+    /// # #[effect_handler(effects = obzenflow_runtime::effects)]
+    /// # struct Checkout { #[system] card: System<dyn CardPort> }
+    /// #[async_trait]
+    /// impl EffectfulTransformHandler for Checkout {
+    ///     type Input = Order;
+    ///     type Output = obzenflow_core::stage_fact_set![Shipped];
+    ///     type AllowedEffects = obzenflow_runtime::effect_set![ChargeCard];
+    ///
+    ///     async fn process(
+    ///         &self,
+    ///         _: Order,
+    ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+    ///         fx.call(ChargeCardRequest).await?;
+    ///         Ok(fx.complete()?)
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// A value that is not a request does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// # use async_trait::async_trait;
+    /// # use obzenflow_core::TypedPayload;
+    /// # use obzenflow_runtime::effects::{EffectHandler, Effects, StageCompletion};
+    /// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+    /// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+    /// # use serde::{Deserialize, Serialize};
+    /// # #[derive(Clone, Debug, Serialize, Deserialize)]
+    /// # struct Order;
+    /// # impl TypedPayload for Order { const EVENT_TYPE: &'static str = "docs.call.order"; }
+    /// # #[derive(Clone, Debug, EffectHandler)]
+    /// # #[effect_handler(effects = obzenflow_runtime::effects)]
+    /// # struct Stamper;
+    /// #[async_trait]
+    /// impl EffectfulTransformHandler for Stamper {
+    ///     type Input = Order;
+    ///     type Output = Order;
+    ///     type AllowedEffects = obzenflow_runtime::effect_set![];
+    ///
+    ///     async fn process(
+    ///         &self,
+    ///         order: Order,
+    ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+    ///         fx.call(order).await?;
+    ///         Ok(fx.complete()?)
+    ///     }
+    /// }
+    /// ```
+    pub async fn call<R, At, Proof>(&mut self, request: R) -> Result<R::Outcome, EffectError>
+    where
+        R: CallRequest,
+        Call<R>:
+            AllowedEffectsAllowEffect<AllowedEffects, At> + EffectOutcomeFitsOutput<Output, Proof>,
+    {
+        let projection = self.core.project_named_effect::<Call<R>>()?;
+        Box::pin(self.core.perform(Call::new(request, projection))).await
     }
 
     /// Capture deterministic ambient data. Capture records are framework

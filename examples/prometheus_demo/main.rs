@@ -24,7 +24,6 @@
 
 use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
-use obzenflow::flow::backpressure::enforced;
 use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
@@ -253,7 +252,7 @@ pub(crate) fn flow_definition(
 }
 
 /// The same demo with a shorter outage interval for bounded integration proofs.
-/// The breaker duration, middleware, backpressure, and business path stay intact.
+/// The breaker duration, middleware, and business path stay intact.
 pub(crate) fn flow_definition_with_outage_interval(
     total_events: usize,
     journal_root: std::path::PathBuf,
@@ -306,26 +305,24 @@ fn flow_definition_with_options(
         Ok(flow! {
             name: "prometheus_demo",
             journals: disk_journals(journal_root),
-            // Explicit demo defaults; operator configuration can override them.
-            backpressure: enforced(64).stall_timeout_ms(30_000),
 
             stages: {
                 // The simulated service outage belongs at the live source boundary.
                 // Pure transform errors still follow their existing error-journal path.
                 high_volume_source = match source_rate_limit {
-                    SourceRateLimit::Enabled => source!(DataRequest => high_volume_source_handler with {
+                    SourceRateLimit::Enabled => source!(DataRequest with {
                         circuit_breaker()
                             .consecutive_failures(1)
                             .open_for(SOURCE_BREAKER_COOLDOWN)
                             .probes(1),
                         rate_limit(1000.0)
-                    }),
-                    SourceRateLimit::Disabled => source!(DataRequest => high_volume_source_handler with {
+                    } => high_volume_source_handler),
+                    SourceRateLimit::Disabled => source!(DataRequest with {
                         circuit_breaker()
                             .consecutive_failures(1)
                             .open_for(SOURCE_BREAKER_COOLDOWN)
                             .probes(1)
-                    }),
+                    } => high_volume_source_handler),
                 };
                 error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
                 event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);

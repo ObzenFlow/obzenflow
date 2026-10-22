@@ -36,7 +36,8 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect as RuntimeEffect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    System,
 };
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -46,7 +47,6 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::sink::DeliveryProvenance;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -373,45 +373,56 @@ impl TypedFiniteSourceHandler for HookSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct HookEffect {
-    value: u64,
+#[obzenflow::port]
+struct HookService {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct HookRequest {
+    value: u64,
+}
+
 #[async_trait]
-impl RuntimeEffect for HookEffect {
+impl CallRequest for HookRequest {
     const EFFECT_TYPE: &'static str = "middleware_hook_binding.effect";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = HookService;
     type Outcome = HookEffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "hook_effect"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        service: &HookService,
+        _ctx: &mut EffectContext,
+    ) -> Result<HookEffectValue, EffectError> {
+        service.calls.fetch_add(1, Ordering::SeqCst);
         Ok(HookEffectValue {
             value: self.value + 100,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("hook-effect:{}", self.value)))
+impl Keyed for HookRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("hook-effect:{}", self.value))
     }
 }
 
-#[derive(Clone, Debug)]
+type HookEffect = Call<HookRequest>;
+
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct HookTransform {
-    effect_calls: Arc<AtomicUsize>,
+    #[system]
+    service: System<HookService>,
+}
+
+impl HookTransform {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            service: System::eager("hook-service", Arc::new(HookService { calls }))
+                .expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -425,12 +436,7 @@ impl EffectfulTransformHandler for HookTransform {
         input: HookInput,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let result = fx
-            .perform(HookEffect {
-                value: input.value,
-                calls: self.effect_calls.clone(),
-            })
-            .await;
+        let result = fx.call(HookRequest { value: input.value }).await;
 
         let path = match result {
             Ok(value) => format!("effect:{}", value.value),
@@ -509,7 +515,7 @@ fn build_flow(
     let delivered = delivered.clone();
     FlowDefinition::materialize(move |_runtime_config| {
         let hook_source = HookSource::new();
-        let hook_transform = HookTransform { effect_calls };
+        let hook_transform = HookTransform::new(effect_calls);
         let output_sink = DeliveryProbe { delivered };
 
         Ok(flow! {
@@ -517,14 +523,14 @@ fn build_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                input = source!(HookInput => hook_source with {
+                input = source!(HookInput with {
                     HookProofFactory::new(counters.clone(), 1, SourcePoll)
-                });
+                } => hook_source);
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with HookProofFactory::new(counters.clone(), 1, Effect) => hook_transform);
-                output = sink!(HookOutput => output_sink with {
+                    HookInput -> { HookOutput, HookEffectValue } with HookProofFactory::new(counters.clone(), 1, Effect) => hook_transform);
+                output = sink!(HookOutput with {
                     HookProofFactory::new(counters.clone(), 1, SinkDelivery)
-                });
+                } => output_sink);
             },
 
             topology: {
@@ -543,7 +549,7 @@ fn build_failure_cause_flow(
     let delivered = delivered.clone();
     FlowDefinition::materialize(move |_runtime_config| {
         let hook_source = HookSource::new();
-        let hook_transform = HookTransform { effect_calls };
+        let hook_transform = HookTransform::new(effect_calls);
         let output_sink = DeliveryProbe { delivered };
 
         Ok(flow! {
@@ -553,7 +559,7 @@ fn build_failure_cause_flow(
             stages: {
                 input = source!(HookInput => hook_source);
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(BreakerCauseProofFactory) => hook_transform);
+                    HookInput -> { HookOutput, HookEffectValue } with Box::new(BreakerCauseProofFactory) => hook_transform);
                 output = sink!(HookOutput => output_sink);
             },
 
@@ -611,7 +617,7 @@ fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
             else {
                 return None;
             };
-            if record.descriptor.effect_type.as_str() != HookEffect::EFFECT_TYPE {
+            if record.descriptor.effect_type.as_str() != HookRequest::EFFECT_TYPE {
                 return None;
             }
             let EffectOutcomePayload::Failed {

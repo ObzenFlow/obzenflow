@@ -44,10 +44,12 @@ fn deleted_flow_middleware_plumbing_stays_absent() {
             "retired flow-lane token resurfaced in the ordinary builder: {retired}"
         );
     }
-    assert!(
-        builder.contains("clause.declare(&mut __dsl_candidates, ConfigScope::Flow)"),
-        "flow-level backpressure must retain its legitimate flow config scope"
-    );
+    for retired in ["BackpressureClause", "clause.declare("] {
+        assert!(
+            !builder.contains(retired),
+            "backpressure comes only from configuration, yet the builder declares it: {retired}"
+        );
+    }
     assert!(
         builder.contains(".create_handle(config, resources, control_middleware.clone())"),
         "all stages must retain the one shared control aggregator"

@@ -65,7 +65,8 @@ impl TypedFiniteSourceHandler for OneEventSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct HungTransform {
     entered: Arc<Notify>,
     dropped: Arc<AtomicBool>,
@@ -201,7 +202,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
             stages: {
                 numbers = source!(ProbeEvent => one_event_source);
                 hung = effectful_transform!(
-                    ProbeEvent -> ProbeEvent => hung_transform with { handler_observer(
+                    ProbeEvent -> ProbeEvent with { handler_observer(
                             "hung-handler-occurrences",
                             CountsHungHandlerOccurrences {
                                 before: before_callbacks_for_flow,
@@ -213,7 +214,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
                             RecordsHungLifecycle {
                                 phases: lifecycle_phases_for_flow,
                             }
-                        ) },
+                        ) } => hung_transform,
                 );
                 snk = sink!(ProbeEvent => noop_sink);
             },

@@ -12,7 +12,7 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+use obzenflow_runtime::effects::{EffectError, EffectHandler, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -23,6 +23,8 @@ pub(super) const FINALIZE_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.finalize.
 
 type GeneratedFinalizeTypes<Seed, Collected, Out> = fn() -> (Seed, Collected, Out);
 
+#[derive(EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 pub(super) struct GeneratedAiMapHandler<Item, Partial, Role> {
     role: Arc<Role>,
     _types: std::marker::PhantomData<fn() -> (Item, Partial)>,
@@ -54,6 +56,8 @@ impl<Item, Partial, Role> fmt::Debug for GeneratedAiMapHandler<Item, Partial, Ro
     }
 }
 
+#[derive(EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 pub(super) struct GeneratedAiFinalizeHandler<Seed, Collected, Out, Role> {
     role: Arc<Role>,
     _types: std::marker::PhantomData<GeneratedFinalizeTypes<Seed, Collected, Out>>,

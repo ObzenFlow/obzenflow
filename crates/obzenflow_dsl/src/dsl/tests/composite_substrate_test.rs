@@ -12,8 +12,8 @@ mod tests {
 
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::effects::{
-        Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Portless,
-        RecordedReply,
+        AnswersEffect, Call, CallRequest, EffectContext, EffectDeclaration, EffectError,
+        Idempotent, System,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::TransformHandler;
@@ -60,29 +60,29 @@ mod tests {
     payload!(FailedP, "test.branch.failed");
     payload!(UnrelatedP, "test.branch.unrelated");
 
-    #[derive(Clone, Debug)]
-    struct FixtureEffect;
+    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    struct FixturePort;
+
+    #[derive(Clone, Debug, Serialize)]
+    struct FixtureRequest;
 
     #[async_trait::async_trait]
-    impl Effect for FixtureEffect {
+    impl CallRequest for FixtureRequest {
         const EFFECT_TYPE: &'static str = "test.fixture_effect";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = Portless;
-        type Outcome = ();
-        type OutcomeSemantics = RecordedReply;
+        type Safety = Idempotent;
+        type Port = FixturePort;
+        type Outcome = MidP;
 
-        fn label(&self) -> &str {
-            "fixture"
+        async fn call(&self, _: &FixturePort, _: &mut EffectContext) -> Result<MidP, EffectError> {
+            Ok(MidP)
         }
+    }
 
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(())
-        }
+    fn fixture_declaration() -> EffectDeclaration {
+        let system =
+            System::eager("fixture", std::sync::Arc::new(FixturePort)).expect("fixture system");
+        AnswersEffect::<Call<FixtureRequest>>::declaration(&system, None)
+            .expect("fixture declaration")
     }
 
     fn typed_transform(
@@ -95,7 +95,6 @@ mod tests {
             name: name.to_string(),
             handler: Noop,
             observers: vec![],
-            backpressure: None,
         };
         let mut metadata = StageTypingMetadata::transform(input, output, false, None);
         if !extra_outputs.is_empty() {
@@ -139,7 +138,7 @@ mod tests {
         }
 
         fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-            vec![EffectDeclaration::of::<FixtureEffect>()]
+            vec![fixture_declaration()]
         }
 
         async fn create_handle(
@@ -230,7 +229,6 @@ mod tests {
                             name: "worker".to_string(),
                             handler: Noop,
                             observers: vec![],
-                            backpressure: None,
                         },
                     }));
                 ctx.edge("intake", "worker");

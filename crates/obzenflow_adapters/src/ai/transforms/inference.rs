@@ -4,7 +4,7 @@
 
 use crate::ai::{effect_error_to_handler_error, ChatCompletion, ChatEffects};
 use async_trait::async_trait;
-use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::effects::{EffectHandler, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, InferenceHandler};
 
@@ -13,7 +13,8 @@ const INFERENCE_CHAT_COMPLETION_LABEL: &str = "inference.chat_completion";
 /// Hidden bridge from authored inference hooks to the ordinary effectful
 /// transform stage machinery.
 #[doc(hidden)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 pub struct InferenceHandlerAdapter<H> {
     handler: H,
 }

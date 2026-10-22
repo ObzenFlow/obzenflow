@@ -7,7 +7,6 @@
 //! This is the core of the let bindings approach - each stage macro creates a
 //! descriptor that encapsulates both the handler and how to create its supervisor.
 
-use crate::dsl::backpressure_clause::BackpressureClause;
 use crate::dsl::typing::StageTypingMetadata;
 use crate::dsl::StageCreationResult;
 use crate::stage_handle_adapter::StageHandleAdapter;
@@ -29,6 +28,7 @@ use obzenflow_runtime::stages::observer::{
 use obzenflow_runtime::{
     effects::{
         EffectBoundary, EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
+        StageEffectsError,
     },
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
@@ -449,12 +449,6 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// Get the stage name
     fn name(&self) -> &str;
 
-    /// The stage's `backpressure:` clause, when declared (FLOWIP-115e).
-    /// Pure DSL-tier candidate sugar; enforcement is the resolved mode.
-    fn backpressure_clause(&self) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
-        None
-    }
-
     /// Update the stage's runtime name.
     ///
     /// Implementations that carry an internal name field should override this.
@@ -871,7 +865,7 @@ pub(crate) fn validate_authored_effect_declarations(
             )
         {
             return Err(format!(
-                "Effectful stage '{stage_name}' declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
+                "Effectful stage '{stage_name}' performs paid non-idempotent effect '{}' without acknowledging it",
                 declaration.effect_type()
             ));
         }
@@ -888,7 +882,6 @@ pub(crate) struct FiniteSourceDescriptor<H: UnifiedFiniteSourceHandler + 'static
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -897,10 +890,6 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 {
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1028,7 +1017,6 @@ pub(crate) struct AsyncFiniteSourceDescriptor<H: UnifiedAsyncFiniteSourceHandler
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSourceDescriptor<H> {
@@ -1045,7 +1033,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSour
             source_policies: Vec::new(),
             ingress_policy: None,
             observers: Vec::new(),
-            backpressure: None,
         }
     }
 }
@@ -1056,10 +1043,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 {
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1186,7 +1169,6 @@ pub(crate) struct InfiniteSourceDescriptor<H: UnifiedInfiniteSourceHandler + 'st
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -1195,10 +1177,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
 {
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1327,7 +1305,6 @@ pub(crate) struct AsyncInfiniteSourceDescriptor<H: UnifiedAsyncInfiniteSourceHan
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
@@ -1351,7 +1328,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
             source_policies: Vec::new(),
             ingress_policy: None,
             observers: Vec::new(),
-            backpressure: None,
         }
     }
 }
@@ -1368,10 +1344,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescript
 
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1498,7 +1470,6 @@ pub(crate) struct TransformDescriptor<H: TransformHandler + 'static> {
     pub(crate) name: String,
     pub(crate) handler: H,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -1515,10 +1486,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1627,7 +1594,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     }
 }
 
-/// The single control policy declared inline on one `uses` entry.
+/// One middleware value attached to one of a stage's effects, with the site it
+/// was written at.
 pub struct EffectPolicyAttachment {
     pub effect_type: &'static str,
     pub factory: Box<dyn MiddlewareFactory>,
@@ -1656,13 +1624,20 @@ fn validate_effect_policy_attachments(
     for attachment in attachments {
         if !declared_effect_types.contains(attachment.effect_type) {
             return Err(format!(
-                "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'",
+                "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'; `.for_effect::<E>()` must name an effect its handler performs",
                 attachment.effect_type
             ));
         }
     }
 
     Ok(())
+}
+
+fn refuse_effect_row(stage_name: &str, refusal: Option<&StageEffectsError>) -> Result<(), String> {
+    match refusal {
+        Some(refusal) => Err(refusal.for_stage(stage_name)),
+        None => Ok(()),
+    }
 }
 
 fn validate_pre_collection_effect_configuration(
@@ -1742,7 +1717,7 @@ fn materialize_effect_boundary(
             .find(|effect| effect.effect_type() == attachment.effect_type)
             .ok_or_else(|| {
                 format!(
-                    "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'",
+                    "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'; `.for_effect::<E>()` must name an effect its handler performs",
                     attachment.effect_type
                 )
             })?;
@@ -1776,33 +1751,54 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     name: String,
     handler: H,
     effects: Vec<EffectDeclaration>,
+    effect_refusal: Option<StageEffectsError>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    /// Per-effect policy attachments from the `uses` clause.
-    /// (FLOWIP-120c H7).
     effect_policies: Vec<EffectPolicyAttachment>,
     direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
     pass_through_descriptor: Option<obzenflow_core::EventDescriptor>,
     generated_surface: Option<&'static str>,
     generated_owner_kind: &'static str,
-    backpressure: Option<BackpressureClause>,
 }
 
 impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
-    /// Construct an ordinary effectful transform. Generated direct-fact
-    /// admission and raw physical pass-through are intentionally absent.
+    /// Construct an ordinary effectful transform from the effects its
+    /// handler declares and the middleware its row lists in `with`.
+    /// Generated direct-fact admission and raw physical pass-through are
+    /// intentionally absent.
     pub fn new(
         name: impl Into<String>,
         handler: H,
+        effects: Result<Vec<EffectDeclaration>, StageEffectsError>,
+        middleware: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Self {
+        let (effects, effect_refusal) = match effects {
+            Ok(effects) => (effects, None),
+            Err(refusal) => (Vec::new(), Some(refusal)),
+        };
+        Self::from_parts(
+            name,
+            handler,
+            effects,
+            effect_refusal,
+            middleware,
+            Vec::new(),
+        )
+    }
+
+    fn from_parts(
+        name: impl Into<String>,
+        handler: H,
         effects: Vec<EffectDeclaration>,
+        effect_refusal: Option<StageEffectsError>,
         observers: Vec<Box<dyn MiddlewareFactory>>,
         effect_policies: Vec<EffectPolicyAttachment>,
-        backpressure: Option<BackpressureClause>,
     ) -> Self {
         let (effects, effect_policies) = canonicalize_effect_row(effects, effect_policies);
         Self {
             name: name.into(),
             handler,
             effects,
+            effect_refusal,
             observers,
             effect_policies,
             direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
@@ -1810,7 +1806,6 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             pass_through_descriptor: None,
             generated_surface: None,
             generated_owner_kind: "role",
-            backpressure,
         }
     }
 
@@ -1832,7 +1827,8 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
     where
         Input: obzenflow_core::TypedPayload,
     {
-        let mut descriptor = Self::new(name, handler, effects, Vec::new(), effect_policies, None);
+        let mut descriptor =
+            Self::from_parts(name, handler, effects, None, Vec::new(), effect_policies);
         descriptor.direct_fact_plan =
             obzenflow_runtime::stages::resources_builder::DirectFactPlan::generated::<Input>(
                 direct_bound,
@@ -1883,6 +1879,8 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     for EffectfulTransformDescriptor<H>
 {
     fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
+        refuse_effect_row(&self.name, self.effect_refusal.as_ref())
+            .map_err(crate::dsl::error::MiddlewarePlanError::InvalidStageRow)?;
         crate::dsl::attachment_plan::prepare_effects(
             &self.name,
             &self.effects,
@@ -1893,10 +1891,6 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1928,6 +1922,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     }
 
     fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        refuse_effect_row(&self.name, self.effect_refusal.as_ref())?;
         validate_pre_collection_effect_configuration(
             &self.name,
             &self.effects,
@@ -2519,7 +2514,6 @@ pub(crate) struct StatefulDescriptor<H: UnifiedStatefulHandler + 'static> {
     pub(crate) handler: H,
     pub(crate) emit_interval: Option<Duration>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -2536,10 +2530,6 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
 
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -2646,52 +2636,38 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
 /// Input-driven only (FLOWIP-120z): there is no emission interval, because
 /// the effectful surface has no periodic-emission position.
 pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
-    pub name: String,
-    pub handler: H,
+    name: String,
+    handler: H,
     effects: Vec<EffectDeclaration>,
-    /// Per-effect policy attachments from the canonical `uses` clause.
+    effect_refusal: Option<StageEffectsError>,
     effect_policies: Vec<EffectPolicyAttachment>,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     EffectfulStatefulDescriptor<H>
 {
-    pub fn new(name: impl Into<String>, handler: H) -> Self {
+    /// Construct an effectful stateful stage from the effects its handler
+    /// declares and the middleware its row lists in `with`.
+    pub fn new(
+        name: impl Into<String>,
+        handler: H,
+        effects: Result<Vec<EffectDeclaration>, StageEffectsError>,
+        middleware: Vec<Box<dyn MiddlewareFactory>>,
+    ) -> Self {
+        let (effects, effect_refusal) = match effects {
+            Ok(effects) => (effects, None),
+            Err(refusal) => (Vec::new(), Some(refusal)),
+        };
+        let (effects, effect_policies) = canonicalize_effect_row(effects, Vec::new());
         Self {
             name: name.into(),
             handler,
-            effects: Vec::new(),
-            effect_policies: Vec::new(),
-            observers: Vec::new(),
-            backpressure: None,
+            effects,
+            effect_refusal,
+            effect_policies,
+            observers: middleware,
         }
-    }
-
-    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
-        self.observers.push(Box::new(observer));
-        self
-    }
-
-    pub fn with_effect_declarations(mut self, effects: Vec<EffectDeclaration>) -> Self {
-        (self.effects, self.effect_policies) =
-            canonicalize_effect_row(effects, std::mem::take(&mut self.effect_policies));
-        self
-    }
-
-    #[doc(hidden)]
-    pub fn with_effect_row(
-        mut self,
-        effects: Vec<EffectDeclaration>,
-        effect_policies: Vec<EffectPolicyAttachment>,
-    ) -> Self {
-        (self.effects, self.effect_policies) = canonicalize_effect_row(effects, effect_policies);
-        self
-    }
-
-    pub fn build(self) -> Box<dyn StageDescriptor> {
-        Box::new(self)
     }
 }
 
@@ -2700,6 +2676,8 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     for EffectfulStatefulDescriptor<H>
 {
     fn prepare_middleware(&mut self) -> Result<(), crate::dsl::error::MiddlewarePlanError> {
+        refuse_effect_row(&self.name, self.effect_refusal.as_ref())
+            .map_err(crate::dsl::error::MiddlewarePlanError::InvalidStageRow)?;
         crate::dsl::attachment_plan::prepare_effects(
             &self.name,
             &self.effects,
@@ -2710,10 +2688,6 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -2745,6 +2719,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 
     fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        refuse_effect_row(&self.name, self.effect_refusal.as_ref())?;
         validate_pre_collection_effect_configuration(
             &self.name,
             &self.effects,
@@ -3178,17 +3153,12 @@ pub(crate) struct MergeDescriptor {
     pub(crate) first: Option<&'static str>,
     pub(crate) first_phase: Vec<StageId>,
     pub(crate) held: Vec<StageId>,
-    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
 impl StageDescriptor for MergeDescriptor {
     fn name(&self) -> &str {
         &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -3323,10 +3293,8 @@ mod tests {
     };
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
-        transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
-        EffectBindingUse, EffectCommitHandle, EffectContext, EffectError, EffectPortSlotSet,
-        EffectRegistrationBuilder, LogicalEffectBindingName, Named, NamedEffect, RecordedReply,
-        TransactionalEffectPort,
+        Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
+        EffectPortSlotSet, EffectRegistrationBuilder, LogicalEffectBindingName, Named, NamedEffect,
     };
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
@@ -3387,15 +3355,47 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.transactional_declared_output";
     }
 
+    macro_rules! zero_slot_fixture {
+        ($effect:ty) => {
+            impl NamedEffect for $effect {
+                type BindingEvidence = SafetyBindingEvidence;
+
+                fn binding_use(&self) -> &EffectBindingUse<Self> {
+                    &self.binding
+                }
+
+                fn required_slots() -> EffectPortSlotSet {
+                    EffectPortSlotSet::new()
+                }
+            }
+        };
+    }
+
+    fn zero_slot_binding<E>(name: &str) -> EffectBinding<E>
+    where
+        E: NamedEffect<BindingEvidence = SafetyBindingEvidence>,
+    {
+        EffectRegistrationBuilder::<E>::new(
+            LogicalEffectBindingName::new(name).unwrap(),
+            SafetyBindingEvidence,
+        )
+        .finish()
+        .unwrap()
+    }
+
     #[derive(Clone, Debug)]
-    struct MissingKeyEffect;
+    struct MissingKeyEffect {
+        binding: EffectBindingUse<Self>,
+    }
+
+    zero_slot_fixture!(MissingKeyEffect);
 
     #[async_trait]
     impl Effect for MissingKeyEffect {
         const EFFECT_TYPE: &'static str = "test.non_idempotent";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-        type BindingMode = obzenflow_runtime::effects::Portless;
+        type BindingMode = Named<SafetyBindingEvidence>;
 
         type Outcome = DemoTransactionalOutput;
         type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -3414,14 +3414,18 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct BarePaidEffect;
+    struct BarePaidEffect {
+        binding: EffectBindingUse<Self>,
+    }
+
+    zero_slot_fixture!(BarePaidEffect);
 
     #[async_trait]
     impl Effect for BarePaidEffect {
         const EFFECT_TYPE: &'static str = "obzenflow.ai.chat_completion";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
-        type BindingMode = obzenflow_runtime::effects::Portless;
+        type BindingMode = Named<SafetyBindingEvidence>;
 
         type Outcome = ();
         type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
@@ -3440,7 +3444,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
-    struct SafetyBindingEvidence;
+    pub(super) struct SafetyBindingEvidence;
 
     impl EffectBindingEvidence for SafetyBindingEvidence {
         const SCHEMA_VERSION: u32 = 1;
@@ -3501,41 +3505,8 @@ mod tests {
         }
     }
 
-    struct SafetyTransactionalPort;
-
-    #[async_trait]
-    impl<const CLASS: u8> TransactionalEffectPort<NamedSafetyEffect<CLASS>>
-        for SafetyTransactionalPort
-    {
-        async fn execute_and_commit(
-            &self,
-            _effect: NamedSafetyEffect<CLASS>,
-            _ctx: &mut EffectContext,
-            commit: EffectCommitHandle<(), RecordedReply>,
-        ) -> Result<(), EffectError> {
-            commit.commit_success(&()).await?;
-            Ok(())
-        }
-    }
-
     fn safety_binding<const CLASS: u8>() -> EffectBinding<NamedSafetyEffect<CLASS>> {
-        let builder = EffectRegistrationBuilder::<NamedSafetyEffect<CLASS>>::new(
-            LogicalEffectBindingName::new(format!("safety_{CLASS}")).unwrap(),
-            SafetyBindingEvidence,
-        );
-        if CLASS == 3 {
-            builder
-                .bind_eager(
-                    transactional_effect_port_slot::<NamedSafetyEffect<CLASS>>(),
-                    Arc::new(SafetyTransactionalPort)
-                        as Arc<dyn TransactionalEffectPort<NamedSafetyEffect<CLASS>>>,
-                )
-                .unwrap()
-                .finish()
-                .unwrap()
-        } else {
-            builder.finish().unwrap()
-        }
+        zero_slot_binding(&format!("safety_{CLASS}"))
     }
 
     #[test]
@@ -3552,16 +3523,18 @@ mod tests {
 
     #[test]
     fn effect_declaration_constructor_closes_missing_key_strategy() {
-        let declaration = EffectDeclaration::of::<MissingKeyEffect>();
+        let declaration =
+            EffectDeclaration::named(&zero_slot_binding::<MissingKeyEffect>("missing_key"));
         assert_eq!(
             declaration.idempotency_key_policy(),
             IdempotencyKeyPolicy::Required
         );
+        let registry = EffectPortRegistry::collect_from_declarations([&declaration]).unwrap();
 
         validate_effect_declarations(
             "effectful",
             &[declaration],
-            &EffectPortRegistry::new(),
+            &registry,
             obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
         )
         .expect("the public constructor cannot create a missing-key declaration");
@@ -3580,13 +3553,15 @@ mod tests {
 
         assert_eq!(
             error,
-            "Effectful stage 'effectful' attaches policy middleware to undeclared effect 'test.undeclared'"
+            "Effectful stage 'effectful' attaches policy middleware to undeclared effect \
+             'test.undeclared'; `.for_effect::<E>()` must name an effect its handler performs"
         );
     }
 
     #[test]
     fn effect_declaration_validation_requires_explicit_at_least_once_acknowledgement() {
-        let declaration = EffectDeclaration::of::<BarePaidEffect>();
+        let declaration =
+            EffectDeclaration::named(&zero_slot_binding::<BarePaidEffect>("bare_paid"));
 
         let error = validate_effect_declarations(
             "standalone_chat",
@@ -3597,8 +3572,9 @@ mod tests {
         .expect_err("a bare paid effect must be rejected");
         assert_eq!(
             error,
-            "Effectful stage 'standalone_chat' declares paid non-idempotent effect \
-             'obzenflow.ai.chat_completion' without explicit at_least_once(...) acknowledgement"
+            "Effectful stage 'standalone_chat' performs paid non-idempotent effect \
+             'obzenflow.ai.chat_completion' without acknowledging it; add \
+             `.at_least_once::<BarePaidEffect>()` after the handler"
         );
     }
 
@@ -3613,32 +3589,32 @@ mod tests {
             (
                 EffectDeclaration::named_at_least_once(&idempotent),
                 EffectSafety::Idempotent,
-                "at_least_once(...), but its authoritative Effect::SAFETY is Idempotent",
+                "as at-least-once, but its safety is Idempotent",
             ),
             (
                 EffectDeclaration::named_at_least_once(&requires_key),
                 EffectSafety::NonIdempotentRequiresKey,
-                "at_least_once(...), but its authoritative Effect::SAFETY is NonIdempotentRequiresKey",
+                "as at-least-once, but its safety is NonIdempotentRequiresKey",
             ),
             (
                 EffectDeclaration::named_at_least_once(&transactional),
                 EffectSafety::Transactional,
-                "at_least_once(...), but its authoritative Effect::SAFETY is Transactional",
+                "as at-least-once, but its safety is Transactional",
             ),
             (
                 EffectDeclaration::transactional(&idempotent),
                 EffectSafety::Idempotent,
-                "transactional(...), but its authoritative Effect::SAFETY is Idempotent",
+                "as transactional, but its safety is Idempotent",
             ),
             (
                 EffectDeclaration::transactional(&requires_key),
                 EffectSafety::NonIdempotentRequiresKey,
-                "transactional(...), but its authoritative Effect::SAFETY is NonIdempotentRequiresKey",
+                "as transactional, but its safety is NonIdempotentRequiresKey",
             ),
             (
                 EffectDeclaration::transactional(&at_least_once),
                 EffectSafety::NonIdempotentAtLeastOnce,
-                "transactional(...), but its authoritative Effect::SAFETY is NonIdempotentAtLeastOnce",
+                "as transactional, but its safety is NonIdempotentAtLeastOnce",
             ),
         ];
 
@@ -3667,11 +3643,11 @@ mod tests {
         for (declaration, expected) in [
             (
                 EffectDeclaration::named(&at_least_once),
-                "without explicit at_least_once(...) acknowledgement",
+                "add `.at_least_once::<NamedSafetyEffect<2>>()` after the handler",
             ),
             (
                 EffectDeclaration::named(&transactional),
-                "without the transactional(...) wrapper",
+                "add `.transactional::<NamedSafetyEffect<3>>()` after the handler",
             ),
         ] {
             let error = validate_effect_declarations(
@@ -3713,14 +3689,18 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct DemoDuplicateEffect;
+    struct DemoDuplicateEffect {
+        binding: EffectBindingUse<Self>,
+    }
+
+    zero_slot_fixture!(DemoDuplicateEffect);
 
     #[async_trait]
     impl Effect for DemoDuplicateEffect {
         const EFFECT_TYPE: &'static str = "test.duplicate";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = obzenflow_runtime::effects::Portless;
+        type BindingMode = Named<SafetyBindingEvidence>;
 
         type Outcome = DemoTransactionalOutput;
         type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -3739,14 +3719,34 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    pub(super) struct ObserverFixtureEffect<const SECOND: bool>;
+    pub(super) struct ObserverFixtureEffect<const SECOND: bool> {
+        binding: EffectBindingUse<Self>,
+    }
+
+    impl<const SECOND: bool> NamedEffect for ObserverFixtureEffect<SECOND> {
+        type BindingEvidence = SafetyBindingEvidence;
+
+        fn binding_use(&self) -> &EffectBindingUse<Self> {
+            &self.binding
+        }
+
+        fn required_slots() -> EffectPortSlotSet {
+            EffectPortSlotSet::new()
+        }
+    }
+
+    pub(super) fn observer_fixture_declaration<const SECOND: bool>() -> EffectDeclaration {
+        EffectDeclaration::named(&zero_slot_binding::<ObserverFixtureEffect<SECOND>>(
+            if SECOND { "effect_b" } else { "effect_a" },
+        ))
+    }
 
     #[async_trait]
     impl<const SECOND: bool> Effect for ObserverFixtureEffect<SECOND> {
         const EFFECT_TYPE: &'static str = if SECOND { "effect.b" } else { "effect.a" };
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = obzenflow_runtime::effects::Portless;
+        type BindingMode = Named<SafetyBindingEvidence>;
 
         type Outcome = ();
         type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
@@ -3767,7 +3767,7 @@ mod tests {
     #[test]
     fn effect_row_permutations_canonicalize_by_effect_identity() {
         fn declaration<const SECOND: bool>() -> EffectDeclaration {
-            EffectDeclaration::of::<ObserverFixtureEffect<SECOND>>()
+            observer_fixture_declaration::<SECOND>()
         }
 
         fn policy<const SECOND: bool>() -> EffectPolicyAttachment {
@@ -3814,9 +3814,10 @@ mod tests {
 
     #[test]
     fn effect_declaration_validation_rejects_duplicate_effect_type() {
+        let binding = zero_slot_binding::<DemoDuplicateEffect>("duplicate");
         let declarations = [
-            EffectDeclaration::of::<DemoDuplicateEffect>(),
-            EffectDeclaration::of::<DemoDuplicateEffect>(),
+            EffectDeclaration::named(&binding),
+            EffectDeclaration::named(&binding),
         ];
 
         let err = validate_effect_declarations(
@@ -4540,7 +4541,6 @@ mod tests {
             source_policies: vec![Box::new(breaker)],
             ingress_policy: None,
             observers: vec![],
-            backpressure: None,
         };
 
         let control_middleware = Arc::new(ControlMiddlewareAggregator::new());
@@ -4965,7 +4965,7 @@ mod observer_placement_negative_tests {
 
     #[test]
     fn observer_label_conflicts_are_local_to_the_authored_site() {
-        let effect = EffectDeclaration::of::<super::tests::ObserverFixtureEffect<false>>();
+        let effect = super::tests::observer_fixture_declaration::<false>();
         let observer = || {
             Box::new(RecordingEffectObserverFactory {
                 calls: Arc::new(Mutex::new(vec![])),
@@ -5000,8 +5000,8 @@ mod observer_placement_negative_tests {
     #[test]
     fn implementation_control_stays_ambiguous_when_one_of_multiple_effects_is_covered() {
         let effects = vec![
-            EffectDeclaration::of::<super::tests::ObserverFixtureEffect<false>>(),
-            EffectDeclaration::of::<super::tests::ObserverFixtureEffect<true>>(),
+            super::tests::observer_fixture_declaration::<false>(),
+            super::tests::observer_fixture_declaration::<true>(),
         ];
         let mut implementation: Vec<Box<dyn MiddlewareFactory>> =
             vec![Box::new(obzenflow_adapters::middleware::rate_limit(5.0))];
@@ -5158,8 +5158,8 @@ mod observer_placement_negative_tests {
             calls: calls.clone(),
         };
         let effects = [
-            EffectDeclaration::of::<super::tests::ObserverFixtureEffect<false>>(),
-            EffectDeclaration::of::<super::tests::ObserverFixtureEffect<true>>(),
+            super::tests::observer_fixture_declaration::<false>(),
+            super::tests::observer_fixture_declaration::<true>(),
         ];
         let mut observers = StageObserverSet::default();
 

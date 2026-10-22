@@ -104,7 +104,7 @@ async fn legacy_slots_and_override_families_do_not_merge_observer_attachments() 
             journals: obzenflow_infra::journal::memory_journals(),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with {
+                src = source!(TestEvent with {
                     SlotFactory {
                         label: "slot.a",
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -124,7 +124,7 @@ async fn legacy_slots_and_override_families_do_not_merge_observer_attachments() 
                         materialisations: factory_materialisations.clone(),
                     },
                     circuit_breaker().consecutive_failures(3)
-                });
+                } => placeholder!());
                 snk = sink!(TestEvent => placeholder!());
             },
 
@@ -188,7 +188,7 @@ async fn duplicate_builtin_controls_are_rejected_before_materialisation() {
             journals: obzenflow_infra::journal::memory_journals(),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with {
+                src = source!(TestEvent with {
                     SlotFactory {
                         label: "observer",
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -197,7 +197,7 @@ async fn duplicate_builtin_controls_are_rejected_before_materialisation() {
                     },
                     rate_limit(10.0),
                     rate_limit(20.0)
-                });
+                } => placeholder!());
                 snk = sink!(TestEvent => placeholder!());
             },
 
@@ -237,7 +237,7 @@ async fn repeated_observer_labels_are_rejected_before_materialisation() {
             journals: obzenflow_infra::journal::memory_journals(),
 
             stages: {
-                src = source!(TestEvent => placeholder!() with {
+                src = source!(TestEvent with {
                     SlotFactory {
                         label: "same_label",
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -250,7 +250,7 @@ async fn repeated_observer_labels_are_rejected_before_materialisation() {
                         slot: TopologyMiddlewareConfigSlot::RateLimiter,
                         materialisations: factory_materialisations,
                     }
-                });
+                } => placeholder!());
                 snk = sink!(TestEvent => placeholder!());
             },
 

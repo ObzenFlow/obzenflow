@@ -7,7 +7,6 @@ mod replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::application::FlowApplication;
-use obzenflow::flow::backpressure::enforced;
 use obzenflow::flow::{flow, merge, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
@@ -87,34 +86,22 @@ fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition
         let rate = inputs.first_rate;
         let journals = journal_base.clone();
 
-        macro_rules! concat_flow {
-            ($($backpressure:tt)*) => {
-                flow! {
-                    name: "concat_merge_test",
-                    journals: disk_journals(journals),
-                    $($backpressure)*
+        Ok(flow! {
+            name: "concat_merge_test",
+            journals: disk_journals(journals),
 
-                    stages: {
-                        early = source!(Note => first_source with rate_limit(rate));
-                        late = source!(Note => last_source);
-                        merged = merge!(first early: Note => merges::concat);
-                        collector = sink!(Note => collector);
-                    },
-
-                    topology: {
-                        early |> merged;
-                        late |> merged;
-                        merged |> collector;
-                    }
-                }
-            };
-        }
-
-        Ok(match inputs.enforce {
-            Some((window, stall_timeout_ms)) => concat_flow! {
-                backpressure: enforced(window).stall_timeout_ms(stall_timeout_ms),
+            stages: {
+                early = source!(Note with rate_limit(rate) => first_source);
+                late = source!(Note => last_source);
+                merged = merge!(first early: Note => merges::concat);
+                collector = sink!(Note => collector);
             },
-            None => concat_flow! {},
+
+            topology: {
+                early |> merged;
+                late |> merged;
+                merged |> collector;
+            }
         })
     })
 }
@@ -122,15 +109,24 @@ fn build(journal_base: PathBuf, inputs: Inputs, sink: Collect) -> FlowDefinition
 async fn run_to_end(journal_base: &Path, inputs: Inputs, args: Vec<OsString>) -> Result<PathBuf> {
     let mut cli = vec![OsString::from("obzenflow")];
     cli.extend(args);
-    FlowApplication::builder()
-        .with_cli_args(cli)
-        .run_async(build(
-            journal_base.to_path_buf(),
-            inputs,
-            Collect::default(),
-        ))
-        .await
-        .map_err(|error| anyhow!("{error:?}"))?;
+    let mut app = FlowApplication::builder().with_cli_args(cli);
+    if let Some((window, stall_timeout_ms)) = inputs.enforce {
+        let config = journal_base.with_file_name("obzenflow.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = {window}\nstall_timeout_ms = {stall_timeout_ms}\n"
+            ),
+        )?;
+        app = app.with_config_file(config);
+    }
+    app.run_async(build(
+        journal_base.to_path_buf(),
+        inputs,
+        Collect::default(),
+    ))
+    .await
+    .map_err(|error| anyhow!("{error:?}"))?;
     Ok(replay_testkit::latest_run_dir(journal_base))
 }
 

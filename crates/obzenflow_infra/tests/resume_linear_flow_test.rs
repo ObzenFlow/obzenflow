@@ -169,10 +169,10 @@ fn build_flow_with_observer(
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink { delivered };
         let transformed = match observer_calls {
-            Some(calls) => transform!(Tick -> Doubled => transform_handler with { handler_observer(
+            Some(calls) => transform!(Tick -> Doubled with { handler_observer(
                     "live-transform-occurrences",
                     CountsLiveTransformOccurrences { calls }
-                ) }),
+                ) } => transform_handler),
             None => transform!(Tick -> Doubled => transform_handler),
         };
 

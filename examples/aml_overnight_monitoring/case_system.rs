@@ -5,13 +5,11 @@
 use super::domain::{AccountKey, AlertId, AlertRaised, CaseNumber, Reasons, RulesVersion};
 use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
 use async_trait::async_trait;
-use obzenflow::effects::{EffectPortSlot, IdempotencyKey};
+use obzenflow::effects::IdempotencyKey;
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
-
-pub const CASE_SYSTEM: EffectPortSlot<dyn CaseSystemPort> = EffectPortSlot::new("case_system");
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CaseRequest {
@@ -45,6 +43,13 @@ impl LedgerAnswer for CaseAnswer {
 #[error("the case system could not record the call: {0}")]
 pub struct CaseSystemError(#[from] std::io::Error);
 
+impl CaseSystemError {
+    pub fn code(&self) -> &'static str {
+        "ledger_write_failed"
+    }
+}
+
+#[obzenflow::port]
 #[async_trait]
 pub trait CaseSystemPort: Send + Sync {
     async fn open(

@@ -606,9 +606,8 @@ mod tests {
 
     #[test]
     fn the_4a_worked_example_resolves_verbatim() {
-        // The flow's `backpressure:` clause declares a DSL-tier window of
-        // 1000; `enricher` declares a deliberate 200 exception; a global
-        // file entry sets 500.
+        // A flow-scope DSL-tier window of 1000, a deliberate stage-scope
+        // exception of 200 for `enricher`, and a global file entry of 500.
         let mut set = CandidateSet::default();
         admit(
             &mut set,
@@ -1123,8 +1122,8 @@ mod tests {
 
     #[test]
     fn a_file_entry_unsets_a_dsl_declared_enforce_at_the_same_scope() {
-        // The clause desugar: DSL declares enforce + window + stall at stage
-        // scope. An environment file sets mode=off at the same scope, which
+        // DSL candidates declare enforce + window + stall at stage scope. An
+        // environment file sets mode=off at the same scope, which
         // outranks the DSL tier: enforcement is off with no build error, and
         // the now-inert window draws the diagnostic.
         let mut dsl = crate::runtime_config::DslCandidates::default();

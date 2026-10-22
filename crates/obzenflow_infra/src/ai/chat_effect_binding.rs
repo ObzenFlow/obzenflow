@@ -9,16 +9,12 @@ use super::endpoint_identity::{
 };
 use super::resolve_estimator_for_model;
 use crate::ai::rig::RigChatClient;
-use obzenflow_adapters::ai::{
-    ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
-};
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion};
 use obzenflow_core::ai::{AiProvider, ChatClient, ChatTarget};
 use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_runtime::effects::{
     EffectBinding, EffectBindingBuildError, EffectPortResolutionError, EffectPortResolver,
-    EffectPortResolverWithMetadata, EffectRegistrationBuilder, LogicalEffectBindingName,
-    ResolvedEffectPort,
 };
 use obzenflow_runtime::runtime_config::AiModelsConfig;
 use std::sync::Arc;
@@ -206,22 +202,9 @@ impl ChatEffectBinding {
     fn finish(self) -> Result<EffectBinding<ChatCompletion>, ChatEffectBindingError> {
         let target = self.evidence.target().clone();
         let authority = Arc::new(self.authority);
-        let resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> =
-            Arc::new(move || {
-                let client = resolve_client(&target, &authority)?;
-                // Snapshot the resolved client's observed target. Reusing the
-                // requested target here would make pre-boundary validation tautological.
-                let metadata = Arc::new(client.target().clone());
-                Ok(ResolvedEffectPort::new(client, metadata))
-            });
-        EffectRegistrationBuilder::<ChatCompletion>::new(
-            LogicalEffectBindingName::new("chat")
-                .expect("framework chat binding name is a valid public identifier"),
-            self.evidence,
-        )
-        .bind_deferred_with_metadata(CHAT_CLIENT, resolver)?
-        .finish()
-        .map_err(Into::into)
+        self.evidence
+            .into_binding(Arc::new(move || resolve_client(&target, &authority)))
+            .map_err(Into::into)
     }
 
     fn new_bound(

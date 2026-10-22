@@ -51,13 +51,15 @@ use super::domain::{
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
-use super::gateway::{AuthorizePayment, GatewayTransform};
+use super::gateway::{GatewayTransform, ScriptedGateway};
 use super::validation;
+use obzenflow::effects::System;
 use obzenflow::flow::{effectful_transform, flow, sink, source, transform};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{circuit_breaker, rate_limit, retry, sink_delivery_observer};
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources;
+use std::sync::Arc;
 use std::time::Duration;
 
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
@@ -79,7 +81,7 @@ pub fn build_flow() -> obzenflow::flow::FlowDefinition {
     assemble_flow(
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
-        GatewayTransform::with_first_recovery_pause(FIRST_RECOVERY_PAUSE),
+        Some(FIRST_RECOVERY_PAUSE),
         GATEWAY_CALLS_PER_SECOND,
         std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
     )
@@ -92,11 +94,16 @@ pub fn build_flow() -> obzenflow::flow::FlowDefinition {
 pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
-    gateway_transform: GatewayTransform,
+    first_recovery_pause: Option<Duration>,
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
 ) -> obzenflow::flow::FlowDefinition {
     obzenflow::flow::FlowDefinition::materialize(move |_runtime_config| {
+        let gateway = System::eager("scripted-gateway", Arc::new(ScriptedGateway))?;
+        let gateway_transform = match first_recovery_pause {
+            Some(pause) => GatewayTransform::new(gateway).with_first_recovery_pause(pause),
+            None => GatewayTransform::new(gateway),
+        };
         // One effect-only resilience attachment owns the gateway's health,
         // recovery policy, and per-physical-attempt admission. Its fixed ordering
         // keeps limiter wait outside the dependency clock and prevents a stale
@@ -138,14 +145,14 @@ pub fn assemble_flow(
                 // (FLOWIP-115a). These are local scripted fixtures, so a source
                 // circuit breaker would be misleading here; the breaker belongs
                 // on external dependencies such as the gateway effect below.
-                web_orders = source!(CustomerOrderPlaced => web_orders_feed with {
+                web_orders = source!(CustomerOrderPlaced with {
                     rate_limit(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                         .burst_capacity(SOURCE_RATE_LIMIT_BURST)
-                });
-                store_orders = source!(CustomerOrderPlaced => store_orders_feed with {
+                } => web_orders_feed);
+                store_orders = source!(CustomerOrderPlaced with {
                     rate_limit(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                         .burst_capacity(SOURCE_RATE_LIMIT_BURST)
-                });
+                } => store_orders_feed);
 
                 // Local validation: deterministic checks with no external I/O,
                 // classified exactly once by one multi-type stage. This is typed
@@ -176,8 +183,8 @@ pub fn assemble_flow(
                 //     single half-open probe.
                 // The finite demo pauses before its first live Recovery call so
                 // the real five-second open window expires before that probe.
-                // The breaker attaches inline to the effect it guards
-                // (FLOWIP-120c H7): one policy instance per protected
+                // The handler performs one effect, so the controls in `with`
+                // guard that effect: one policy instance per protected
                 // dependency. A prevented call is recorded under the effect
                 // cursor like any other failure, so contracts stay strict with
                 // no breaker-aware compensation: every admitted input has a
@@ -190,33 +197,32 @@ pub fn assemble_flow(
                         PaymentDeclined,
                         PaymentAuthorizationUnavailable,
                     }
-                    uses AuthorizePayment
-                        with { gateway_breaker, gateway_retry, gateway_limiter }
+                    with { gateway_breaker, gateway_retry, gateway_limiter }
                     => gateway_transform,
                 );
 
                 // Paid-order sink: a tiny in-process console integration. Its
                 // implementation only writes and reports what it actually did;
-                // the site-level clause classifies repeat delivery for resume.
+                // `.idempotent()` classifies repeat delivery for resume.
                 // One passive observer logs the runtime's immutable delivery
                 // classification. It cannot alter settlement or emit flow facts.
                 paid_orders = sink!(
-                    PaymentAuthorized => shipping_handoff with { sink_delivery_observer(
+                    PaymentAuthorized with { sink_delivery_observer(
                         "shipping-delivery-log",
                         ShippingDeliveryLog
-                    ) },
-                    delivery: idempotent);
+                    ) } => shipping_handoff.idempotent()
+                );
 
                 // Declined-payment console destination. The gateway's decline
                 // is recorded by the effect as `PaymentDeclined`; it is a
                 // payment outcome, not an order cancellation.
-                declined_orders = sink!(PaymentDeclined => record_declined, delivery: idempotent);
+                declined_orders = sink!(PaymentDeclined => record_declined.idempotent());
 
                 // Cancelled-order console destination for locally invalid
                 // orders. `InvalidOrder` stays a journal-recorded fact with no
                 // dedicated sink; this delivery carries its lifecycle
                 // consequence. The console adapter labels reconstructed output.
-                cancelled_orders = sink!(CancelledOrder => record_cancelled, delivery: idempotent);
+                cancelled_orders = sink!(CancelledOrder => record_cancelled.idempotent());
 
                 // Unavailable-authorization destination: failed gateway call or
                 // breaker refusal. No payment decision was reached, so the order
@@ -224,11 +230,11 @@ pub fn assemble_flow(
                 // logs routing after successful output; the Delivery receipt
                 // remains the durable settlement fact.
                 manual_review = sink!(
-                    PaymentAuthorizationUnavailable => record_unavailable with { sink_delivery_observer(
+                    PaymentAuthorizationUnavailable with { sink_delivery_observer(
                         "manual-review-delivery-log",
                         ManualReviewDeliveryLog
-                    ) },
-                    delivery: idempotent);
+                    ) } => record_unavailable.idempotent()
+                );
             },
 
             topology: {

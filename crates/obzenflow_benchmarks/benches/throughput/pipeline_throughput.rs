@@ -9,17 +9,20 @@
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use obzenflow_benchmarks::case::{declare, Category};
+use obzenflow_core::config::{ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
-use obzenflow_dsl::dsl::backpressure_clause::enforced;
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
 use obzenflow_runtime::effects::{
-    DomainFacts, Effect, EffectContext, EffectError, EffectSafety, Effects, Portless,
-    StageCompletion,
+    Call, CallRequest, EffectContext, EffectError, Effects, Idempotent, StageCompletion, System,
 };
 use obzenflow_runtime::pipeline::FlowHandle;
+use obzenflow_runtime::run_context::FlowBuildContext;
+use obzenflow_runtime::runtime_config::{
+    CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -27,7 +30,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -106,6 +108,30 @@ impl InlineSink for Sink {
         Ok(())
     }
 }
+fn enforced_backpressure(window: u64) -> FlowBuildContext {
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(window)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(30_000),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .unwrap();
+    }
+    FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(candidates)))
+}
 async fn build<P, J>(
     journals: P,
     deep: bool,
@@ -130,11 +156,9 @@ where
             delivered,
             constrained,
         };
-        let capacity = if constrained { 2 } else { 64 };
         Ok(if deep {
             flow! {
                 journals: journals,
-                backpressure: enforced(capacity).stall_timeout_ms(30_000),
                 stages: {
                     src = async_source!(Input => source);
                     a = transform!(Input -> Input => Identity);
@@ -147,7 +171,6 @@ where
         } else {
             flow! {
                 journals: journals,
-                backpressure: enforced(capacity).stall_timeout_ms(30_000),
                 stages: {
                     src = async_source!(Input => source);
                     a = transform!(Input -> Input => Identity);
@@ -157,7 +180,7 @@ where
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(if constrained { 2 } else { 64 }))
     .await
     .unwrap()
 }
@@ -226,41 +249,43 @@ struct Settled {
 impl TypedPayload for Settled {
     const EVENT_TYPE: &'static str = "bench.effect_settled";
 }
-#[derive(Clone, Debug)]
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+struct Ledger;
+#[derive(Clone, Debug, Serialize)]
 struct Settle {
     index: u64,
 }
 #[async_trait]
-impl Effect for Settle {
+impl CallRequest for Settle {
     const EFFECT_TYPE: &'static str = "bench.settle";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-    type BindingMode = Portless;
+    type Safety = Idempotent;
+    type Port = Ledger;
     type Outcome = Settled;
-    type OutcomeSemantics = DomainFacts;
-    fn label(&self) -> &str {
-        "settle"
-    }
-    fn canonical_input(&self) -> Value {
-        json!({ "index": self.index })
-    }
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Settled, EffectError> {
+    async fn call(
+        &self,
+        _ledger: &Ledger,
+        _ctx: &mut EffectContext,
+    ) -> Result<Settled, EffectError> {
         Ok(Settled { index: self.index })
     }
 }
-#[derive(Clone, Debug)]
-struct SettleEach;
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
+struct SettleEach {
+    #[system]
+    ledger: System<Ledger>,
+}
 #[async_trait]
 impl EffectfulTransformHandler for SettleEach {
     type Input = Input;
     type Output = obzenflow_core::stage_fact_set![Settled];
-    type AllowedEffects = obzenflow_runtime::effect_set![Settle];
+    type AllowedEffects = obzenflow_runtime::effect_set![Call<Settle>];
     async fn process(
         &self,
         input: Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        fx.perform(Settle { index: input.index })
+        fx.call(Settle { index: input.index })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
         Ok(fx.complete()?)
@@ -295,18 +320,20 @@ async fn build_effectful(
             sparse: false,
         };
         let sink = SettledSink { settled };
+        let settle_each = SettleEach {
+            ledger: System::eager("ledger", Arc::new(Ledger))?,
+        };
         Ok(flow! {
             journals: journals,
-            backpressure: enforced(64).stall_timeout_ms(30_000),
             stages: {
                 src = async_source!(Input => source);
-                settle = effectful_transform!(Input -> Settled uses Settle => SettleEach);
+                settle = effectful_transform!(Input -> Settled => settle_each);
                 snk = sink!(Settled => sink);
             },
             topology: { src |> settle; settle |> snk; }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(64))
     .await
     .unwrap()
 }

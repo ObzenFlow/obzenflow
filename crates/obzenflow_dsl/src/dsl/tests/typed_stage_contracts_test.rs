@@ -12,7 +12,7 @@ mod tests {
     use obzenflow_core::journal::archive::DeliveryOrder;
     use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
-    use obzenflow_runtime::effects::{Effects, StageCompletion};
+    use obzenflow_runtime::effects::{EffectHandler, Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{FactVisibility, FeedRole};
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -35,7 +35,6 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::any::type_name;
     use std::collections::HashMap;
-    use std::time::Duration;
 
     use crate::dsl::error::{EdgeTypingMismatchKind, FlowBuildError};
     use crate::dsl::stage_descriptor::StageDescriptor;
@@ -334,7 +333,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulExactTransform;
 
     #[async_trait]
@@ -355,7 +355,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulMultiOutputTransform;
 
     #[async_trait]
@@ -427,7 +428,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulProductStateful;
 
     #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
@@ -465,7 +467,8 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, EffectHandler)]
+    #[effect_handler(effects = obzenflow_runtime::effects)]
     struct EffectfulExactStateful;
 
     #[async_trait]
@@ -740,8 +743,7 @@ mod tests {
 
         let stateful = crate::stateful!(
             name: "stateful",
-            InputEvent -> OutputEvent => ExactStateful,
-            emit_interval = Duration::from_secs(5)
+            InputEvent -> OutputEvent => ExactStateful
         );
         let stateful_meta = stateful.typing_metadata().unwrap();
         assert_eq!(stateful_meta.input_type, exact::<InputEvent>());
@@ -869,8 +871,7 @@ mod tests {
 
         let stateful = crate::stateful!(
             name: "multi_output_stateful",
-            InputEvent -> { OutputEvent, AlternateEvent } => MultiOutputStateful,
-            emit_interval = Duration::from_secs(1)
+            InputEvent -> { OutputEvent, AlternateEvent } => MultiOutputStateful
         );
         let stateful_meta = stateful.typing_metadata().unwrap();
         assert_eq!(stateful_meta.output_type, exact::<OutputEvent>());
@@ -1099,7 +1100,6 @@ mod tests {
             name: "transform".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         let transform_metadata = StageTypingMetadata::transform(
             TypeHint::exact::<InputEvent>(),
@@ -3026,7 +3026,6 @@ mod tests {
             name: "untyped_transform".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         // Sanity: the bare TransformDescriptor returns None.
         assert!(descriptor.typing_metadata().is_none());
@@ -3057,7 +3056,6 @@ mod tests {
             name: "synthetic".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(
             TypeHint::Unspecified,
@@ -3090,7 +3088,6 @@ mod tests {
             name: "synthetic".to_string(),
             handler: ExactTransform,
             observers: vec![],
-            backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(
             TypeHint::exact::<InputEvent>(),

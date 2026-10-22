@@ -465,12 +465,12 @@ async fn immediate_emitter_emits_during_accumulating() {
 
                 stages: {
                     src = source!(NumberEvent => source_handler);
-                    emitter = stateful!(NumberEvent -> ProgressUpdate => emitter_handler with { stateful_observer(
+                    emitter = stateful!(NumberEvent -> ProgressUpdate with { stateful_observer(
                             "non-empty-stateful-emits",
                             CountsNonEmptyStatefulEmits {
                                 calls: observer_calls_for_flow,
                             }
-                        ) });
+                        ) } => emitter_handler);
                     sink = sink!(ProgressUpdate => sink_handler);
                 },
 

@@ -389,7 +389,7 @@ impl EffectsCore {
                 return Err(self.latch_binding_fault(fault));
             }
         };
-        let logical_name = declaration.binding().logical_name().cloned();
+        let logical_name = Some(declaration.binding().logical_name().clone());
         match declaration.binding().typed_projection::<E>() {
             Some(projection) => Ok(projection),
             None => {
@@ -949,7 +949,6 @@ impl EffectsCore {
         let invocation = <E::BindingMode as EffectBindingMode<E>>::invocation_binding(&effect);
         if let Err(mismatch) = declaration.binding().compare_invocation(&invocation) {
             let kind = match mismatch {
-                super::binding::BindingMatchError::Mode => BindingMismatchKind::Mode,
                 super::binding::BindingMatchError::Family => {
                     BindingMismatchKind::ConstructionFamily
                 }
@@ -957,7 +956,7 @@ impl EffectsCore {
             };
             let fault = BindingAuthorityFault::binding_mismatch(
                 E::EFFECT_TYPE,
-                declaration.binding().logical_name().cloned(),
+                Some(declaration.binding().logical_name().clone()),
                 kind,
             );
             return Err(self.latch_binding_fault(fault));
@@ -2226,9 +2225,6 @@ impl EffectsCore {
             descriptor,
             binding_context: mut effect_ctx,
         } = prepared;
-        let executor_slot = transactional_effect_port_slot::<E>();
-        let executor = executor_slot.label();
-        let port = effect_ctx.port(executor_slot)?;
         let output_ordinal = match E::OutcomeSemantics::KIND {
             EffectOutcomeKind::DomainFacts => Some(self.reserve_output_ordinal()?),
             EffectOutcomeKind::RecordedReply => None,
@@ -2251,6 +2247,7 @@ impl EffectsCore {
                 defer_persistence: self.ctx.effect_boundary.is_some(),
             });
         let commit_observer = commit.clone();
+        effect_ctx.transaction = Some(Arc::new(commit));
 
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
             // The port commits its outcome through the handle. Its returned value is
@@ -2258,33 +2255,25 @@ impl EffectsCore {
             // source of truth, so a live run decodes the same journaled outcome a replay
             // would, and a port that commits one outcome but returns another cannot make
             // live output diverge from replay output (FLOWIP-120a).
-            let port_result = port
-                .execute_and_commit(effect, &mut effect_ctx, commit)
-                .await
-                .map(|_| ());
+            let port_result = effect.execute(&mut effect_ctx).await.map(|_| ());
             let outcome = commit_observer.settled_outcome();
-            let result =
-                self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
+            let result = self.settle_transactional::<E>(output_ordinal, port_result, outcome);
             self.observe_effect_result(E::EFFECT_TYPE, &result);
             return result;
         };
 
         // FLOWIP-120c H5: transactional effects route through the boundary.
-        // Admission runs before `execute_and_commit`, observation after
+        // Admission runs before `execute`, observation after
         // `settled_outcome()`; rejection-only in v1, no fallback synthesis.
         let settle_slot: TransactionalSettleSlot<E::Outcome> = Arc::new(Mutex::new(None));
         let operation = {
             let slot = settle_slot.clone();
             let observer = commit_observer.clone();
-            let executor_name = executor.to_string();
             SingleUseEffectOperation::new_with_lifecycle(move |lifecycle| {
                 async move {
                     *slot.lock().unwrap_or_else(|p| p.into_inner()) = None;
                     lifecycle.mark_started();
-                    let port_result = port
-                        .execute_and_commit(effect, &mut effect_ctx, commit)
-                        .await
-                        .map(|_| ());
+                    let port_result = effect.execute(&mut effect_ctx).await.map(|_| ());
                     let outcome = observer.settled_outcome();
                     // A committed failure is the dependency result even when the
                     // transactional port returned `Ok`; conversely, a committed
@@ -2320,7 +2309,6 @@ impl EffectsCore {
                         (Err(err), None) => Err(err.clone()),
                         (Ok(()), None) => Err(EffectError::TransactionalCommitMissing {
                             effect_type: E::EFFECT_TYPE.to_string(),
-                            executor: executor_name,
                         }),
                     };
                     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
@@ -2352,12 +2340,8 @@ impl EffectsCore {
                         self.commit_deferred_transactional_outcome(&cursor, prepared, Vec::new())
                             .await?;
                     }
-                    let result = self.settle_transactional::<E>(
-                        executor,
-                        output_ordinal,
-                        port_result,
-                        outcome,
-                    );
+                    let result =
+                        self.settle_transactional::<E>(output_ordinal, port_result, outcome);
                     self.observe_effect_result(E::EFFECT_TYPE, &result);
                     return result;
                 }
@@ -2405,7 +2389,6 @@ impl EffectsCore {
                         Err(err) => err,
                         Ok(()) => EffectError::TransactionalCommitMissing {
                             effect_type: E::EFFECT_TYPE.to_string(),
-                            executor: executor.to_string(),
                         },
                     };
                     self.append_failed_record_with_control_events(
@@ -2428,8 +2411,7 @@ impl EffectsCore {
                 };
                 self.commit_deferred_transactional_outcome(&cursor, prepared, control_events)
                     .await?;
-                let result =
-                    self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
+                let result = self.settle_transactional::<E>(output_ordinal, port_result, outcome);
                 self.observe_effect_result(E::EFFECT_TYPE, &result);
                 result
             }
@@ -2523,7 +2505,6 @@ impl EffectsCore {
     /// source of truth (FLOWIP-120a).
     fn settle_transactional<E>(
         &mut self,
-        executor: &'static str,
         output_ordinal: Option<EffectOutputOrdinal>,
         port_result: Result<(), EffectError>,
         outcome: Option<PreparedEffectOutcome<E::Outcome>>,
@@ -2541,7 +2522,6 @@ impl EffectsCore {
                 Err(err) => err,
                 Ok(()) => EffectError::TransactionalCommitMissing {
                     effect_type: E::EFFECT_TYPE.to_string(),
-                    executor: executor.to_string(),
                 },
             });
         };
@@ -2610,7 +2590,7 @@ impl EffectsCore {
             return Some(fault.clone());
         }
 
-        let (binding, _, _) = declaration.binding().named_parts()?;
+        let binding = declaration.binding().logical_name();
         match error {
             EffectError::EffectTargetInvariantViolation { slot } => {
                 let slot = declaration.binding().declared_slot_label(slot.as_str())?;
@@ -2643,31 +2623,29 @@ impl EffectsCore {
         &self,
         declaration: &EffectDeclaration,
     ) -> Result<(EffectPortMetadataContext, EffectContext), EffectError> {
-        let views = match declaration.binding().named_parts() {
-            None => super::ports::EffectPortViews::default(),
-            Some((binding, registration, slots)) => self
-                .ctx
-                .effect_ports
-                .scoped_view(registration, slots)
-                .map_err(|error| {
-                    let fault = match error {
-                        super::ports::EffectPortViewBuildError::MissingRegistration => {
-                            BindingAuthorityFault::registration_missing(
-                                declaration.effect_type(),
-                                binding.clone(),
-                            )
-                        }
-                        super::ports::EffectPortViewBuildError::Resolver { slot, .. } => {
-                            BindingAuthorityFault::resolution_failed(
-                                declaration.effect_type(),
-                                binding.clone(),
-                                slot,
-                            )
-                        }
-                    };
-                    EffectError::BindingAuthority { fault }
-                })?,
-        };
+        let binding = declaration.binding();
+        let views = self
+            .ctx
+            .effect_ports
+            .scoped_view(binding.registration, binding.slots())
+            .map_err(|error| {
+                let fault = match error {
+                    super::ports::EffectPortViewBuildError::MissingRegistration => {
+                        BindingAuthorityFault::registration_missing(
+                            declaration.effect_type(),
+                            binding.logical_name().clone(),
+                        )
+                    }
+                    super::ports::EffectPortViewBuildError::Resolver { slot, .. } => {
+                        BindingAuthorityFault::resolution_failed(
+                            declaration.effect_type(),
+                            binding.logical_name().clone(),
+                            slot,
+                        )
+                    }
+                };
+                EffectError::BindingAuthority { fault }
+            })?;
         let metadata_context = EffectPortMetadataContext {
             metadata: views.metadata,
         };
@@ -2677,6 +2655,7 @@ impl EffectsCore {
             stage_key: self.ctx.stage_key.clone(),
             input_seq: self.ctx.input_seq,
             ports: views.ports,
+            transaction: None,
         };
         Ok((metadata_context, binding_context))
     }

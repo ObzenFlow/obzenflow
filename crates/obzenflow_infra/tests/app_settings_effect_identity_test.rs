@@ -34,7 +34,8 @@ use obzenflow_infra::journal::read::{
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
@@ -172,60 +173,58 @@ impl TypedInfiniteSourceHandler for BoundedReader {
 
 type Executed = Arc<Mutex<Vec<u64>>>;
 
-#[derive(Clone, Debug)]
-struct ScoreEffect {
-    value: u64,
-    threshold: u64,
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+struct Scorer {
     executed: Executed,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ScoreRequest {
+    value: u64,
+    threshold: u64,
+}
+
 #[async_trait]
-impl Effect for ScoreEffect {
+impl CallRequest for ScoreRequest {
     const EFFECT_TYPE: &'static str = "app_identity.score";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = Scorer;
     type Outcome = Score;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "score"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value, "threshold": self.threshold })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.executed.lock().unwrap().push(self.value);
+    async fn call(&self, scorer: &Scorer, _ctx: &mut EffectContext) -> Result<Score, EffectError> {
+        scorer.executed.lock().unwrap().push(self.value);
         Ok(Score {
             score: self.value * self.threshold,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("app-identity:{}", self.value)))
+impl Keyed for ScoreRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("app-identity:{}", self.value))
     }
 }
+
+type ScoreEffect = Call<ScoreRequest>;
 
 type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored, Noted, Capped];
 type ScoreEffects = obzenflow_runtime::effect_set![ScoreEffect];
 
 const RESCORE_OFFSET: u64 = 1_000;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct ScoreTransform {
     app: App,
-    executed: Executed,
+    #[system]
+    scorer: System<Scorer>,
 }
 
 impl ScoreTransform {
-    fn effect(&self, value: u64) -> ScoreEffect {
-        ScoreEffect {
+    fn request(&self, value: u64) -> ScoreRequest {
+        ScoreRequest {
             value,
             threshold: self.app.threshold,
-            executed: self.executed.clone(),
         }
     }
 
@@ -234,9 +233,9 @@ impl ScoreTransform {
         value: u64,
         fx: &mut Effects<ScoreOutput, ScoreEffects>,
     ) -> Result<Score, EffectError> {
-        let score = fx.perform(self.effect(value)).await?;
+        let score = fx.call(self.request(value)).await?;
         if self.app.rescore {
-            fx.perform(self.effect(value + RESCORE_OFFSET)).await?;
+            fx.call(self.request(value + RESCORE_OFFSET)).await?;
         }
         Ok(score)
     }
@@ -350,7 +349,7 @@ async fn build(
                 quiet: settings.quiet,
                 failing: settings.failing,
             },
-            executed,
+            scorer: System::eager("scorer", Arc::new(Scorer { executed }))?,
         };
         let counting_sink = CountingSink { delivered };
         Ok(flow! {
@@ -361,7 +360,7 @@ async fn build(
                 src = infinite_source!(Reading => reader);
                 score = effectful_transform!(
                     Reading -> { Scored, Score, Unscored, Noted, Capped }
-                        uses ScoreEffect => score_transform);
+                        => score_transform);
                 snk = sink!(Scored => counting_sink);
             },
 
@@ -511,7 +510,7 @@ async fn assert_refused(run_dir: &Path, reason: StageFatalReason) -> Result<Stag
 
 fn score_effect(input: u64, ordinal: u32) -> DepartureAction {
     DepartureAction::Effect {
-        effect_type: EffectType::from(ScoreEffect::EFFECT_TYPE),
+        effect_type: EffectType::from(ScoreRequest::EFFECT_TYPE),
         input_position: EffectInputPosition::new(input),
         effect_ordinal: EffectOrdinal::new(ordinal),
     }
@@ -1114,9 +1113,9 @@ async fn build_accounts(
             journals: disk_journals(base),
 
             stages: {
-                accounts = source!(Account => accounts_source with {
+                accounts = source!(Account with {
                     rate_limit(rate).burst_capacity(burst)
-                });
+                } => accounts_source);
                 collect = sink!(Account => collect_handler);
             },
 

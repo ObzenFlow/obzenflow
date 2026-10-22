@@ -90,7 +90,8 @@ enum EffectSum {
 type Facts = of::schema::stage_fact_set![Fact];
 type NoEffects = of::effects::effect_set![];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, of::effects::EffectHandler)]
+#[effect_handler(effects = of::effects)]
 struct Pure;
 
 impl sources::TypedFiniteSourceHandler for Pure {

@@ -13,7 +13,6 @@ use obzenflow::ai::{
     EmbeddingTransformBuilder,
 };
 use obzenflow::stages::sources;
-use obzenflow_adapters::ai::{CHAT_CLIENT, EMBEDDING_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{
     AiClientError, ChatClient, ChatRequest, ChatTarget, EmbeddingClient, EmbeddingRequest,
@@ -31,8 +30,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortResolver, EffectRegistrationBuilder, LogicalEffectBindingName,
-    ResolvedEffectPort, SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+    EffectBinding, EffectPortResolver, SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -251,26 +249,16 @@ fn live_authority(
 
 fn eager_authority(chat: Arc<dyn ChatClient>, embedding: Arc<dyn EmbeddingClient>) -> AiAuthority {
     let (chat_seed, embedding_seed) = base_bindings(None).expect("fixture evidence");
-    let chat = EffectRegistrationBuilder::<ChatCompletion>::new(
-        LogicalEffectBindingName::new("chat").unwrap(),
-        chat_seed.evidence().clone(),
-    )
-    .bind_eager_with_metadata(
-        CHAT_CLIENT,
-        ResolvedEffectPort::new(chat.clone(), Arc::new(chat.target().clone())),
-    )
-    .and_then(|builder| builder.finish())
-    .unwrap();
-    let embedding = EffectRegistrationBuilder::<EmbeddingGeneration>::new(
-        LogicalEffectBindingName::new("embedding").unwrap(),
-        embedding_seed.evidence().clone(),
-    )
-    .bind_eager_with_metadata(
-        EMBEDDING_CLIENT,
-        ResolvedEffectPort::new(embedding.clone(), Arc::new(embedding.target().clone())),
-    )
-    .and_then(|builder| builder.finish())
-    .unwrap();
+    let chat = chat_seed
+        .evidence()
+        .clone()
+        .into_binding(Arc::new(move || Ok(chat.clone())))
+        .unwrap();
+    let embedding = embedding_seed
+        .evidence()
+        .clone()
+        .into_binding(Arc::new(move || Ok(embedding.clone())))
+        .unwrap();
     AiAuthority { chat, embedding }
 }
 
@@ -306,9 +294,6 @@ fn build_flow(
             scenario.chat_endpoint.clone(),
             scenario.live_authority.clone(),
         )?;
-        let chat = authority.chat;
-        let embedding = authority.embedding;
-
         let suffix = scenario.prompt_suffix.clone();
         let chat_builder = ChatTransformBuilder::new()
             .logic_version(scenario.chat_logic_version.clone())
@@ -321,6 +306,7 @@ fn build_flow(
         };
         let chat_handler = chat_builder
             .build_typed::<TicketRaised, TicketSummarised>(
+                authority.chat,
                 move |ticket| Ok(format!("{}{}", ticket.description, suffix)),
                 |ticket, response| {
                     Ok(TicketSummarised {
@@ -334,6 +320,7 @@ fn build_flow(
             .logic_version("ticket-embedding-v1")
             .dimensions(scenario.embedding_dimensions)
             .build_typed::<TicketSummarised, TicketEmbedded>(
+                authority.embedding,
                 |ticket| Ok(vec![ticket.summary.clone()]),
                 |ticket, response| {
                     Ok(TicketEmbedded {
@@ -356,17 +343,13 @@ fn build_flow(
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
                     TicketRaised -> TicketSummarised
-                    uses at_least_once(ChatCompletion)
-                        via chat
-                        with ai_resilience()
-                    => chat_handler,
+                    with ai_resilience()
+                    => chat_handler.at_least_once::<ChatCompletion>(),
                 );
                 embedding = effectful_transform!(
                     TicketSummarised -> TicketEmbedded
-                    uses at_least_once(EmbeddingGeneration)
-                        via embedding
-                        with ai_resilience()
-                    => embedding_handler,
+                    with ai_resilience()
+                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
                 );
                 collected = sink!(TicketEmbedded => collected);
             },

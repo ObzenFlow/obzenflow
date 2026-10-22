@@ -98,7 +98,8 @@ impl TypedAsyncFiniteSourceHandler for DelayedTwoEventSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct SlowTransform {
     calls: Arc<AtomicUsize>,
 }

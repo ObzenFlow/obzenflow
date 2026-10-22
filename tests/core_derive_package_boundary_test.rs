@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CORE: &str = "obzenflow_core";
+const RUNTIME: &str = "obzenflow_runtime";
 const SATELLITE: &str = "obzenflow_core_derive";
 const RETIRED_SATELLITE: &str = "obzenflow_derive";
+const PERMITTED_FACADE_PATHS: [&str; 2] = ["obzenflow::effects", "obzenflow::port"];
 
 #[test]
 fn core_derive_is_a_core_owned_compiler_satellite() {
@@ -67,8 +69,8 @@ fn core_derive_is_a_core_owned_compiler_satellite() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         reverse_dependencies,
-        BTreeSet::from([CORE]),
-        "Core must be the satellite's sole first-party reverse dependency across all dependency kinds and targets"
+        BTreeSet::from([CORE, RUNTIME]),
+        "Core and Runtime must be the satellite's only first-party reverse dependencies across all dependency kinds and targets"
     );
 
     let core_satellite_edges = dependencies(core)
@@ -86,7 +88,7 @@ fn core_derive_is_a_core_owned_compiler_satellite() {
         "Core's compiler satellite must be one unconditional normal dependency"
     );
 
-    assert_codegen_names_only_core_contracts();
+    assert_codegen_names_only_permitted_roots();
 }
 
 fn cargo_metadata() -> Value {
@@ -117,7 +119,7 @@ fn dependencies(package: &Value) -> &[Value] {
         .expect("package dependencies")
 }
 
-fn assert_codegen_names_only_core_contracts() {
+fn assert_codegen_names_only_permitted_roots() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("crates")
         .join(SATELLITE)
@@ -135,11 +137,27 @@ fn assert_codegen_names_only_core_contracts() {
             "obzenflow_adapters",
             "obzenflow_dsl",
             "obzenflow_infra",
-            "obzenflow::",
         ] {
             assert!(
                 !source.contains(forbidden),
                 "{} must not name outer crate root `{forbidden}`",
+                source_path.display()
+            );
+        }
+        for (offset, _) in source.match_indices("obzenflow::") {
+            let named = source[offset..]
+                .split(|character: char| {
+                    !character.is_alphanumeric() && character != '_' && character != ':'
+                })
+                .next()
+                .unwrap_or_default();
+            assert!(
+                PERMITTED_FACADE_PATHS.into_iter().any(|permitted| {
+                    named
+                        .strip_prefix(permitted)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+                }),
+                "{} must not name facade path `{named}`; the satellite names only {PERMITTED_FACADE_PATHS:?}",
                 source_path.display()
             );
         }

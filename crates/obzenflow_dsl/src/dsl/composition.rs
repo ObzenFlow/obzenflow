@@ -998,7 +998,6 @@ mod tests {
             name: name.to_string(),
             handler: Noop,
             observers: vec![],
-            backpressure: None,
         })
     }
 

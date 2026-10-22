@@ -38,8 +38,8 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefi
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectCursor, EffectError, EffectSafety, Effects, IdempotencyKey,
-    SinkRedeliverySafety,
+    Call, CallRequest, EffectContext, EffectCursor, EffectError, Effects, IdempotencyKey, Keyed,
+    RequiresKey, SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -49,7 +49,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -145,33 +144,30 @@ impl TypedTransformHandler for FanOutTransform {
 /// Each derived logical effect fails once with a typed, retryable timeout and
 /// then succeeds. Calls are counted by canonical input so the proof verifies
 /// that every fan-out sibling owns an independent recovery session.
-#[derive(Clone, Debug)]
-struct RetryOnceEffect {
-    value: u64,
+#[obzenflow::port]
+struct FlakyService {
     calls: Arc<Mutex<BTreeMap<u64, usize>>>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct RetryOnce {
+    value: u64,
+}
+
 #[async_trait]
-impl Effect for RetryOnceEffect {
+impl CallRequest for RetryOnce {
     const EFFECT_TYPE: &'static str = "cb_composition.retry_once";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = FlakyService;
     type Outcome = CompEffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "retry_once"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn call(
+        &self,
+        service: &FlakyService,
+        _ctx: &mut EffectContext,
+    ) -> Result<CompEffectValue, EffectError> {
         let call = {
-            let mut calls = self.calls.lock().expect("calls lock poisoned");
+            let mut calls = service.calls.lock().expect("calls lock poisoned");
             let call = calls.entry(self.value).or_default();
             *call += 1;
             *call
@@ -187,16 +183,30 @@ impl Effect for RetryOnceEffect {
             })
         }
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("retry-once:{}", self.value)))
+impl Keyed for RetryOnce {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("retry-once:{}", self.value))
     }
 }
 
+type RetryOnceEffect = Call<RetryOnce>;
+
 /// Performs the retry-once effect and emits the recovered outcome.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct RetryTransform {
-    calls: Arc<Mutex<BTreeMap<u64, usize>>>,
+    #[system]
+    service: System<FlakyService>,
+}
+
+impl RetryTransform {
+    fn new(calls: Arc<Mutex<BTreeMap<u64, usize>>>) -> Self {
+        Self {
+            service: System::eager("flaky-service", Arc::new(FlakyService { calls }))
+                .expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -211,10 +221,7 @@ impl EffectfulTransformHandler for RetryTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .perform(RetryOnceEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-            })
+            .call(RetryOnce { value: input.value })
             .await
             .map_err(|e| HandlerError::Timeout(e.to_string()))?;
 
@@ -272,7 +279,7 @@ fn build_retry_flow(
         let sink_breaker = circuit_breaker().consecutive_failures(5);
         let source_handler = CompSource::new(source_calls);
         let fan_out_handler = FanOutTransform::new();
-        let effectful_handler = RetryTransform { calls };
+        let effectful_handler = RetryTransform::new(calls);
         let collector_handler = CollectSink { outputs };
 
         Ok(flow! {
@@ -281,11 +288,11 @@ fn build_retry_flow(
 
             stages: {
                 // Source breaker stays closed; the scripted source never fails.
-                inputs = source!(CompInput => source_handler with {source_breaker});
+                inputs = source!(CompInput with {source_breaker} => source_handler);
                 fan_out = transform!(CompInput -> CompInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    CompInput -> { CompOutput, CompEffectValue } uses RetryOnceEffect with { effect_resilience.0, effect_resilience.1 } => effectful_handler);
-                collector = sink!(CompOutput => collector_handler with {sink_breaker});
+                    CompInput -> { CompOutput, CompEffectValue } with { effect_resilience.0, effect_resilience.1 } => effectful_handler);
+                collector = sink!(CompOutput with {sink_breaker} => collector_handler);
             },
 
             topology: {

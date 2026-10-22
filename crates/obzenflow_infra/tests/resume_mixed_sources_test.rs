@@ -48,7 +48,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -203,46 +204,49 @@ impl TypedTransformHandler for MergeTransform {
     }
 }
 
-/// The effectful descendant that makes the fan-in a deterministic orderer.
-#[derive(Clone, Debug)]
-struct CountingEffect {
-    value: u64,
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
 
+/// The effectful descendant that makes the fan-in a deterministic orderer.
+#[derive(Clone, Debug, Serialize)]
+struct Counting {
+    value: u64,
+}
+
 #[async_trait]
-impl Effect for CountingEffect {
+impl CallRequest for Counting {
     const EFFECT_TYPE: &'static str = "resume_mixed.counting";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = CallCounter;
     type Outcome = EffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "counting"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        counter: &CallCounter,
+        _ctx: &mut EffectContext,
+    ) -> Result<EffectValue, EffectError> {
+        counter.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EffectValue {
             effect_value: self.value + 1000,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("resume-mixed:{}", self.value)))
+impl Keyed for Counting {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("resume-mixed:{}", self.value))
     }
 }
 
-#[derive(Clone, Debug)]
+type CountingEffect = Call<Counting>;
+
+#[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 struct EffectfulTail {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    counter: System<CallCounter>,
 }
 
 #[async_trait]
@@ -257,10 +261,7 @@ impl EffectfulTransformHandler for EffectfulTail {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .perform(CountingEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-            })
+            .call(Counting { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(MixedOutput {
@@ -321,7 +322,9 @@ fn build_flow(
         let infinite_handler =
             ReattachingSource(InfiniteChannelSource::new("i", inf_first, inf_count));
         let merge_handler = MergeTransform::new();
-        let effectful_handler = EffectfulTail { calls };
+        let effectful_handler = EffectfulTail {
+            counter: System::eager("call-counter", Arc::new(CallCounter { calls }))?,
+        };
         let collect_handler = CountingSink { delivered };
 
         Ok(flow! {
@@ -333,7 +336,7 @@ fn build_flow(
                 inf = infinite_source!(ChannelTick => infinite_handler);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 effectful = effectful_transform!(
-                    Merged -> { MixedOutput, EffectValue } uses CountingEffect => effectful_handler);
+                    Merged -> { MixedOutput, EffectValue } => effectful_handler);
                 collect = sink!(MixedOutput => collect_handler);
             },
 
@@ -1322,9 +1325,9 @@ fn build_csv_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                orders = source!(Order => orders_source with {
+                orders = source!(Order with {
                     rate_limit(rate).burst_capacity(burst)
-                });
+                } => orders_source);
                 collect = sink!(Order => collect_handler);
             },
 
@@ -1703,29 +1706,54 @@ impl InlineSink for DelayedCount {
     }
 }
 
-/// Lazy orders paced at the source, and by a backpressure window on the edge
-/// when `window` is set.
+fn enforced_backpressure(window: u64) -> obzenflow_runtime::run_context::FlowBuildContext {
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    };
+    let mut candidates = CandidateSet::default();
+    for (key, value) in [
+        (
+            "runtime.backpressure.mode",
+            ConfigValue::Text("enforce".to_owned()),
+        ),
+        ("runtime.backpressure.window", ConfigValue::U64(window)),
+        (
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigValue::U64(60_000),
+        ),
+    ] {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::Flow,
+                ConfigSource::File,
+                value,
+            ))
+            .expect("the backpressure setting admits");
+    }
+    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
+        candidates,
+    )))
+}
+
+/// Lazy orders paced at the source.
 fn lazy_flow(
     journal_base: &Path,
     orders_source: LazyOrders,
     (rate, burst): (f64, f64),
-    window: Option<u64>,
     collect_handler: DelayedCount,
 ) -> FlowDefinition {
     let journals = journal_base.to_path_buf();
-    let backpressure = window.map_or_else(obzenflow_dsl::backpressure::off, |window| {
-        obzenflow_dsl::backpressure::enforced(window).stall_timeout_ms(60_000)
-    });
     FlowDefinition::materialize(move |_runtime_config| {
         Ok(flow! {
             name: "resume_lazy",
             journals: disk_journals(journals),
-            backpressure: backpressure,
 
             stages: {
-                orders = source!(Order => orders_source with {
+                orders = source!(Order with {
                     rate_limit(rate).burst_capacity(burst)
-                });
+                } => orders_source);
                 collect = sink!(Order => collect_handler);
             },
 
@@ -1757,7 +1785,6 @@ async fn run_lazy_orders(
         journal_base,
         orders_source,
         pacing,
-        None,
         DelayedCount {
             delivered: delivered.clone(),
             delay: Duration::ZERO,
@@ -1792,12 +1819,11 @@ macro_rules! orders_flow {
             Ok(flow! {
                 name: "resume_lazy",
                 journals: disk_journals(journals),
-                backpressure: obzenflow_dsl::backpressure::off(),
 
                 stages: {
-                    orders = source!(Order => $orders_source with {
+                    orders = source!(Order with {
                         rate_limit(50.0).burst_capacity(5.0)
-                    });
+                    } => $orders_source);
                     collect = sink!(Order => collect_handler);
                 },
 
@@ -2096,13 +2122,12 @@ async fn a_source_resumes_after_its_commits_not_its_reads() -> Result<()> {
         &journal_base,
         orders_source,
         (1000.0, 1000.0),
-        Some(WINDOW),
         DelayedCount {
             delivered: delivered.clone(),
             delay: Duration::from_millis(5),
         },
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(WINDOW))
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -2135,13 +2160,12 @@ async fn a_source_resumes_after_its_commits_not_its_reads() -> Result<()> {
         &journal_base,
         orders_source,
         (1000.0, 1000.0),
-        Some(WINDOW),
         DelayedCount {
             delivered: delivered.clone(),
             delay: Duration::ZERO,
         },
     )
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(enforced_backpressure(WINDOW))
     .await
     .map_err(|e| anyhow!("resumed flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -2192,7 +2216,6 @@ async fn a_failed_seek_refuses_before_live_input() -> Result<()> {
         &journal_base,
         orders_source,
         (1000.0, 100.0),
-        None,
         DelayedCount {
             delivered: Arc::new(AtomicUsize::new(0)),
             delay: Duration::ZERO,

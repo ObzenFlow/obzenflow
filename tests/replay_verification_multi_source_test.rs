@@ -25,7 +25,8 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -33,7 +34,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -82,42 +82,43 @@ impl TypedFiniteSourceHandler for Channel {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ChargeEffect {
-    order_id: u64,
+#[obzenflow::port]
+struct Processor {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ChargeRequest {
+    order_id: u64,
+}
+
 #[async_trait]
-impl Effect for ChargeEffect {
+impl CallRequest for ChargeRequest {
     const EFFECT_TYPE: &'static str = "replay_verification_multi.charge";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = Processor;
     type Outcome = Charged;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "charge"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "order_id": self.order_id })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        processor: &Processor,
+        _ctx: &mut EffectContext,
+    ) -> Result<Charged, EffectError> {
+        processor.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Charged {
             order_id: self.order_id,
             receipt: self.order_id + 5000,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("charge:{}", self.order_id)))
+impl Keyed for ChargeRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("charge:{}", self.order_id))
     }
 }
+
+type ChargeEffect = Call<ChargeRequest>;
 
 /// Pass-through intake: re-emits each order so the fan-in has a derived
 /// input and keeps the Kahn merge (see the module doc).
@@ -141,9 +142,19 @@ impl TypedTransformHandler for Intake {
 
 /// The effectful merge: charging sits directly at the fan-in, so the build
 /// marks the merge itself as a deterministic orderer (canonical merge).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ChargeOrders {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    processor: System<Processor>,
+}
+
+impl ChargeOrders {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            processor: System::eager("processor", Arc::new(Processor { calls }))
+                .expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -157,9 +168,8 @@ impl EffectfulTransformHandler for ChargeOrders {
         order: OrderPlaced,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        fx.perform(ChargeEffect {
+        fx.call(ChargeRequest {
             order_id: order.order_id,
-            calls: self.calls.clone(),
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -176,7 +186,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
         let web_orders_handler = Channel::new(vec![1, 3, 5]);
         let store_orders_handler = Channel::new(vec![2, 4, 6]);
         let intake_handler = Intake::new();
-        let charge_handler = ChargeOrders { calls };
+        let charge_handler = ChargeOrders::new(calls);
         let receipts_handler = replay_testkit::Discard::<Charged>::default();
 
         Ok(flow! {
@@ -188,7 +198,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 store_orders = source!(OrderPlaced => store_orders_handler);
                 intake = transform!(OrderPlaced -> OrderPlaced => intake_handler);
                 charge = effectful_transform!(
-                    OrderPlaced -> { Charged } uses ChargeEffect => charge_handler);
+                    OrderPlaced -> { Charged } => charge_handler);
                 receipts = sink!(Charged => receipts_handler);
             },
 

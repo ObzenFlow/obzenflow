@@ -82,19 +82,20 @@
 //! - `infinite_source!(Out => handler)` for an infinite source.
 //! - `async_infinite_source!(Out => handler)` for an async infinite source.
 //! - `transform!(In -> Out => handler)` for a synchronous transform.
-//! - `effectful_transform!(In -> Out uses ... => handler)`
-//!   for a transform that performs declared external work.
+//! - `effectful_transform!(In -> Out => handler)` for a transform that
+//!   performs the external work its handler's effect set declares.
 //! - `sink!(In => handler)` for a sink.
 //! - `stateful!(In -> Out => handler)` for stateful aggregation.
 //! - `join!(catalog ref_stage: Ref, Stream -> Out => handler)` for joining with
 //!   reference data.
 //!
 //! Control middleware attaches with the live I/O unit it protects, for example
-//! `source!(Out => handler with rate_limit(10.0))`. Controls and passive
-//! observers share `with middleware` or `with { first, second }`. A named
-//! effect can carry its own group, such as `uses Fetch with { rate_limit(10.0),
-//! retry().max_attempts(3) }`; the complete plan is validated before any
-//! middleware is materialised or effect connector is opened.
+//! `source!(Out with rate_limit(10.0) => handler)`. Controls and passive
+//! observers share `with middleware` or `with { first, second }`, written
+//! before `=>`. Middleware built with `.for_effect::<E>()` guards only that
+//! effect, such as `let fetch_retry = retry().max_attempts(3).for_effect::<Fetch>();`;
+//! the complete plan is validated before any middleware is materialised or
+//! effect connector is opened.
 //!
 //! ### `topology:`
 //! Edges connecting stages:
@@ -233,3 +234,5 @@ pub mod stages;
 
 #[cfg(feature = "test-support")]
 pub mod testing;
+
+pub use obzenflow_runtime::effects::port;

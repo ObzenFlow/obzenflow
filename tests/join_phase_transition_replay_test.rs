@@ -25,7 +25,8 @@ use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinitio
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
+    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -34,7 +35,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -151,45 +151,56 @@ impl TypedFiniteSourceHandler for StreamSource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CountingEffect {
-    value: u64,
+#[obzenflow::port]
+struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct Counting {
+    value: u64,
+}
+
 #[async_trait]
-impl Effect for CountingEffect {
+impl CallRequest for Counting {
     const EFFECT_TYPE: &'static str = "join_replay.counting";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
-
+    type Safety = RequiresKey;
+    type Port = CallCounter;
     type Outcome = JoinEffectValue;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "counting"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    async fn call(
+        &self,
+        counter: &CallCounter,
+        _ctx: &mut EffectContext,
+    ) -> Result<JoinEffectValue, EffectError> {
+        counter.calls.fetch_add(1, Ordering::SeqCst);
         Ok(JoinEffectValue {
             effect_value: self.value + 100,
         })
     }
+}
 
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("join-replay:{}", self.value)))
+impl Keyed for Counting {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(format!("join-replay:{}", self.value))
     }
 }
 
-#[derive(Clone, Debug)]
+type CountingEffect = Call<Counting>;
+
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct EffectfulTail {
-    calls: Arc<AtomicUsize>,
+    #[system]
+    counter: System<CallCounter>,
+}
+
+impl EffectfulTail {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            counter: System::eager("call-counter", Arc::new(CallCounter { calls }))
+                .expect("a valid system name"),
+        }
+    }
 }
 
 #[async_trait]
@@ -204,10 +215,7 @@ impl EffectfulTransformHandler for EffectfulTail {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
-            .perform(CountingEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-            })
+            .call(Counting { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         fx.emit(FinalOutput {
@@ -309,7 +317,7 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
             |s: &StreamItem| s.key.clone(),
             join_fn,
         );
-        let effectful = EffectfulTail { calls };
+        let effectful = EffectfulTail::new(calls);
         let collector = DropSink::<FinalOutput>::new();
 
         Ok(flow! {
@@ -321,7 +329,7 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
                 stream_src = source!(StreamItem => stream_source);
                 joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
                 effectful = effectful_transform!(
-                    JoinedItem -> { FinalOutput, JoinEffectValue } uses CountingEffect => effectful);
+                    JoinedItem -> { FinalOutput, JoinEffectValue } => effectful);
                 collector = sink!(FinalOutput => collector);
             },
 

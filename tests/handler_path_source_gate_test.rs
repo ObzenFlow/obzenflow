@@ -14,8 +14,8 @@ const LOWERING_IMPLEMENTATIONS: &[&str] = &[
     "crates/obzenflow_dsl/src/dsl/dsl.rs",
 ];
 // The sole test file licensed to spell helpers: it pins cross-helper lowering
-// contracts the public surface cannot observe (FLOWIP-120z muncher agreement).
-// Public-surface tests must not be added there.
+// contracts the public surface cannot observe. Public-surface tests must not
+// be added there.
 const LOWERING_CONTRACT_TESTS: &str =
     "crates/obzenflow_dsl/src/dsl/tests/lowering_helper_contract_test.rs";
 

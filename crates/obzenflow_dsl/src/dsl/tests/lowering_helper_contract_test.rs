@@ -15,9 +15,9 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::{BoundedBindingEvidence, TypedPayload};
     use obzenflow_runtime::effects::{
-        transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
-        EffectBindingUse, EffectContext, EffectDeclaration, EffectError, EffectPortResolutionError,
-        EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, EffectSet,
+        Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext,
+        EffectDeclaration, EffectError, EffectPortResolutionError, EffectPortSlot,
+        EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, IdempotencyKeyPolicy,
         LogicalEffectBindingName, Named, NamedEffect,
     };
     use serde::{Deserialize, Serialize};
@@ -30,41 +30,32 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
     }
 
+    trait ReplyPort: Send + Sync {}
+
+    const REPLY: EffectPortSlot<dyn ReplyPort> = EffectPortSlot::new("reply");
+
     #[derive(Clone, Debug)]
-    struct PlainEffect;
-
-    #[async_trait]
-    impl Effect for PlainEffect {
-        const EFFECT_TYPE: &'static str = "test.lowering_contract.plain_effect";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = obzenflow_runtime::effects::Portless;
-
-        type Outcome = Out;
-        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
-
-        fn label(&self) -> &str {
-            "plain_effect"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(Out)
-        }
+    struct AffineEffect {
+        binding: EffectBindingUse<Self>,
     }
 
-    #[derive(Clone, Debug)]
-    struct AffineEffect;
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct AffineEvidence;
+
+    impl EffectBindingEvidence for AffineEvidence {
+        const SCHEMA_VERSION: u32 = 1;
+
+        fn canonical_bytes(&self) -> BoundedBindingEvidence {
+            BoundedBindingEvidence::try_new(b"affine-fixture".to_vec()).unwrap()
+        }
+    }
 
     #[async_trait]
     impl Effect for AffineEffect {
         const EFFECT_TYPE: &'static str = "test.lowering_contract.affine_effect";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
-        type BindingMode = obzenflow_runtime::effects::Portless;
+        type BindingMode = Named<AffineEvidence>;
 
         type Outcome = Out;
         type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -82,64 +73,25 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct TxEffect {
-        binding: EffectBindingUse<Self>,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct TxEvidence;
-
-    impl EffectBindingEvidence for TxEvidence {
-        const SCHEMA_VERSION: u32 = 1;
-
-        fn canonical_bytes(&self) -> BoundedBindingEvidence {
-            BoundedBindingEvidence::try_new(b"tx-fixture".to_vec()).unwrap()
-        }
-    }
-
-    #[async_trait]
-    impl Effect for TxEffect {
-        const EFFECT_TYPE: &'static str = "test.lowering_contract.tx_effect";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Transactional;
-        type BindingMode = Named<TxEvidence>;
-
-        type Outcome = Out;
-        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
-
-        fn label(&self) -> &str {
-            "tx_effect"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::Value::Null
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(Out)
-        }
-    }
-
-    impl NamedEffect for TxEffect {
-        type BindingEvidence = TxEvidence;
+    impl NamedEffect for AffineEffect {
+        type BindingEvidence = AffineEvidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
             &self.binding
         }
 
         fn required_slots() -> EffectPortSlotSet {
-            EffectPortSlotSet::single(transactional_effect_port_slot::<Self>())
+            EffectPortSlotSet::single(REPLY)
         }
     }
 
-    fn tx_binding() -> EffectBinding<TxEffect> {
-        EffectRegistrationBuilder::<TxEffect>::new(
-            LogicalEffectBindingName::new("tx").unwrap(),
-            TxEvidence,
+    fn affine_binding() -> EffectBinding<AffineEffect> {
+        EffectRegistrationBuilder::<AffineEffect>::new(
+            LogicalEffectBindingName::new("affine").unwrap(),
+            AffineEvidence,
         )
         .bind_deferred(
-            transactional_effect_port_slot::<TxEffect>(),
+            REPLY,
             Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
         )
         .unwrap()
@@ -147,84 +99,37 @@ mod tests {
         .unwrap()
     }
 
-    /// FLOWIP-120z: the type-level manifest muncher and the value-level entry
-    /// muncher must agree for every effect-declaration spelling.
     #[test]
-    fn effect_manifest_type_muncher_matches_every_declaration_spelling() {
-        type Plain = crate::__obzenflow_effect_manifest_types!(PlainEffect);
-        let mut plain = Vec::new();
-        let _plain_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
-            Vec::new();
-        crate::__obzenflow_effect_entries!(@entry plain, _plain_attachments, [], PlainEffect);
-        assert_eq!(
-            <Plain as EffectSet>::effect_types(),
-            plain
-                .iter()
-                .map(EffectDeclaration::effect_type)
-                .collect::<Vec<_>>()
-        );
-
-        type WithPolicy = crate::__obzenflow_effect_manifest_types!(
-            PlainEffect with obzenflow_adapters::middleware::rate_limit(2.0)
-        );
-        let mut with_policy = Vec::new();
-        let mut with_policy_attachments = Vec::new();
+    fn generated_entry_declares_one_acknowledged_effect_and_attaches_its_policies() {
+        let binding = affine_binding();
+        let mut declarations: Vec<EffectDeclaration> = Vec::new();
+        let mut attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> = Vec::new();
         crate::__obzenflow_effect_entries!(
-            @entry with_policy,
-            with_policy_attachments,
-            [],
-            PlainEffect with obzenflow_adapters::middleware::rate_limit(2.0)
-        );
-        assert_eq!(
-            <WithPolicy as EffectSet>::effect_types(),
-            with_policy
-                .iter()
-                .map(EffectDeclaration::effect_type)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(with_policy_attachments.len(), 1);
-
-        let tx = tx_binding();
-        type Transactional =
-            crate::__obzenflow_effect_manifest_types!(transactional(TxEffect) via tx);
-        let mut transactional = Vec::new();
-        let transactional_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
-            Vec::new();
-        crate::__obzenflow_effect_entries!(
-            @entry transactional,
-            transactional_attachments,
-            [],
-            transactional(TxEffect) via tx
-        );
-        assert_eq!(
-            <Transactional as EffectSet>::effect_types(),
-            transactional
-                .iter()
-                .map(EffectDeclaration::effect_type)
-                .collect::<Vec<_>>()
-        );
-        assert!(transactional_attachments.is_empty());
-
-        type AtLeastOnce = crate::__obzenflow_effect_manifest_types!(at_least_once(AffineEffect));
-        let mut at_least_once = Vec::new();
-        let _at_least_once_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
-            Vec::new();
-        crate::__obzenflow_effect_entries!(
-            @entry at_least_once,
-            _at_least_once_attachments,
+            @entry declarations,
+            attachments,
             [],
             at_least_once(AffineEffect)
+                via binding
+                with {
+                    obzenflow_adapters::middleware::rate_limit(2.0),
+                    obzenflow_adapters::middleware::circuit_breaker()
+                }
         );
+
         assert_eq!(
-            <AtLeastOnce as EffectSet>::effect_types(),
-            at_least_once
+            declarations
                 .iter()
                 .map(EffectDeclaration::effect_type)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            [AffineEffect::EFFECT_TYPE]
         );
         assert!(matches!(
-            at_least_once[0].idempotency_key_policy(),
-            obzenflow_runtime::effects::IdempotencyKeyPolicy::AtLeastOnceAcknowledged
+            declarations[0].idempotency_key_policy(),
+            IdempotencyKeyPolicy::AtLeastOnceAcknowledged
         ));
+        assert_eq!(attachments.len(), 2);
+        assert!(attachments
+            .iter()
+            .all(|attachment| attachment.effect_type == AffineEffect::EFFECT_TYPE));
     }
 }

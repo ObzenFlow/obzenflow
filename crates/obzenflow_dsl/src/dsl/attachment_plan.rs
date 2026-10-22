@@ -56,12 +56,30 @@ fn observer_labels(
     Ok(())
 }
 
+fn refuse_effect_scope_without_effects(
+    stage: &str,
+    factories: &[Box<dyn MiddlewareFactory>],
+) -> Result<(), MiddlewarePlanError> {
+    if factories
+        .iter()
+        .any(|factory| factory.effect_scope().is_some())
+    {
+        return Err(MiddlewarePlanError::invalid(
+            stage,
+            None,
+            format!("stage '{stage}' performs no effects, so middleware built with `.for_effect::<E>()` has nothing to guard"),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn prepare_observers(
     stage: &str,
     stage_type: StageType,
     observers: &mut Factories,
 ) -> Result<(), MiddlewarePlanError> {
     freeze(observers);
+    refuse_effect_scope_without_effects(stage, observers)?;
     for factory in observers.iter() {
         if factory.declaration().is_control() {
             return Err(MiddlewarePlanError::invalid(stage, None, format!("stage '{stage}' ({stage_type:?}) has no declared live operation for control '{}'; attach it to a source, sink, or declared effect", factory.label())));
@@ -113,6 +131,7 @@ pub(super) fn prepare_io(
     all.extend(ingress.take());
     all.append(observers);
     freeze(&mut all);
+    refuse_effect_scope_without_effects(stage, &all)?;
     let operation = if stage_type == StageType::Sink {
         MiddlewareSurfaceKind::SinkDelivery
     } else {
@@ -162,8 +181,29 @@ pub(super) fn prepare_effects(
     attachments: &mut Vec<EffectPolicyAttachment>,
 ) -> Result<(), MiddlewarePlanError> {
     freeze(implementation);
+    if effects.is_empty() {
+        refuse_effect_scope_without_effects(stage, implementation)?;
+    }
     let mut observers = Vec::new();
     for factory in std::mem::take(implementation) {
+        if let Some(effect_type) = factory.effect_scope() {
+            let Some(effect) = effects
+                .iter()
+                .find(|effect| effect.effect_type() == effect_type)
+            else {
+                return Err(MiddlewarePlanError::invalid(
+                    stage,
+                    None,
+                    format!("Effectful stage '{stage}' attaches policy middleware to undeclared effect '{effect_type}'; `.for_effect::<E>()` must name an effect its handler performs"),
+                ));
+            };
+            attachments.push(EffectPolicyAttachment {
+                effect_type: effect.effect_type(),
+                factory,
+                authored_site: MiddlewareAttachmentSite::Effect,
+            });
+            continue;
+        }
         if factory.declaration().is_observer() {
             observers.push(factory);
             continue;
@@ -174,7 +214,7 @@ pub(super) fn prepare_effects(
                 .map(EffectDeclaration::effect_type)
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(MiddlewarePlanError::invalid(stage, None, format!("stage '{stage}': implementation control '{}' requires exactly one declared effect; attach it to a named effect from [{choices}]", factory.label())));
+            return Err(MiddlewarePlanError::invalid(stage, None, format!("stage '{stage}': implementation control '{}' requires exactly one declared effect; build it with `.for_effect::<E>()` for one of [{choices}]", factory.label())));
         }
         attachments.push(EffectPolicyAttachment {
             effect_type: effects[0].effect_type(),

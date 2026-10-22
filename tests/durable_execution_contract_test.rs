@@ -36,10 +36,10 @@ use gateway_demo::gateway::AuthorizePaymentOutcome;
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
 use obzenflow::application::FlowApplication;
 use obzenflow::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, StageCompletion,
+    CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    StageCompletion,
 };
 use obzenflow::error::HandlerError;
-use obzenflow::flow::backpressure::enforced;
 use obzenflow::flow::{
     async_infinite_source, effectful_transform, flow, sink, source, stateful, FlowDefinition,
 };
@@ -266,6 +266,7 @@ async fn hold_until(release: &Path) {
 /// Appends every physical call to the ledger with one unbuffered write, which
 /// survives SIGKILL. Holds `hold` after recording its call until `release`
 /// exists.
+#[obzenflow::port]
 #[derive(Clone, Debug)]
 struct Gateway {
     ledger: PathBuf,
@@ -349,46 +350,39 @@ fn read_lines<T: DeserializeOwned>(path: &Path) -> Vec<T> {
 }
 
 /// Authorizes one order at the gateway, keyed by its order id.
-#[derive(Clone, Debug)]
-struct AuthorizePayment {
+#[derive(Clone, Debug, Serialize)]
+struct AuthorizationRequest {
     order: CustomerOrderPlaced,
-    gateway: Gateway,
 }
 
 #[async_trait]
-impl Effect for AuthorizePayment {
+impl CallRequest for AuthorizationRequest {
     const EFFECT_TYPE: &'static str = "payment.authorize";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow::effects::Portless;
+    type Safety = RequiresKey;
+    type Port = Gateway;
     type Outcome = AuthorizePaymentOutcome;
-    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-    fn label(&self) -> &str {
-        "authorize_payment"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({
-            "order_id": self.order.order_id,
-            "customer_id": self.order.customer_id,
-            "amount_cents": self.order.amount_cents,
-            "payment_method_state": self.order.payment_method_state,
-        })
-    }
-
-    async fn execute(&self, _: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.gateway.authorize(&self.order).await
-    }
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(idempotency_key(&self.order.order_id)))
+    async fn call(
+        &self,
+        gateway: &Gateway,
+        _: &mut EffectContext,
+    ) -> Result<AuthorizePaymentOutcome, EffectError> {
+        gateway.authorize(&self.order).await
     }
 }
 
-#[derive(Clone, Debug)]
+impl Keyed for AuthorizationRequest {
+    fn idempotency_key(&self) -> IdempotencyKey {
+        IdempotencyKey(idempotency_key(&self.order.order_id))
+    }
+}
+
+type AuthorizePayment = obzenflow::effects::Call<AuthorizationRequest>;
+
+#[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct Authorize {
-    gateway: Gateway,
+    #[system]
+    gateway: obzenflow::effects::System<Gateway>,
 }
 
 type Authorization = obzenflow::schema::stage_fact_set![PaymentAuthorized, PaymentDeclined];
@@ -405,13 +399,10 @@ impl EffectfulTransformHandler for Authorize {
         order: CustomerOrderPlaced,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        // `perform` records whichever payment fact happened.
-        fx.perform(AuthorizePayment {
-            order,
-            gateway: self.gateway.clone(),
-        })
-        .await
-        .map_err(|error| HandlerError::Other(error.to_string()))?;
+        // `fx.call` records whichever payment fact happened.
+        fx.call(AuthorizationRequest { order })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
         Ok(fx.complete()?)
     }
 
@@ -511,12 +502,14 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
         Some(Hold::ReceiptAndGateway { receipt, gateway }) => (Some(gateway), Some(receipt)),
         Some(Hold::BetweenEffects(_)) | None => (None, None),
     };
+    let gateway = Gateway {
+        ledger: scenario.ledger(),
+        hold: gateway_hold,
+        release: scenario.release(),
+    };
     let authorize = Authorize {
-        gateway: Gateway {
-            ledger: scenario.ledger(),
-            hold: gateway_hold,
-            release: scenario.release(),
-        },
+        gateway: obzenflow::effects::System::eager("payment-gateway", std::sync::Arc::new(gateway))
+            .expect("a valid system name"),
     };
     let receipt_file = ReceiptFile {
         path: scenario.receipts(),
@@ -532,14 +525,12 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             WebOrders::Yaml(web_orders_input) => flow! {
                 name: "durable_execution_contract",
                 journals: disk_journals(journals),
-                backpressure: enforced(4).stall_timeout_ms(120_000),
 
                 stages: {
                     web_orders = source!(CustomerOrderPlaced => web_orders_input);
                     store_orders = source!(CustomerOrderPlaced => store_orders_input);
                     authorize_payment = effectful_transform!(
-                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined }
-                            uses AuthorizePayment => authorize
+                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined } => authorize
                     );
                     settlement = stateful!(PaymentAuthorized -> SettlementLedger => ledger);
                     settled = sink!(SettlementLedger => settled_ledger);
@@ -557,14 +548,12 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
             WebOrders::Http(web_orders_input) => flow! {
                 name: "durable_execution_contract",
                 journals: disk_journals(journals),
-                backpressure: enforced(4).stall_timeout_ms(120_000),
 
                 stages: {
                     web_orders = async_infinite_source!(CustomerOrderPlaced => web_orders_input);
                     store_orders = source!(CustomerOrderPlaced => store_orders_input);
                     authorize_payment = effectful_transform!(
-                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined }
-                            uses AuthorizePayment => authorize
+                        CustomerOrderPlaced -> { PaymentAuthorized, PaymentDeclined } => authorize
                     );
                     settlement = stateful!(PaymentAuthorized -> SettlementLedger => ledger);
                     settled = sink!(SettlementLedger => settled_ledger);
@@ -615,7 +604,8 @@ fn durable_execution_contract_child() {
                 )),
                 None => WebOrders::Yaml(orders(scenario.web_input(), "/web_orders")),
             };
-            app.run_blocking(build_flow(scenario, plan.hold, web))
+            app.with_config_file(payment_config(scenario))
+                .run_blocking(build_flow(scenario, plan.hold, web))
         }
         Graph::ThenLive
         | Graph::ThenLiveEffect
@@ -673,6 +663,16 @@ enum Graph {
     FlashSale,
     RateLimitedSink,
     UnorderedFanIn,
+}
+
+fn payment_config(scenario: &Scenario) -> PathBuf {
+    let path = scenario.root.join("obzenflow.toml");
+    std::fs::write(
+        &path,
+        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 4\nstall_timeout_ms = 120000\n",
+    )
+    .expect("write the configuration");
+    path
 }
 
 impl Scenario {
@@ -2598,43 +2598,46 @@ mod then_live {
         scenario.root.join("audit-ledger.jsonl")
     }
 
-    #[derive(Clone, Debug)]
-    struct Audit {
+    #[obzenflow::port]
+    struct AuditLedger {
+        path: PathBuf,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct AuditEntry {
         entry: Entry,
-        ledger: PathBuf,
     }
 
     #[async_trait]
-    impl Effect for Audit {
+    impl CallRequest for AuditEntry {
         const EFFECT_TYPE: &'static str = "durable_contract.then_live.audit";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-        type BindingMode = obzenflow::effects::Portless;
+        type Safety = RequiresKey;
+        type Port = AuditLedger;
         type Outcome = Entry;
-        type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "audit"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({ "note": self.entry.note })
-        }
-
-        async fn execute(&self, _: &mut EffectContext) -> Result<Entry, EffectError> {
-            append_line(&self.ledger, &self.entry.note)
+        async fn call(
+            &self,
+            ledger: &AuditLedger,
+            _: &mut EffectContext,
+        ) -> Result<Entry, EffectError> {
+            append_line(&ledger.path, &self.entry.note)
                 .map_err(|error| EffectError::Transport(error.to_string()))?;
             Ok(self.entry.clone())
         }
+    }
 
-        fn idempotency_key(&self) -> Option<IdempotencyKey> {
-            Some(IdempotencyKey(format!("audit:{}", self.entry.note)))
+    impl Keyed for AuditEntry {
+        fn idempotency_key(&self) -> IdempotencyKey {
+            IdempotencyKey(format!("audit:{}", self.entry.note))
         }
     }
 
-    #[derive(Clone, Debug)]
+    type Audit = obzenflow::effects::Call<AuditEntry>;
+
+    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Vet {
-        ledger: PathBuf,
+        #[system]
+        ledger: obzenflow::effects::System<AuditLedger>,
     }
 
     #[async_trait]
@@ -2649,12 +2652,9 @@ mod then_live {
             fx: &mut Effects<Self::Output, Self::AllowedEffects>,
         ) -> Result<StageCompletion<Self::Output>, HandlerError> {
             if AUDITED.contains(&entry.note.as_str()) {
-                fx.perform(Audit {
-                    entry,
-                    ledger: self.ledger.clone(),
-                })
-                .await
-                .map_err(|error| HandlerError::Other(error.to_string()))?;
+                fx.call(AuditEntry { entry })
+                    .await
+                    .map_err(|error| HandlerError::Other(error.to_string()))?;
             } else {
                 fx.emit(entry).await?;
             }
@@ -2678,8 +2678,12 @@ mod then_live {
         let graph = scenario.graph;
         let slow_tx_input = (graph == Graph::ThenLiveTwoBatch)
             .then(|| yaml(EntryYaml, slow_entries_input(scenario), "/entries"));
+        let audit = AuditLedger {
+            path: audit_ledger(scenario),
+        };
         let vet = Vet {
-            ledger: audit_ledger(scenario),
+            ledger: obzenflow::effects::System::eager("audit-ledger", std::sync::Arc::new(audit))
+                .expect("a valid system name"),
         };
         FlowDefinition::materialize(move |_runtime_config| {
             let post_entry = joins::inner_then_live(
@@ -2697,8 +2701,8 @@ mod then_live {
                     journals: disk_journals(journals),
 
                     stages: {
-                        batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
-                        batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
+                        batch_accounts = source!(Account with rate_limit(2.0) => batch_accounts_input);
+                        batch_tx = source!(Entry with rate_limit(2.0) => batch_tx_input);
                         live_accounts = async_infinite_source!(Account => live_accounts_input);
                         accounts = merge!(Account => merges::then_live);
                         posted = join!(catalog accounts: Account, Entry -> Posted => post_entry);
@@ -2721,7 +2725,7 @@ mod then_live {
                     stages: {
                         batch_accounts = source!(Account => batch_accounts_input);
                         batch_tx = source!(Entry => batch_tx_input);
-                        batch_tx_slow = source!(Entry => slow_tx_input with rate_limit(2.0));
+                        batch_tx_slow = source!(Entry with rate_limit(2.0) => slow_tx_input);
                         live_accounts = async_infinite_source!(Account => live_accounts_input);
                         live_tx = async_infinite_source!(Entry => live_tx_input);
                         accounts = merge!(Account => merges::then_live);
@@ -2747,9 +2751,9 @@ mod then_live {
                     journals: disk_journals(journals),
 
                     stages: {
-                        batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
-                        batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
-                        vet = effectful_transform!(Entry -> Entry uses Audit => vet);
+                        batch_accounts = source!(Account with rate_limit(2.0) => batch_accounts_input);
+                        batch_tx = source!(Entry with rate_limit(2.0) => batch_tx_input);
+                        vet = effectful_transform!(Entry -> Entry => vet);
                         live_accounts = async_infinite_source!(Account => live_accounts_input);
                         live_tx = async_infinite_source!(Entry => live_tx_input);
                         accounts = merge!(Account => merges::then_live);
@@ -2774,8 +2778,8 @@ mod then_live {
                 journals: disk_journals(journals),
 
                 stages: {
-                    batch_accounts = source!(Account => batch_accounts_input with rate_limit(2.0));
-                    batch_tx = source!(Entry => batch_tx_input with rate_limit(2.0));
+                    batch_accounts = source!(Account with rate_limit(2.0) => batch_accounts_input);
+                    batch_tx = source!(Entry with rate_limit(2.0) => batch_tx_input);
                     live_accounts = async_infinite_source!(Account => live_accounts_input);
                     live_tx = async_infinite_source!(Entry => live_tx_input);
                     accounts = merge!(Account => merges::then_live);
@@ -3192,8 +3196,8 @@ mod concat {
                 journals: disk_journals(journals),
 
                 stages: {
-                    early = source!(Note => early_input with rate_limit(2.0));
-                    late = source!(Note => late_input with rate_limit(2.0));
+                    early = source!(Note with rate_limit(2.0) => early_input);
+                    late = source!(Note with rate_limit(2.0) => late_input);
                     merged = merge!(first early: Note => merges::concat);
                     collected = sink!(Note => collected);
                 },
@@ -3430,8 +3434,8 @@ mod as_of {
                 journals: disk_journals(journals),
 
                 stages: {
-                    fx_rates = source!(Rate => rates_feed with rate_limit(rates_pace));
-                    payments = source!(Payment => payments_feed with rate_limit(payments_pace));
+                    fx_rates = source!(Rate with rate_limit(rates_pace) => rates_feed);
+                    payments = source!(Payment with rate_limit(payments_pace) => payments_feed);
                     price = join!(catalog fx_rates: Rate, Payment -> Priced => price);
                     priced = sink!(Priced => priced);
                 },
@@ -3542,7 +3546,6 @@ mod payment_demo {
     use super::*;
     use gateway_demo::domain::{PaymentAuthorizationUnavailable, TrafficPhase};
     use gateway_demo::fixtures;
-    use gateway_demo::gateway::GatewayTransform;
     use obzenflow::application::{Banner, Presentation};
 
     const BANNER: &str = "Durable execution contract: payment demo";
@@ -3566,7 +3569,7 @@ mod payment_demo {
         gateway_demo::flow::assemble_flow(
             fixtures::scripted_web_orders(),
             fixtures::scripted_store_orders(),
-            GatewayTransform::with_first_recovery_pause(FIRST_RECOVERY_PAUSE),
+            Some(FIRST_RECOVERY_PAUSE),
             GATEWAY_CALLS_PER_SECOND,
             scenario.journals(),
         )
@@ -3832,32 +3835,31 @@ mod two_effects {
         append_line(ledger, &call).map_err(|error| EffectError::Transport(error.to_string()))
     }
 
-    #[derive(Clone, Debug)]
-    struct AuthorizeOrder {
+    /// The ledger both requests write to, one system answering both.
+    #[obzenflow::port]
+    struct ChargeLedger {
+        path: PathBuf,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct AuthorizeCharge {
         order_id: String,
-        ledger: PathBuf,
     }
 
     #[async_trait]
-    impl Effect for AuthorizeOrder {
+    impl CallRequest for AuthorizeCharge {
         const EFFECT_TYPE: &'static str = "durable_contract.two_effects.authorize";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-        type BindingMode = obzenflow::effects::Portless;
+        type Safety = RequiresKey;
+        type Port = ChargeLedger;
         type Outcome = Authorized;
-        type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "authorize"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({ "order_id": self.order_id })
-        }
-
-        async fn execute(&self, _: &mut EffectContext) -> Result<Authorized, EffectError> {
+        async fn call(
+            &self,
+            ledger: &ChargeLedger,
+            _: &mut EffectContext,
+        ) -> Result<Authorized, EffectError> {
             record_call(
-                &self.ledger,
+                &ledger.path,
                 LedgerCall {
                     order_id: self.order_id.clone(),
                     call: "authorize".into(),
@@ -3868,39 +3870,36 @@ mod two_effects {
                 order_id: self.order_id.clone(),
             })
         }
+    }
 
-        fn idempotency_key(&self) -> Option<IdempotencyKey> {
-            Some(IdempotencyKey(format!("authorize:{}", self.order_id)))
+    impl Keyed for AuthorizeCharge {
+        fn idempotency_key(&self) -> IdempotencyKey {
+            IdempotencyKey(format!("authorize:{}", self.order_id))
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct CaptureOrder {
+    type AuthorizeOrder = obzenflow::effects::Call<AuthorizeCharge>;
+
+    #[derive(Clone, Debug, Serialize)]
+    struct CaptureCharge {
         order_id: String,
         amount_cents: u64,
-        ledger: PathBuf,
     }
 
     #[async_trait]
-    impl Effect for CaptureOrder {
+    impl CallRequest for CaptureCharge {
         const EFFECT_TYPE: &'static str = "durable_contract.two_effects.capture";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-        type BindingMode = obzenflow::effects::Portless;
+        type Safety = RequiresKey;
+        type Port = ChargeLedger;
         type Outcome = Captured;
-        type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "capture"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({ "order_id": self.order_id, "amount_cents": self.amount_cents })
-        }
-
-        async fn execute(&self, _: &mut EffectContext) -> Result<Captured, EffectError> {
+        async fn call(
+            &self,
+            ledger: &ChargeLedger,
+            _: &mut EffectContext,
+        ) -> Result<Captured, EffectError> {
             record_call(
-                &self.ledger,
+                &ledger.path,
                 LedgerCall {
                     order_id: self.order_id.clone(),
                     call: "capture".into(),
@@ -3912,15 +3911,20 @@ mod two_effects {
                 amount_cents: self.amount_cents,
             })
         }
+    }
 
-        fn idempotency_key(&self) -> Option<IdempotencyKey> {
-            Some(IdempotencyKey(format!("capture:{}", self.order_id)))
+    impl Keyed for CaptureCharge {
+        fn idempotency_key(&self) -> IdempotencyKey {
+            IdempotencyKey(format!("capture:{}", self.order_id))
         }
     }
 
-    #[derive(Clone, Debug)]
+    type CaptureOrder = obzenflow::effects::Call<CaptureCharge>;
+
+    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Charge {
-        ledger: PathBuf,
+        #[system]
+        ledger: obzenflow::effects::System<ChargeLedger>,
         hold: Option<String>,
         release: PathBuf,
         fix: bool,
@@ -3937,9 +3941,8 @@ mod two_effects {
             order: ChargeOrder,
             fx: &mut Effects<Self::Output, Self::AllowedEffects>,
         ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-            fx.perform(AuthorizeOrder {
+            fx.call(AuthorizeCharge {
                 order_id: order.order_id.clone(),
-                ledger: self.ledger.clone(),
             })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
@@ -3951,10 +3954,9 @@ mod two_effects {
             } else {
                 AMOUNT_CENTS
             };
-            fx.perform(CaptureOrder {
+            fx.call(CaptureCharge {
                 order_id: order.order_id,
                 amount_cents,
-                ledger: self.ledger.clone(),
             })
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
@@ -3973,8 +3975,15 @@ mod two_effects {
             .batch_size(1)
             .build()
             .expect("the order channel is configured");
+        let charge_ledger = ChargeLedger {
+            path: ledger(scenario),
+        };
         let charge = Charge {
-            ledger: ledger(scenario),
+            ledger: obzenflow::effects::System::eager(
+                "charge-ledger",
+                std::sync::Arc::new(charge_ledger),
+            )
+            .expect("a valid system name"),
             hold: match hold {
                 Some(Hold::BetweenEffects(order)) => Some(order),
                 _ => None,
@@ -3992,9 +4001,7 @@ mod two_effects {
                 stages: {
                     orders = source!(ChargeOrder => orders_input);
                     charge = effectful_transform!(
-                        ChargeOrder -> { Authorized, Captured }
-                            uses { AuthorizeOrder, CaptureOrder }
-                        => charge
+                        ChargeOrder -> { Authorized, Captured } => charge
                     );
                     captured = sink!(Captured => captured);
                 },
@@ -4133,7 +4140,7 @@ mod emit_only {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Stamp;
 
     #[async_trait]
@@ -4171,9 +4178,9 @@ mod emit_only {
                 journals: disk_journals(journals),
 
                 stages: {
-                    ticks = source!(Tick => ticks_input with {
+                    ticks = source!(Tick with {
                         rate_limit(5.0).burst_capacity(1.0)
-                    });
+                    } => ticks_input);
                     stamp = effectful_transform!(Tick -> Stamped => Stamp);
                     stamped = sink!(Stamped => stamped);
                 },
@@ -4663,10 +4670,10 @@ mod lagging {
 
                 stages: {
                     items = source!(Item => items_input);
-                    deliver = sink!(Item => recording with {
+                    deliver = sink!(Item with {
                         rate_limit(4.0).burst_capacity(1.0),
                         sink_delivery_observer("observed", observer)
-                    });
+                    } => recording);
                 },
 
                 topology: {
@@ -4702,8 +4709,7 @@ mod lagging {
                     right = source!(Item => right_input);
                     combine = transform!(Item -> Combined => Combine);
                     print = sink!(
-                        Combined => print with { rate_limit(4.0).burst_capacity(1.0) },
-                        delivery: idempotent
+                        Combined with { rate_limit(4.0).burst_capacity(1.0) } => print.idempotent()
                     );
                 },
 

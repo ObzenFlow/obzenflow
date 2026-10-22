@@ -150,9 +150,8 @@ macro_rules! effect_set {
 
 #[cfg(test)]
 mod tests {
-    use super::super::declaration::EffectSafety;
     use super::super::error::EffectError;
-    use super::super::EffectContext;
+    use super::super::{Call, CallRequest, EffectContext, Idempotent};
     use super::*;
     use async_trait::async_trait;
     use obzenflow_core::event::schema::Member;
@@ -168,57 +167,39 @@ mod tests {
         const EVENT_TYPE: &'static str = "effect_set.ping_value";
     }
 
-    #[derive(Debug, Clone)]
-    struct Ping;
+    #[derive(Debug, Clone, Serialize)]
+    struct PingRequest;
 
     #[async_trait]
-    impl Effect for Ping {
+    impl CallRequest for PingRequest {
         const EFFECT_TYPE: &'static str = "effect_set.ping";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = crate::effects::Portless;
-
+        type Safety = Idempotent;
+        type Port = ();
         type Outcome = PingValue;
-        type OutcomeSemantics = crate::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "ping"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        async fn call(&self, _: &(), _: &mut EffectContext) -> Result<PingValue, EffectError> {
             Ok(PingValue { value: 1 })
         }
     }
 
-    #[derive(Debug, Clone)]
-    struct Pong;
+    type Ping = Call<PingRequest>;
+
+    #[derive(Debug, Clone, Serialize)]
+    struct PongRequest;
 
     #[async_trait]
-    impl Effect for Pong {
+    impl CallRequest for PongRequest {
         const EFFECT_TYPE: &'static str = "effect_set.pong";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Idempotent;
-        type BindingMode = crate::effects::Portless;
-
+        type Safety = Idempotent;
+        type Port = ();
         type Outcome = PingValue;
-        type OutcomeSemantics = crate::effects::DomainFacts;
 
-        fn label(&self) -> &str {
-            "pong"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        async fn call(&self, _: &(), _: &mut EffectContext) -> Result<PingValue, EffectError> {
             Ok(PingValue { value: 2 })
         }
     }
+
+    type Pong = Call<PongRequest>;
 
     fn member_holds<Set, E, Index>()
     where

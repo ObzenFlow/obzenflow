@@ -8,7 +8,7 @@ use obzenflow_core::ai::{
     ChatMessage, ChatParams, ChatRequestSpec, ChatResponse, ChatResponseFormat, ToolDefinition,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::effects::{EffectBinding, EffectHandler, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -29,7 +29,11 @@ pub(crate) struct ChatTransformSettings {
 }
 
 /// Typed standalone chat handler using the declaration-scoped chat operation.
+#[derive(EffectHandler)]
+#[effect_handler(effects = obzenflow_runtime::effects)]
 pub struct ChatTransform<In, Out> {
+    #[system]
+    chat: EffectBinding<ChatCompletion>,
     system: Option<String>,
     params: ChatParams,
     tools: Vec<ToolDefinition>,
@@ -42,12 +46,14 @@ pub struct ChatTransform<In, Out> {
 
 impl<In, Out> ChatTransform<In, Out> {
     pub(crate) fn from_parts(
+        chat: EffectBinding<ChatCompletion>,
         settings: ChatTransformSettings,
         input_to_prompt: Arc<PromptMapper<In>>,
         response_to_output: Arc<ResponseMapper<In, Out>>,
         logic_version: String,
     ) -> Self {
         Self {
+            chat,
             system: settings.system,
             params: settings.params,
             tools: settings.tools,
@@ -63,6 +69,7 @@ impl<In, Out> ChatTransform<In, Out> {
 impl<In, Out> Clone for ChatTransform<In, Out> {
     fn clone(&self) -> Self {
         Self {
+            chat: self.chat.clone(),
             system: self.system.clone(),
             params: self.params.clone(),
             tools: self.tools.clone(),
