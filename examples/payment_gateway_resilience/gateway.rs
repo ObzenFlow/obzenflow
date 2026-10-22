@@ -6,12 +6,12 @@
 //!
 //! The gateway call is the one place this flow touches the outside world, so it
 //! is expressed as a request ([`AuthorizeRequest`]) the handler passes to
-//! `fx.call` with the gateway system, rather than inline I/O. The runtime owns
-//! one logical effect invocation, applies its configured
-//! retry policy to live physical calls, journals the one terminal outcome fact
-//! that happened (`payment.authorized` or `payment.declined`), and on
-//! replay reconstructs that recorded outcome without calling the gateway again.
-//! That is the durable-execution property the tutorial teaches.
+//! `fx.call`, rather than inline I/O. The runtime owns one logical effect
+//! invocation, applies its configured retry policy to live physical calls,
+//! journals the one terminal outcome fact that happened (`payment.authorized`
+//! or `payment.declined`), and on replay reconstructs that recorded outcome
+//! without calling the gateway again. That is the durable-execution property
+//! the tutorial teaches.
 //!
 //! Each payment-gateway example is self-contained; the high-volume variant keeps
 //! its own copy of this logic and only swaps the source and the flow wiring.

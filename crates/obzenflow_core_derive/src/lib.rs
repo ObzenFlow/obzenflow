@@ -8,7 +8,7 @@
 //! `#[derive(StageOutputFacts)]` for pure stage output carriers, which
 //! `obzenflow_core` re-exports next to their traits, and
 //! `#[derive(EffectHandler)]` and `#[port]`, which the runtime's effects module
-//! re-exports, the same way serde re-exports its derives.
+//! re-exports next to its effect handler and port contracts.
 
 mod effect_handler;
 mod effects_path;
