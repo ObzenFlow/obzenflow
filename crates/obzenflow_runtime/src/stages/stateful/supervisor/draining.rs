@@ -446,8 +446,12 @@ pub(super) async fn dispatch_draining<
                             });
 
                         match handler.emit_with_context(&mut ctx.current_state, output_context) {
-                            Ok(events_to_emit) => {
+                            Ok(mut events_to_emit) => {
                                 if !events_to_emit.is_empty() {
+                                    super::clear_replay_context_of_live_work(
+                                        &mut events_to_emit,
+                                        observer_scope,
+                                    );
                                     let stage_writer_id =
                                         ctx.writer_id.ok_or("No writer ID available")?;
                                     let _observer_parent = ctx
@@ -844,7 +848,7 @@ pub(super) async fn produce_final_output<
     }
 
     // Call handler.drain() to emit final accumulated state.
-    let final_state = ctx.current_state.clone();
+    let final_state = &ctx.current_state;
     let handler = (**ctx
         .handler
         .as_ref()
@@ -870,7 +874,7 @@ pub(super) async fn produce_final_output<
 
     let drain_result = process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
         handler
-            .drain_with_context(&final_state, output_context)
+            .drain_with_context(final_state, output_context)
             .await
             .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
                 instrumentation.record_error(err.kind());
@@ -880,7 +884,8 @@ pub(super) async fn produce_final_output<
     .await;
 
     match drain_result {
-        Ok(drain_events) => {
+        Ok(mut drain_events) => {
+            super::clear_replay_context_of_live_work(&mut drain_events, observer_scope);
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             if !drain_events.is_empty() {
                 let observer_parent = ctx

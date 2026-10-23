@@ -189,15 +189,13 @@ impl TypedStatefulHandler for NoopStateful {
 
     fn initial_state(&self) -> Self::State {}
 
-    fn emit(
-        &self,
-        _state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, _state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: (),
             outputs: Vec::new(),
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 fn single_flow_run_dir(base: &Path) -> Result<PathBuf> {

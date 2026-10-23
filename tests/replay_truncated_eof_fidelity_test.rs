@@ -129,15 +129,13 @@ impl TypedStatefulHandler for SumHandler {
         0
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: *state,
             outputs: vec![SumResult { total: *state }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 /// EOF kinds present in a stage journal, in append order.

@@ -71,15 +71,8 @@ impl TypedStatefulHandler for WindowedFold {
         state.contributions >= 2
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::ResetEpoch {
-            next_state: FoldState {
-                running_total: state.running_total,
-                contributions: 0,
-            },
             outputs: (state.contributions > 0)
                 .then_some(FoldSnapshot {
                     running_total: state.running_total,
@@ -88,6 +81,10 @@ impl TypedStatefulHandler for WindowedFold {
                 .into_iter()
                 .collect(),
         })
+    }
+
+    fn post_emit(&self, state: &mut Self::State) {
+        state.contributions = 0;
     }
 }
 

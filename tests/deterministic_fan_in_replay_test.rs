@@ -341,17 +341,15 @@ impl TypedStatefulHandler for OrderedListStateful {
         Vec::new()
     }
 
-    fn emit(
-        &self,
-        state: &Vec<String>,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Vec<String>) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
             outputs: vec![OrderedList {
                 items: state.clone(),
             }],
         })
     }
+
+    fn post_emit(&self, _: &mut Vec<String>) {}
 }
 
 /// Two channels of unequal length fan into the merge; the effectful tail

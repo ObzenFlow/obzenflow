@@ -142,12 +142,12 @@ impl stateful::TypedStatefulHandler for Pure {
     fn accumulate(&self, state: &mut u64, input: Fact) {
         *state += input.0;
     }
-    fn emit(&self, state: &u64) -> Result<stateful::StatefulEmission<u64, Fact>, HandlerError> {
+    fn emit(&self, state: &u64) -> Result<stateful::StatefulEmission<Fact>, HandlerError> {
         Ok(stateful::StatefulEmission::RetainEpoch {
-            next_state: *state,
             outputs: vec![Fact(*state)],
         })
     }
+    fn post_emit(&self, _: &mut u64) {}
 }
 
 impl joins::TypedJoinHandler for Pure {

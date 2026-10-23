@@ -106,15 +106,13 @@ impl TypedStatefulHandler for GuardedAccumulator {
         0
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: *state,
             outputs: vec![Aggregate { count: *state }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 #[derive(Clone, Debug)]

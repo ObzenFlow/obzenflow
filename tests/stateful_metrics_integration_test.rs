@@ -168,15 +168,13 @@ impl TypedStatefulHandler for SlowAccumulator {
         CounterState::default()
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
             outputs: vec![AggregateMetricEvent { count: state.count }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 #[derive(Debug)]

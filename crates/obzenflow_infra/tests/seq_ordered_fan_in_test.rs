@@ -161,18 +161,16 @@ impl TypedStatefulHandler for Checkbook {
         state.count > 0
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
             outputs: vec![Snapshot {
                 count: state.count,
                 sum: state.sum,
             }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 #[derive(Clone, Debug)]
@@ -420,18 +418,16 @@ impl TypedStatefulHandler for Tally {
         state.count > 0
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
             outputs: vec![Snapshot {
                 count: state.count,
                 sum: state.sum,
             }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 fn end_of_input_flow(

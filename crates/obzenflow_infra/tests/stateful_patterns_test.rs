@@ -187,17 +187,15 @@ impl TypedStatefulHandler for CounterHandler {
         CounterState::default()
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
             outputs: vec![CountResult {
                 total_count: state.count,
             }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 #[derive(Debug, Clone)]
@@ -222,12 +220,8 @@ impl TypedStatefulHandler for AccumulatorHandler {
         Vec::new()
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
             outputs: state
                 .iter()
                 .copied()
@@ -235,6 +229,8 @@ impl TypedStatefulHandler for AccumulatorHandler {
                 .collect(),
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 #[derive(Debug, Clone)]
@@ -259,15 +255,13 @@ impl TypedStatefulHandler for SumHandler {
         0
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: *state,
             outputs: vec![SumResult { total_sum: *state }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 #[derive(Debug, Clone)]
@@ -306,17 +300,15 @@ impl TypedStatefulHandler for ImmediateEmitter {
         *state > 0
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: *state,
             outputs: vec![ProgressUpdate {
                 current_count: *state,
             }],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 
     fn initial_state(&self) -> Self::State {
         0

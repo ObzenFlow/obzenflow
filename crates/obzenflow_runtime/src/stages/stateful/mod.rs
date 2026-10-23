@@ -8,7 +8,7 @@
 //! windowing operations, and session tracking without `Arc<Mutex>` anti-patterns.
 //!
 //! Key features:
-//! - Functional state updates (handler returns new state)
+//! - In-place state updates through `accumulate` and `post_emit`
 //! - Type-safe state management (State: Clone + Send + Sync)
 //! - Proper lifecycle with Accumulating → Draining → Drained states
 //! - Control event strategies for customizing behavior
@@ -35,12 +35,13 @@
 //!         0
 //!     }
 //!
-//!     fn emit(&self, state: &Self::State) -> Result<StatefulEmission<u64, CountSnapshot>, HandlerError> {
+//!     fn emit(&self, state: &Self::State) -> Result<StatefulEmission<CountSnapshot>, HandlerError> {
 //!         Ok(StatefulEmission::RetainEpoch {
-//!             next_state: *state,
 //!             outputs: vec![CountSnapshot { total: *state }],
 //!         })
 //!     }
+//!
+//!     fn post_emit(&self, _: &mut Self::State) {}
 //! }
 //! ```
 

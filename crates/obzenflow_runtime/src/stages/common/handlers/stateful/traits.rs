@@ -339,12 +339,12 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 ///
 /// A `decide` invocation is not transactional. Every fact whose commit
 /// completes through `fx` remains durable even if `decide` later returns an
-/// error. Before propagating that result, the adapter folds all such facts in
-/// commit order through [`EffectfulStatefulHandler::apply`] and installs the
-/// completed draft. Returning an error never rolls a committed fact back. If
-/// decoding or folding a committed fact fails, the adapter leaves the prior
-/// state installed and returns a stage-fatal [`HandlerError::ContractViolation`]
-/// instead of the `decide` result. The committed fact remains durable, but the
+/// error. Before propagating that result, the adapter folds each such fact
+/// into the installed state in commit order through
+/// [`EffectfulStatefulHandler::apply`]. Returning an error never rolls a
+/// committed fact back. If decoding or folding a committed fact fails, the
+/// adapter returns a stage-fatal [`HandlerError::ContractViolation`] instead
+/// of the `decide` result. The committed fact remains durable, but the
 /// stage cannot acknowledge the input, process later input, or complete drain
 /// because its state no longer represents a fold of its durable history.
 ///
@@ -440,12 +440,12 @@ pub trait EffectfulStatefulHandler: crate::effects::EffectHandler + Send + Sync 
     /// fact in commit order; carriers never appear here.
     ///
     /// The fact is already durable when this method is called. Returning an
-    /// error therefore contradicts the state-fold contract: the adapter keeps
-    /// the previously installed state, wraps the error as
-    /// [`HandlerError::ContractViolation`], and the effectful stateful
-    /// supervisor fails the stage. It does not acknowledge the input or skip
-    /// the fact and continue. Implementations must not rely on retry because
-    /// they receive mutable access to both the handler and the draft state.
+    /// error therefore contradicts the state-fold contract: the adapter wraps
+    /// the error as [`HandlerError::ContractViolation`], and the effectful
+    /// stateful supervisor fails the stage, which never reads its state again.
+    /// It does not acknowledge the input or skip the fact and continue.
+    /// Implementations must not rely on retry because they receive mutable
+    /// access to both the handler and the state.
     fn apply(
         &mut self,
         state: &mut Self::State,
@@ -529,10 +529,9 @@ where
         self.install_required_effect_boundary(&mut effect_context.effect_boundary)?;
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
         let decide_result = self.handler.decide(state, &input, &mut fx).await;
-        let mut draft = state.clone();
         for fact_event in fx.drain_committed_facts() {
             let fact = decode_effectful_stateful_fact::<H::Output>(&fact_event)?;
-            self.handler.apply(&mut draft, fact).map_err(|source| {
+            self.handler.apply(state, fact).map_err(|source| {
                 HandlerError::ContractViolation(format!(
                     "effectful_stateful_apply: `apply` rejected committed event `{}` of type \
                      `{}`: {source}",
@@ -541,7 +540,6 @@ where
                 ))
             })?;
         }
-        *state = draft;
         if let Some(fatal) = fx.authoring_halt_fatal() {
             return Err(HandlerError::Fatal(fatal));
         }

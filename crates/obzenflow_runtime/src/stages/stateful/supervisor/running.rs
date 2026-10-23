@@ -855,7 +855,8 @@ pub(super) async fn dispatch_emitting<
     .await;
 
     match emit_result {
-        Ok(events) if !events.is_empty() => {
+        Ok(mut events) if !events.is_empty() => {
+            super::clear_replay_context_of_live_work(&mut events, observer_scope);
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let observer_parent = ctx
                 .last_consumed_envelope

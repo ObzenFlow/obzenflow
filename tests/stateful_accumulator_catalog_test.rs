@@ -233,17 +233,12 @@ fn top_n_replacement_and_top_n_by_aggregation_are_distinct_contracts() {
 }
 
 fn emit_and_advance<H: TypedStatefulHandler>(handler: &H, state: &mut H::State) -> Vec<H::Output> {
-    let (next_state, outputs) = match handler.emit(state).expect("emit typed values") {
-        StatefulEmission::RetainEpoch {
-            next_state,
-            outputs,
+    let outputs = match handler.emit(state).expect("emit typed values") {
+        StatefulEmission::RetainEpoch { outputs } | StatefulEmission::ResetEpoch { outputs } => {
+            outputs
         }
-        | StatefulEmission::ResetEpoch {
-            next_state,
-            outputs,
-        } => (next_state, outputs),
     };
-    *state = next_state;
+    handler.post_emit(state);
     outputs
 }
 

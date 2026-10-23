@@ -126,15 +126,13 @@ impl TypedStatefulHandler for IngestAggregator {
     fn initial_state(&self) -> Self::State {
         IngestSummary::default()
     }
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
             outputs: vec![state.clone()],
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 #[derive(Clone, Debug)]

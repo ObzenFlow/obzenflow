@@ -91,15 +91,13 @@ impl TypedStatefulHandler for Checkbook {
         state.last_snapshot.is_some()
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
-        let mut next_state = state.clone();
-        let outputs = next_state.last_snapshot.take().into_iter().collect();
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state,
-            outputs,
+            outputs: state.last_snapshot.iter().cloned().collect(),
         })
+    }
+
+    fn post_emit(&self, state: &mut Self::State) {
+        state.last_snapshot = None;
     }
 }
