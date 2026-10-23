@@ -166,7 +166,7 @@ where
     /// # #[derive(Clone, Debug, Serialize, Deserialize)]
     /// # struct Charged;
     /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.call.charged"; }
-    /// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+    /// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
     /// #[derive(Clone, Debug, Serialize)]
     /// struct ChargeCardRequest;
     ///
@@ -178,7 +178,7 @@ where
     ///     type Outcome = Charged;
     ///
     ///     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> {
-    ///         Ok(card.charge())
+    ///         card.charge()
     ///     }
     /// }
     ///
@@ -223,7 +223,7 @@ where
     /// # #[derive(Clone, Debug, Serialize, Deserialize)]
     /// # struct Charged;
     /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.call.charged"; }
-    /// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+    /// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
     /// # #[derive(Clone, Debug, Serialize)]
     /// # struct ChargeCardRequest;
     /// # #[async_trait]
@@ -232,7 +232,7 @@ where
     /// #     type Safety = Idempotent;
     /// #     type Port = dyn CardPort;
     /// #     type Outcome = Charged;
-    /// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+    /// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
     /// # }
     /// # #[derive(Clone, Debug, EffectHandler)]
     /// # #[effect_handler(effects = obzenflow_runtime::effects)]
@@ -272,7 +272,7 @@ where
     /// # #[derive(Clone, Debug, Serialize, Deserialize)]
     /// # struct Shipped;
     /// # impl TypedPayload for Shipped { const EVENT_TYPE: &'static str = "docs.call.shipped"; }
-    /// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+    /// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
     /// # #[derive(Clone, Debug, Serialize)]
     /// # struct ChargeCardRequest;
     /// # #[async_trait]
@@ -281,7 +281,7 @@ where
     /// #     type Safety = Idempotent;
     /// #     type Port = dyn CardPort;
     /// #     type Outcome = Charged;
-    /// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+    /// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
     /// # }
     /// # type ChargeCard = Call<ChargeCardRequest>;
     /// # #[derive(Clone, Debug, EffectHandler)]

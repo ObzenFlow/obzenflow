@@ -43,10 +43,9 @@ pub trait PaymentGatewayPort: Send + Sync {
         &self,
         request: &AuthorizeRequest,
         ctx: &EffectContext,
-    ) -> Result<GatewayResponse, GatewayError>;
+    ) -> Result<AuthorizePaymentOutcome, EffectError>;
 }
 
-/// What the gateway decided for one authorization.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authorization", rename_all = "snake_case")]
 pub enum GatewayResponse {
@@ -54,43 +53,19 @@ pub enum GatewayResponse {
     Declined { reason: PaymentDeclineReason },
 }
 
-/// Why the gateway decided nothing for one attempt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
-pub enum GatewayFailure {
+enum GatewayFailure {
     TimedOut,
     InvalidPaymentMethod,
 }
 
-/// A failed authorization attempt, as the gateway's port reports it.
-#[derive(Debug, thiserror::Error)]
-pub enum GatewayError {
-    #[error("gateway_timeout_simulated")]
-    TimedOut,
-    #[error("invalid_payment_method_reached_gateway")]
-    InvalidPaymentMethod,
-    #[error(transparent)]
-    CallLog(#[from] CallLogError),
-}
-
-impl From<GatewayFailure> for GatewayError {
+impl From<GatewayFailure> for EffectError {
     fn from(failure: GatewayFailure) -> Self {
         match failure {
-            GatewayFailure::TimedOut => Self::TimedOut,
-            GatewayFailure::InvalidPaymentMethod => Self::InvalidPaymentMethod,
-        }
-    }
-}
-
-impl From<GatewayError> for EffectError {
-    fn from(error: GatewayError) -> Self {
-        match error {
-            GatewayError::TimedOut => EffectError::Timeout("gateway_timeout_simulated".to_string()),
-            GatewayError::InvalidPaymentMethod => {
-                EffectError::Validation("invalid_payment_method_reached_gateway".to_string())
-            }
-            GatewayError::CallLog(error) => {
-                EffectError::unavailable("payment_gateway", "ledger_write_failed", error)
+            GatewayFailure::TimedOut => Self::Timeout("gateway_timeout_simulated".to_string()),
+            GatewayFailure::InvalidPaymentMethod => {
+                Self::Validation("invalid_payment_method_reached_gateway".to_string())
             }
         }
     }
@@ -119,7 +94,7 @@ impl PaymentGatewayPort for ScriptedGateway {
         &self,
         request: &AuthorizeRequest,
         ctx: &EffectContext,
-    ) -> Result<GatewayResponse, GatewayError> {
+    ) -> Result<AuthorizePaymentOutcome, EffectError> {
         // Latency comes from the deterministic, seeded RNG on the effect context
         // rather than a wall clock, so a replay reconstructs the same timing.
         let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
@@ -132,10 +107,22 @@ impl PaymentGatewayPort for ScriptedGateway {
             let hang_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
             ctx.sleep(Duration::from_millis(hang_ms)).await;
         }
-        self.calls
+        let response = self
+            .calls
             .try_answer(&request.idempotency_key(), ctx.flow_id(), |_| {
                 decide(request)
             })
+            .map_err(|error| {
+                EffectError::unavailable("payment_gateway", "ledger_write_failed", error)
+            })??;
+        Ok(match response {
+            GatewayResponse::Charged { authorization_id } => {
+                AuthorizePaymentOutcome::Authorized(request.authorized(authorization_id))
+            }
+            GatewayResponse::Declined { reason } => {
+                AuthorizePaymentOutcome::Declined(request.declined(reason))
+            }
+        })
     }
 }
 
@@ -183,7 +170,7 @@ impl AuthorizeRequest {
         }
     }
 
-    fn authorized(&self, authorization_id: String) -> PaymentAuthorized {
+    pub fn authorized(&self, authorization_id: String) -> PaymentAuthorized {
         PaymentAuthorized {
             order_id: self.order_id.clone(),
             customer_id: self.customer_id.clone(),
@@ -193,7 +180,7 @@ impl AuthorizeRequest {
         }
     }
 
-    fn declined(&self, reason: PaymentDeclineReason) -> PaymentDeclined {
+    pub fn declined(&self, reason: PaymentDeclineReason) -> PaymentDeclined {
         PaymentDeclined {
             order_id: self.order_id.clone(),
             customer_id: self.customer_id.clone(),
@@ -234,14 +221,7 @@ impl CallRequest for AuthorizeRequest {
         gateway: &dyn PaymentGatewayPort,
         ctx: &mut EffectContext,
     ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        Ok(match gateway.authorize(self, ctx).await? {
-            GatewayResponse::Charged { authorization_id } => {
-                AuthorizePaymentOutcome::Authorized(self.authorized(authorization_id))
-            }
-            GatewayResponse::Declined { reason } => {
-                AuthorizePaymentOutcome::Declined(self.declined(reason))
-            }
-        })
+        gateway.authorize(self, ctx).await
     }
 }
 

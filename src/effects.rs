@@ -24,7 +24,7 @@ pub use obzenflow_runtime::effects::{
 };
 
 #[doc(hidden)]
-pub use obzenflow_runtime::effects::{PortImpl, ServesPort};
+pub use obzenflow_runtime::effects::{assert_port_answer, PortAnswer, PortImpl, ServesPort};
 
 /// Building blocks for simulated outside systems: a call log that answers a
 /// repeated idempotency key with its first decided response and records every

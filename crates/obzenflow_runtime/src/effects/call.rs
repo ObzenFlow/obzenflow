@@ -47,7 +47,11 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Scored;
 /// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.keyed.scored"; }
-/// # trait RiskEnginePort: Send + Sync {}
+/// #[async_trait]
+/// trait RiskEnginePort: Send + Sync {
+///     async fn score(&self, request: &ScoreRequest) -> Result<Scored, EffectError>;
+/// }
+///
 /// #[derive(Clone, Debug, serde::Serialize)]
 /// struct ScoreRequest {
 ///     txn_id: u64,
@@ -62,10 +66,10 @@ pub trait CallRequest: Clone + std::fmt::Debug + Serialize + Send + Sync + 'stat
 ///
 ///     async fn call(
 ///         &self,
-///         _: &dyn RiskEnginePort,
+///         engine: &dyn RiskEnginePort,
 ///         _: &mut EffectContext,
 ///     ) -> Result<Scored, EffectError> {
-///         Ok(Scored)
+///         engine.score(self).await
 ///     }
 /// }
 ///

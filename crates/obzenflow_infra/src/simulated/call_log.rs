@@ -134,25 +134,19 @@ where
 
     /// Answers like [`CallLog::answer`] with a decision that may fail.
     ///
-    /// A failure is logged as `failed` and returned, and the key stays
-    /// undecided, so the next attempt decides again.
+    /// A failure is logged as `failed` and returned inside the result, and the
+    /// key stays undecided, so the next attempt decides again.
     ///
     /// # Errors
     ///
-    /// Returns the decision's failure, or the log's error when the line cannot
-    /// be written.
-    pub fn try_answer<F, E>(
+    /// Fails when the line cannot be written, and then remembers nothing.
+    pub fn try_answer<F: Serialize>(
         &self,
         key: &IdempotencyKey,
         flow_id: FlowId,
         decide: impl FnOnce(u64) -> Result<A, F>,
-    ) -> Result<A, E>
-    where
-        F: Serialize,
-        E: From<F> + From<CallLogError>,
-    {
-        let answer = self.call(key, flow_id, decide)?;
-        answer.map_err(E::from)
+    ) -> Result<Result<A, F>, CallLogError> {
+        self.call(key, flow_id, decide)
     }
 
     fn call<F: Serialize>(
@@ -294,26 +288,6 @@ mod tests {
         TimedOut,
     }
 
-    #[derive(Debug, PartialEq)]
-    enum PortError {
-        TimedOut,
-        Log(String),
-    }
-
-    impl From<Failure> for PortError {
-        fn from(failure: Failure) -> Self {
-            match failure {
-                Failure::TimedOut => Self::TimedOut,
-            }
-        }
-    }
-
-    impl From<CallLogError> for PortError {
-        fn from(error: CallLogError) -> Self {
-            Self::Log(error.to_string())
-        }
-    }
-
     fn key(name: &str) -> IdempotencyKey {
         IdempotencyKey(name.to_owned())
     }
@@ -441,9 +415,10 @@ mod tests {
         assert_eq!(log.answer(&key("aml-case:5"), run, number).unwrap(), 1);
         assert_eq!(log.answer(&key("aml-case:3"), run, number).unwrap(), 2);
         assert_eq!(log.answer(&key("aml-case:5"), run, number).unwrap(), 1);
-        let failed: Result<u64, PortError> =
-            log.try_answer(&key("aml-case:7"), run, |_| Err(Failure::TimedOut));
-        assert_eq!(failed, Err(PortError::TimedOut));
+        let failed = log
+            .try_answer(&key("aml-case:7"), run, |_| Err(Failure::TimedOut))
+            .unwrap();
+        assert_eq!(failed, Err(Failure::TimedOut));
         drop(log);
 
         let reopened = CallLog::<u64>::open(&path).expect("the log reopens");
@@ -467,16 +442,18 @@ mod tests {
         let path = dir.path().join("gateway.jsonl");
         let run = FlowId::new();
         let log = CallLog::open(&path).expect("the log opens");
-        let outage: Result<String, PortError> =
-            log.try_answer(&key("payment-authorize:web-1"), run, |_| {
-                Err(Failure::TimedOut)
-            });
-        assert_eq!(outage, Err(PortError::TimedOut));
-        let charged: Result<String, PortError> =
-            log.try_answer(&key("payment-authorize:web-1"), run, |decided| {
+        let outage = log
+            .try_answer(&key("payment-authorize:web-1"), run, |_| {
+                Err::<String, _>(Failure::TimedOut)
+            })
+            .unwrap();
+        assert_eq!(outage, Err(Failure::TimedOut));
+        let charged = log
+            .try_answer(&key("payment-authorize:web-1"), run, |decided| {
                 assert_eq!(decided, 0, "a failed attempt is not counted");
                 Ok::<_, Failure>("AUTH-web-1".to_owned())
-            });
+            })
+            .unwrap();
         assert_eq!(charged, Ok("AUTH-web-1".to_owned()));
         assert_eq!(
             lines(&path),
@@ -524,6 +501,12 @@ mod tests {
             assert!(matches!(error, CallLogError::Io { .. }), "{error}");
         }
         assert_eq!(decisions.get(), 2, "the key was never remembered");
+        let error = log
+            .try_answer(&key("aml-score:2"), FlowId::new(), |_| {
+                Err::<Verdict, _>(Failure::TimedOut)
+            })
+            .expect_err("a failed attempt's line cannot be written either");
+        assert!(matches!(error, CallLogError::Io { .. }), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 

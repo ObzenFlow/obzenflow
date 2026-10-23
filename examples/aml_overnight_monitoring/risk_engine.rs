@@ -7,9 +7,10 @@ use super::domain::{
     RulesVersion, TxnId, AMLWORLD_TIME,
 };
 use super::money::{Currency, Money, UsdCents, UsdPerUnit};
+use super::vendors::{ScoreOutcome, RISK_ENGINE_SOURCE};
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
-use obzenflow::effects::IdempotencyKey;
+use obzenflow::effects::{EffectContext, EffectError, Keyed};
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -57,32 +58,14 @@ pub enum RiskVerdict {
     },
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum RiskEngineError {
-    #[error("the risk engine could not record the call: {0}")]
-    CallLog(#[from] CallLogError),
-    #[error("the risk engine is unavailable")]
-    Unavailable,
-}
-
-impl RiskEngineError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::CallLog(_) => "ledger_write_failed",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
 #[obzenflow::port]
 #[async_trait]
 pub trait RiskEnginePort: Send + Sync {
     async fn score(
         &self,
-        key: &IdempotencyKey,
-        flow_id: FlowId,
         request: &ScoreRequest,
-    ) -> Result<RiskVerdict, RiskEngineError>;
+        ctx: &EffectContext,
+    ) -> Result<ScoreOutcome, EffectError>;
 }
 
 pub struct RiskEngineOutage;
@@ -91,11 +74,14 @@ pub struct RiskEngineOutage;
 impl RiskEnginePort for RiskEngineOutage {
     async fn score(
         &self,
-        _: &IdempotencyKey,
-        _: FlowId,
         _: &ScoreRequest,
-    ) -> Result<RiskVerdict, RiskEngineError> {
-        Err(RiskEngineError::Unavailable)
+        _: &EffectContext,
+    ) -> Result<ScoreOutcome, EffectError> {
+        Err(EffectError::unavailable(
+            RISK_ENGINE_SOURCE,
+            "unavailable",
+            "the risk engine is unavailable",
+        ))
     }
 }
 
@@ -109,17 +95,24 @@ impl SimulatedRiskEngine {
             calls: CallLog::open(path)?,
         })
     }
+
+    fn answer(&self, request: &ScoreRequest, flow_id: FlowId) -> Result<RiskVerdict, CallLogError> {
+        self.calls
+            .answer(&request.idempotency_key(), flow_id, |_| decide(request))
+    }
 }
 
 #[async_trait]
 impl RiskEnginePort for SimulatedRiskEngine {
     async fn score(
         &self,
-        key: &IdempotencyKey,
-        flow_id: FlowId,
         request: &ScoreRequest,
-    ) -> Result<RiskVerdict, RiskEngineError> {
-        Ok(self.calls.answer(key, flow_id, |_| decide(request))?)
+        ctx: &EffectContext,
+    ) -> Result<ScoreOutcome, EffectError> {
+        let verdict = self.answer(request, ctx.flow_id()).map_err(|error| {
+            EffectError::unavailable(RISK_ENGINE_SOURCE, "ledger_write_failed", error)
+        })?;
+        Ok(ScoreOutcome::from_verdict(request, verdict))
     }
 }
 
@@ -286,10 +279,6 @@ mod tests {
         }
     }
 
-    fn key(txn_id: u64) -> IdempotencyKey {
-        IdempotencyKey(format!("aml-score:{txn_id}"))
-    }
-
     fn log_lines(path: &Path) -> Vec<serde_json::Value> {
         std::fs::read_to_string(path)
             .expect("the call log is readable")
@@ -377,8 +366,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_repeated_key_is_answered_replayed_with_the_first_answer() {
+    #[test]
+    fn a_repeated_key_is_answered_replayed_with_the_first_answer() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("risk.jsonl");
         let flagged = request(
@@ -387,14 +376,8 @@ mod tests {
         );
         let engine = SimulatedRiskEngine::open(&path).expect("the call log opens");
         let first_run = FlowId::new();
-        let first = engine
-            .score(&key(8), first_run, &flagged)
-            .await
-            .expect("first call");
-        let repeat = engine
-            .score(&key(8), first_run, &flagged)
-            .await
-            .expect("repeated call");
+        let first = engine.answer(&flagged, first_run).expect("first call");
+        let repeat = engine.answer(&flagged, first_run).expect("repeated call");
         assert_eq!(repeat, first);
 
         assert_eq!(

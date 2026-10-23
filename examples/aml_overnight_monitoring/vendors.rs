@@ -30,7 +30,7 @@ pub enum ScoreOutcome {
 }
 
 impl ScoreOutcome {
-    fn from_verdict(request: &ScoreRequest, verdict: RiskVerdict) -> Self {
+    pub fn from_verdict(request: &ScoreRequest, verdict: RiskVerdict) -> Self {
         match verdict {
             RiskVerdict::Cleared { rules_version } => Self::Cleared(TransactionCleared {
                 txn_id: request.txn_id,
@@ -61,11 +61,7 @@ impl CallRequest for ScoreRequest {
         engine: &dyn RiskEnginePort,
         ctx: &mut EffectContext,
     ) -> Result<ScoreOutcome, EffectError> {
-        let verdict = engine
-            .score(&self.idempotency_key(), ctx.flow_id(), self)
-            .await
-            .map_err(|error| EffectError::unavailable(RISK_ENGINE_SOURCE, error.code(), error))?;
-        Ok(ScoreOutcome::from_verdict(self, verdict))
+        engine.score(self, ctx).await
     }
 }
 
@@ -87,17 +83,7 @@ impl CallRequest for CaseRequest {
         cases: &dyn CaseSystemPort,
         ctx: &mut EffectContext,
     ) -> Result<CaseOpened, EffectError> {
-        let case_number = cases
-            .open(&self.idempotency_key(), ctx.flow_id(), self)
-            .await
-            .map_err(|error| EffectError::unavailable(CASE_SYSTEM_SOURCE, error.code(), error))?;
-        Ok(CaseOpened {
-            case_number,
-            alert_id: self.alert_id.clone(),
-            account: self.account.clone(),
-            reasons: self.reasons.clone(),
-            rules_version: self.rules_version.clone(),
-        })
+        cases.open(self, ctx).await
     }
 }
 

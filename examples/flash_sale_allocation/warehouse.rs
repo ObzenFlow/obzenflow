@@ -75,37 +75,14 @@ impl WarehouseStats {
     }
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum WarehousePortError {
-    #[error("warehouse unavailable")]
-    Unavailable,
-    #[cfg(test)]
-    #[error("warehouse rejected invalid reservation input")]
-    Validation,
-    #[cfg(test)]
-    #[error("warehouse refused the reservation")]
-    Domain,
-    #[cfg(test)]
-    #[error("injected warehouse provenance failure")]
-    Provenance,
-    #[cfg(test)]
-    #[error("injected warehouse journal failure")]
-    Journal,
-}
-
 /// The physical integration port. Capacity is intentionally not implemented
 /// here: the allocator is the domain authority and sends only authorised work.
 #[obzenflow::port]
 #[async_trait]
 pub trait WarehousePort: Send + Sync {
-    async fn reserve(&self, order_id: &OrderId, sku: &Sku) -> Result<HoldId, WarehousePortError>;
+    async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError>;
 
-    async fn release(
-        &self,
-        order_id: &OrderId,
-        sku: &Sku,
-        hold_id: &HoldId,
-    ) -> Result<(), WarehousePortError>;
+    async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError>;
 }
 
 #[derive(Debug)]
@@ -116,38 +93,49 @@ struct SimulatedWarehouse {
 
 #[async_trait]
 impl WarehousePort for SimulatedWarehouse {
-    async fn reserve(&self, order_id: &OrderId, sku: &Sku) -> Result<HoldId, WarehousePortError> {
+    async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError> {
         self.stats.reserve_calls.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.config.reserve_latency).await;
         if self.config.reserve_unavailable {
-            return Err(WarehousePortError::Unavailable);
+            return Err(EffectError::unavailable(
+                "warehouse",
+                "unavailable",
+                "warehouse unavailable",
+            ));
         }
         #[cfg(test)]
         match self.config.reserve_test_fault {
             Some(WarehouseTestFault::Validation) => {
-                return Err(WarehousePortError::Validation);
+                return Err(EffectError::Validation(
+                    "warehouse rejected invalid reservation input".to_string(),
+                ));
             }
-            Some(WarehouseTestFault::Domain) => return Err(WarehousePortError::Domain),
+            Some(WarehouseTestFault::Domain) => {
+                return Err(EffectError::Domain(
+                    "warehouse refused the reservation".to_string(),
+                ));
+            }
             Some(WarehouseTestFault::Provenance) => {
-                return Err(WarehousePortError::Provenance);
+                return Err(EffectError::EffectProvenanceMismatch(
+                    "injected warehouse provenance failure".to_string(),
+                ));
             }
-            Some(WarehouseTestFault::Journal) => return Err(WarehousePortError::Journal),
+            Some(WarehouseTestFault::Journal) => {
+                return Err(EffectError::Journal(
+                    "injected warehouse journal failure".to_string(),
+                ));
+            }
             Some(WarehouseTestFault::BindingResolution) | None => {}
         }
-        Ok(HoldId(format!(
+        Ok(request.reserved(HoldId(format!(
             "{}:{}:{}",
-            self.config.warehouse_id, sku.0, order_id.0
-        )))
+            self.config.warehouse_id, request.sku.0, request.order_id.0
+        ))))
     }
 
-    async fn release(
-        &self,
-        _order_id: &OrderId,
-        _sku: &Sku,
-        _hold_id: &HoldId,
-    ) -> Result<(), WarehousePortError> {
+    async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError> {
         self.stats.release_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(request.released())
     }
 }
 
@@ -179,6 +167,16 @@ pub struct StockReservation {
     pub sku: Sku,
 }
 
+impl StockReservation {
+    pub fn reserved(&self, hold_id: HoldId) -> StockReserved {
+        StockReserved {
+            order_id: self.order_id.clone(),
+            sku: self.sku.clone(),
+            hold_id,
+        }
+    }
+}
+
 pub type ReserveStock = Call<StockReservation>;
 
 #[async_trait]
@@ -193,15 +191,7 @@ impl CallRequest for StockReservation {
         warehouse: &dyn WarehousePort,
         _: &mut EffectContext,
     ) -> Result<StockReserved, EffectError> {
-        let hold_id = warehouse
-            .reserve(&self.order_id, &self.sku)
-            .await
-            .map_err(warehouse_error)?;
-        Ok(StockReserved {
-            order_id: self.order_id.clone(),
-            sku: self.sku.clone(),
-            hold_id,
-        })
+        warehouse.reserve(self).await
     }
 }
 
@@ -210,6 +200,16 @@ pub struct StockRelease {
     pub order_id: OrderId,
     pub sku: Sku,
     pub hold_id: HoldId,
+}
+
+impl StockRelease {
+    pub fn released(&self) -> StockReleased {
+        StockReleased {
+            order_id: self.order_id.clone(),
+            sku: self.sku.clone(),
+            hold_id: self.hold_id.clone(),
+        }
+    }
 }
 
 pub type ReleaseStock = Call<StockRelease>;
@@ -226,30 +226,6 @@ impl CallRequest for StockRelease {
         warehouse: &dyn WarehousePort,
         _: &mut EffectContext,
     ) -> Result<StockReleased, EffectError> {
-        warehouse
-            .release(&self.order_id, &self.sku, &self.hold_id)
-            .await
-            .map_err(warehouse_error)?;
-        Ok(StockReleased {
-            order_id: self.order_id.clone(),
-            sku: self.sku.clone(),
-            hold_id: self.hold_id.clone(),
-        })
-    }
-}
-
-fn warehouse_error(error: WarehousePortError) -> EffectError {
-    match error {
-        WarehousePortError::Unavailable => {
-            EffectError::unavailable("warehouse", "unavailable", error)
-        }
-        #[cfg(test)]
-        WarehousePortError::Validation => EffectError::Validation(error.to_string()),
-        #[cfg(test)]
-        WarehousePortError::Domain => EffectError::Domain(error.to_string()),
-        #[cfg(test)]
-        WarehousePortError::Provenance => EffectError::EffectProvenanceMismatch(error.to_string()),
-        #[cfg(test)]
-        WarehousePortError::Journal => EffectError::Journal(error.to_string()),
+        warehouse.release(self).await
     }
 }
