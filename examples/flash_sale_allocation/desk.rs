@@ -37,15 +37,13 @@ impl TypedStatefulHandler for ReservationDesk {
         state.pending.is_some()
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
-        let mut next_state = state.clone();
-        let outputs = next_state.pending.take().into_iter().collect();
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::ResetEpoch {
-            next_state,
-            outputs,
+            outputs: state.pending.iter().cloned().collect(),
         })
+    }
+
+    fn post_emit(&self, state: &mut Self::State) {
+        state.pending = None;
     }
 }

@@ -397,12 +397,11 @@ mod tests {
         fn emit(
             &self,
             _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch {
-                next_state: (),
-                outputs: vec![],
-            })
+        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
+            Ok(StatefulEmission::RetainEpoch { outputs: vec![] })
         }
+
+        fn post_emit(&self, _: &mut Self::State) {}
     }
 
     #[derive(Clone, Debug)]
@@ -420,12 +419,11 @@ mod tests {
         fn emit(
             &self,
             _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch {
-                next_state: (),
-                outputs: vec![],
-            })
+        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
+            Ok(StatefulEmission::RetainEpoch { outputs: vec![] })
         }
+
+        fn post_emit(&self, _: &mut Self::State) {}
     }
 
     #[derive(Clone, Debug, EffectHandler)]

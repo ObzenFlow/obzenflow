@@ -844,7 +844,7 @@ pub(super) async fn produce_final_output<
     }
 
     // Call handler.drain() to emit final accumulated state.
-    let final_state = ctx.current_state.clone();
+    let final_state = &ctx.current_state;
     let handler = (**ctx
         .handler
         .as_ref()
@@ -870,7 +870,7 @@ pub(super) async fn produce_final_output<
 
     let drain_result = process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
         handler
-            .drain_with_context(&final_state, output_context)
+            .drain_with_context(final_state, output_context)
             .await
             .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
                 instrumentation.record_error(err.kind());

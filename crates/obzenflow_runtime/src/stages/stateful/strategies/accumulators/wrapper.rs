@@ -18,10 +18,7 @@ use obzenflow_core::{OneFactStageOutput, TypedPayload};
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
-type AccumulatorTransition<S, O> = (
-    StatefulEmission<WrapperState<S>, O>,
-    Option<Vec<TraceState>>,
-);
+type AccumulatorTransition<O> = (StatefulEmission<O>, Option<Vec<TraceState>>);
 
 /// Explicit domain and cadence state for an accumulator strategy.
 #[derive(Clone, Debug)]
@@ -174,25 +171,12 @@ where
         (outputs, traces)
     }
 
-    fn transition(
-        &self,
-        state: &WrapperState<A::State>,
-    ) -> AccumulatorTransition<A::State, A::Output> {
+    fn transition(&self, state: &WrapperState<A::State>) -> AccumulatorTransition<A::Output> {
         let (outputs, traces) = self.typed_outputs(state);
-        let mut next_state = state.clone();
-        next_state.advance_period();
-
         let emission = if self.emission.resets_accumulator_on_emit() {
-            next_state.inner = self.accumulator.initial_state();
-            StatefulEmission::ResetEpoch {
-                next_state,
-                outputs,
-            }
+            StatefulEmission::ResetEpoch { outputs }
         } else {
-            StatefulEmission::RetainEpoch {
-                next_state,
-                outputs,
-            }
+            StatefulEmission::RetainEpoch { outputs }
         };
         (emission, traces)
     }
@@ -240,17 +224,21 @@ where
         self.emission.emit_interval_hint()
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(self.transition(state).0)
+    }
+
+    fn post_emit(&self, state: &mut Self::State) {
+        state.advance_period();
+        if self.emission.resets_accumulator_on_emit() {
+            state.inner = self.accumulator.initial_state();
+        }
     }
 
     fn emit_invocation(
         &self,
         state: &Self::State,
-    ) -> Result<TypedStatefulInvocation<Self::State, Self::Output>, HandlerError> {
+    ) -> Result<TypedStatefulInvocation<Self::Output>, HandlerError> {
         let (emission, traces) = self.transition(state);
         Ok(match traces {
             Some(traces) => TypedStatefulInvocation::with_output_traces(emission, traces),
@@ -278,6 +266,63 @@ where
 mod tests {
     use super::*;
     use crate::stages::stateful::strategies::emissions::{EveryN, TimeWindow};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct Tick;
+
+    impl TypedPayload for Tick {
+        const EVENT_TYPE: &'static str = "stateful.accumulator.wrapper.tick";
+    }
+
+    #[derive(Debug)]
+    struct Ticks;
+
+    impl Accumulator for Ticks {
+        type State = u64;
+        type Input = Tick;
+        type Output = Tick;
+
+        fn initial_state(&self) -> u64 {
+            0
+        }
+
+        fn accumulate(&self, count: &mut u64, _: Tick) {
+            *count += 1;
+        }
+
+        fn outputs(&self, _: &u64) -> Vec<Tick> {
+            vec![Tick]
+        }
+    }
+
+    #[test]
+    fn post_emit_restarts_the_period_and_resets_only_for_a_resetting_strategy() {
+        let retaining = StatefulWithEmission::new(Ticks, EveryN::new(2));
+        let mut state = retaining.initial_state();
+        retaining.accumulate(&mut state, Tick);
+        retaining.accumulate(&mut state, Tick);
+        assert!(matches!(
+            retaining.emit(&state),
+            Ok(StatefulEmission::RetainEpoch { .. })
+        ));
+        retaining.post_emit(&mut state);
+        assert_eq!(state.inner, 2);
+        assert_eq!(state.events_seen, 0);
+        assert_eq!(state.period_started_at, None);
+
+        let resetting = StatefulWithEmission::new(Ticks, TimeWindow::new(Duration::ZERO));
+        let mut state = resetting.initial_state();
+        resetting.accumulate(&mut state, Tick);
+        assert!(matches!(
+            resetting.emit(&state),
+            Ok(StatefulEmission::ResetEpoch { .. })
+        ));
+        resetting.post_emit(&mut state);
+        assert_eq!(state.inner, 0);
+        assert_eq!(state.events_seen, 0);
+        assert_eq!(state.period_started_at, None);
+    }
 
     #[test]
     fn probes_do_not_mutate_cadence_state() {

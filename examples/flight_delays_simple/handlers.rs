@@ -77,10 +77,7 @@ impl TypedStatefulHandler for CarrierAggregator {
         CarrierStats::default()
     }
 
-    fn emit(
-        &self,
-        state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         let mut outputs: Vec<_> = state
             .stats
             .iter()
@@ -100,9 +97,8 @@ impl TypedStatefulHandler for CarrierAggregator {
             })
             .collect();
         outputs.sort_by(|left, right| left.carrier.cmp(&right.carrier));
-        Ok(StatefulEmission::RetainEpoch {
-            next_state: state.clone(),
-            outputs,
-        })
+        Ok(StatefulEmission::RetainEpoch { outputs })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }

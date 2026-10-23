@@ -1520,15 +1520,13 @@ where
 
     fn initial_state(&self) -> Self::State {}
 
-    fn emit(
-        &self,
-        _state: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, _state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: (),
             outputs: Vec::new(),
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 
     fn drain(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {

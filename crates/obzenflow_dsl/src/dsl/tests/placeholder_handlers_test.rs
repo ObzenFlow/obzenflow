@@ -93,10 +93,8 @@ fn placeholder_stateful_emits_nothing_and_drains() {
     TypedStatefulHandler::accumulate(&handler, &mut (), PlaceholderInput);
     let emission = TypedStatefulHandler::emit(&handler, &()).expect("stateful emit");
     let outputs = match emission {
-        obzenflow_runtime::stages::stateful::StatefulEmission::RetainEpoch { outputs, .. }
-        | obzenflow_runtime::stages::stateful::StatefulEmission::ResetEpoch { outputs, .. } => {
-            outputs
-        }
+        obzenflow_runtime::stages::stateful::StatefulEmission::RetainEpoch { outputs }
+        | obzenflow_runtime::stages::stateful::StatefulEmission::ResetEpoch { outputs } => outputs,
     };
     assert!(outputs.is_empty());
 

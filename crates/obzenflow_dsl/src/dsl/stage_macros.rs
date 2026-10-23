@@ -5410,9 +5410,10 @@ macro_rules! source {
 /// #     type Output = Fact;
 /// #     fn accumulate(&self, _: &mut (), _: Fact) {}
 /// #     fn initial_state(&self) {}
-/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<(), Fact>, HandlerError> {
-/// #         Ok(StatefulEmission::RetainEpoch { next_state: (), outputs: Vec::new() })
+/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<Fact>, HandlerError> {
+/// #         Ok(StatefulEmission::RetainEpoch { outputs: Vec::new() })
 /// #     }
+/// #     fn post_emit(&self, _: &mut ()) {}
 /// # }
 /// let totals = Totals;
 /// let stage = obzenflow_dsl::stateful!(Fact -> Fact => totals);
@@ -5432,9 +5433,10 @@ macro_rules! source {
 /// #     type Output = Fact;
 /// #     fn accumulate(&self, _: &mut (), _: Fact) {}
 /// #     fn initial_state(&self) {}
-/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<(), Fact>, HandlerError> {
-/// #         Ok(StatefulEmission::RetainEpoch { next_state: (), outputs: Vec::new() })
+/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<Fact>, HandlerError> {
+/// #         Ok(StatefulEmission::RetainEpoch { outputs: Vec::new() })
 /// #     }
+/// #     fn post_emit(&self, _: &mut ()) {}
 /// # }
 /// let totals = Totals;
 /// let stage = obzenflow_dsl::stateful!(

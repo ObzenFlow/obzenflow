@@ -157,15 +157,13 @@ impl TypedStatefulHandler for DailyProfile {
             .insert(transaction.payer());
     }
 
-    fn emit(
-        &self,
-        accounts: &Self::State,
-    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+    fn emit(&self, accounts: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
         Ok(StatefulEmission::RetainEpoch {
-            next_state: accounts.clone(),
             outputs: self.alerts(accounts),
         })
     }
+
+    fn post_emit(&self, _: &mut Self::State) {}
 }
 
 pub type ScoreOutput =
