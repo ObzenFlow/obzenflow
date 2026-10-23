@@ -8,17 +8,25 @@ use async_trait::async_trait;
 use obzenflow::stages::stateful::{
     Accumulator, EmitAlways, EveryN, OnEOF, StatefulWithEmission, TimeWindow,
 };
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulStatefulHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
+use obzenflow_runtime::stages::source::{
+    FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceInputIdentity,
+    SourcePosition, SourceReaderInitContext, SourceRecord,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -388,4 +396,222 @@ async fn stateful_stages_emit_drain_and_fold_without_copying_state() {
     assert_ne!(live, replay);
     assert_every_boundary_emitted(&replay).await;
     assert_no_state_copies(&copies);
+}
+
+fn replay_marks(rows: &[JournalRecord<ChainPayload>]) -> Vec<(Total, bool)> {
+    rows.iter()
+        .filter_map(|row| {
+            let event = row.authored();
+            Total::from_event(&event).map(|total| (total, event.replay_context.is_some()))
+        })
+        .collect()
+}
+
+async fn stage_replay_marks(run_dir: &Path, stage_key: &str) -> Vec<(Total, bool)> {
+    replay_marks(&replay_testkit::read_stage_envelopes_appended(run_dir, stage_key).await)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_replay_marks_every_stateful_output() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let copies = StateCopies::default();
+
+    run(&journal_base, &copies, None).await;
+    let live = replay_testkit::latest_run_dir(&journal_base);
+    run(&journal_base, &copies, Some(&live)).await;
+    let replay = replay_testkit::latest_run_dir(&journal_base);
+
+    for stage in copies.by_stage().into_keys() {
+        let recorded = stage_replay_marks(&live, stage).await;
+        assert!(
+            recorded.iter().all(|(_, marked)| !marked),
+            "{stage} in the live run: {recorded:?}"
+        );
+        let replayed = stage_replay_marks(&replay, stage).await;
+        assert!(
+            !replayed.is_empty() && replayed.iter().all(|(_, marked)| *marked),
+            "{stage} in the replay: {replayed:?}"
+        );
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Offset(usize);
+
+impl SourcePosition for Offset {}
+
+#[derive(Clone, Debug)]
+struct HeldReadings {
+    holds_its_end: bool,
+}
+
+struct HeldReadingsReader {
+    next: usize,
+    holds_its_end: bool,
+    identity: SourceInputIdentity,
+}
+
+impl SeekableSource for HeldReadingsReader {
+    type Position = Offset;
+
+    fn input_identity(&self) -> &SourceInputIdentity {
+        &self.identity
+    }
+
+    fn beginning(&self) -> Offset {
+        Offset(0)
+    }
+
+    fn seek(&mut self, position: Offset) -> Result<(), SourceError> {
+        self.next = position.0;
+        Ok(())
+    }
+}
+
+impl PositionedFiniteReader for HeldReadingsReader {
+    type Output = Reading;
+
+    fn next(&mut self) -> Result<Option<Vec<SourceRecord<Reading, Offset>>>, SourceError> {
+        let Some(value) = VALUES.get(self.next).copied() else {
+            return Ok(self.holds_its_end.then(Vec::new));
+        };
+        self.next += 1;
+        Ok(Some(vec![SourceRecord {
+            value: Reading { value },
+            after: Offset(self.next),
+        }]))
+    }
+}
+
+impl FiniteSourceConnector for HeldReadings {
+    type Output = Reading;
+    type Reader = HeldReadingsReader;
+    type Continuation = Seek<Offset>;
+
+    fn open(&self, _: SourceReaderInitContext) -> Result<HeldReadingsReader, SourceError> {
+        Ok(HeldReadingsReader {
+            next: 0,
+            holds_its_end: self.holds_its_end,
+            identity: SourceInputIdentity::new("held_readings", &json!({ "values": VALUES }))
+                .expect("the identity encodes"),
+        })
+    }
+}
+
+fn running_total_flow(
+    journal_base: PathBuf,
+    holds_its_end: bool,
+    delivered: Arc<AtomicUsize>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let readings = HeldReadings { holds_its_end };
+        let running_total = StatefulWithEmission::new(
+            Sum {
+                copies: Arc::default(),
+            },
+            EmitAlways,
+        );
+        let totals = replay_testkit::CountDeliveries::<Total>::new(delivered);
+
+        Ok(flow! {
+            name: "stateful_resume_marks",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                readings = source!(Reading => readings);
+                running_total = stateful!(Reading -> Total => running_total);
+                totals = sink!(Total => totals);
+            },
+
+            topology: {
+                readings |> running_total;
+                running_total |> totals;
+            }
+        })
+    })
+}
+
+async fn replay_marks_around_crossing(
+    run_dir: &Path,
+    stage_key: &str,
+) -> (Vec<(Total, bool)>, Vec<(Total, bool)>) {
+    let rows = replay_testkit::read_stage_envelopes_appended(run_dir, stage_key).await;
+    let crossing = rows
+        .iter()
+        .position(|row| {
+            matches!(
+                &row.payload,
+                ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+            )
+        })
+        .unwrap_or_else(|| panic!("{stage_key} crosses into live work"));
+    (
+        replay_marks(&rows[..crossing]),
+        replay_marks(&rows[crossing + 1..]),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_stage_marks_what_it_rebuilds_and_not_its_live_drain() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let handle = running_total_flow(journal_base.clone(), true, delivered.clone())
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .expect("the held flow builds");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while delivered.load(Ordering::SeqCst) < VALUES.len() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("every reading's total is delivered while the source holds its end");
+    handle.stop().await.expect("the held run stops");
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+        .await
+        .expect("the stopped run finishes")
+        .expect("the stopped run tears down");
+    drop(handle);
+    let interrupted = replay_testkit::latest_run_dir(&journal_base);
+    assert_eq!(
+        totals(&interrupted, "running_total").await.len(),
+        VALUES.len(),
+        "the stop lands after every reading and before the drain"
+    );
+
+    let _bootstrap = install_bootstrap_config(
+        replay_testkit::bootstrap_with_archive(ReplayBootstrap {
+            archive_path: interrupted.clone(),
+            allow_incomplete_archive: true,
+            allow_duplicate_sink_delivery: false,
+            verb: ReplayVerb::Resume,
+        })
+        .await,
+    );
+    let handle = running_total_flow(journal_base.clone(), false, Arc::default())
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .expect("the resumed flow builds");
+    tokio::time::timeout(Duration::from_secs(20), handle.wait_for_completion())
+        .await
+        .expect("the resumed run finishes")
+        .expect("the resumed run completes");
+    let resumed = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(resumed, interrupted);
+
+    let (rebuilt, live) = replay_marks_around_crossing(&resumed, "running_total").await;
+    assert_eq!(
+        rebuilt,
+        vec![
+            (total(1, 1), true),
+            (total(3, 2), true),
+            (total(6, 3), true),
+            (total(10, 4), true),
+            (total(15, 5), true),
+        ]
+    );
+    assert_eq!(live, vec![(total(15, 5), false)]);
 }

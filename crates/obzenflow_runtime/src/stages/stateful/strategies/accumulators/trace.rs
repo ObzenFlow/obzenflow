@@ -24,6 +24,7 @@ pub(crate) struct TraceState {
     correlation_ids_truncated: bool,
     correlation_id: Option<CorrelationId>,
     correlation_payload: Option<CorrelationPayload>,
+    /// The latest contributor's replay provenance.
     replay_context: Option<ReplayContext>,
     /// Exact, untruncated composite inputs that contributed to this state.
     #[serde(default)]
@@ -55,6 +56,7 @@ impl TraceState {
         while self.parent_ids.len() > max_depth {
             self.parent_ids.pop_front();
         }
+        self.replay_context = event.replay_context.clone();
 
         match union_composite_activations(
             &self.composite_activations,
@@ -90,7 +92,6 @@ impl TraceState {
             self.correlation_mixed = true;
             self.correlation_id = None;
             self.correlation_payload = None;
-            self.replay_context = None;
             return;
         }
 
@@ -98,7 +99,6 @@ impl TraceState {
             self.correlation_seen = true;
             self.correlation_id = event.correlation_id();
             self.correlation_payload = event.correlation_payload().cloned();
-            self.replay_context = event.replay_context.clone();
             return;
         }
 
@@ -110,15 +110,11 @@ impl TraceState {
             self.correlation_mixed = true;
             self.correlation_id = None;
             self.correlation_payload = None;
-            self.replay_context = None;
             return;
         }
 
         if self.correlation_payload.as_ref() != event.correlation_payload() {
             self.correlation_payload = None;
-        }
-        if self.replay_context != event.replay_context {
-            self.replay_context = None;
         }
     }
 
@@ -164,16 +160,13 @@ impl TraceState {
         }
         if let Some(ids) = self.mixed_correlation_ids() {
             event.clear_correlation();
-            event.replay_context = None;
             event.set_correlation_sample(ids, self.correlation_ids_truncated());
+        } else if let Some(correlation_id) = self.correlation_id() {
+            event.set_single_correlation(correlation_id, self.correlation_payload());
         } else {
-            if let Some(correlation_id) = self.correlation_id() {
-                event.set_single_correlation(correlation_id, self.correlation_payload());
-            } else {
-                event.clear_correlation();
-            }
-            event.replay_context = self.replay_context();
+            event.clear_correlation();
         }
+        event.replay_context = self.replay_context();
     }
 
     pub(crate) fn apply_to_event(&self, event: &mut ChainEvent) {
@@ -212,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn fan_in_preserves_equal_origins_and_discards_conflicting_evidence() {
+    fn fan_in_keeps_equal_origins_and_the_latest_replay_context() {
         let policy = obzenflow_core::config::LineagePolicy::default();
         let mut first = event_with_correlation(deterministic_correlation_id(1));
         first.correlation.as_mut().unwrap().payload = Some(CorrelationPayload {
@@ -266,15 +259,39 @@ mod tests {
                 "origin case {difference}"
             );
             assert_eq!(
-                output.replay_context.as_ref(),
-                if difference >= 5 {
-                    None
-                } else {
-                    first.replay_context.as_ref()
-                },
+                output.replay_context, second.replay_context,
                 "replay case {difference}"
             );
         }
+    }
+
+    #[test]
+    fn mixed_correlations_carry_the_latest_contributors_replay_context() {
+        let policy = obzenflow_core::config::LineagePolicy::default();
+        let recorded = |value| {
+            let mut event = event_with_correlation(deterministic_correlation_id(value));
+            event.replay_context = Some(ReplayContext {
+                original_event_id: EventId::new(),
+                original_flow_id: "original-flow".into(),
+                original_stage_id: StageId::new(),
+            });
+            event
+        };
+        let first = recorded(1);
+        let second = recorded(2);
+        let live = event_with_correlation(deterministic_correlation_id(3));
+        let mut trace = TraceState::default();
+        let mut output = event_with_correlation(deterministic_correlation_id(4));
+
+        trace.record_event(&first, policy);
+        trace.record_event(&second, policy);
+        trace.apply_to_event(&mut output);
+        assert!(trace.mixed_correlation_ids().is_some());
+        assert_eq!(output.replay_context, second.replay_context);
+
+        trace.record_event(&live, policy);
+        trace.apply_to_event(&mut output);
+        assert_eq!(output.replay_context, None);
     }
 
     #[test]

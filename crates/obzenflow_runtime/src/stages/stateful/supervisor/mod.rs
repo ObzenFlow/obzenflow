@@ -36,7 +36,7 @@ use obzenflow_core::event::payloads::supervisor_descriptor::{
 use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::{ChainEvent, JournalRecord, StageId, WriterId};
+use obzenflow_core::{ChainEvent, JournalRecord, MiddlewareExecutionScope, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::fmt::Debug;
@@ -56,6 +56,14 @@ fn contract_violation_directive<H>(
             input.id,
         )))
     })
+}
+
+fn clear_replay_context_of_live_work(outputs: &mut [ChainEvent], scope: MiddlewareExecutionScope) {
+    if !scope.is_deterministic_replay() {
+        for output in outputs {
+            output.replay_context = None;
+        }
+    }
 }
 
 /// Supervisor for stateful stages
