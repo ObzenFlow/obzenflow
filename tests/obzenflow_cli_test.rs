@@ -636,6 +636,101 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_verify_calls_exit_codes_follow_the_contract() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut runs = Vec::new();
+    for lineage in ["first", "second"] {
+        let journal_base = temp.path().join(lineage);
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .run_async(build_flow(journal_base.clone()))
+            .await
+            .expect("live flow should complete");
+        runs.push(latest_run_dir(&journal_base));
+    }
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(runs[0].join("run_manifest.json")).expect("manifest"),
+    )
+    .expect("manifest JSON");
+    let first = manifest["flow_id"].as_str().expect("flow id").to_owned();
+    let decided = |key: &str| {
+        format!(
+            r#"{{"result":"decided","key":"{key}","flow_id":"{first}","response":{{"case_number":1}}}}"#
+        )
+    };
+    let log = |name: &str, lines: &[String]| {
+        let path = temp.path().join(name);
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(&path, text).expect("write the call log");
+        path
+    };
+    let passing = log(
+        "passing.jsonl",
+        &[decided("aml-case:1"), decided("aml-case:2")],
+    );
+    let twice = log(
+        "twice.jsonl",
+        &[decided("aml-case:1"), decided("aml-case:1")],
+    );
+    let never_created = temp.path().join("never-created.jsonl");
+    let verify_calls = |runs: &[&PathBuf], logs: &[&PathBuf]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_obzenflow"));
+        command.args(["verify", "calls"]);
+        for run in runs {
+            command.arg("--run").arg(run);
+        }
+        let output = command
+            .args(logs)
+            .output()
+            .expect("obzenflow binary should run");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+
+    let (code, stdout) = verify_calls(&[&runs[0]], &[&passing]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert_eq!(
+        stdout.trim_end(),
+        format!(
+            "ok: {} holds 2 calls from this lineage, 0 repeated by a resume.",
+            passing.display()
+        )
+    );
+
+    let (code, stdout) = verify_calls(&[&runs[0]], &[&passing, &twice]);
+    assert_eq!(code, Some(1), "a log that breaks a rule exits 1: {stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "error: aml-case:1 was decided twice in this lineage ({first}, {first})."
+        )),
+        "{stdout}"
+    );
+
+    let (code, stdout) = verify_calls(&[&runs[0]], &[&passing, &never_created]);
+    assert_eq!(code, Some(2), "an uncertified log exits 2: {stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "uncertified: {} does not exist, so it holds no calls from {first}, which started this lineage.",
+            never_created.display()
+        )),
+        "{stdout}"
+    );
+
+    let (code, stdout) = verify_calls(&[&runs[0], &runs[1]], &[&passing]);
+    assert_eq!(
+        code,
+        Some(3),
+        "manifests from two lineages are refused: {stdout}"
+    );
+    assert!(
+        stdout.starts_with("error: the manifests belong to 2 lineages, started by "),
+        "{stdout}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() {
     use gateway_demo::domain::{
@@ -658,12 +753,14 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         let mut declined = valid.clone();
         declined.order_id = "cli-teaching-declined".into();
         declined.payment_method_state = PaymentMethodState::AddressMismatch;
+        let gateway_calls = root.join("gateway-calls.jsonl");
         gateway_demo::flow::assemble_flow(
             vec![valid, invalid, declined],
             Vec::new(),
             None,
             1_000.0,
             root,
+            gateway_calls,
         )
     }
 

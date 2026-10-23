@@ -3913,7 +3913,7 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
 /// A host-provided port that the greeting request calls.
 #[obzenflow::port]
 trait GreetingPort: Send + Sync {
-    fn greet(&self, value: u64) -> u64;
+    fn greet(&self, request: &Greet) -> Result<ReplayEffectValue, EffectError>;
 }
 
 struct DoublingGreetingPort {
@@ -3921,9 +3921,11 @@ struct DoublingGreetingPort {
 }
 
 impl GreetingPort for DoublingGreetingPort {
-    fn greet(&self, value: u64) -> u64 {
+    fn greet(&self, request: &Greet) -> Result<ReplayEffectValue, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        value * 2
+        Ok(ReplayEffectValue {
+            effect_value: request.value * 2,
+        })
     }
 }
 
@@ -3945,9 +3947,7 @@ impl CallRequest for Greet {
         greeter: &dyn GreetingPort,
         _ctx: &mut EffectContext,
     ) -> Result<ReplayEffectValue, EffectError> {
-        Ok(ReplayEffectValue {
-            effect_value: greeter.greet(self.value),
-        })
+        greeter.greet(self)
     }
 }
 

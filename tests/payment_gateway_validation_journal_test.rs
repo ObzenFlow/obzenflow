@@ -24,12 +24,14 @@ fn build_validation_journal_flow(journal_root: PathBuf) -> obzenflow_dsl::FlowDe
     invalid.customer_id = "validation-invalid-customer".to_string();
     invalid.payment_method_state = PaymentMethodState::InvalidNumber;
 
+    let gateway_calls = journal_root.join("gateway-calls.jsonl");
     support::flow::assemble_flow(
         vec![valid, invalid],
         Vec::new(),
         None,
         1_000.0,
         journal_root,
+        gateway_calls,
     )
 }
 

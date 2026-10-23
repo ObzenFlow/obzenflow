@@ -117,7 +117,9 @@ pub fn derive_effect_handler(input: TokenStream) -> TokenStream {
 }
 
 /// Mark a trait as a port, or a struct as its own port, so a `System` takes its
-/// port type from the value it is built from. Generated code resolves
+/// port type from the value it is built from. Port methods fail with
+/// `EffectError`, and the one that settles a request answers with that
+/// request's outcome. Generated code resolves
 /// `::obzenflow::effects`; code that depends on the runtime crate directly
 /// writes `#[port(effects = <path>)]`.
 #[proc_macro_attribute]

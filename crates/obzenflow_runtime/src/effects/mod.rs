@@ -100,10 +100,10 @@ pub use obzenflow_core::SystemBindingEvidence;
 pub use obzenflow_core_derive::{port, EffectHandler};
 #[doc(hidden)]
 pub use system::{
-    effectful_stateful_effects, effectful_transform_effects, AcknowledgedSafety, AnswersEffect,
-    DeclareEffects, EffectAcknowledgement, EverySystemAnswers, FindSystem, MarkSystemUsed,
-    PortImpl, ServesPort, StageEffectsError, SystemAfter, SystemAnswersAnEffect, SystemFound,
-    SystemList, SystemMark, Unused, Used,
+    assert_port_answer, effectful_stateful_effects, effectful_transform_effects,
+    AcknowledgedSafety, AnswersEffect, DeclareEffects, EffectAcknowledgement, EverySystemAnswers,
+    FindSystem, MarkSystemUsed, PortAnswer, PortImpl, ServesPort, StageEffectsError, SystemAfter,
+    SystemAnswersAnEffect, SystemFound, SystemList, SystemMark, Unused, Used,
 };
 pub use system::{EffectHandler, StageSystem, System, SystemError};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.

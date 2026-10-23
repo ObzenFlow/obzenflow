@@ -1,13 +1,16 @@
 # ObzenFlow Core Derive
 
-This crate implements Core's procedural macros. Application authors use the
-derives re-exported by `obzenflow::schema`; they do not need a direct dependency
-on this compiler crate.
+This crate implements ObzenFlow's procedural macros. Application authors use the
+fact derives re-exported by `obzenflow::schema` and the effect macros re-exported
+by `obzenflow::effects`; they do not need a direct dependency on this compiler
+crate.
 
-| Derive | Contract |
+| Macro | Contract |
 | --- | --- |
 | `EffectOutcomeFacts` | Declares the typed facts an effect outcome can contain. |
 | `StageOutputFacts` | Declares a stage output carrier and its fact-set projections. |
+| `EffectHandler` | Declares the systems an effectful handler calls, each in a `#[system]` field. |
+| `#[obzenflow::port]` | Marks a trait as a port, or a struct as its own port, so a `System` takes its port type from the value it is built from. Its methods answer with their request's outcome. |
 
 ## Application use
 
@@ -29,8 +32,11 @@ If the facade dependency is renamed to `of`, use `of::schema` in either attribut
 
 ## Compiler integration
 
-The generated implementations use Core's schema contracts. The compiler crate
-has no dependency on the facade or other ObzenFlow workspace crates.
+The fact derives generate implementations of Core's schema contracts.
+`EffectHandler` and the port attribute expand to paths under `::obzenflow::effects`;
+code that depends on the runtime crate directly names its effects module with
+`#[effect_handler(effects = <path>)]` or `#[port(effects = <path>)]`. The compiler
+crate has no dependency on the facade or other ObzenFlow workspace crates.
 
 Direct Core consumers can use its re-exported derives with the default
 `::obzenflow_core` path. A renamed Core dependency retains the

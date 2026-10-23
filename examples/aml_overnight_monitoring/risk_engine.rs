@@ -6,15 +6,15 @@ use super::domain::{
     AccountHistory, AccountKey, PaymentFormat, ProfiledTransaction, ReasonCode, Reasons,
     RulesVersion, TxnId, AMLWORLD_TIME,
 };
-use super::ledger::{CallResult, Ledger, LedgerAnswer, LedgerError};
 use super::money::{Currency, Money, UsdCents, UsdPerUnit};
+use super::vendors::{ScoreOutcome, RISK_ENGINE_SOURCE};
 use async_trait::async_trait;
-use obzenflow::effects::IdempotencyKey;
+use obzenflow::effects::simulated::{CallLog, CallLogError};
+use obzenflow::effects::{EffectContext, EffectError, Keyed};
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
 
 pub const RULES_VERSION: &str = "sim-2026.10";
 
@@ -58,36 +58,14 @@ pub enum RiskVerdict {
     },
 }
 
-impl LedgerAnswer for RiskVerdict {
-    const DECIDED: CallResult = CallResult::Scored;
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RiskEngineError {
-    #[error("the risk engine could not record the call: {0}")]
-    Ledger(#[from] std::io::Error),
-    #[error("the risk engine is unavailable")]
-    Unavailable,
-}
-
-impl RiskEngineError {
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::Ledger(_) => "ledger_write_failed",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
 #[obzenflow::port]
 #[async_trait]
 pub trait RiskEnginePort: Send + Sync {
     async fn score(
         &self,
-        key: &IdempotencyKey,
-        flow_id: FlowId,
         request: &ScoreRequest,
-    ) -> Result<RiskVerdict, RiskEngineError>;
+        ctx: &EffectContext,
+    ) -> Result<ScoreOutcome, EffectError>;
 }
 
 pub struct RiskEngineOutage;
@@ -96,23 +74,31 @@ pub struct RiskEngineOutage;
 impl RiskEnginePort for RiskEngineOutage {
     async fn score(
         &self,
-        _: &IdempotencyKey,
-        _: FlowId,
         _: &ScoreRequest,
-    ) -> Result<RiskVerdict, RiskEngineError> {
-        Err(RiskEngineError::Unavailable)
+        _: &EffectContext,
+    ) -> Result<ScoreOutcome, EffectError> {
+        Err(EffectError::unavailable(
+            RISK_ENGINE_SOURCE,
+            "unavailable",
+            "the risk engine is unavailable",
+        ))
     }
 }
 
 pub struct SimulatedRiskEngine {
-    ledger: Mutex<Ledger<RiskVerdict>>,
+    calls: CallLog<RiskVerdict>,
 }
 
 impl SimulatedRiskEngine {
-    pub fn open(ledger: &Path) -> Result<Self, LedgerError> {
+    pub fn open(path: &Path) -> Result<Self, CallLogError> {
         Ok(Self {
-            ledger: Mutex::new(Ledger::open(ledger)?),
+            calls: CallLog::open(path)?,
         })
+    }
+
+    fn answer(&self, request: &ScoreRequest, flow_id: FlowId) -> Result<RiskVerdict, CallLogError> {
+        self.calls
+            .answer(&request.idempotency_key(), flow_id, |_| decide(request))
     }
 }
 
@@ -120,18 +106,13 @@ impl SimulatedRiskEngine {
 impl RiskEnginePort for SimulatedRiskEngine {
     async fn score(
         &self,
-        key: &IdempotencyKey,
-        flow_id: FlowId,
         request: &ScoreRequest,
-    ) -> Result<RiskVerdict, RiskEngineError> {
-        let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(first) = ledger.first_answer(&key.0).cloned() {
-            ledger.record_repeat(&key.0, flow_id)?;
-            return Ok(first);
-        }
-        let verdict = decide(request);
-        ledger.record_first(&key.0, flow_id, verdict.clone())?;
-        Ok(verdict)
+        ctx: &EffectContext,
+    ) -> Result<ScoreOutcome, EffectError> {
+        let verdict = self.answer(request, ctx.flow_id()).map_err(|error| {
+            EffectError::unavailable(RISK_ENGINE_SOURCE, "ledger_write_failed", error)
+        })?;
+        Ok(ScoreOutcome::from_verdict(request, verdict))
     }
 }
 
@@ -298,15 +279,11 @@ mod tests {
         }
     }
 
-    fn key(txn_id: u64) -> IdempotencyKey {
-        IdempotencyKey(format!("aml-score:{txn_id}"))
-    }
-
-    fn ledger_lines(path: &Path) -> Vec<serde_json::Value> {
+    fn log_lines(path: &Path) -> Vec<serde_json::Value> {
         std::fs::read_to_string(path)
-            .expect("ledger is readable")
+            .expect("the call log is readable")
             .lines()
-            .map(|line| serde_json::from_str(line).expect("ledger line is JSON"))
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
             .collect()
     }
 
@@ -389,98 +366,39 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_repeated_key_is_answered_replayed_with_the_first_answer() {
+    #[test]
+    fn a_repeated_key_is_answered_replayed_with_the_first_answer() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("risk.jsonl");
         let flagged = request(
             transaction(8, PaymentFormat::Wire, Currency::UsDollar, "60000.00"),
             Some(history(1, 1, &[PaymentFormat::Cheque])),
         );
-        let engine = SimulatedRiskEngine::open(&path).expect("ledger opens");
+        let engine = SimulatedRiskEngine::open(&path).expect("the call log opens");
         let first_run = FlowId::new();
-        let first = engine
-            .score(&key(8), first_run, &flagged)
-            .await
-            .expect("first call");
-        let repeat = engine
-            .score(&key(8), first_run, &flagged)
-            .await
-            .expect("repeated call");
+        let first = engine.answer(&flagged, first_run).expect("first call");
+        let repeat = engine.answer(&flagged, first_run).expect("repeated call");
         assert_eq!(repeat, first);
 
-        let lines = ledger_lines(&path);
-        assert_eq!(lines.len(), 2);
         assert_eq!(
-            lines[0],
-            serde_json::json!({
-                "key": "aml-score:8",
-                "result": "scored",
-                "flow_id": first_run.to_string(),
-                "verdict": "flagged",
-                "reasons": ["format_switch", "thin_history_large_transfer"],
-                "rules_version": RULES_VERSION,
-            })
-        );
-        assert_eq!(
-            lines[1],
-            serde_json::json!({
-                "key": "aml-score:8",
-                "result": "replayed",
-                "flow_id": first_run.to_string(),
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn a_reopened_engine_answers_from_the_first_line_of_each_key() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("risk.jsonl");
-        let flagged = request(
-            transaction(9, PaymentFormat::Wire, Currency::UsDollar, "60000.00"),
-            Some(history(1, 1, &[PaymentFormat::Cheque])),
-        );
-        let first = SimulatedRiskEngine::open(&path)
-            .expect("ledger opens")
-            .score(&key(9), FlowId::new(), &flagged)
-            .await
-            .expect("first call");
-
-        let changed = request(
-            transaction(9, PaymentFormat::Cheque, Currency::UsDollar, "10.00"),
-            Some(history(1, 1, &[PaymentFormat::Cheque])),
-        );
-        let resumed = FlowId::new();
-        let reopened = SimulatedRiskEngine::open(&path).expect("ledger reopens");
-        let repeat = reopened
-            .score(&key(9), resumed, &changed)
-            .await
-            .expect("repeated call after reopening");
-        assert_eq!(repeat, first);
-        assert_eq!(
-            reasons(&repeat),
-            vec!["format_switch", "thin_history_large_transfer"]
-        );
-
-        let cleared = reopened
-            .score(&key(10), resumed, &changed)
-            .await
-            .expect("new key after reopening");
-        assert!(matches!(cleared, RiskVerdict::Cleared { .. }));
-
-        let lines = ledger_lines(&path);
-        let results: Vec<_> = lines
-            .iter()
-            .map(|line| (line["key"].as_str(), line["result"].as_str()))
-            .collect();
-        assert_eq!(
-            results,
+            log_lines(&path),
             vec![
-                (Some("aml-score:9"), Some("scored")),
-                (Some("aml-score:9"), Some("replayed")),
-                (Some("aml-score:10"), Some("scored")),
+                serde_json::json!({
+                    "result": "decided",
+                    "key": "aml-score:8",
+                    "flow_id": first_run.to_string(),
+                    "response": {
+                        "verdict": "flagged",
+                        "reasons": ["format_switch", "thin_history_large_transfer"],
+                        "rules_version": RULES_VERSION,
+                    },
+                }),
+                serde_json::json!({
+                    "result": "replayed",
+                    "key": "aml-score:8",
+                    "flow_id": first_run.to_string(),
+                }),
             ]
         );
-        assert_eq!(lines[1]["flow_id"], resumed.to_string());
     }
 }

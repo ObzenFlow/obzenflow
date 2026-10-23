@@ -27,7 +27,7 @@ use obzenflow_runtime::stages::source::strategies::{
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// RAII guard for one source half-open probe slot.
 pub(super) struct SourceProbeGuard {
@@ -426,7 +426,6 @@ impl CircuitBreakerMiddleware {
         classification: &FailureClassification,
         ctx: &mut MiddlewareContext,
     ) {
-        let now = Instant::now();
         let is_probe = ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false);
 
         // Track allowed calls (i.e. calls that reached the wrapped handler), regardless of
@@ -501,7 +500,7 @@ impl CircuitBreakerMiddleware {
             CircuitState::Closed => {
                 if contributes_health {
                     if let Some(event) =
-                        self.record_closed_outcome(counted_as_failure, call_duration, now)
+                        self.record_closed_outcome(counted_as_failure, call_duration)
                     {
                         ctx.write_control_event(event);
                     }

@@ -17,7 +17,6 @@ use obzenflow_runtime::effects::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant as StdInstant;
 
 /// A per-effect chain, partitioned once at construction so the execution
 /// paths are explicit in the type and no per-invocation breaker discovery
@@ -123,11 +122,7 @@ pub(in crate::middleware::control) async fn execute_chain_once(
         }
     }
 
-    let call_started = StdInstant::now();
     let result = operation.execute().await;
-    ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
-        call_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-    );
     let attempt = EffectAttemptOutcome::Executed(&result);
     observe_reverse(&admitted, event, &attempt, &mut ctx);
     EffectBoundaryReport {
@@ -160,11 +155,7 @@ async fn execute_single_use_chain_once(
         }
     }
 
-    let call_started = StdInstant::now();
     let execution = operation.execute().await;
-    ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
-        call_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-    );
     let attempt = EffectAttemptOutcome::Executed(execution.result());
     observe_reverse(&admitted, event, &attempt, &mut ctx);
     execution.into_report(ctx.take_control_events())
@@ -194,11 +185,7 @@ async fn execute_affine_chain_once(
         }
     }
 
-    let call_started = StdInstant::now();
     let execution = operation.execute().await;
-    ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
-        call_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-    );
     let attempt = EffectAttemptOutcome::Executed(execution.result());
     observe_reverse(&admitted, event, &attempt, &mut ctx);
     execution.into_report(ctx.take_control_events())

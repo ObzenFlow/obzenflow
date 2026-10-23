@@ -15,7 +15,7 @@ struct LedgerRefused;
 #[crate::effects::port(effects = crate::effects)]
 #[async_trait]
 trait LedgerPort: Send + Sync {
-    async fn write(&self, value: u64) -> Result<u64, LedgerRefused>;
+    async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError>;
 }
 
 struct CountingLedger {
@@ -24,9 +24,9 @@ struct CountingLedger {
 
 #[async_trait]
 impl LedgerPort for CountingLedger {
-    async fn write(&self, value: u64) -> Result<u64, LedgerRefused> {
+    async fn write(&self, value: u64) -> Result<LedgerWritten, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(value * 10)
+        Ok(LedgerWritten { value: value * 10 })
     }
 }
 
@@ -34,8 +34,8 @@ struct RefusingLedger;
 
 #[async_trait]
 impl LedgerPort for RefusingLedger {
-    async fn write(&self, _: u64) -> Result<u64, LedgerRefused> {
-        Err(LedgerRefused)
+    async fn write(&self, _: u64) -> Result<LedgerWritten, EffectError> {
+        Err(EffectError::unavailable("ledger", "refused", LedgerRefused))
     }
 }
 
@@ -65,11 +65,7 @@ impl CallRequest for LedgerWrite {
         ledger: &dyn LedgerPort,
         _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
-        let value = ledger
-            .write(self.value)
-            .await
-            .map_err(|error| EffectError::unavailable("ledger", "refused", error))?;
-        Ok(LedgerWritten { value })
+        ledger.write(self.value).await
     }
 }
 
@@ -96,11 +92,7 @@ impl CallRequest for LedgerCheck {
         ledger: &dyn LedgerPort,
         _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
-        let value = ledger
-            .write(self.value)
-            .await
-            .map_err(|error| EffectError::unavailable("ledger", "refused", error))?;
-        Ok(LedgerWritten { value })
+        ledger.write(self.value).await
     }
 }
 
@@ -121,11 +113,7 @@ impl CallRequest for LedgerCharge {
         ledger: &dyn LedgerPort,
         _: &mut EffectContext,
     ) -> Result<LedgerWritten, EffectError> {
-        let value = ledger
-            .write(self.value)
-            .await
-            .map_err(|error| EffectError::unavailable("ledger", "refused", error))?;
-        Ok(LedgerWritten { value })
+        ledger.write(self.value).await
     }
 }
 
@@ -156,11 +144,7 @@ impl Effect for HandWrittenLedgerWrite {
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         let ledger = ctx.port(LEDGER_PORT)?;
-        let value = ledger
-            .write(self.request.value)
-            .await
-            .map_err(|error| EffectError::unavailable("ledger", "refused", error))?;
-        Ok(LedgerWritten { value })
+        ledger.write(self.request.value).await
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {

@@ -7,7 +7,9 @@
 
 use clap::{Args, Parser, Subcommand};
 use obzenflow::application::control::*;
-use obzenflow::application::{render_verdict, verify_run_dirs, VerifyOptions};
+use obzenflow::application::{
+    render_call_log_check, render_verdict, verify_call_logs, verify_run_dirs, VerifyOptions,
+};
 use obzenflow::journal::read::*;
 use obzenflow::journal::{inspect, JOURNAL_SCHEMA_VERSION};
 use std::io::{BufWriter, IsTerminal, Write};
@@ -58,7 +60,7 @@ enum Command {
     Start(StartArgs),
     /// Inspect run metadata, stage data journal files and record byte offsets.
     Inspect(InspectArgs),
-    /// Verify a candidate run's recorded output against a baseline.
+    /// Verify a candidate run's recorded output against a baseline, or call logs against their lineage.
     Verify(VerifyArgs),
 }
 
@@ -129,15 +131,34 @@ struct InspectArgs {
 }
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 struct VerifyArgs {
-    #[arg(long)]
-    baseline: PathBuf,
-    #[arg(long)]
-    candidate: PathBuf,
+    #[command(subcommand)]
+    check: Option<VerifyCheck>,
+    #[arg(long, required = true)]
+    baseline: Option<PathBuf>,
+    #[arg(long, required = true)]
+    candidate: Option<PathBuf>,
     #[arg(long)]
     report_path: Option<PathBuf>,
     #[arg(long, default_value_t = 5)]
     max_divergences: usize,
+}
+
+#[derive(Subcommand)]
+enum VerifyCheck {
+    /// Judge simulated systems' call logs against the lineage their runs record.
+    Calls(VerifyCallsArgs),
+}
+
+#[derive(Args)]
+struct VerifyCallsArgs {
+    /// A run directory of the lineage, containing run_manifest.json; repeat for each run.
+    #[arg(long = "run", value_name = "RUN_DIR", required = true)]
+    runs: Vec<PathBuf>,
+    /// A call log to judge against that lineage.
+    #[arg(value_name = "CALL_LOG", required = true)]
+    call_logs: Vec<PathBuf>,
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -162,19 +183,7 @@ async fn run(command: Command) -> Result<u8, Error> {
             observe(snapshot, &args.view).await
         }
         Command::Start(args) => start(args).await,
-        Command::Verify(args) => {
-            tokio::task::spawn_blocking(move || {
-                let options = VerifyOptions {
-                    max_divergences: args.max_divergences,
-                    report_path: args.report_path,
-                    write_report: true,
-                };
-                let outcome = verify_run_dirs(&args.baseline, &args.candidate, &options)?;
-                println!("{}", render_verdict(&outcome));
-                Ok::<_, Error>(outcome.exit_code())
-            })
-            .await?
-        }
+        Command::Verify(args) => tokio::task::spawn_blocking(move || verify(args)).await?,
         Command::Inspect(args) => {
             tokio::task::spawn_blocking(move || {
                 inspect(
@@ -187,6 +196,25 @@ async fn run(command: Command) -> Result<u8, Error> {
             .await?
         }
     }
+}
+
+fn verify(args: VerifyArgs) -> Result<u8, Error> {
+    if let Some(VerifyCheck::Calls(calls)) = args.check {
+        let check = verify_call_logs(&calls.runs, &calls.call_logs)?;
+        println!("{}", render_call_log_check(&check));
+        return Ok(check.exit_code());
+    }
+    let (Some(baseline), Some(candidate)) = (args.baseline, args.candidate) else {
+        return Err("verify needs --baseline and --candidate".into());
+    };
+    let options = VerifyOptions {
+        max_divergences: args.max_divergences,
+        report_path: args.report_path,
+        write_report: true,
+    };
+    let outcome = verify_run_dirs(&baseline, &candidate, &options)?;
+    println!("{}", render_verdict(&outcome));
+    Ok(outcome.exit_code())
 }
 
 fn validate_server_origin(server: &reqwest::Url) -> Result<(), Error> {

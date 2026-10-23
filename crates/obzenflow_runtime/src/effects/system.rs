@@ -7,11 +7,12 @@ use super::call::{call_port_slot, Call, CallRequest};
 use super::declaration::EffectDeclarationSyntax;
 use super::ports::SystemPort;
 use super::{
-    Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectPortResolutionError,
-    EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName, NamedEffect,
+    Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError,
+    EffectPortResolutionError, EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName,
+    NamedEffect,
 };
 use crate::stages::common::handlers::{EffectfulStatefulHandler, EffectfulTransformHandler};
-use obzenflow_core::event::schema::{EmptySet, WithMember};
+use obzenflow_core::event::schema::{EffectOutcomeFacts, EmptySet, WithMember};
 use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -174,6 +175,73 @@ pub struct PortImpl<T: ?Sized>(PhantomData<fn() -> Arc<T>>);
 pub trait ServesPort<P: ?Sized, T: ?Sized> {
     fn coerce(port: Arc<T>) -> Arc<P>;
 }
+
+/// The answer a port method gives, its request's outcome or an `EffectError`.
+/// `#[obzenflow::port]` requires it of every method on a port trait.
+///
+/// ```
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::effects::EffectError;
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.port.charged"; }
+/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// trait CardPort: Send + Sync {
+///     fn charge(&self) -> Result<Charged, EffectError>;
+/// }
+/// ```
+///
+/// A method that returns a system's own answer does not compile:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::effects::EffectError;
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # enum GatewayResponse { Charged }
+/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// trait GatewayPort: Send + Sync {
+///     fn authorize(&self) -> Result<GatewayResponse, EffectError>;
+/// }
+/// ```
+///
+/// Nor does one that fails with its own error:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_core::TypedPayload;
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.port.charged"; }
+/// # #[derive(Debug)]
+/// # struct GatewayError;
+/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// trait GatewayPort: Send + Sync {
+///     fn authorize(&self) -> Result<Charged, GatewayError>;
+/// }
+/// ```
+///
+/// Nor one that answers with a bare fact:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_core::TypedPayload;
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Charged;
+/// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "docs.port.charged"; }
+/// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// trait CardPort: Send + Sync {
+///     fn charge(&self) -> Charged;
+/// }
+/// ```
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "a port method answers with its request's outcome and fails with `EffectError`",
+    label = "`{Self}` is not `Result<Outcome, EffectError>`",
+    note = "keep a system's own answer behind the port and turn it into the outcome there"
+)]
+pub trait PortAnswer {}
+
+impl<O: EffectOutcomeFacts> PortAnswer for Result<O, EffectError> {}
+
+#[doc(hidden)]
+pub fn assert_port_answer<T: PortAnswer>() {}
 
 impl<P: ?Sized + Send + Sync + 'static> Clone for System<P> {
     fn clone(&self) -> Self {

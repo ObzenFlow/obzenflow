@@ -7,7 +7,8 @@ pub mod support;
 
 use chrono::NaiveDateTime;
 use obzenflow::application::{
-    verify_run_dirs, ApplicationError, FlowApplication, LogLevel, VerifyOptions, VerifyOutcome,
+    verify_call_logs, verify_run_dirs, ApplicationError, CallLogCheck, CallLogVerdict,
+    FlowApplication, LogLevel, VerifyOptions, VerifyOutcome,
 };
 use obzenflow::journal::read::{
     open_disk_run, read_config_changes, ChainPayload, ExecutionPayload, FlowControlPayload,
@@ -396,9 +397,27 @@ fn reasons(fact: &serde_json::Value) -> Vec<&str> {
 
 fn line_count(path: &Path) -> usize {
     std::fs::read_to_string(path)
-        .expect("ledger is readable")
+        .expect("the call log is readable")
         .lines()
         .count()
+}
+
+fn decided_keys(path: &Path) -> usize {
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(path)
+        .expect("the call log is readable")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+        .collect();
+    for line in &lines {
+        assert_eq!(line["result"], "decided", "{line}");
+        assert!(line.get("response").is_some(), "{line}");
+    }
+    let keys: BTreeSet<&str> = lines
+        .iter()
+        .map(|line| line["key"].as_str().expect("each line names its key"))
+        .collect();
+    assert_eq!(keys.len(), lines.len(), "one decided line per key");
+    keys.len()
 }
 
 fn divergences(baseline: &Path, candidate: &Path) -> BTreeMap<String, u64> {
@@ -645,10 +664,28 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
         assert_eq!(case["rules_version"], alert["rules_version"]);
     }
 
-    let risk_calls = line_count(&dir.path().join("risk-calls.jsonl"));
-    let case_calls = line_count(&dir.path().join("case-calls.jsonl"));
+    let risk_log = dir.path().join("risk-calls.jsonl");
+    let case_log = dir.path().join("case-calls.jsonl");
+    let risk_calls = line_count(&risk_log);
+    let case_calls = line_count(&case_log);
     assert_eq!(risk_calls, fixture_rows().len());
     assert_eq!(case_calls, expected_ids.len());
+    assert_eq!(decided_keys(&risk_log), risk_calls);
+    assert_eq!(decided_keys(&case_log), case_calls);
+    let check = verify_call_logs(
+        std::slice::from_ref(&baseline),
+        &[risk_log.clone(), case_log.clone()],
+    )
+    .expect("the lineage check runs");
+    let CallLogCheck::Judged { logs, .. } = &check else {
+        panic!("the fresh run names one lineage: {check:?}");
+    };
+    assert!(
+        logs.iter()
+            .all(|log| log.verdict == CallLogVerdict::Passed && log.replayed_by_resumes == 0),
+        "the fresh run's logs pass with no repeats: {logs:?}"
+    );
+    assert_eq!(check.exit_code(), 0);
 
     let replay = Arc::new(VendorStats::default());
     run(&config, &journal_root, Some(&baseline), replay.clone());

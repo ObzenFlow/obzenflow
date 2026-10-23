@@ -4,9 +4,9 @@
 
 use super::case_system::{CaseRequest, CaseSystemPort, SimulatedCaseSystem};
 use super::domain::{AlertRaised, AlertSubject, CaseOpened, TransactionCleared};
-use super::ledger::LedgerError;
 use super::risk_engine::{RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine};
 use async_trait::async_trait;
+use obzenflow::effects::simulated::CallLogError;
 use obzenflow::effects::{
     Call, CallRequest, EffectContext, EffectError, EffectPortResolutionError, IdempotencyKey,
     Keyed, RequiresKey, System, SystemError,
@@ -30,7 +30,7 @@ pub enum ScoreOutcome {
 }
 
 impl ScoreOutcome {
-    fn from_verdict(request: &ScoreRequest, verdict: RiskVerdict) -> Self {
+    pub fn from_verdict(request: &ScoreRequest, verdict: RiskVerdict) -> Self {
         match verdict {
             RiskVerdict::Cleared { rules_version } => Self::Cleared(TransactionCleared {
                 txn_id: request.txn_id,
@@ -61,11 +61,7 @@ impl CallRequest for ScoreRequest {
         engine: &dyn RiskEnginePort,
         ctx: &mut EffectContext,
     ) -> Result<ScoreOutcome, EffectError> {
-        let verdict = engine
-            .score(&self.idempotency_key(), ctx.flow_id(), self)
-            .await
-            .map_err(|error| EffectError::unavailable(RISK_ENGINE_SOURCE, error.code(), error))?;
-        Ok(ScoreOutcome::from_verdict(self, verdict))
+        engine.score(self, ctx).await
     }
 }
 
@@ -87,17 +83,7 @@ impl CallRequest for CaseRequest {
         cases: &dyn CaseSystemPort,
         ctx: &mut EffectContext,
     ) -> Result<CaseOpened, EffectError> {
-        let case_number = cases
-            .open(&self.idempotency_key(), ctx.flow_id(), self)
-            .await
-            .map_err(|error| EffectError::unavailable(CASE_SYSTEM_SOURCE, error.code(), error))?;
-        Ok(CaseOpened {
-            case_number,
-            alert_id: self.alert_id.clone(),
-            account: self.account.clone(),
-            reasons: self.reasons.clone(),
-            rules_version: self.rules_version.clone(),
-        })
+        cases.open(self, ctx).await
     }
 }
 
@@ -150,8 +136,8 @@ pub fn simulated_case_system(
     })
 }
 
-fn construction_failed(error: LedgerError) -> EffectPortResolutionError {
-    tracing::error!(%error, "a simulated system could not open its ledger");
+fn construction_failed(error: CallLogError) -> EffectPortResolutionError {
+    tracing::error!(%error, "a simulated system could not open its call log");
     EffectPortResolutionError::ClientConstructionFailed
 }
 

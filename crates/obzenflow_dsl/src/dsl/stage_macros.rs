@@ -4726,9 +4726,9 @@ macro_rules! effectful_stateful {
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
 /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # struct Card;
-/// # impl CardPort for Card { fn charge(&self) -> Charged { Charged } }
+/// # impl CardPort for Card { fn charge(&self) -> Result<Charged, EffectError> { Ok(Charged) } }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -4737,7 +4737,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// #[derive(Clone, Debug, EffectHandler)]
@@ -4787,7 +4787,7 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -4796,7 +4796,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// #[derive(Clone, Debug, EffectHandler)]
@@ -4836,7 +4836,7 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # trait LedgerPort: Send + Sync {}
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
@@ -4846,7 +4846,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// #[derive(Clone, Debug, EffectHandler)]
@@ -4888,7 +4888,7 @@ macro_rules! effectful_stateful {
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -4897,7 +4897,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// #[derive(Clone, Debug, EffectHandler)]
@@ -4942,7 +4942,7 @@ macro_rules! effectful_stateful {
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
 /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -4951,7 +4951,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// # #[derive(Clone, Debug, EffectHandler)]
@@ -4989,7 +4989,7 @@ macro_rules! effectful_stateful {
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
 /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -4998,7 +4998,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// # #[derive(Clone, Debug, EffectHandler)]
@@ -5036,7 +5036,7 @@ macro_rules! effectful_stateful {
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
 /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -5045,7 +5045,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// # #[derive(Clone, Debug, EffectHandler)]
@@ -5084,7 +5084,7 @@ macro_rules! effectful_stateful {
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
 /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -5093,7 +5093,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// # #[derive(Clone, Debug, EffectHandler)]
@@ -5131,7 +5131,7 @@ macro_rules! effectful_stateful {
 /// # struct Charged;
 /// # impl TypedPayload for Charged { const EVENT_TYPE: &'static str = "row_doc.charged"; }
 /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
-/// # trait CardPort: Send + Sync { fn charge(&self) -> Charged; }
+/// # trait CardPort: Send + Sync { fn charge(&self) -> Result<Charged, EffectError>; }
 /// # #[derive(Clone, Debug, Serialize)]
 /// # struct ChargeCardRequest;
 /// # #[async_trait]
@@ -5140,7 +5140,7 @@ macro_rules! effectful_stateful {
 /// #     type Safety = Idempotent;
 /// #     type Port = dyn CardPort;
 /// #     type Outcome = Charged;
-/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { Ok(card.charge()) }
+/// #     async fn call(&self, card: &dyn CardPort, _: &mut EffectContext) -> Result<Charged, EffectError> { card.charge() }
 /// # }
 /// # type ChargeCard = Call<ChargeCardRequest>;
 /// # #[derive(Clone, Debug, EffectHandler)]

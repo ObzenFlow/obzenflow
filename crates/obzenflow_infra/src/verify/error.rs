@@ -40,6 +40,9 @@ pub enum VerifyError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error(transparent)]
+    CallLog(#[from] crate::simulated::CallLogError),
 }
 
 /// Why verification refused to compare (exit code 3). Refusals are part of
@@ -87,6 +90,13 @@ pub enum RefusalReason {
         baseline_namespace: String,
         candidate_namespace: String,
     },
+
+    /// No run directory names the lineage that call logs are judged against.
+    NoRunDirectories,
+
+    /// The run directories belong to more than one lineage, each named by the
+    /// run that started it.
+    SeveralLineages { first_runs: Vec<String> },
 }
 
 impl fmt::Display for RefusalReason {
@@ -138,6 +148,23 @@ impl fmt::Display for RefusalReason {
                 f,
                 "runs do not share a replay lineage (stage '{stage}': baseline effect namespace '{baseline_namespace}', candidate '{candidate_namespace}')"
             ),
+            Self::NoRunDirectories => {
+                write!(f, "no run directory given. List every run of the lineage.")
+            }
+            Self::SeveralLineages { first_runs } => write!(
+                f,
+                "the manifests belong to {} lineages, started by {}. List the runs of one lineage.",
+                first_runs.len(),
+                and_list(first_runs)
+            ),
         }
+    }
+}
+
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }

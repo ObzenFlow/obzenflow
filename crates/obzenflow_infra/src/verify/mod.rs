@@ -10,10 +10,12 @@
 //! The comparator submodules (`projection`, `certification`, `walker`,
 //! `lineage`, `report`, `verdict`) are I/O-free over `obzenflow_core` types;
 //! `source` and `fs` touch disk, reusing infra's framed journal format and
-//! archive status derivation. Both product surfaces (the `--verify` flag on
+//! archive status derivation, and `calls` reads run manifests and simulated
+//! systems' call logs. Both product surfaces (the `--verify` flag on
 //! `FlowApplication` and external operational tools) call
 //! [`verify_run_dirs`], so both certify identically from manifest data.
 
+pub mod calls;
 pub mod certification;
 pub mod error;
 pub mod fs;
@@ -28,6 +30,10 @@ pub mod walker;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub use calls::{
+    render_call_log_check, verify_call_logs, CallLogCheck, CallLogJudgment, CallLogVerdict,
+    CallLogViolation,
+};
 pub use error::{RefusalReason, VerifyError};
 pub use lineage::IdentityMode;
 pub use report::{VerificationReport, REPORT_VERSION};

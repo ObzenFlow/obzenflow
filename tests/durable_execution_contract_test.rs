@@ -32,9 +32,10 @@ use gateway_demo::domain::{
     CustomerOrderPlaced, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
     PaymentMethodState,
 };
-use gateway_demo::gateway::AuthorizePaymentOutcome;
+use gateway_demo::gateway::{AuthorizePaymentOutcome, GatewayResponse};
 use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, IngressTiming};
-use obzenflow::application::FlowApplication;
+use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
+use obzenflow::effects::simulated::CallLog;
 use obzenflow::effects::{
     CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
     StageCompletion,
@@ -49,7 +50,7 @@ use obzenflow::journal::read::{
     RunJournalKind, RunOutcome, RunRecord, RunRecordData, SystemPayload,
 };
 use obzenflow::journal::JournalRecord;
-use obzenflow::schema::TypedPayload;
+use obzenflow::schema::{FlowId, TypedPayload};
 use obzenflow::stages::sinks::{
     DeliveryMethod, DeliveryResult, DiscardSink, InlineSink, SinkDescription, SinkOperationError,
     SinkRedeliverySafety, SinkWriteFailure, SinkWritePhase,
@@ -105,6 +106,7 @@ const PATIENCE: Duration = Duration::from_secs(1);
 /// The server answers by its acknowledgement deadline; this only bounds a
 /// server that never answers.
 const ANSWER: Duration = Duration::from_secs(IngressTiming::DEFAULT_ACK_DEADLINE.as_secs() + 5);
+const SETTLE_ATTEMPTS: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Workload: 6 web orders that finish early, 23 store orders and one invalid
@@ -228,19 +230,35 @@ enum WebOrders {
 // ---------------------------------------------------------------------------
 // External history: the test-double gateway.
 
-/// One physical gateway call, as the gateway records it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One physical gateway call, as the gateway's call log records it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 struct GatewayCall {
+    result: CallResult,
     key: String,
-    order_id: String,
-    call: Call,
+    response: Option<GatewayResponse>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl GatewayCall {
+    fn order_id(&self) -> &str {
+        self.key
+            .strip_prefix("payment-authorize:")
+            .expect("a gateway key names its order")
+    }
+
+    fn decision(&self) -> Option<&'static str> {
+        match self.response {
+            Some(GatewayResponse::Charged { .. }) => Some(AUTHORIZED),
+            Some(GatewayResponse::Declined { .. }) => Some(DECLINED),
+            None => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Call {
-    Charged,
-    Declined,
+enum CallResult {
+    Decided,
+    Failed,
     /// A key the gateway already decided: no second charge.
     Replayed,
 }
@@ -263,13 +281,11 @@ async fn hold_until(release: &Path) {
     }
 }
 
-/// Appends every physical call to the ledger with one unbuffered write, which
-/// survives SIGKILL. Holds `hold` after recording its call until `release`
-/// exists.
+/// Keeps every physical call in a call log, whose lines survive SIGKILL. Holds
+/// `hold` after recording its call until `release` exists.
 #[obzenflow::port]
-#[derive(Clone, Debug)]
 struct Gateway {
-    ledger: PathBuf,
+    calls: CallLog<GatewayResponse>,
     hold: Option<String>,
     release: PathBuf,
 }
@@ -278,46 +294,42 @@ impl Gateway {
     async fn authorize(
         &self,
         order: &CustomerOrderPlaced,
+        flow_id: FlowId,
     ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        let key = idempotency_key(&order.order_id);
-        let decided = read_lines::<GatewayCall>(&self.ledger)
-            .iter()
-            .any(|call| call.key == key);
-        let outcome = match order.payment_method_state {
-            PaymentMethodState::InsufficientFunds => {
-                declined(order, PaymentDeclineReason::InsufficientFunds)
-            }
-            PaymentMethodState::AddressMismatch => {
-                declined(order, PaymentDeclineReason::AddressMismatch)
-            }
-            PaymentMethodState::Valid | PaymentMethodState::InvalidNumber => {
+        let key = IdempotencyKey(idempotency_key(&order.order_id));
+        let response = self
+            .calls
+            .answer(&key, flow_id, |_| decide(order))
+            .map_err(|error| EffectError::Transport(error.to_string()))?;
+        if self.hold.as_deref() == Some(order.order_id.as_str()) {
+            hold_until(&self.release).await;
+        }
+        Ok(match response {
+            GatewayResponse::Charged { authorization_id } => {
                 AuthorizePaymentOutcome::Authorized(PaymentAuthorized {
                     order_id: order.order_id.clone(),
                     customer_id: order.customer_id.clone(),
                     amount_cents: order.amount_cents,
                     phase: order.phase.clone(),
-                    authorization_id: format!("AUTH-{}", order.order_id),
+                    authorization_id,
                 })
             }
-        };
-        let call = match (decided, &outcome) {
-            (true, _) => Call::Replayed,
-            (false, AuthorizePaymentOutcome::Authorized(_)) => Call::Charged,
-            (false, AuthorizePaymentOutcome::Declined(_)) => Call::Declined,
-        };
-        append_line(
-            &self.ledger,
-            &GatewayCall {
-                key,
-                order_id: order.order_id.clone(),
-                call,
-            },
-        )
-        .map_err(|error| EffectError::Transport(error.to_string()))?;
-        if self.hold.as_deref() == Some(order.order_id.as_str()) {
-            hold_until(&self.release).await;
-        }
-        Ok(outcome)
+            GatewayResponse::Declined { reason } => declined(order, reason),
+        })
+    }
+}
+
+fn decide(order: &CustomerOrderPlaced) -> GatewayResponse {
+    match order.payment_method_state {
+        PaymentMethodState::InsufficientFunds => GatewayResponse::Declined {
+            reason: PaymentDeclineReason::InsufficientFunds,
+        },
+        PaymentMethodState::AddressMismatch => GatewayResponse::Declined {
+            reason: PaymentDeclineReason::AddressMismatch,
+        },
+        PaymentMethodState::Valid | PaymentMethodState::InvalidNumber => GatewayResponse::Charged {
+            authorization_id: format!("AUTH-{}", order.order_id),
+        },
     }
 }
 
@@ -365,9 +377,9 @@ impl CallRequest for AuthorizationRequest {
     async fn call(
         &self,
         gateway: &Gateway,
-        _: &mut EffectContext,
+        ctx: &mut EffectContext,
     ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        gateway.authorize(&self.order).await
+        gateway.authorize(&self.order, ctx.flow_id()).await
     }
 }
 
@@ -503,7 +515,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
         Some(Hold::BetweenEffects(_)) | None => (None, None),
     };
     let gateway = Gateway {
-        ledger: scenario.ledger(),
+        calls: CallLog::open(scenario.ledger()).expect("the gateway's call log opens"),
         hold: gateway_hold,
         release: scenario.release(),
     };
@@ -1089,8 +1101,20 @@ impl Sender {
         answer
     }
 
-    /// Resend every order whose last answer is unknown, returning the answers.
-    async fn resend_unknown(&self, run: &Path) -> Vec<(String, Answer)> {
+    /// Resend every order whose last answer is unknown until it settles,
+    /// returning the orders resent. An order a run in `earlier` committed
+    /// answers duplicate.
+    async fn resend_unknown(&self, run: &Path, earlier: &[&Path]) -> Vec<String> {
+        let mut committed = BTreeSet::new();
+        for archive in earlier {
+            committed.extend(
+                Archive::read(archive)
+                    .await
+                    .admitted()
+                    .into_iter()
+                    .map(|(order, _)| order),
+            );
+        }
         let mut last: Vec<(String, Answer)> = Vec::new();
         for sent in self.scenario.answers() {
             match last.iter_mut().find(|(order, _)| *order == sent.order_id) {
@@ -1103,10 +1127,25 @@ impl Sender {
             .into_iter()
             .filter(|(_, answer)| *answer == Answer::Unknown)
         {
-            let answer = self.send(run, &order).await;
-            resent.push((order, answer));
+            let answer = self.settle(run, &order).await;
+            assert!(
+                !committed.contains(&order) || matches!(answer, Answer::Duplicate { .. }),
+                "{order} was committed by an earlier run and answered {answer:?}"
+            );
+            resent.push(order);
         }
         resent
+    }
+
+    async fn settle(&self, run: &Path, order_id: &str) -> Answer {
+        for _ in 0..SETTLE_ATTEMPTS {
+            match self.send(run, order_id).await {
+                Answer::Unknown => {}
+                answer @ (Answer::Committed { .. } | Answer::Duplicate { .. }) => return answer,
+                other => panic!("{order_id}: {other:?}"),
+            }
+        }
+        panic!("{order_id}: unsettled after {SETTLE_ATTEMPTS} sends");
     }
 
     /// Send orders until one stalls behind backpressure: its sender gives up
@@ -1117,11 +1156,9 @@ impl Sender {
                 Answer::Committed { .. } => {}
                 Answer::Unknown => {
                     let admitted = Archive::read(run).await.admitted();
-                    assert!(
-                        admitted.iter().all(|(admitted, _)| *admitted != order),
-                        "{order} committed after its sender gave up"
-                    );
-                    return order;
+                    if admitted.iter().all(|(admitted, _)| *admitted != order) {
+                        return order;
+                    }
                 }
                 other => panic!("{order}: {other:?}"),
             }
@@ -1463,6 +1500,8 @@ struct History {
     runs: Vec<(Archive, Ended)>,
     /// Orders whose gateway call was in flight at a cut.
     in_flight: BTreeSet<String>,
+    /// What the lineage check shows about the gateway's call log.
+    call_log: CallLogVerdict,
 }
 
 impl History {
@@ -1472,6 +1511,7 @@ impl History {
             scenario: scenario.clone(),
             runs: Vec::new(),
             in_flight: BTreeSet::new(),
+            call_log: CallLogVerdict::Passed,
         }
     }
 
@@ -1485,8 +1525,8 @@ impl History {
             self.in_flight.extend(
                 self.scenario
                     .calls()
-                    .into_iter()
-                    .map(|call| call.order_id)
+                    .iter()
+                    .map(|call| call.order_id().to_string())
                     .filter(|order| !outcomes.contains_key(order)),
             );
         }
@@ -1672,33 +1712,45 @@ impl History {
             .iter()
             .any(|(_, ended)| matches!(ended, Ended::Natural | Ended::Stopped));
         for order in &valid {
-            let decided: Vec<Call> = calls
+            let decided: Vec<&'static str> = calls
                 .iter()
-                .filter(|call| &call.order_id == order && call.call != Call::Replayed)
-                .map(|call| call.call)
+                .filter(|call| call.order_id() == order && call.result == CallResult::Decided)
+                .filter_map(GatewayCall::decision)
                 .collect();
             if completed {
-                let expected = if decision(order) == AUTHORIZED {
-                    Call::Charged
-                } else {
-                    Call::Declined
-                };
                 assert_eq!(
                     decided,
-                    [expected],
+                    [decision(order)],
                     "{name}: the gateway decided {order} once"
                 );
             } else {
                 assert!(decided.len() <= 1, "{name}: {order} decided {decided:?}");
             }
         }
-        for call in calls.iter().filter(|call| call.call == Call::Replayed) {
+        for call in calls
+            .iter()
+            .filter(|call| call.result == CallResult::Replayed)
+        {
             assert!(
-                self.in_flight.contains(&call.order_id),
+                self.in_flight.contains(call.order_id()),
                 "{name}: {} replayed without being in flight at a cut",
-                call.order_id
+                call.order_id()
             );
         }
+        let run_dirs: Vec<PathBuf> = self
+            .runs
+            .iter()
+            .map(|(archive, _)| archive.dir.clone())
+            .collect();
+        let check =
+            verify_call_logs(&run_dirs, &[self.scenario.ledger()]).expect("the lineage check runs");
+        let CallLogCheck::Judged { logs, .. } = &check else {
+            panic!("{name}: the history's runs name one lineage: {check:?}");
+        };
+        assert_eq!(
+            logs[0].verdict, self.call_log,
+            "{name}: the lineage check over the gateway's call log: {logs:?}"
+        );
 
         // I8: every receipt delivered at least once; a physical receipt
         // without its committed delivery only where a kill cut it.
@@ -1990,7 +2042,7 @@ async fn first_cut(scenario: &Scenario, child: &Child, name: &str) -> PathBuf {
             && scenario
                 .calls()
                 .iter()
-                .any(|call| call.order_id == FIRST_CUT)
+                .any(|call| call.order_id() == FIRST_CUT)
             && !archive.outcomes().contains_key(FIRST_CUT)
     })
     .await;
@@ -2054,7 +2106,7 @@ async fn durable_execution_contract() {
     let torn = child.run().await;
     cut(&torn, "S5", |archive| {
         archive.reconstruction_completed()
-            && s5.calls().iter().any(|call| call.order_id == SECOND_CUT)
+            && s5.calls().iter().any(|call| call.order_id() == SECOND_CUT)
             && !archive.outcomes().contains_key(SECOND_CUT)
     })
     .await;
@@ -2086,7 +2138,7 @@ async fn durable_execution_contract() {
                 .filter(|receipt| receipt.order_id == HELD_RECEIPT)
                 .count()
                 == 2
-            && s4.calls().iter().any(|call| call.order_id == TORN_CUT)
+            && s4.calls().iter().any(|call| call.order_id() == TORN_CUT)
             && !archive.outcomes().contains_key(TORN_CUT)
     })
     .await;
@@ -2144,6 +2196,7 @@ async fn durable_execution_contract() {
     for (name, killed) in [("S8", false), ("S8b", true)] {
         let scenario = Scenario::fresh(&name.to_lowercase());
         let mut never_pinned = History::new(name, &scenario);
+        never_pinned.call_log = CallLogVerdict::Uncertified;
         std::fs::remove_file(scenario.store_input()).expect("replace the store input");
         assert!(std::process::Command::new("mkfifo")
             .arg(scenario.store_input())
@@ -2189,8 +2242,8 @@ async fn durable_execution_contract() {
         std::fs::write(scenario.store_input(), store_input()).expect("restore store orders");
         let web_calls = scenario
             .calls()
-            .into_iter()
-            .filter(|call| call.order_id.starts_with("W-"))
+            .iter()
+            .filter(|call| call.order_id().starts_with("W-"))
             .count();
         assert_eq!(web_calls, 0, "{name}: nothing is charged before the cut");
         let args = if killed {
@@ -2211,9 +2264,9 @@ async fn durable_execution_contract() {
         assert!(pinned.is_some() && pinned < started, "{name}: {opening:?}");
         let web_calls_after: Vec<String> = scenario
             .calls()
-            .into_iter()
-            .filter(|call| call.order_id.starts_with("W-"))
-            .map(|call| call.order_id)
+            .iter()
+            .filter(|call| call.order_id().starts_with("W-"))
+            .map(|call| call.order_id().to_string())
             .collect();
         let distinct: BTreeSet<&String> = web_calls_after.iter().collect();
         assert_eq!(
@@ -2250,7 +2303,7 @@ async fn durable_execution_contract_over_http() {
         scenario
             .calls()
             .iter()
-            .any(|call| call.order_id == FIRST_CUT)
+            .any(|call| call.order_id() == FIRST_CUT)
             && !archive.outcomes().contains_key(FIRST_CUT)
     })
     .await;
@@ -2268,16 +2321,13 @@ async fn durable_execution_contract_over_http() {
     let child = Child::spawn(&scenario, resume(&first), Some(Hold::Gateway(held.clone())));
     let second = child.run().await;
     sender.live().await;
-    assert!(matches!(
-        sender.resend_unknown(&second).await.as_slice(),
-        [(order, Answer::Committed { .. })] if *order == uncommitted
-    ));
-    assert!(matches!(
-        sender.send(&second, &held).await,
-        Answer::Committed { .. }
-    ));
+    assert!(sender
+        .resend_unknown(&second, &[&first])
+        .await
+        .contains(&uncommitted));
+    sender.settle(&second, &held).await;
     until(&second, "H2", |archive| {
-        scenario.calls().iter().any(|call| call.order_id == held)
+        scenario.calls().iter().any(|call| call.order_id() == held)
             && !archive.outcomes().contains_key(&held)
     })
     .await;
@@ -2298,15 +2348,12 @@ async fn durable_execution_contract_over_http() {
     let child = Child::spawn(&scenario, resume(&second), None);
     let third = child.run().await;
     sender.live().await;
-    assert!(matches!(
-        sender.resend_unknown(&third).await.as_slice(),
-        [(order, Answer::Duplicate { .. })] if *order == lost
-    ));
+    assert!(sender
+        .resend_unknown(&third, &[&first, &second])
+        .await
+        .contains(&lost));
     let acknowledged = pool.next().expect("an order to acknowledge");
-    assert!(matches!(
-        sender.send(&third, &acknowledged).await,
-        Answer::Committed { .. }
-    ));
+    sender.settle(&third, &acknowledged).await;
     child.signal(Signal::Kill);
     assert!(!child.exit().await.success());
     history
@@ -2318,7 +2365,10 @@ async fn durable_execution_contract_over_http() {
     let child = Child::spawn(&scenario, resume(&third), None);
     let last = child.run().await;
     sender.live().await;
-    assert!(sender.resend_unknown(&last).await.is_empty());
+    assert!(sender
+        .resend_unknown(&last, &[&first, &second, &third])
+        .await
+        .is_empty());
     assert_eq!(
         sender.send(&last, INVALID_HTTP_ORDER).await,
         Answer::Rejected {
@@ -2326,11 +2376,7 @@ async fn durable_execution_contract_over_http() {
         }
     );
     for order in pool {
-        let answer = sender.send(&last, &order).await;
-        assert!(
-            matches!(answer, Answer::Committed { .. }),
-            "{order}: {answer:?}"
-        );
+        sender.settle(&last, &order).await;
     }
     let valid = history.valid();
     until(&last, "H4", |archive| {
@@ -3572,7 +3618,12 @@ mod payment_demo {
             Some(FIRST_RECOVERY_PAUSE),
             GATEWAY_CALLS_PER_SECOND,
             scenario.journals(),
+            gateway_calls(scenario),
         )
+    }
+
+    fn gateway_calls(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("gateway-calls.jsonl")
     }
 
     fn routes(archive: &Archive) -> BTreeMap<String, (TrafficPhase, &'static str)> {
@@ -3652,6 +3703,37 @@ mod payment_demo {
                 Some(route),
                 "{name}: {order} routes as in the uninterrupted demo"
             );
+        }
+        let check = verify_call_logs(
+            &[killed.clone(), resumed.clone()],
+            &[gateway_calls(&scenario)],
+        )
+        .expect("the lineage check runs");
+        let CallLogCheck::Judged { logs, .. } = &check else {
+            panic!("{name}: the killed and resumed runs name one lineage: {check:?}");
+        };
+        assert_eq!(logs[0].verdict, CallLogVerdict::Passed, "{name}: {logs:?}");
+        let phases: BTreeMap<String, TrafficPhase> = fixtures::scripted_web_orders()
+            .into_iter()
+            .chain(fixtures::scripted_store_orders())
+            .map(|order| (order.order_id, order.phase))
+            .collect();
+        let calls: Vec<GatewayCall> = read_lines(&gateway_calls(&scenario));
+        for call in &calls {
+            if phases[call.order_id()] == TrafficPhase::Outage {
+                assert_eq!(
+                    call.result,
+                    CallResult::Failed,
+                    "{name}: an outage order decides nothing: {call:?}"
+                );
+            }
+        }
+        for (order, _) in RECOVERY_ROUTES {
+            let decided = calls
+                .iter()
+                .filter(|call| call.order_id() == order && call.result == CallResult::Decided)
+                .count();
+            assert_eq!(decided, 1, "{name}: {order} is decided once");
         }
         let log = read_log(&log);
         let observed: BTreeSet<String> = log

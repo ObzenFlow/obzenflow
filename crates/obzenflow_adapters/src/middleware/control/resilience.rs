@@ -1013,14 +1013,6 @@ impl EffectResilienceMiddleware {
     }
 
     #[cfg(test)]
-    pub(in crate::middleware::control) fn expire_breaker_cooldown_for_test(&self) {
-        self.breaker
-            .as_ref()
-            .expect("test requires a breaker")
-            .expire_effect_cooldown_for_test();
-    }
-
-    #[cfg(test)]
     async fn pause_before_final_admission(&self, cursor: &EffectCursor, completed_attempts: u32) {
         let gate = self
             .final_admission_test_gate
