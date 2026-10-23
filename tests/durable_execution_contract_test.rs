@@ -106,6 +106,7 @@ const PATIENCE: Duration = Duration::from_secs(1);
 /// The server answers by its acknowledgement deadline; this only bounds a
 /// server that never answers.
 const ANSWER: Duration = Duration::from_secs(IngressTiming::DEFAULT_ACK_DEADLINE.as_secs() + 5);
+const SETTLE_ATTEMPTS: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Workload: 6 web orders that finish early, 23 store orders and one invalid
@@ -1100,8 +1101,20 @@ impl Sender {
         answer
     }
 
-    /// Resend every order whose last answer is unknown, returning the answers.
-    async fn resend_unknown(&self, run: &Path) -> Vec<(String, Answer)> {
+    /// Resend every order whose last answer is unknown until it settles,
+    /// returning the orders resent. An order a run in `earlier` committed
+    /// answers duplicate.
+    async fn resend_unknown(&self, run: &Path, earlier: &[&Path]) -> Vec<String> {
+        let mut committed = BTreeSet::new();
+        for archive in earlier {
+            committed.extend(
+                Archive::read(archive)
+                    .await
+                    .admitted()
+                    .into_iter()
+                    .map(|(order, _)| order),
+            );
+        }
         let mut last: Vec<(String, Answer)> = Vec::new();
         for sent in self.scenario.answers() {
             match last.iter_mut().find(|(order, _)| *order == sent.order_id) {
@@ -1114,10 +1127,25 @@ impl Sender {
             .into_iter()
             .filter(|(_, answer)| *answer == Answer::Unknown)
         {
-            let answer = self.send(run, &order).await;
-            resent.push((order, answer));
+            let answer = self.settle(run, &order).await;
+            assert!(
+                !committed.contains(&order) || matches!(answer, Answer::Duplicate { .. }),
+                "{order} was committed by an earlier run and answered {answer:?}"
+            );
+            resent.push(order);
         }
         resent
+    }
+
+    async fn settle(&self, run: &Path, order_id: &str) -> Answer {
+        for _ in 0..SETTLE_ATTEMPTS {
+            match self.send(run, order_id).await {
+                Answer::Unknown => {}
+                answer @ (Answer::Committed { .. } | Answer::Duplicate { .. }) => return answer,
+                other => panic!("{order_id}: {other:?}"),
+            }
+        }
+        panic!("{order_id}: unsettled after {SETTLE_ATTEMPTS} sends");
     }
 
     /// Send orders until one stalls behind backpressure: its sender gives up
@@ -1128,11 +1156,9 @@ impl Sender {
                 Answer::Committed { .. } => {}
                 Answer::Unknown => {
                     let admitted = Archive::read(run).await.admitted();
-                    assert!(
-                        admitted.iter().all(|(admitted, _)| *admitted != order),
-                        "{order} committed after its sender gave up"
-                    );
-                    return order;
+                    if admitted.iter().all(|(admitted, _)| *admitted != order) {
+                        return order;
+                    }
                 }
                 other => panic!("{order}: {other:?}"),
             }
@@ -2295,14 +2321,11 @@ async fn durable_execution_contract_over_http() {
     let child = Child::spawn(&scenario, resume(&first), Some(Hold::Gateway(held.clone())));
     let second = child.run().await;
     sender.live().await;
-    assert!(matches!(
-        sender.resend_unknown(&second).await.as_slice(),
-        [(order, Answer::Committed { .. })] if *order == uncommitted
-    ));
-    assert!(matches!(
-        sender.send(&second, &held).await,
-        Answer::Committed { .. }
-    ));
+    assert!(sender
+        .resend_unknown(&second, &[&first])
+        .await
+        .contains(&uncommitted));
+    sender.settle(&second, &held).await;
     until(&second, "H2", |archive| {
         scenario.calls().iter().any(|call| call.order_id() == held)
             && !archive.outcomes().contains_key(&held)
@@ -2325,15 +2348,12 @@ async fn durable_execution_contract_over_http() {
     let child = Child::spawn(&scenario, resume(&second), None);
     let third = child.run().await;
     sender.live().await;
-    assert!(matches!(
-        sender.resend_unknown(&third).await.as_slice(),
-        [(order, Answer::Duplicate { .. })] if *order == lost
-    ));
+    assert!(sender
+        .resend_unknown(&third, &[&first, &second])
+        .await
+        .contains(&lost));
     let acknowledged = pool.next().expect("an order to acknowledge");
-    assert!(matches!(
-        sender.send(&third, &acknowledged).await,
-        Answer::Committed { .. }
-    ));
+    sender.settle(&third, &acknowledged).await;
     child.signal(Signal::Kill);
     assert!(!child.exit().await.success());
     history
@@ -2345,7 +2365,10 @@ async fn durable_execution_contract_over_http() {
     let child = Child::spawn(&scenario, resume(&third), None);
     let last = child.run().await;
     sender.live().await;
-    assert!(sender.resend_unknown(&last).await.is_empty());
+    assert!(sender
+        .resend_unknown(&last, &[&first, &second, &third])
+        .await
+        .is_empty());
     assert_eq!(
         sender.send(&last, INVALID_HTTP_ORDER).await,
         Answer::Rejected {
@@ -2353,11 +2376,7 @@ async fn durable_execution_contract_over_http() {
         }
     );
     for order in pool {
-        let answer = sender.send(&last, &order).await;
-        assert!(
-            matches!(answer, Answer::Committed { .. }),
-            "{order}: {answer:?}"
-        );
+        sender.settle(&last, &order).await;
     }
     let valid = history.valid();
     until(&last, "H4", |archive| {

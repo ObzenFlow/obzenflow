@@ -203,13 +203,25 @@ impl Lineage {
             resumes,
         })
     }
+
+    fn seen(&self, flow_id: &str, run: usize) -> Seen {
+        if !self.runs.contains(flow_id) {
+            Seen::Outside { run }
+        } else if flow_id == self.first_run {
+            Seen::FromFirstRun
+        } else {
+            Seen::Other
+        }
+    }
 }
 
 fn judge(path: &Path, lineage: &Lineage) -> Result<CallLogJudgment, VerifyError> {
-    let mut tally = Tally::default();
+    let mut evidence = Evidence::default();
+    let mut judging = Judging::default();
     match File::open(path) {
         Ok(file) => read_lines(path, file, |line: CallLogLine<IgnoredAny, IgnoredAny>| {
-            tally.add(line, lineage);
+            let seen = evidence.record(line, lineage);
+            judging = std::mem::take(&mut judging).on_line(seen);
         })?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
@@ -222,88 +234,134 @@ fn judge(path: &Path, lineage: &Lineage) -> Result<CallLogJudgment, VerifyError>
     }
     Ok(CallLogJudgment {
         path: path.to_path_buf(),
-        calls: tally.calls,
-        replayed_by_resumes: tally.replayed,
-        verdict: tally.verdict(lineage),
+        calls: evidence.calls,
+        replayed_by_resumes: evidence.replayed,
+        verdict: judging.on_end(&evidence, lineage),
     })
 }
 
 #[derive(Default)]
-struct Tally {
-    calls: u64,
-    replayed: u64,
-    from_first_run: bool,
-    runs: Vec<(String, u64)>,
-    first_outside: Option<usize>,
-    decided_by: HashMap<String, usize>,
-    decided_twice: Option<(String, usize, usize)>,
+enum Judging {
+    #[default]
+    AwaitingFirstRunCall,
+    FirstRunCalled,
+    Broken(RuleBreak),
 }
 
-impl Tally {
-    fn add(&mut self, line: CallLogLine<IgnoredAny, IgnoredAny>, lineage: &Lineage) {
-        let (key, flow_id, decided) = match line {
-            CallLogLine::Decided { key, flow_id, .. } => (key, flow_id, true),
-            CallLogLine::Failed { key, flow_id, .. } => (key, flow_id, false),
-            CallLogLine::Replayed { key, flow_id } => {
-                self.replayed += 1;
-                (key, flow_id, false)
+enum RuleBreak {
+    Outside {
+        run: usize,
+    },
+    DecidedTwice {
+        key: String,
+        first: usize,
+        second: usize,
+    },
+}
+
+enum Seen {
+    Outside {
+        run: usize,
+    },
+    SecondDecision {
+        key: String,
+        first: usize,
+        second: usize,
+    },
+    FromFirstRun,
+    Other,
+}
+
+impl Judging {
+    fn on_line(self, seen: Seen) -> Self {
+        match (self, seen) {
+            (Self::Broken(RuleBreak::Outside { run }), _) => {
+                Self::Broken(RuleBreak::Outside { run })
             }
-        };
-        self.calls += 1;
-        self.from_first_run |= flow_id == lineage.first_run;
-        let run = self.run(flow_id, lineage);
-        if !decided {
-            return;
+            (_, Seen::Outside { run }) => Self::Broken(RuleBreak::Outside { run }),
+            (Self::Broken(rule), _) => Self::Broken(rule),
+            (_, Seen::SecondDecision { key, first, second }) => {
+                Self::Broken(RuleBreak::DecidedTwice { key, first, second })
+            }
+            (Self::AwaitingFirstRunCall, Seen::FromFirstRun) => Self::FirstRunCalled,
+            (state, Seen::FromFirstRun | Seen::Other) => state,
         }
-        match self.decided_by.entry(key) {
-            Entry::Vacant(entry) => {
-                entry.insert(run);
+    }
+
+    fn on_end(self, evidence: &Evidence, lineage: &Lineage) -> CallLogVerdict {
+        match self {
+            Self::Broken(RuleBreak::Outside { run }) => {
+                let (flow_id, calls) = evidence.runs[run].clone();
+                CallLogVerdict::Violated(CallLogViolation::OutsideLineage { flow_id, calls })
             }
-            Entry::Occupied(entry) => {
-                if self.decided_twice.is_none() {
-                    self.decided_twice = Some((entry.key().clone(), *entry.get(), run));
+            Self::Broken(RuleBreak::DecidedTwice { key, first, second }) => {
+                CallLogVerdict::Violated(CallLogViolation::DecidedTwice {
+                    key,
+                    first: evidence.runs[first].0.clone(),
+                    second: evidence.runs[second].0.clone(),
+                })
+            }
+            _ if evidence.replayed > lineage.resumes => {
+                CallLogVerdict::Violated(CallLogViolation::TooManyRepeats {
+                    replayed: evidence.replayed,
+                })
+            }
+            Self::FirstRunCalled => CallLogVerdict::Passed,
+            Self::AwaitingFirstRunCall => CallLogVerdict::Uncertified,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Evidence {
+    calls: u64,
+    replayed: u64,
+    runs: Vec<(String, u64)>,
+    decided_by: HashMap<String, usize>,
+}
+
+impl Evidence {
+    fn record(&mut self, line: CallLogLine<IgnoredAny, IgnoredAny>, lineage: &Lineage) -> Seen {
+        self.calls += 1;
+        match line {
+            CallLogLine::Decided { key, flow_id, .. } => {
+                let run = self.run(flow_id);
+                let seen = lineage.seen(&self.runs[run].0, run);
+                match (seen, self.decided_by.entry(key)) {
+                    (seen, Entry::Vacant(entry)) => {
+                        entry.insert(run);
+                        seen
+                    }
+                    (outside @ Seen::Outside { .. }, Entry::Occupied(_)) => outside,
+                    (_, Entry::Occupied(entry)) => Seen::SecondDecision {
+                        key: entry.key().clone(),
+                        first: *entry.get(),
+                        second: run,
+                    },
                 }
+            }
+            CallLogLine::Failed { flow_id, .. } => {
+                let run = self.run(flow_id);
+                lineage.seen(&self.runs[run].0, run)
+            }
+            CallLogLine::Replayed { flow_id, .. } => {
+                self.replayed += 1;
+                let run = self.run(flow_id);
+                lineage.seen(&self.runs[run].0, run)
             }
         }
     }
 
-    fn run(&mut self, flow_id: String, lineage: &Lineage) -> usize {
+    fn run(&mut self, flow_id: String) -> usize {
         let index = match self.runs.iter().position(|(seen, _)| *seen == flow_id) {
             Some(index) => index,
             None => {
-                if !lineage.runs.contains(&flow_id) && self.first_outside.is_none() {
-                    self.first_outside = Some(self.runs.len());
-                }
                 self.runs.push((flow_id, 0));
                 self.runs.len() - 1
             }
         };
         self.runs[index].1 += 1;
         index
-    }
-
-    fn verdict(&self, lineage: &Lineage) -> CallLogVerdict {
-        if let Some(outside) = self.first_outside {
-            let (flow_id, calls) = self.runs[outside].clone();
-            return CallLogVerdict::Violated(CallLogViolation::OutsideLineage { flow_id, calls });
-        }
-        if let Some((key, first, second)) = &self.decided_twice {
-            return CallLogVerdict::Violated(CallLogViolation::DecidedTwice {
-                key: key.clone(),
-                first: self.runs[*first].0.clone(),
-                second: self.runs[*second].0.clone(),
-            });
-        }
-        if self.replayed > lineage.resumes {
-            return CallLogVerdict::Violated(CallLogViolation::TooManyRepeats {
-                replayed: self.replayed,
-            });
-        }
-        if self.from_first_run {
-            CallLogVerdict::Passed
-        } else {
-            CallLogVerdict::Uncertified
-        }
     }
 }
 
@@ -435,6 +493,22 @@ mod tests {
                 key: "aml-score:1".to_string(),
                 first: FIRST.to_string(),
                 second: RESUMED.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_call_from_outside_the_lineage_outranks_an_earlier_second_decision() {
+        let lines = [
+            decided("aml-score:1", FIRST),
+            decided("aml-score:1", RESUMED),
+            decided("aml-score:2", OTHER),
+        ];
+        assert_eq!(
+            verdict(&killed_and_resumed(), &lines),
+            CallLogVerdict::Violated(CallLogViolation::OutsideLineage {
+                flow_id: OTHER.to_string(),
+                calls: 1,
             })
         );
     }

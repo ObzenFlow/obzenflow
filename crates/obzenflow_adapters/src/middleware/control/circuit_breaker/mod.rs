@@ -28,7 +28,8 @@ use obzenflow_runtime::effects::EffectError;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::time::Instant;
 
 mod classifier;
 mod config;
@@ -394,23 +395,10 @@ impl CircuitBreakerMiddleware {
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::middleware::control) fn expire_effect_cooldown_for_test(&self) {
-        let elapsed = self.cooldown.saturating_add(Duration::from_nanos(1));
-        let opened_at = Instant::now()
-            .checked_sub(elapsed)
-            .unwrap_or_else(Instant::now);
-        *self
-            .opened_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(opened_at);
-    }
-
     fn record_closed_outcome(
         &self,
         counted_as_failure: bool,
         call_duration: Option<Duration>,
-        _now: Instant,
     ) -> Option<ChainEvent> {
         let consecutive_failures = if counted_as_failure {
             self.failure_count.fetch_add(1, Ordering::SeqCst) + 1
@@ -1005,14 +993,14 @@ impl CircuitBreakerMiddleware {
             SourceOutcome::Success { poll_duration } => {
                 self.successes_total.fetch_add(1, Ordering::Relaxed);
                 if matches!(self.current_state(), CircuitState::Closed) {
-                    return self.record_closed_outcome(false, Some(poll_duration), Instant::now());
+                    return self.record_closed_outcome(false, Some(poll_duration));
                 }
                 None
             }
             SourceOutcome::Failure { poll_duration } => {
                 self.failures_total.fetch_add(1, Ordering::Relaxed);
                 if matches!(self.current_state(), CircuitState::Closed) {
-                    return self.record_closed_outcome(true, Some(poll_duration), Instant::now());
+                    return self.record_closed_outcome(true, Some(poll_duration));
                 }
                 None
             }
@@ -1297,13 +1285,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn failed_half_open_probe_reports_its_own_opening_evidence() {
+    #[tokio::test(start_paused = true)]
+    async fn failed_half_open_probe_reports_its_own_opening_evidence() {
         let breaker = CircuitBreakerMiddleware::new(1);
         let mut initial_ctx =
             MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
         breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut initial_ctx);
-        breaker.expire_effect_cooldown_for_test();
+        tokio::time::advance(breaker.cooldown).await;
 
         let mut probe_ctx =
             MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
@@ -1374,8 +1362,8 @@ mod tests {
         assert_eq!(breaker.current_state(), CircuitState::Open);
     }
 
-    #[test]
-    fn successful_probe_starts_a_fresh_rate_window() {
+    #[tokio::test(start_paused = true)]
+    async fn successful_probe_starts_a_fresh_rate_window() {
         let mut breaker = CircuitBreakerMiddleware::new(5);
         breaker.failure_mode = CircuitBreakerFailureMode::RateBased {
             window: FailureWindow::Count { size: 5 },
@@ -1399,7 +1387,7 @@ mod tests {
         }
         assert_eq!(breaker.current_state(), CircuitState::Open);
 
-        breaker.expire_effect_cooldown_for_test();
+        tokio::time::advance(breaker.cooldown).await;
         let mut probe_ctx =
             MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
         let epoch = breaker.effect_precheck(&mut probe_ctx, None).unwrap();

@@ -1328,7 +1328,7 @@ async fn stale_initial_reservation_cannot_cross_open_recover_closed_cycle() {
         EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
     ));
 
-    resilience.expire_breaker_cooldown_for_test();
+    tokio::time::advance(Duration::from_millis(1)).await;
     let probe = boundary
         .around_repeatable_effect(
             &identity_at(4),
@@ -1442,7 +1442,7 @@ async fn stale_retry_reservation_preserves_last_physical_error_after_recovery_cy
         EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
     ));
 
-    resilience.expire_breaker_cooldown_for_test();
+    tokio::time::advance(Duration::from_millis(1)).await;
     let probe = boundary
         .around_repeatable_effect(
             &identity_at(14),
@@ -1576,7 +1576,7 @@ async fn open_half_open_recovery_and_chronic_failure_share_one_authority() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
     let factory = EffectPlanFactory::with_breaker(
         crate::middleware::control::circuit_breaker()
@@ -1588,10 +1588,6 @@ async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
     .build()
     .expect("probe-busy resilience aggregate");
     let (attachment, control, stage_id) = materialized_resilience(factory);
-    let resilience = attachment
-        .effect_resilience_policy()
-        .expect("aggregate attachment")
-        .clone();
     let boundary = Arc::new(boundary_with_chain(vec![attachment]));
 
     let opening = boundary
@@ -1609,7 +1605,7 @@ async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
         opening.outcome,
         EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
     ));
-    resilience.expire_breaker_cooldown_for_test();
+    tokio::time::advance(Duration::from_secs(30)).await;
 
     let probe_started = Arc::new(tokio::sync::Notify::new());
     let release_probe = Arc::new(tokio::sync::Notify::new());
