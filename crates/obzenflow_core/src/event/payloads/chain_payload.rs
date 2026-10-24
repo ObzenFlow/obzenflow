@@ -70,11 +70,11 @@ impl ChainPayload {
     ) -> Result<Self, serde_json::Error> {
         if kind != EventKind::Fact {
             let expected = match (kind, event_type) {
+                (EventKind::CompositeData, event_type) => {
+                    CompositeDataPayload::schema_version_of(event_type)
+                        .map_or(1, NonZeroU32::get)
+                }
                 (
-                    EventKind::CompositeData,
-                    "ai.map_reduce.reduce_input" | "ai.map_reduce.chunk_failed",
-                )
-                | (
                     EventKind::Execution,
                     "obzenflow.sink_operation_failed"
                     | "source.poll_error"

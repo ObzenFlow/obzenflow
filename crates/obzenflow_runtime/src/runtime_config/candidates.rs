@@ -337,6 +337,7 @@ pub struct DslCandidates {
     // deliberately separate from emitted values: an optional or inactive-mode
     // key can be consumable without inventing a DSL candidate for it.
     consumption: ConfigConsumptionIndex,
+    owners: BTreeMap<obzenflow_core::StageKey, obzenflow_core::StageKey>,
 }
 
 impl DslCandidates {
@@ -391,6 +392,23 @@ impl DslCandidates {
     ) {
         self.consumption
             .consume_effect(key_path, stage, effect_type);
+    }
+
+    /// Declare that a generated member's configuration point is the authored
+    /// stage that owns it, so configuration names only the owner.
+    #[doc(hidden)]
+    pub fn declare_stage_owner(
+        &mut self,
+        member: impl Into<obzenflow_core::StageKey>,
+        owner: impl Into<obzenflow_core::StageKey>,
+    ) {
+        self.owners.insert(member.into(), owner.into());
+    }
+
+    pub(crate) fn stage_owners(
+        &self,
+    ) -> &BTreeMap<obzenflow_core::StageKey, obzenflow_core::StageKey> {
+        &self.owners
     }
 
     pub(crate) fn stage_consumers(&self) -> &BTreeMap<String, BTreeSet<obzenflow_core::StageKey>> {

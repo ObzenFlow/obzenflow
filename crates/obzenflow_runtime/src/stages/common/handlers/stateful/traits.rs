@@ -145,6 +145,12 @@ pub trait StatefulHandler: Send + Sync {
         TerminalValidation::Clean
     }
 
+    /// Whether a termination of this kind finalizes the handler's state
+    /// through `drain`. A truncated end of input never does.
+    fn finalizes_on(&self, kind: StatefulTerminationKind) -> bool {
+        !matches!(kind, StatefulTerminationKind::TruncatedEof)
+    }
+
     /// Called only after every event returned by the most recent
     /// `emit`/`drain` invocation is durable.
     fn outputs_committed(&self, _state: &mut Self::State) {}
@@ -228,6 +234,10 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         _kind: StatefulTerminationKind,
     ) -> TerminalValidation {
         TerminalValidation::Clean
+    }
+
+    fn finalizes_on(&self, kind: StatefulTerminationKind) -> bool {
+        !matches!(kind, StatefulTerminationKind::TruncatedEof)
     }
 
     fn outputs_committed(&self, _state: &mut Self::State) {}
@@ -315,6 +325,10 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         kind: StatefulTerminationKind,
     ) -> TerminalValidation {
         StatefulHandler::validate_terminal(self, state, kind)
+    }
+
+    fn finalizes_on(&self, kind: StatefulTerminationKind) -> bool {
+        StatefulHandler::finalizes_on(self, kind)
     }
 
     fn outputs_committed(&self, state: &mut Self::State) {

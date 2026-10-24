@@ -13,13 +13,7 @@ mod endpoint_identity;
 mod prompt;
 
 #[cfg(feature = "ai-rig")]
-mod model_config;
-
-#[cfg(feature = "ai-rig")]
-mod chat_effect_binding;
-
-#[cfg(feature = "ai-rig")]
-mod embedding_effect_binding;
+mod model_providers;
 
 #[cfg(feature = "ai-rig")]
 mod native_embedding_client;
@@ -40,13 +34,18 @@ pub use token_estimation::{
 pub use tiktoken::TiktokenEstimator;
 
 #[cfg(feature = "ai-rig")]
-pub use model_config::ModelConfig;
-
-#[cfg(feature = "ai-rig")]
-pub use chat_effect_binding::{ChatEffectBinding, ChatEffectBindingError};
-
-#[cfg(feature = "ai-rig")]
-pub use embedding_effect_binding::{EmbeddingEffectBinding, EmbeddingEffectBindingError};
+pub use model_providers::{NativeEmbeddingModelProvider, RigChatModelProvider};
 
 #[cfg(feature = "ai-rig")]
 pub use native_embedding_client::NativeEmbeddingClient;
+
+/// The model providers a host installs in each flow's build context: rig
+/// chat and native embeddings with the `ai-rig` feature, none without it.
+pub fn builtin_ai_models() -> obzenflow_runtime::ai::AiModelProviders {
+    let providers = obzenflow_runtime::ai::AiModelProviders::default();
+    #[cfg(feature = "ai-rig")]
+    let providers = providers
+        .chat(RigChatModelProvider)
+        .embedding(NativeEmbeddingModelProvider);
+    providers
+}

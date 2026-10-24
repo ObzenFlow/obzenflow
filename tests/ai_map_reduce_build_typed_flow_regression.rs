@@ -2,35 +2,24 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-114c regression test: the ordinary flow builder must attach composite
-//! subgraph membership to the topology it passes to `validate_edge_typing`.
-//!
-//! Before the closing-PR fix, the build path assembled `topology_stages`
-//! from `TopologyStageInfo::new(...)` without `.with_subgraph(...)`, and the
-//! validator's composite-internal-edge skip rule could not fire. Any flow
-//! using `ai_map_reduce!` would surface its mixed internal selected feeds as a
-//! `SingleEdge` mismatch (the map consumes both chunks and manifests; the
-//! collector consumes forwarded manifests plus tagged partials). This test wires a minimal
-//! `ai_map_reduce!` composite end-to-end through `flow!`, awaits the build,
-//! and asserts `Ok(_)`.
-//!
-//! The source and sink below are stubs for the build-only cases. Those tests
-//! exercise DSL expansion, composite lowering, topology assembly, and edge
-//! validation without driving the runtime.
+//! Map-reduce `ai!` stages through the ordinary flow builder: composite
+//! subgraph membership reaches edge validation, the generated members run
+//! with a fake chat provider, and joins resolve references through the
+//! stage's boundary.
+
+#[path = "support/fake_ai.rs"]
+pub mod fake_ai;
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion};
-use obzenflow_core::ai::{
-    AiClientError, AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
-    ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
-    HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
-    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+use fake_ai::{build_context, build_context_with, chat_model, enforced_backpressure, FakeChatModels};
+use obzenflow::ai::{
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Keyed,
+    Partials, TriggeredMapReduce, Unkeyed,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
+use obzenflow_dsl::{ai, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::EffectBinding;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -39,25 +28,17 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-
-// ── Typed payloads for each stage of the ai_map_reduce composite ──────────
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct BuildOnlySeed {
-    n: u64,
-}
-impl TypedPayload for BuildOnlySeed {
-    const EVENT_TYPE: &'static str = "regression.amr.seed";
-}
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BuildOnlyItem {
     value: u64,
 }
+impl TypedPayload for BuildOnlyItem {
+    const EVENT_TYPE: &'static str = "regression.amr.item";
+}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct BuildOnlyPartial {
     value: u64,
 }
@@ -65,7 +46,7 @@ impl TypedPayload for BuildOnlyPartial {
     const EVENT_TYPE: &'static str = "regression.amr.partial";
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct BuildOnlyOut {
     total: u64,
 }
@@ -73,583 +54,238 @@ impl TypedPayload for BuildOnlyOut {
     const EVENT_TYPE: &'static str = "regression.amr.out";
 }
 
-fn test_target() -> ChatTarget {
-    ChatTarget::new("test", "deterministic")
-}
+#[derive(Clone, Copy)]
+struct SumMap;
 
-struct BuildMapRole;
+impl AiRole<Chunk<BuildOnlyItem>> for SumMap {
+    type Effect = ChatCompletion;
+    type Out = BuildOnlyPartial;
 
-impl AiMapRole<BuildOnlyItem, BuildOnlyPartial> for BuildMapRole {
-    fn prepare(
-        &self,
-        items: &[BuildOnlyItem],
-        _chunk: &obzenflow_core::ai::ChunkInfo,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        Ok(ChatRequestSpec {
-            messages: vec![ChatMessage::user(format!("{} items", items.len()))],
-            params: ChatParams::default(),
-            tools: Vec::new(),
-            response_format: None,
-        })
+    fn prepare(&self, chunk: &Chunk<BuildOnlyItem>) -> Result<ChatRequestSpec, HandlerError> {
+        let values: Vec<String> = chunk.iter().map(|item| item.value.to_string()).collect();
+        Ok(ChatRequestSpec::new("Sum the items.", values.join(" ")))
     }
 
     fn interpret(
         &self,
-        items: Vec<BuildOnlyItem>,
-        _chunk: obzenflow_core::ai::ChunkInfo,
-        _request: ChatRequestSpec,
-        _reply: ChatCompletionReply,
-    ) -> Result<BuildOnlyPartial, AiRoleLogicFailure> {
+        chunk: Chunk<BuildOnlyItem>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<BuildOnlyPartial, HandlerError> {
+        outcome.replied()?;
         Ok(BuildOnlyPartial {
-            value: items.into_iter().map(|item| item.value).sum(),
+            value: chunk.iter().map(|item| item.value).sum(),
         })
     }
 }
 
-struct BuildFinalizeRole;
+#[derive(Clone, Copy)]
+struct SumReduce;
 
-impl AiFinalizeRole<BuildOnlySeed, Many<BuildOnlyPartial>, BuildOnlyOut> for BuildFinalizeRole {
+impl AiRole<Partials<BuildOnlyItem, BuildOnlyPartial>> for SumReduce {
+    type Effect = ChatCompletion;
+    type Out = BuildOnlyOut;
+
     fn prepare(
         &self,
-        _seed: &BuildOnlySeed,
-        collected: &Many<BuildOnlyPartial>,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        Ok(ChatRequestSpec {
-            messages: vec![ChatMessage::user(format!(
-                "{} partials",
-                collected.items.len()
-            ))],
-            params: ChatParams::default(),
-            tools: Vec::new(),
-            response_format: None,
-        })
+        input: &Partials<BuildOnlyItem, BuildOnlyPartial>,
+    ) -> Result<ChatRequestSpec, HandlerError> {
+        Ok(ChatRequestSpec::new(
+            "Sum the partials.",
+            format!("{} partials", input.partials().len()),
+        ))
     }
 
     fn interpret(
         &self,
-        _seed: BuildOnlySeed,
-        collected: Many<BuildOnlyPartial>,
-        _request: ChatRequestSpec,
-        _reply: ChatCompletionReply,
-    ) -> Result<BuildOnlyOut, AiRoleLogicFailure> {
+        input: Partials<BuildOnlyItem, BuildOnlyPartial>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<BuildOnlyOut, HandlerError> {
+        outcome.replied()?;
         Ok(BuildOnlyOut {
-            total: collected
-                .items
-                .into_iter()
-                .map(|partial| partial.value)
-                .sum(),
+            total: input.partials().iter().map(|partial| partial.value).sum(),
         })
     }
 }
 
-struct DeterministicChatClient {
-    target: ChatTarget,
+type Digest = TriggeredMapReduce<SumMap, SumReduce, BuildOnlyItem, Unkeyed>;
+
+fn digest() -> Digest {
+    ai::map(SumMap).chunks(1).reduce(SumReduce).on_eof()
 }
 
-#[async_trait]
-impl ChatClient for DeterministicChatClient {
-    fn target(&self) -> &ChatTarget {
-        &self.target
-    }
-
-    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AiClientError> {
-        Ok(ChatResponse {
-            text: "ok".to_string(),
-            tool_calls: Vec::new(),
-            usage: None,
-            raw: None,
-        })
-    }
+fn models() -> FakeChatModels {
+    FakeChatModels::replying(|_| "ok".to_string())
 }
-
-fn test_binding(estimator_model: &str) -> EffectBinding<ChatCompletion> {
-    let client: Arc<dyn ChatClient> = Arc::new(DeterministicChatClient {
-        target: test_target(),
-    });
-    ChatBindingEvidence::new(test_target(), test_estimator(estimator_model))
-        .expect("test chat target and estimator models agree")
-        .into_binding(Arc::new(move || Ok(client.clone())))
-        .unwrap()
-}
-
-fn test_estimator(model: &str) -> ResolvedTokenEstimator {
-    ResolvedTokenEstimator::new(
-        Arc::new(HeuristicTokenEstimator::default()),
-        TokenEstimatorResolutionInfo::heuristic(
-            model,
-            TokenEstimatorFallbackReason::ExplicitHeuristic,
-            None,
-        ),
-    )
-}
-
-macro_rules! generated_digest {
-    ($chat:expr) => {{
-        let chat = $chat;
-        let map_role = BuildMapRole;
-        let finalize_role = BuildFinalizeRole;
-        ai_map_reduce!(
-            BuildOnlySeed -> BuildOnlyOut => {
-                map: [BuildOnlyItem] -> BuildOnlyPartial
-                    uses at_least_once(ChatCompletion)
-                        via chat
-                        with obzenflow_adapters::middleware::control::ai_resilience()
-                    => map_role,
-                reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
-                    uses at_least_once(ChatCompletion)
-                        via chat
-                        with obzenflow_adapters::middleware::control::ai_resilience()
-                    => finalize_role,
-            },
-            chunking: by_budget {
-                items: |seed: &BuildOnlySeed| {
-                    (1..=seed.n)
-                        .map(|value| BuildOnlyItem { value })
-                        .collect::<Vec<_>>()
-                },
-                render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
-                budget: TokenCount::new(100),
-                max_items: Some(1),
-                oversize: error,
-            }
-        )
-    }};
-}
-
-// ── Stub handlers (build-only; never invoked under this test's run path) ──
 
 #[derive(Clone, Debug)]
 struct NoEventSource;
 impl SourceTyping for NoEventSource {
-    type Output = BuildOnlySeed;
+    type Output = BuildOnlyItem;
 }
 impl TypedFiniteSourceHandler for NoEventSource {
-    type Output = BuildOnlySeed;
+    type Output = BuildOnlyItem;
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
     }
 }
 
-#[derive(Debug)]
-struct NoopSink<T>(std::marker::PhantomData<fn() -> T>);
+#[derive(Clone, Debug)]
+struct ItemSource {
+    next: u64,
+    last: u64,
+}
 
-impl<T> Clone for NoopSink<T> {
-    fn clone(&self) -> Self {
-        Self(std::marker::PhantomData)
+impl ItemSource {
+    fn one_to(last: u64) -> Self {
+        Self { next: 1, last }
     }
 }
 
-impl<T> NoopSink<T> {
-    fn new() -> Self {
-        Self(std::marker::PhantomData)
+impl SourceTyping for ItemSource {
+    type Output = BuildOnlyItem;
+}
+
+impl TypedFiniteSourceHandler for ItemSource {
+    type Output = BuildOnlyItem;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if self.next > self.last {
+            return Ok(None);
+        }
+        let value = self.next;
+        self.next += 1;
+        Ok(Some(vec![BuildOnlyItem { value }]))
+    }
+}
+
+#[derive(Debug)]
+struct Collect<T> {
+    rows: Arc<Mutex<Vec<T>>>,
+}
+
+impl<T> Clone for Collect<T> {
+    fn clone(&self) -> Self {
+        Self {
+            rows: Arc::clone(&self.rows),
+        }
+    }
+}
+
+impl<T> Collect<T> {
+    fn new() -> (Self, Arc<Mutex<Vec<T>>>) {
+        let rows = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                rows: Arc::clone(&rows),
+            },
+            rows,
+        )
     }
 }
 
 #[async_trait]
-impl<T> InlineSink for NoopSink<T>
+impl<T> InlineSink for Collect<T>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    T: TypedPayload + Send + Sync + std::fmt::Debug + 'static,
 {
     type Input = T;
 
     fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("Noop".to_string()))
+        SinkDescription::method(DeliveryMethod::Custom("Collect".to_string()))
     }
 
-    async fn write(&mut self, _event: T) -> Result<(), SinkWriteFailure> {
+    async fn write(&mut self, row: T) -> Result<(), SinkWriteFailure> {
+        self.rows.lock().expect("collected rows").push(row);
         Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CountingOutSink {
-    delivered: Arc<AtomicUsize>,
-    total: Arc<AtomicU64>,
-}
-
-impl CountingOutSink {
-    fn new(delivered: Arc<AtomicUsize>, total: Arc<AtomicU64>) -> Self {
-        Self { delivered, total }
-    }
-}
-
-#[async_trait]
-impl InlineSink for CountingOutSink {
-    type Input = BuildOnlyOut;
-
-    fn describe(&self) -> SinkDescription {
-        SinkDescription::method(DeliveryMethod::Custom("CountingOut".to_string()))
-    }
-
-    async fn write(&mut self, out: BuildOnlyOut) -> Result<(), SinkWriteFailure> {
-        self.delivered.fetch_add(1, Ordering::SeqCst);
-        self.total.store(out.total, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct OneSeedSource {
-    emitted: bool,
-}
-
-impl OneSeedSource {
-    fn new() -> Self {
-        Self { emitted: false }
-    }
-}
-
-impl SourceTyping for OneSeedSource {
-    type Output = BuildOnlySeed;
-}
-
-impl TypedFiniteSourceHandler for OneSeedSource {
-    type Output = BuildOnlySeed;
-
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        if self.emitted {
-            return Ok(None);
-        }
-        self.emitted = true;
-        Ok(Some(vec![BuildOnlySeed { n: 5 }]))
     }
 }
 
 #[tokio::test]
 async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
-    // The build is the assertion. If `validate_edge_typing` ran against a
-    // topology without composite subgraph membership, the mixed selected
-    // internal feeds would surface as
-    // `FlowBuildError::EdgeTypingMismatch { kind: SingleEdge, .. }` and this
-    // `.await` would resolve to `Err`. With the FLOWIP-114c closing-PR fix in
-    // the ordinary builder, subgraph membership is attached before the
-    // validator runs and the three composite-internal edges are recognized.
+    // If edge validation ran without composite subgraph membership, the
+    // members' mixed internal feeds would surface as a SingleEdge mismatch.
     let result = FlowDefinition::materialize(|_runtime_config| {
-        let seed_handler = NoEventSource;
-        let sink_handler = NoopSink::<BuildOnlyOut>::new();
-        let chat = test_binding("deterministic");
+        let items = NoEventSource;
+        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let digest = digest();
 
         Ok(flow! {
             name: "amr_build_only",
             journals: memory_journals(),
             stages: {
-                seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!(chat);
-                sink_stage = sink!(BuildOnlyOut => sink_handler);
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
             },
 
             topology: {
-                seed |> digest;
-                digest |> sink_stage;
+                items |> digest;
+                digest |> out;
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(build_context(&models(), "deterministic"))
     .await;
 
-    let _handle = result.unwrap_or_else(|err| {
+    result.unwrap_or_else(|err| {
         panic!(
-            "FLOWIP-114c regression: the ordinary flow builder rejected an ai_map_reduce flow that \
-             should validate cleanly under the composite-internal-edge skip rule. If you see \
-             a SingleEdge mismatch on `digest__chunk -> digest__collect`, the subgraph \
-             membership map is being applied AFTER `validate_edge_typing` instead of before. \
-             See `obzenflow_dsl/src/dsl/flow_builder.rs` around the topology_stages assembly. Error: \
-             {err:?}"
+            "the ordinary flow builder must accept a map-reduce ai! stage under the \
+             composite-internal-edge rule: {err:?}"
         )
     });
-}
-
-#[tokio::test]
-async fn materializer_scope_remains_visible_to_ai_effect_bindings() {
-    let result = FlowDefinition::materialize(|_runtime_config| {
-        let chat = test_binding("deterministic");
-        let bound_map_role = BuildMapRole;
-        let bound_finalize_role = BuildFinalizeRole;
-        let seed_handler = NoEventSource;
-        let sink_handler = NoopSink::<BuildOnlyOut>::new();
-
-        Ok(flow! {
-            name: "amr_flow_materializer_hygiene",
-            journals: memory_journals(),
-            stages: {
-                seed = source!(BuildOnlySeed => seed_handler);
-                digest = ai_map_reduce!(
-                    BuildOnlySeed -> BuildOnlyOut => {
-                        map: [BuildOnlyItem] -> BuildOnlyPartial
-                            uses at_least_once(ChatCompletion)
-                                via chat
-                                with obzenflow_adapters::middleware::control::ai_resilience()
-                            => bound_map_role,
-                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
-                            uses at_least_once(ChatCompletion)
-                                via chat
-                                with obzenflow_adapters::middleware::control::ai_resilience()
-                            => bound_finalize_role,
-                    },
-                    chunking: by_budget {
-                        items: |seed: &BuildOnlySeed| {
-                            (1..=seed.n)
-                                .map(|value| BuildOnlyItem { value })
-                                .collect::<Vec<_>>()
-                        },
-                        render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
-                        budget: TokenCount::new(100),
-                        max_items: Some(1),
-                        oversize: error,
-                    }
-                );
-                sink_stage = sink!(BuildOnlyOut => sink_handler);
-            },
-
-            topology: {
-                seed |> digest;
-                digest |> sink_stage;
-            }
-        })
-    })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await;
-
-    let _handle = result.expect("materializer locals must remain visible to the inner flow");
-}
-
-#[cfg(feature = "test-support")]
-#[tokio::test]
-async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
-    let result = async {
-        let chat = test_binding("deterministic");
-        let bound_map_role = BuildMapRole;
-        let bound_finalize_role = BuildFinalizeRole;
-        let seed_handler = NoEventSource;
-        let sink_handler = NoopSink::<BuildOnlyOut>::new();
-
-        obzenflow_dsl::test_flow! {
-            name: "amr_test_flow_binding_hygiene",
-            journals: memory_journals(),
-            stages: {
-                seed = source!(BuildOnlySeed => seed_handler);
-                digest = ai_map_reduce!(
-                    BuildOnlySeed -> BuildOnlyOut => {
-                        map: [BuildOnlyItem] -> BuildOnlyPartial
-                            uses at_least_once(ChatCompletion)
-                                via chat
-                                with obzenflow_adapters::middleware::control::ai_resilience()
-                            => bound_map_role,
-                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
-                            uses at_least_once(ChatCompletion)
-                                via chat
-                                with obzenflow_adapters::middleware::control::ai_resilience()
-                            => bound_finalize_role,
-                    },
-                    chunking: by_budget {
-                        items: |seed: &BuildOnlySeed| {
-                            (1..=seed.n)
-                                .map(|value| BuildOnlyItem { value })
-                                .collect::<Vec<_>>()
-                        },
-                        render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
-                        budget: TokenCount::new(100),
-                        max_items: Some(1),
-                        oversize: error,
-                    }
-                );
-                sink_stage = sink!(BuildOnlyOut => sink_handler);
-            },
-
-            topology: {
-                seed |> digest;
-                digest |> sink_stage;
-            }
-        }
-        .await
-    }
-    .await;
-
-    let _harness = result.expect("ordinary Rust locals must remain visible to test_flow!");
-}
-
-#[test]
-fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
-    let journals_evaluated = Arc::new(AtomicBool::new(false));
-    let ports_evaluated = Arc::new(AtomicBool::new(false));
-    let journal_probe = Arc::clone(&journals_evaluated);
-    let port_probe = Arc::clone(&ports_evaluated);
-
-    let result = (|| {
-        let evidence = ChatBindingEvidence::new(test_target(), test_estimator("different-model"))?;
-        journal_probe.store(true, Ordering::SeqCst);
-        port_probe.store(true, Ordering::SeqCst);
-        Ok::<_, ChatBindingEvidenceBuildError>(evidence)
-    })();
-    let error = result.expect_err("an estimator for a different model must fail construction");
-
-    assert!(matches!(
-        error,
-        ChatBindingEvidenceBuildError::EstimatorModelMismatch
-    ));
-    assert!(
-        !journals_evaluated.load(Ordering::SeqCst),
-        "journal construction must remain outside a rejected chat contract"
-    );
-    assert!(
-        !ports_evaluated.load(Ordering::SeqCst),
-        "effect-port registration must remain outside a rejected chat contract"
-    );
-}
-
-#[tokio::test]
-async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
-    let handle = FlowDefinition::materialize(|_runtime_config| {
-        let seed_handler = NoEventSource;
-        let sink_handler = NoopSink::<BuildOnlyOut>::new();
-        let chat = test_binding("deterministic");
-
-        Ok(flow! {
-            name: "amr_boundary_payload_contract",
-            journals: memory_journals(),
-            stages: {
-                seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!(chat);
-                sink_stage = sink!(BuildOnlyOut => sink_handler);
-            },
-
-            topology: {
-                seed |> digest;
-                digest |> sink_stage;
-            }
-        })
-    })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .expect("typed ai_map_reduce flow should build");
-
-    let topology = handle.topology().expect("built flow exposes topology");
-    let digest = topology
-        .subgraphs()
-        .iter()
-        .find(|subgraph| subgraph.subgraph_id == "ai_map_reduce:digest")
-        .expect("digest subgraph");
-    let input = digest
-        .boundary_ports
-        .iter()
-        .find(|port| port.name == "in")
-        .expect("input port");
-    let output = digest
-        .boundary_ports
-        .iter()
-        .find(|port| port.name == "out")
-        .expect("output port");
-
-    assert_eq!(
-        input.payload_event_types,
-        vec![BuildOnlySeed::event_type_name()]
-    );
-    assert_eq!(
-        output.payload_event_types,
-        vec![BuildOnlyOut::event_type_name()]
-    );
-
-    let serialized = serde_json::to_string(&*topology).expect("topology serializes");
-    assert!(serialized.contains("regression.amr.seed"));
-    assert!(serialized.contains("regression.amr.out"));
-    assert!(
-        !serialized.contains(".v1.v1"),
-        "boundary payload event types must already be canonical: {serialized}"
-    );
-}
-
-fn enforced_backpressure() -> obzenflow_runtime::run_context::FlowBuildContext {
-    use obzenflow_core::config::{ConfigScope, ConfigSource};
-    use obzenflow_runtime::runtime_config::{
-        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
-    };
-    let mut candidates = CandidateSet::default();
-    for (key, value) in [
-        (
-            "runtime.backpressure.mode",
-            ConfigValue::Text("enforce".to_owned()),
-        ),
-        ("runtime.backpressure.window", ConfigValue::U64(3)),
-        (
-            "runtime.backpressure.stall_timeout_ms",
-            ConfigValue::U64(3_000),
-        ),
-    ] {
-        candidates
-            .admit(ScopedCandidate::unqualified(
-                key,
-                ConfigScope::Flow,
-                ConfigSource::File,
-                value,
-            ))
-            .expect("the backpressure setting admits");
-    }
-    obzenflow_runtime::run_context::FlowBuildContext::new(Arc::new(ResolvedRuntimeConfig::new(
-        candidates,
-    )))
 }
 
 #[tokio::test]
 async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
-    let metrics_context = enforced_backpressure().with_metrics_exporter(metrics_model.clone());
-    let delivered = Arc::new(AtomicUsize::new(0));
-    let delivered_for_flow = delivered.clone();
-    let total = Arc::new(AtomicU64::new(0));
-    let total_for_flow = total.clone();
+    let fake = models();
+    let context = build_context_with(
+        &fake,
+        std::iter::once(chat_model("deterministic")).chain(enforced_backpressure(3)),
+    )
+    .with_metrics_exporter(metrics_model.clone());
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let seed_handler = OneSeedSource::new();
-        let sink_handler = CountingOutSink::new(delivered_for_flow, total_for_flow);
-        let chat = test_binding("deterministic");
+        let items = ItemSource::one_to(5);
+        let digest = digest();
 
         Ok(flow! {
             name: "amr_runtime_internal_contracts",
             journals: memory_journals(),
             stages: {
-                seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!(chat);
-                sink_stage = sink!(BuildOnlyOut => sink_handler);
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
             },
 
             topology: {
-                seed |> digest;
-                digest |> sink_stage;
+                items |> digest;
+                digest |> out;
             }
         })
     })
-    .build(metrics_context)
+    .build(context)
     .await
-    .expect("ai_map_reduce runtime flow should build");
+    .expect("map-reduce ai! flow should build");
 
     handle
         .run()
         .await
-        .expect("ai_map_reduce should commit planning manifests and tagged partials");
-    let metrics = metrics_model.clone();
+        .expect("the generated members should commit their protocol facts");
 
     assert_eq!(
-        delivered.load(Ordering::SeqCst),
-        1,
-        "ai_map_reduce should deliver one reduced output to the downstream sink"
+        *rows.lock().unwrap(),
+        vec![BuildOnlyOut { total: 15 }],
+        "one window reduces once at the natural end of input"
     );
-    assert_eq!(
-        total.load(Ordering::SeqCst),
-        15,
-        "collector should route tagged partials and finalize their sum"
-    );
+    assert_eq!(fake.call_count(), 6, "five groups and one reduce");
 
     let rendered = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
-        .render(&metrics.snapshot())
+        .render(&metrics_model.snapshot())
         .expect("terminal backpressure metrics should render");
-    assert!(
-        !rendered
-            .lines()
-            .any(|line| line.starts_with("obzenflow_composite_boundary_duration_seconds_count{")),
-        "live metrics must not reconstruct paired historical durations"
-    );
     let in_flight: Vec<&str> = rendered
         .lines()
         .filter(|line| {
@@ -657,10 +293,7 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
                 && line.contains("flow=\"amr_runtime_internal_contracts\"")
         })
         .collect();
-    assert!(
-        !in_flight.is_empty(),
-        "window-2 run should export physical edge debt"
-    );
+    assert!(!in_flight.is_empty(), "the run should export edge debt");
     for line in in_flight {
         let debt = line
             .split_whitespace()
@@ -672,34 +305,163 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     }
 }
 
-/// FLOWIP-128a D1 diagnostics: a downstream whose type no boundary port
-/// carries binds the default port, and the resulting edge-typing error names
-/// the composite and the port rather than only the mangled member stage.
+#[tokio::test]
+async fn a_map_only_stage_emits_one_output_per_group() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyPartial>::new();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let items = ItemSource::one_to(5);
+        let tag = ai::map(SumMap).chunks(2);
+
+        Ok(flow! {
+            name: "amr_map_only",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                tag = ai!(BuildOnlyItem -> BuildOnlyPartial => tag);
+                out = sink!(BuildOnlyPartial => out);
+            },
+
+            topology: {
+                items |> tag;
+                tag |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a map-only ai! flow should build");
+    handle.run().await.expect("a map-only ai! flow should run");
+
+    assert_eq!(
+        *rows.lock().unwrap(),
+        vec![
+            BuildOnlyPartial { value: 3 },
+            BuildOnlyPartial { value: 7 },
+            BuildOnlyPartial { value: 5 },
+        ],
+        "groups close at two items, and the end of input flushes the last"
+    );
+    assert_eq!(fake.call_count(), 3);
+}
+
+#[tokio::test]
+async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of_input() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let items = ItemSource::one_to(5);
+        let digest = ai::map(SumMap).chunks(1).reduce(SumReduce).every_n_chunks(2);
+
+        Ok(flow! {
+            name: "amr_every_n_chunks",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a rolling map-reduce ai! flow should build");
+    handle.run().await.expect("a rolling map-reduce ai! flow should run");
+
+    assert_eq!(
+        *rows.lock().unwrap(),
+        vec![
+            BuildOnlyOut { total: 3 },
+            BuildOnlyOut { total: 7 },
+            BuildOnlyOut { total: 5 },
+        ]
+    );
+    assert_eq!(fake.call_count(), 8, "five groups and three reduces");
+}
+
+type ByParity = TriggeredMapReduce<
+    SumMap,
+    SumReduce,
+    BuildOnlyItem,
+    Keyed<u64, fn(&BuildOnlyItem) -> u64>,
+>;
+
+fn parity(item: &BuildOnlyItem) -> u64 {
+    item.value % 2
+}
+
+#[tokio::test]
+async fn a_keyed_stage_never_mixes_keys_in_a_group_or_window() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let items = ItemSource::one_to(5);
+        let by_parity: ByParity = ai::map(SumMap)
+            .key_by(parity as fn(&BuildOnlyItem) -> u64)
+            .chunks(2)
+            .reduce(SumReduce)
+            .on_eof();
+
+        Ok(flow! {
+            name: "amr_keyed",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                by_parity = ai!(BuildOnlyItem -> BuildOnlyOut => by_parity);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> by_parity;
+                by_parity |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a keyed map-reduce ai! flow should build");
+    handle.run().await.expect("a keyed map-reduce ai! flow should run");
+
+    let mut totals: Vec<u64> = rows.lock().unwrap().iter().map(|row| row.total).collect();
+    totals.sort_unstable();
+    assert_eq!(totals, vec![6, 9], "even keys sum to 6 and odd keys to 9");
+    assert_eq!(
+        fake.call_count(),
+        5,
+        "odd items 1, 3 and 5 form two groups, even items 2 and 4 one, and each key reduces once"
+    );
+}
+
 #[tokio::test]
 async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
     let result = FlowDefinition::materialize(|_runtime_config| {
-        let seed_handler = NoEventSource;
-        let sink_handler = NoopSink::<BuildOnlySeed>::new();
-        let chat = test_binding("deterministic");
+        let items = NoEventSource;
+        let (wrong, _) = Collect::<BuildOnlyItem>::new();
+        let digest = digest();
 
         Ok(flow! {
             name: "amr_boundary_mismatch",
             journals: memory_journals(),
             stages: {
-                seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!(chat);
-                // Wrong type: no output port carries BuildOnlySeed, so the edge
-                // binds the default `out` port and must fail edge typing there.
-                sink_stage = sink!(BuildOnlySeed => sink_handler);
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                // No output port carries BuildOnlyItem, so the edge binds the
+                // default `out` port and must fail edge typing there.
+                wrong = sink!(BuildOnlyItem => wrong);
             },
 
             topology: {
-                seed |> digest;
-                digest |> sink_stage;
+                items |> digest;
+                digest |> wrong;
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(build_context(&models(), "deterministic"))
     .await;
 
     let err = match result {
@@ -708,12 +470,12 @@ async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
     };
     let message = format!("{err:?}");
     assert!(
-        message.contains("digest__finalize"),
+        message.contains("digest__reduce"),
         "error should name the member stage: {message}"
     );
     assert!(
         message.contains("composite 'digest' boundary port 'out'"),
-        "error should name the composite and port (FLOWIP-128a D1): {message}"
+        "error should name the composite and port: {message}"
     );
 }
 
@@ -772,44 +534,133 @@ impl TypedFiniteSourceHandler for NoStreamSource {
     }
 }
 
-/// FLOWIP-128a A4: a join reference variable naming a composite resolves
-/// through the boundary by the join's declared reference type, with
-/// default-port fallback. Before the fix this build failed with
-/// "references unknown stage variable 'digest'".
+/// A join reference naming the `ai!` stage resolves through its boundary by
+/// the join's declared reference type.
 #[tokio::test]
 async fn join_reference_resolves_through_composite_boundary_port() {
     let result = FlowDefinition::materialize(|_runtime_config| {
-        let seed_handler = NoEventSource;
+        let items = NoEventSource;
         let stream_handler = NoStreamSource;
         let join_handler = LocalNoopJoin;
-        let sink_handler = NoopSink::<JoinedP>::new();
-        let chat = test_binding("deterministic");
+        let (joined, _) = Collect::<JoinedP>::new();
+        let digest = digest();
 
         Ok(flow! {
             name: "amr_join_reference",
             journals: memory_journals(),
             stages: {
-                seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!(chat);
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
                 stream_src = source!(JoinStreamP => stream_handler);
                 enrich = join!(catalog digest: BuildOnlyOut, JoinStreamP -> JoinedP => join_handler);
-                joined_sink = sink!(JoinedP => sink_handler);
+                joined = sink!(JoinedP => joined);
             },
 
             topology: {
-                seed |> digest;
+                items |> digest;
                 (digest, stream_src) |> enrich;
-                enrich |> joined_sink;
+                enrich |> joined;
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(build_context(&models(), "deterministic"))
     .await;
 
     result.unwrap_or_else(|err| {
         panic!(
-            "FLOWIP-128a A4: a join referencing the composite binding must resolve \
-             through the boundary's typed output port. Error: {err:?}"
+            "a join referencing the ai! stage must resolve through its typed output port: {err:?}"
         )
     });
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
+    let fake = models();
+    let result = async {
+        let items = NoEventSource;
+        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let digest = digest();
+
+        obzenflow_dsl::test_flow! {
+            build_context: build_context(&fake, "deterministic"),
+            name: "amr_test_flow_binding_hygiene",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        }
+        .await
+    }
+    .await;
+
+    let _harness = result.expect("ordinary Rust locals must remain visible to test_flow!");
+}
+
+#[tokio::test]
+async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
+    let handle = FlowDefinition::materialize(|_runtime_config| {
+        let items = NoEventSource;
+        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let digest = digest();
+
+        Ok(flow! {
+            name: "amr_boundary_payload_contract",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        })
+    })
+    .build(build_context(&models(), "deterministic"))
+    .await
+    .expect("typed map-reduce ai! flow should build");
+
+    let topology = handle.topology().expect("built flow exposes topology");
+    let digest = topology
+        .subgraphs()
+        .iter()
+        .find(|subgraph| subgraph.subgraph_id == "ai_map_reduce:digest")
+        .expect("digest subgraph");
+    let input = digest
+        .boundary_ports
+        .iter()
+        .find(|port| port.name == "in")
+        .expect("input port");
+    let output = digest
+        .boundary_ports
+        .iter()
+        .find(|port| port.name == "out")
+        .expect("output port");
+
+    assert_eq!(
+        input.payload_event_types,
+        vec![BuildOnlyItem::event_type_name()]
+    );
+    assert_eq!(
+        output.payload_event_types,
+        vec![BuildOnlyOut::event_type_name()]
+    );
+
+    let serialized = serde_json::to_string(&*topology).expect("topology serializes");
+    assert!(serialized.contains("regression.amr.item"));
+    assert!(serialized.contains("regression.amr.out"));
+    assert!(
+        !serialized.contains(".v1.v1"),
+        "boundary payload event types must already be canonical: {serialized}"
+    );
 }

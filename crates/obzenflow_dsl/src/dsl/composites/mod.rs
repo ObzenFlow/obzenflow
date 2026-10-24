@@ -12,8 +12,6 @@
 //! port, edges out resolve by the downstream's declared input type with
 //! default-port fallback, and ambiguity fails the build.
 
-pub mod ai_map_reduce;
-
 use crate::dsl::composition::{
     CompositeBuildContext, CompositeBuildError, CompositeExpansion, FlowMember, PortResolveError,
     ResolvedBoundary, ResolvedInternalFeed, ResolvedPort,
@@ -106,12 +104,20 @@ pub fn lower_composites(
     members: HashMap<String, FlowMember>,
     authored: Vec<AuthoredConnection>,
 ) -> Result<LoweredFlow, FlowBuildError> {
+    if let Some(binding) = members
+        .iter()
+        .find_map(|(binding, member)| matches!(member, FlowMember::Ai(_)).then_some(binding))
+    {
+        return Err(build_error(format!(
+            "ai! stage '{binding}' reached composite lowering before its model was bound"
+        )));
+    }
     let bindings = members
         .iter()
         .map(|(name, member)| {
             let descriptor = match member {
                 FlowMember::Stage(stage) => Some(stage.as_ref()),
-                FlowMember::Composite(_) => None,
+                FlowMember::Composite(_) | FlowMember::Ai(_) => None,
             };
             (name.as_str(), descriptor)
         })
@@ -132,6 +138,7 @@ pub fn lower_composites(
                 stages.insert(binding, descriptor);
             }
             FlowMember::Composite(descriptor) => composites.push((binding, descriptor)),
+            FlowMember::Ai(_) => unreachable!("ai! stages were refused above"),
         }
     }
 

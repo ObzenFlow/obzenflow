@@ -12,6 +12,7 @@
 //! `bootstrap` precedent: runtime-owned, visible to dsl, adapters, and
 //! infra. Nothing here touches the process-global bootstrap install.
 
+pub mod ai;
 pub mod app;
 pub mod candidates;
 pub mod difference;
@@ -28,8 +29,12 @@ pub use error::ConfigResolveError;
 pub use flow_view::{
     BackpressureMode, ExactConfigView, FlowEffectiveConfig, FlowResolutionContext,
 };
+pub use ai::{
+    AiConfigError, AiEndpointTable, AiEndpointTables, ResolvedAiModel, AI_EMBEDDINGS_SECTION,
+    AI_MODELS_SECTION, BUILTIN_AI_ENDPOINTS, DEFAULT_MAX_OPEN_KEYS, MAX_OPEN_KEYS_KEY,
+};
 pub use model::{
-    diff, doc_for, doc_for_at, AiModelsConfig, ConfigDiffEntry, Resolved, ResolvedRuntimeConfig,
+    diff, doc_for, doc_for_at, ConfigDiffEntry, Resolved, ResolvedRuntimeConfig,
     RuntimeConfigOverlay,
 };
 pub use resolve::{materialize_flow_config, ResolutionPoint};

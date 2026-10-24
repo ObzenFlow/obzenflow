@@ -2,492 +2,265 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Framework-internal transport payloads for AI map-reduce composites.
-
-use super::{
-    CanonicalizationComponent, ChatCompletionReply, ChatRequestSpec, ChunkExclusionReason,
-    ChunkInfo, ChunkPlanningSummary, TokenCount,
-};
+use super::{AiUnavailable, GroupClosedBy, GroupOrdinal, ReduceTrigger, WindowOrdinal};
 use crate::event::payloads::composite_data_payload::CompositeDataPayload;
+use crate::event::status::processing_status::ErrorKind;
 use crate::event::ChainPayload;
-use crate::{EventId, TypedPayload};
+use crate::TypedPayload;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Many<T> {
-    pub items: Vec<T>,
-    pub planning: ChunkPlanningSummary,
-}
+macro_rules! composite_data_payload {
+    ($ty:ty, [$($generic:ident),*], $event_type:literal, $version:literal, $variant:ident) => {
+        impl<$($generic),*> TypedPayload for $ty
+        where
+            $($generic: Serialize + DeserializeOwned,)*
+        {
+            const EVENT_TYPE: &'static str = $event_type;
+            const SCHEMA_VERSION: u32 = $version;
 
-impl<T> Default for Many<T> {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            planning: ChunkPlanningSummary {
-                input_items_total: 0,
-                planned_items_total: 0,
-                excluded_items_total: 0,
-            },
+            const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+                crate::event::payloads::chain_payload::EventKind::CompositeData;
+
+            fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
+                CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
+                    .map(ChainPayload::CompositeData)
+            }
+
+            fn accepts_payload(payload: &ChainPayload) -> bool {
+                matches!(
+                    payload,
+                    ChainPayload::CompositeData(CompositeDataPayload::$variant(_))
+                )
+            }
         }
-    }
+    };
 }
 
-impl<T> std::fmt::Debug for Many<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Many")
-            .field("items_len", &self.items.len())
-            .field("planning", &self.planning)
-            .finish()
-    }
-}
-
-impl<T> TypedPayload for Many<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    const EVENT_TYPE: &'static str = "ai.map_reduce.many";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiMapReducePlanningManifest {
-    pub oversize_policy: super::OversizePolicy,
-    pub exclusions_by_reason: HashMap<ChunkExclusionReason, u64>,
-    pub job_key: EventId,
-    pub chunk_count: usize,
-    pub planning: ChunkPlanningSummary,
-    /// Raw JSON payload of the outer seed event.
-    ///
-    /// This is used by the composite to provide the reduce handler with the
-    /// original input without forcing users to reconstruct it from partials.
-    pub seed_payload: Value,
-    /// The seed's event type string, for debugging and observability.
-    pub seed_event_type: String,
-}
-
-impl TypedPayload for AiMapReducePlanningManifest {
-    const EVENT_TYPE: &'static str = "ai.map_reduce.planning_manifest";
-    const SCHEMA_VERSION: u32 = 1;
-
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::PlanningManifest(_))
-        )
-    }
-}
-
-/// Internal map-stage input carrying the activation-derived job key beside
-/// one chunk.
-///
-/// The generated chunk adapter authors this carrier. User roles continue to
-/// receive only the chunk's items and [`ChunkInfo`](super::ChunkInfo).
+/// One closed group, the map member's input.
 #[doc(hidden)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiMapReduceMapInput<Chunk> {
-    pub job_key: EventId,
-    pub chunk: Chunk,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiMapReduceMapInput<T> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Value>,
+    pub group: GroupOrdinal,
+    /// Ordinal of the group's first item among its key's items.
+    pub first_item: u64,
+    /// Citation number of the group's first item within its reduce window.
+    pub first_number: u64,
+    pub closed_by: GroupClosedBy,
+    pub items: Vec<T>,
 }
 
-impl<Chunk> TypedPayload for AiMapReduceMapInput<Chunk>
-where
-    Chunk: Serialize + DeserializeOwned,
-{
-    const EVENT_TYPE: &'static str = "ai.map_reduce.map_input";
-    const SCHEMA_VERSION: u32 = 1;
+composite_data_payload!(
+    AiMapReduceMapInput<T>,
+    [T],
+    "ai.map_reduce.map_input",
+    2,
+    MapInput
+);
 
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::MapInput(_))
-        )
-    }
-}
-
-/// Internal transport payload delivered to the finalize (reduce) stage.
-///
-/// The key ergonomic constraint is that the user-facing reduce contract is
-/// `(Seed, Collected) -> Out`. The composite therefore pairs the original seed
-/// with the collected partials before calling the user handler.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiMapReduceReduceInput<Seed, Collected> {
-    pub job_key: EventId,
-    pub seed: Seed,
-    pub collected: Collected,
-    pub planning: ChunkPlanningSummary,
-}
-
-impl<Seed, Collected> TypedPayload for AiMapReduceReduceInput<Seed, Collected>
-where
-    Seed: Serialize + DeserializeOwned,
-    Collected: Serialize + DeserializeOwned,
-{
-    const EVENT_TYPE: &'static str = "ai.map_reduce.reduce_input";
-    const SCHEMA_VERSION: u32 = 2;
-
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::ReduceInput(_))
-        )
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiMapReduceTaggedPartial<T> {
-    pub job_key: EventId,
-    pub chunk_index: usize,
-    pub chunk_count: usize,
-    pub partial: T,
-}
-
-impl<T> TypedPayload for AiMapReduceTaggedPartial<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    const EVENT_TYPE: &'static str = "ai.map_reduce.tagged_partial";
-    const SCHEMA_VERSION: u32 = 1;
-
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::TaggedPartial(_))
-        )
-    }
-}
-
+/// End of input for one key, carrying the key's group count.
+#[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiMapReduceChunkFailed {
-    pub job_key: EventId,
-    pub chunk_index: usize,
-    pub chunk_count: usize,
-    pub cause: AiMapReduceRoleFailure,
+pub struct AiMapReduceGroupingEnded {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Value>,
+    pub group_count: u64,
 }
 
-impl TypedPayload for AiMapReduceChunkFailed {
-    const EVENT_TYPE: &'static str = "ai.map_reduce.chunk_failed";
-    const SCHEMA_VERSION: u32 = 2;
+composite_data_payload!(
+    AiMapReduceGroupingEnded,
+    [],
+    "ai.map_reduce.grouping_ended",
+    1,
+    GroupingEnded
+);
 
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::ChunkFailed(_))
-        )
-    }
+/// A group's partial, carried with the group's items to the collector.
+#[doc(hidden)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiMapReduceTaggedPartial<T, P> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Value>,
+    pub group: GroupOrdinal,
+    pub items: Vec<T>,
+    pub partial: P,
 }
 
-/// Credential-free role logic failures. Framework and provider failures are
-/// added by the sealed generated adapters, not by user roles.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AiRoleLogicFailure {
-    Prompt { message: String },
-    ResponseDecode { message: String },
-    Parse { message: String },
-    EmptyOutput,
-}
+composite_data_payload!(
+    AiMapReduceTaggedPartial<T, P>,
+    [T, P],
+    "ai.map_reduce.tagged_partial",
+    2,
+    TaggedPartial
+);
 
-/// Closed provider-facing failure taxonomy used by generated domain terminals.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AiProviderFailureKind {
-    Timeout,
-    Remote,
-    RateLimited,
-    Authentication,
-    InvalidRequest,
-    Unsupported,
-    Other,
-}
-
-/// Closed generated-role failure contract. Its tag intentionally differs from
-/// the nested logic tag so the wire shape is derivable and unambiguous.
+/// Why a role's call produced no output.
+#[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "failure_type", rename_all = "snake_case")]
 pub enum AiMapReduceRoleFailure {
-    Logic {
-        logic: AiRoleLogicFailure,
-    },
-    RequestCanonicalization {
-        component: CanonicalizationComponent,
-        message: String,
-    },
-    BoundaryRejected {
-        source: String,
-        code: String,
-        message: String,
-    },
-    RecoveryAbandoned {
-        last_started_attempt: u32,
-        source: String,
-        code: String,
-        message: String,
-    },
-    Provider {
-        provider_kind: AiProviderFailureKind,
-        message: String,
-    },
+    /// The role failed with its own error.
+    Role { kind: ErrorKind, message: String },
+    /// The call was unavailable and the role propagated it.
+    Unavailable { unavailable: AiUnavailable },
+    /// The role's request could not become an effect.
+    Request { message: String },
 }
 
-/// User-authored map role. The generated adapter owns effect execution,
-/// target validation, labels, and durable protocol tagging.
-pub trait AiMapRole<Item, Partial>: Send + Sync + 'static {
-    const LOGIC_VERSION: &'static str = "1";
-
-    fn prepare(
-        &self,
-        items: &[Item],
-        chunk: &ChunkInfo,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure>;
-
-    fn interpret(
-        &self,
-        items: Vec<Item>,
-        chunk: ChunkInfo,
-        request: ChatRequestSpec,
-        reply: ChatCompletionReply,
-    ) -> Result<Partial, AiRoleLogicFailure>;
-}
-
-/// User-authored finalization role. The generated adapter owns the single chat
-/// effect and only exposes the domain seed and collected value.
-pub trait AiFinalizeRole<Seed, Collected, Out>: Send + Sync + 'static {
-    const LOGIC_VERSION: &'static str = "1";
-
-    fn prepare(
-        &self,
-        seed: &Seed,
-        collected: &Collected,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure>;
-
-    fn interpret(
-        &self,
-        seed: Seed,
-        collected: Collected,
-        request: ChatRequestSpec,
-        reply: ChatCompletionReply,
-    ) -> Result<Out, AiRoleLogicFailure>;
-}
-
+/// A group whose map role failed.
+#[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AiMapReducePlanningFailure {
-    OversizeItem {
-        item_ordinal: usize,
-        estimated_tokens: TokenCount,
-        budget: TokenCount,
-    },
-    OversizeExhausted {
-        item_ordinal: usize,
-        reason: ChunkExclusionReason,
-        last_estimated_tokens: TokenCount,
-        budget: TokenCount,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiMapReducePlanningFailed {
-    pub job_key: EventId,
-    pub cause: AiMapReducePlanningFailure,
-}
-
-impl TypedPayload for AiMapReducePlanningFailed {
-    const EVENT_TYPE: &'static str = "ai.map_reduce.planning_failed";
-    const SCHEMA_VERSION: u32 = 1;
-
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::PlanningFailed(_))
-        )
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiMapReduceFinalizeFailed {
-    pub job_key: EventId,
+pub struct AiMapReduceChunkFailed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Value>,
+    pub group: GroupOrdinal,
     pub cause: AiMapReduceRoleFailure,
 }
 
-impl TypedPayload for AiMapReduceFinalizeFailed {
-    const EVENT_TYPE: &'static str = "ai.map_reduce.finalize_failed";
-    const SCHEMA_VERSION: u32 = 1;
+composite_data_payload!(
+    AiMapReduceChunkFailed,
+    [],
+    "ai.map_reduce.chunk_failed",
+    3,
+    ChunkFailed
+);
 
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::FinalizeFailed(_))
-        )
-    }
+/// One closed reduce window, the reduce member's input.
+#[doc(hidden)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiMapReduceReduceInput<T, P> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Value>,
+    pub window: WindowOrdinal,
+    pub trigger: ReduceTrigger,
+    pub items: Vec<T>,
+    pub partials: Vec<P>,
 }
 
+composite_data_payload!(
+    AiMapReduceReduceInput<T, P>,
+    [T, P],
+    "ai.map_reduce.reduce_input",
+    3,
+    ReduceInput
+);
+
+/// One failed group of a window.
+#[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiMapReduceJobFailed {
-    pub job_key: EventId,
-    pub chunk_count: usize,
-    pub failed_indices: Vec<usize>,
+pub struct AiMapReduceGroupFailure {
+    pub group: GroupOrdinal,
+    pub cause: AiMapReduceRoleFailure,
 }
 
-impl TypedPayload for AiMapReduceJobFailed {
-    const EVENT_TYPE: &'static str = "ai.map_reduce.job_failed";
-    const SCHEMA_VERSION: u32 = 1;
-
-    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
-        crate::event::payloads::chain_payload::EventKind::CompositeData;
-
-    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
-        CompositeDataPayload::decode(&Self::event_type_name(), serde_json::to_value(self)?)
-            .map(ChainPayload::CompositeData)
-    }
-
-    fn accepts_payload(payload: &ChainPayload) -> bool {
-        matches!(
-            payload,
-            ChainPayload::CompositeData(CompositeDataPayload::JobFailed(_))
-        )
-    }
+/// A window that closed with a failed group and never reduces.
+#[doc(hidden)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiMapReduceWindowFailed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Value>,
+    pub window: WindowOrdinal,
+    pub failures: Vec<AiMapReduceGroupFailure>,
 }
+
+composite_data_payload!(
+    AiMapReduceWindowFailed,
+    [],
+    "ai.map_reduce.window_failed",
+    1,
+    WindowFailed
+);
+
+/// A window whose reduce role failed.
+#[doc(hidden)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiMapReduceReduceFailed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<Value>,
+    pub window: WindowOrdinal,
+    pub cause: AiMapReduceRoleFailure,
+}
+
+composite_data_payload!(
+    AiMapReduceReduceFailed,
+    [],
+    "ai.map_reduce.reduce_failed",
+    1,
+    ReduceFailed
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::{AiProviderFailureKind, AiUnavailableCause};
     use serde_json::json;
 
     #[test]
-    fn role_failure_wire_shape_has_one_outer_tag_and_a_nested_logic_tag() {
+    fn role_failure_wire_shape_has_one_outer_tag() {
         let cases = [
             (
-                AiMapReduceRoleFailure::Logic {
-                    logic: AiRoleLogicFailure::Prompt {
-                        message: "bad prompt".to_string(),
-                    },
+                AiMapReduceRoleFailure::Role {
+                    kind: ErrorKind::Domain,
+                    message: "no summary".to_string(),
+                },
+                json!({"failure_type": "role", "kind": "Domain", "message": "no summary"}),
+            ),
+            (
+                AiMapReduceRoleFailure::Unavailable {
+                    unavailable: AiUnavailable::new(
+                        AiUnavailableCause::Provider {
+                            failure: AiProviderFailureKind::Timeout,
+                        },
+                        "slow",
+                    ),
                 },
                 json!({
-                    "failure_type": "logic",
-                    "logic": {
-                        "kind": "prompt",
-                        "message": "bad prompt"
+                    "failure_type": "unavailable",
+                    "unavailable": {
+                        "cause": {"kind": "provider", "failure": "timeout"},
+                        "reason": "slow"
                     }
                 }),
             ),
             (
-                AiMapReduceRoleFailure::RequestCanonicalization {
-                    component: CanonicalizationComponent::ResponseSchema,
+                AiMapReduceRoleFailure::Request {
                     message: "bad schema".to_string(),
                 },
-                json!({
-                    "failure_type": "request_canonicalization",
-                    "component": "response_schema",
-                    "message": "bad schema"
-                }),
-            ),
-            (
-                AiMapReduceRoleFailure::BoundaryRejected {
-                    source: "circuit_breaker".to_string(),
-                    code: "open".to_string(),
-                    message: "breaker open".to_string(),
-                },
-                json!({
-                    "failure_type": "boundary_rejected",
-                    "source": "circuit_breaker",
-                    "code": "open",
-                    "message": "breaker open"
-                }),
-            ),
-            (
-                AiMapReduceRoleFailure::RecoveryAbandoned {
-                    last_started_attempt: 2,
-                    source: "circuit_breaker".to_string(),
-                    code: "open".to_string(),
-                    message: "still open".to_string(),
-                },
-                json!({
-                    "failure_type": "recovery_abandoned",
-                    "last_started_attempt": 2,
-                    "source": "circuit_breaker",
-                    "code": "open",
-                    "message": "still open"
-                }),
-            ),
-            (
-                AiMapReduceRoleFailure::Provider {
-                    provider_kind: AiProviderFailureKind::InvalidRequest,
-                    message: "invalid".to_string(),
-                },
-                json!({
-                    "failure_type": "provider",
-                    "provider_kind": "invalid_request",
-                    "message": "invalid"
-                }),
+                json!({"failure_type": "request", "message": "bad schema"}),
             ),
         ];
 
         for (failure, expected) in cases {
-            let value = serde_json::to_value(&failure).expect("role failure serialises");
+            let value = serde_json::to_value(&failure).expect("role failure serializes");
             assert_eq!(value, expected);
             assert_eq!(
-                serde_json::from_value::<AiMapReduceRoleFailure>(value)
-                    .expect("role failure deserialises"),
+                serde_json::from_value::<AiMapReduceRoleFailure>(value).unwrap(),
                 failure
             );
         }
+    }
+
+    #[test]
+    fn an_unkeyed_group_omits_its_key() {
+        let group = AiMapReduceMapInput {
+            key: None,
+            group: GroupOrdinal::new(2),
+            first_item: 20,
+            first_number: 21,
+            closed_by: GroupClosedBy::ChunkSize,
+            items: vec!["story"],
+        };
+        assert_eq!(
+            serde_json::to_value(&group).unwrap(),
+            json!({
+                "group": 2,
+                "first_item": 20,
+                "first_number": 21,
+                "closed_by": "chunk_size",
+                "items": ["story"]
+            })
+        );
     }
 }

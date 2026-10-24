@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use super::{
-    DomainFacts, Effect, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
-    EffectPortSlotSet, EffectSafety, IdempotencyKey, Named, NamedEffect,
+    BoundEffect, DomainFacts, Effect, EffectBindingUse, EffectContext, EffectError,
+    EffectPortSlot, EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
 };
 use async_trait::async_trait;
 use obzenflow_core::event::schema::EffectOutcomeFacts;
@@ -275,7 +275,7 @@ impl<R: CallRequest> Effect for Call<R> {
     }
 }
 
-impl<R: CallRequest> NamedEffect for Call<R> {
+impl<R: CallRequest> BoundEffect for Call<R> {
     type BindingEvidence = SystemBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {

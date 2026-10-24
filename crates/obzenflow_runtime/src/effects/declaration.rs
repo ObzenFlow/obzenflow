@@ -171,49 +171,6 @@ pub(super) enum EffectDeclarationSyntax {
     Transactional,
 }
 
-mod declaration_diagnostic_sealed {
-    use super::*;
-
-    pub trait BindingFor<E: Effect> {}
-
-    impl<E> BindingFor<E> for EffectBinding<E> where E: NamedEffect {}
-}
-
-/// Compiler-facing proof that the binding after `via` in an `inference!` or
-/// `ai_map_reduce!` row is the exact typed binding of the declared effect.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "binding `{Self}` does not match declared effect `{E}`",
-    label = "the binding selected by `via` belongs to a different effect",
-    note = "use the `EffectBinding<{E}>` produced for the effect named before `via`"
-)]
-pub trait EffectBindingFor<E: Effect>: declaration_diagnostic_sealed::BindingFor<E> {
-    #[doc(hidden)]
-    fn at_least_once_declaration_for(&self) -> EffectDeclaration;
-}
-
-#[diagnostic::do_not_recommend]
-impl<E> EffectBindingFor<E> for EffectBinding<E>
-where
-    E: NamedEffect,
-{
-    fn at_least_once_declaration_for(&self) -> EffectDeclaration {
-        EffectDeclaration::for_binding::<E>(
-            self.declaration_binding(),
-            EffectDeclarationSyntax::AtLeastOnce,
-        )
-    }
-}
-
-#[doc(hidden)]
-pub fn declare_named_at_least_once_effect<E, B>(binding: &B) -> EffectDeclaration
-where
-    E: Effect,
-    B: EffectBindingFor<E> + ?Sized,
-{
-    binding.at_least_once_declaration_for()
-}
-
 impl EffectDeclaration {
     /// Produce the declaration form retained by stage resources after package collection.
     #[doc(hidden)]
@@ -341,6 +298,19 @@ impl EffectDeclaration {
     pub fn named_at_least_once<E>(binding: &EffectBinding<E>) -> Self
     where
         E: NamedEffect,
+    {
+        Self::for_binding::<E>(
+            binding.declaration_binding(),
+            EffectDeclarationSyntax::AtLeastOnce,
+        )
+    }
+
+    /// Declare a configured effect for the `ai!` stage that resolved its
+    /// binding. The `ai!` row acknowledges the effect's at-least-once safety.
+    #[doc(hidden)]
+    pub fn configured<E>(binding: &EffectBinding<E>) -> Self
+    where
+        E: ConfiguredEffect,
     {
         Self::for_binding::<E>(
             binding.declaration_binding(),

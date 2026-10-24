@@ -485,6 +485,8 @@ mod tests {
                     error_journal_file: format!("{key}_error.log"),
                     inbound: inbound.iter().map(|s| s.to_string()).collect(),
                     delivery_order: *delivery_order,
+                    ai_models: Vec::new(),
+                    max_open_keys: None,
                 },
             );
         }

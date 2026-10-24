@@ -54,6 +54,8 @@ pub struct CircuitBreaker {
     pub(in crate::middleware::control) probes: u32,
     pub(in crate::middleware::control) rate_limited_counts_as_failure: bool,
     pub(in crate::middleware::control) classifier: Option<FailureClassificationClassifier>,
+    #[cfg(feature = "test-support")]
+    pub(in crate::middleware::control) reject_affine_recovery_for_test: bool,
 }
 
 /// Declare an inert breaker value. Choose an explicit failure mode before attachment.
@@ -69,10 +71,20 @@ pub fn circuit_breaker() -> CircuitBreaker {
         probes: 1,
         rate_limited_counts_as_failure: false,
         classifier: None,
+        #[cfg(feature = "test-support")]
+        reject_affine_recovery_for_test: false,
     }
 }
 
 impl CircuitBreaker {
+    /// Refuse to resume an in-doubt affine attempt, so a test can observe
+    /// recovery abandonment.
+    #[cfg(feature = "test-support")]
+    pub fn rejecting_recovery_for_test(mut self) -> Self {
+        self.reject_affine_recovery_for_test = true;
+        self
+    }
+
     pub fn consecutive_failures(mut self, failures: u32) -> Self {
         self.consecutive_failures = Some(failures);
         self

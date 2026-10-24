@@ -454,6 +454,77 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
     }
 }
 
+impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for std::sync::Arc<F> {
+    fn label(&self) -> &'static str {
+        (**self).label()
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        (**self).override_key()
+    }
+
+    fn builtin_control(&self) -> Option<BuiltinControlContribution> {
+        (**self).builtin_control()
+    }
+
+    fn validate_configuration(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        config: &StageConfig,
+        stage_type: StageType,
+    ) -> MiddlewareFactoryResult<()> {
+        (**self).validate_configuration(request, config, stage_type)
+    }
+
+    fn sink_observer_input_type(&self) -> Option<(TypeId, &'static str)> {
+        (**self).sink_observer_input_type()
+    }
+
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        (**self).dsl_config_defaults()
+    }
+
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        (**self).consumed_config_keys()
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        (**self).topology_config_slot()
+    }
+
+    fn supported_stage_types(&self) -> &[StageType] {
+        (**self).supported_stage_types()
+    }
+
+    fn safety_level(&self) -> MiddlewareSafety {
+        (**self).safety_level()
+    }
+
+    fn hints(&self) -> MiddlewareHints {
+        (**self).hints()
+    }
+
+    fn config_snapshot(&self) -> Option<serde_json::Value> {
+        (**self).config_snapshot()
+    }
+
+    fn effect_scope(&self) -> Option<&'static str> {
+        (**self).effect_scope()
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        (**self).declaration()
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        (**self).materialize(request, context)
+    }
+}
+
 /// One evaluation of a middleware declaration and its immutable build inputs.
 /// All later planning, configuration, topology and binding reads use this
 /// snapshot, including for custom factories with interior mutable state.

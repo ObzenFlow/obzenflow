@@ -2,36 +2,32 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-128b live/replay witness for the ordinary standalone AI surface.
+//! Live and replay witness for chat and embedding `ai!` stages, each family
+//! configured in its own section.
 
 mod replay_testkit;
 
-use async_trait::async_trait;
+#[path = "support/fake_ai.rs"]
+pub mod fake_ai;
+
+use fake_ai::{FakeChatModels, FakeEmbeddingModels};
 use obzenflow::ai::{
-    ChatCompletion, ChatEffectBinding, ChatResponse, ChatResponseFormat, ChatTransformBuilder,
-    EmbeddingDimensions, EmbeddingEffectBinding, EmbeddingGeneration, EmbeddingResponse,
-    EmbeddingTransformBuilder,
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
+    ChatResponseFormat, EmbeddingDimensions, EmbeddingGeneration, EmbeddingGenerationReply,
+    EmbeddingParams, EmbeddingRequestSpec,
 };
 use obzenflow::stages::sources;
-use obzenflow_adapters::middleware::control::ai_resilience;
-use obzenflow_core::ai::{
-    AiClientError, ChatClient, ChatRequest, ChatTarget, EmbeddingClient, EmbeddingRequest,
-    EmbeddingTarget,
-};
+use obzenflow_adapters::middleware::circuit_breaker;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectOutcomePayload, EffectRecord,
 };
-use obzenflow_core::http_client::Url;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::dsl::error::FlowBuildError;
-use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortResolver, SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
-};
+use obzenflow_runtime::effects::{SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -41,6 +37,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+const CHAT_EFFECT_TYPE: &str = "obzenflow.ai.chat_completion";
+const EMBEDDING_EFFECT_TYPE: &str = "obzenflow.ai.embedding_generation";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct TicketRaised {
@@ -72,58 +71,132 @@ impl TypedPayload for TicketEmbedded {
     const EVENT_TYPE: &'static str = "flowip_128b.ticket_embedded";
 }
 
-#[derive(Clone, Default)]
-struct AuthorityCounters {
-    chat_resolutions: Arc<AtomicUsize>,
-    chat_calls: Arc<AtomicUsize>,
-    embedding_resolutions: Arc<AtomicUsize>,
-    embedding_calls: Arc<AtomicUsize>,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MapperFailure {
+    #[default]
+    None,
+    BeforeEffect,
+    AfterEffect,
+    EmptyEmbeddingInputs,
 }
 
-#[derive(Debug)]
-struct FixtureChatClient {
-    target: ChatTarget,
-    calls: Arc<AtomicUsize>,
+#[derive(Clone, Debug, Default)]
+struct MapperCounters {
+    request: Arc<AtomicUsize>,
+    response: Arc<AtomicUsize>,
 }
 
-#[async_trait]
-impl ChatClient for FixtureChatClient {
-    fn target(&self) -> &ChatTarget {
-        &self.target
+#[derive(Clone, Debug)]
+struct SummarizeTicket {
+    logic_version: String,
+    prompt_suffix: String,
+    json_response: bool,
+    failure: MapperFailure,
+    counters: MapperCounters,
+}
+
+impl SummarizeTicket {
+    fn baseline() -> Self {
+        Self {
+            logic_version: "ticket-summary-v1".to_string(),
+            prompt_suffix: String::new(),
+            json_response: false,
+            failure: MapperFailure::None,
+            counters: MapperCounters::default(),
+        }
+    }
+}
+
+impl AiRole<TicketRaised> for SummarizeTicket {
+    type Effect = ChatCompletion;
+    type Out = TicketSummarised;
+
+    fn stage_logic_version(&self) -> &str {
+        &self.logic_version
     }
 
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiClientError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(request.target().logically_matches(&self.target));
-        Ok(ChatResponse {
-            text: "concise summary".to_string(),
-            tool_calls: Vec::new(),
-            usage: None,
-            raw: None,
+    fn prepare(&self, ticket: &TicketRaised) -> Result<ChatRequestSpec, HandlerError> {
+        self.counters.request.fetch_add(1, Ordering::SeqCst);
+        if self.failure == MapperFailure::BeforeEffect {
+            return Err(HandlerError::Validation(
+                "fixture request mapping failed".to_string(),
+            ));
+        }
+        let mut request = ChatRequestSpec::new(
+            "Summarise support tickets concisely.",
+            format!("{}{}", ticket.description, self.prompt_suffix),
+        )
+        .temperature(0.2);
+        if self.json_response {
+            request.response_format = Some(ChatResponseFormat::JsonObject);
+        }
+        Ok(request)
+    }
+
+    fn interpret(
+        &self,
+        ticket: TicketRaised,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<TicketSummarised, HandlerError> {
+        self.counters.response.fetch_add(1, Ordering::SeqCst);
+        let reply = outcome.replied()?;
+        if self.failure == MapperFailure::AfterEffect {
+            return Err(HandlerError::Domain(
+                "fixture response mapping failed".to_string(),
+            ));
+        }
+        Ok(TicketSummarised {
+            id: ticket.id,
+            summary: reply.text().to_string(),
         })
     }
 }
 
-#[derive(Debug)]
-struct FixtureEmbeddingClient {
-    target: EmbeddingTarget,
-    calls: Arc<AtomicUsize>,
+#[derive(Clone, Debug)]
+struct EmbedSummary {
+    dimensions: EmbeddingDimensions,
+    empty_inputs: bool,
 }
 
-#[async_trait]
-impl EmbeddingClient for FixtureEmbeddingClient {
-    fn target(&self) -> &EmbeddingTarget {
-        &self.target
+impl EmbedSummary {
+    fn of_width(width: u32) -> Self {
+        Self {
+            dimensions: EmbeddingDimensions::try_from(width).unwrap(),
+            empty_inputs: false,
+        }
+    }
+}
+
+impl AiRole<TicketSummarised> for EmbedSummary {
+    type Effect = EmbeddingGeneration;
+    type Out = TicketEmbedded;
+
+    fn stage_logic_version(&self) -> &str {
+        "ticket-embedding-v1"
     }
 
-    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(request.logically_targets(&self.target));
-        let dimensions = EmbeddingDimensions::try_from(3).unwrap();
-        Ok(EmbeddingResponse {
-            vectors: request.inputs.iter().map(|_| vec![0.1, 0.2, 0.3]).collect(),
-            vector_dim: dimensions,
-            usage: None,
+    fn prepare(&self, ticket: &TicketSummarised) -> Result<EmbeddingRequestSpec, HandlerError> {
+        Ok(EmbeddingRequestSpec {
+            inputs: if self.empty_inputs {
+                Vec::new()
+            } else {
+                vec![ticket.summary.clone()]
+            },
+            params: EmbeddingParams {
+                dimensions: Some(self.dimensions),
+            },
+        })
+    }
+
+    fn interpret(
+        &self,
+        ticket: TicketSummarised,
+        outcome: AiOutcome<EmbeddingGenerationReply>,
+    ) -> Result<TicketEmbedded, HandlerError> {
+        let reply = outcome.replied()?;
+        Ok(TicketEmbedded {
+            id: ticket.id,
+            vectors: reply.response.vectors,
         })
     }
 }
@@ -133,7 +206,7 @@ struct CollectEmbedded {
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl obzenflow_runtime::stages::sink::SinkConnector for CollectEmbedded {
     type Input = TicketEmbedded;
     type Writer = Self;
@@ -168,172 +241,46 @@ impl obzenflow_runtime::stages::sink::SinkWriter for CollectEmbedded {
     }
 }
 
-fn binding_error(binding: &str, error: impl std::fmt::Display) -> FlowBuildError {
-    FlowBuildError::BindingConfiguration {
-        binding: binding.to_string(),
-        detail: error.to_string(),
-    }
+fn summarizing() -> FakeChatModels {
+    FakeChatModels::replying(|_| "concise summary".to_string())
 }
 
-#[derive(Clone)]
-struct AiAuthority {
-    chat: EffectBinding<ChatCompletion>,
-    embedding: EffectBinding<EmbeddingGeneration>,
+fn embedding() -> FakeEmbeddingModels {
+    FakeEmbeddingModels::constant(vec![0.1, 0.2, 0.3])
 }
 
-// Keep fixture materialisation on FlowDefinition's concrete build-error API.
-#[allow(clippy::result_large_err)]
-fn base_bindings(
-    chat_endpoint: Option<Url>,
-) -> Result<
-    (
-        EffectBinding<ChatCompletion>,
-        EffectBinding<EmbeddingGeneration>,
-    ),
-    FlowBuildError,
-> {
-    let chat = ChatEffectBinding::ollama("fixture-chat", chat_endpoint)
-        .map_err(|error| binding_error("chat", error))?;
-    let embedding = EmbeddingEffectBinding::ollama("fixture-embedding", None)
-        .map_err(|error| binding_error("embedding", error))?;
-    Ok((chat, embedding))
-}
-
-// Keep fixture materialisation on FlowDefinition's concrete build-error API.
-#[allow(clippy::result_large_err)]
-fn live_authority(
-    chat_endpoint: Option<Url>,
-    counters: Option<AuthorityCounters>,
-) -> Result<AiAuthority, FlowBuildError> {
-    let (chat_seed, embedding_seed) = base_bindings(chat_endpoint)?;
-    let Some(counters) = counters else {
-        return Ok(AiAuthority {
-            chat: chat_seed,
-            embedding: embedding_seed,
-        });
+/// Each family's section picks its own model; the chat family may name
+/// another endpoint.
+fn ai_config(dir: &Path, chat_endpoint: Option<&str>) -> PathBuf {
+    let path = dir.join("standalone_ai.toml");
+    let endpoint = match chat_endpoint {
+        Some(url) => format!(
+            "[ai.endpoints.alternate]\nprovider = \"ollama\"\nbase_url = \"{url}\"\n\n\
+             [ai.models]\nendpoint = \"alternate\"\nmodel = \"fixture-chat\"\n"
+        ),
+        None => "[ai.models]\nmodel = \"fixture-chat\"\n".to_string(),
     };
-    let chat_target = chat_seed.evidence().target().clone();
-    let embedding_target = embedding_seed.evidence().target().clone();
-    let chat_resolver: EffectPortResolver<dyn ChatClient> = Arc::new({
-        let resolutions = counters.chat_resolutions.clone();
-        let calls = counters.chat_calls.clone();
-        let target = chat_target.clone();
-        move || {
-            let target = target.clone();
-            resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(FixtureChatClient {
-                target,
-                calls: calls.clone(),
-            }) as Arc<dyn ChatClient>)
-        }
-    });
-    let embedding_resolver: EffectPortResolver<dyn EmbeddingClient> = Arc::new({
-        let resolutions = counters.embedding_resolutions.clone();
-        let calls = counters.embedding_calls.clone();
-        let target = embedding_target.clone();
-        move || {
-            let target = target.clone();
-            resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(FixtureEmbeddingClient {
-                target,
-                calls: calls.clone(),
-            }) as Arc<dyn EmbeddingClient>)
-        }
-    });
-    let chat = ChatEffectBinding::from_resolver(chat_target, chat_resolver)
-        .map_err(|error| binding_error("chat", error))?;
-    let embedding = EmbeddingEffectBinding::from_resolver(embedding_target, embedding_resolver)
-        .map_err(|error| binding_error("embedding", error))?;
-    Ok(AiAuthority { chat, embedding })
+    std::fs::write(
+        &path,
+        format!("{endpoint}\n[ai.embeddings]\nmodel = \"fixture-embedding\"\n"),
+    )
+    .expect("write the AI configuration");
+    path
 }
 
-fn eager_authority(chat: Arc<dyn ChatClient>, embedding: Arc<dyn EmbeddingClient>) -> AiAuthority {
-    let (chat_seed, embedding_seed) = base_bindings(None).expect("fixture evidence");
-    let chat = chat_seed
-        .evidence()
-        .clone()
-        .into_binding(Arc::new(move || Ok(chat.clone())))
-        .unwrap();
-    let embedding = embedding_seed
-        .evidence()
-        .clone()
-        .into_binding(Arc::new(move || Ok(embedding.clone())))
-        .unwrap();
-    AiAuthority { chat, embedding }
-}
-
-struct FlowScenario {
-    live_authority: Option<AuthorityCounters>,
-    prompt_suffix: String,
-    chat_logic_version: String,
-    chat_endpoint: Option<Url>,
-    json_response: bool,
-    embedding_dimensions: EmbeddingDimensions,
-}
-
-impl FlowScenario {
-    fn baseline(live_authority: Option<AuthorityCounters>) -> Self {
-        Self {
-            live_authority,
-            prompt_suffix: String::new(),
-            chat_logic_version: "ticket-summary-v1".to_string(),
-            chat_endpoint: None,
-            json_response: false,
-            embedding_dimensions: EmbeddingDimensions::try_from(3).unwrap(),
-        }
-    }
-}
-
-fn build_flow(
+fn chat_and_embedding_flow(
     journal_base: PathBuf,
+    tickets: Vec<TicketRaised>,
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-    scenario: FlowScenario,
+    summarize: SummarizeTicket,
+    embed: EmbedSummary,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let authority = live_authority(
-            scenario.chat_endpoint.clone(),
-            scenario.live_authority.clone(),
-        )?;
-        let suffix = scenario.prompt_suffix.clone();
-        let chat_builder = ChatTransformBuilder::new()
-            .logic_version(scenario.chat_logic_version.clone())
-            .system("Summarise support tickets concisely.")
-            .temperature(0.2);
-        let chat_builder = if scenario.json_response {
-            chat_builder.response_format(ChatResponseFormat::JsonObject)
-        } else {
-            chat_builder
-        };
-        let chat_handler = chat_builder
-            .build_typed::<TicketRaised, TicketSummarised>(
-                authority.chat,
-                move |ticket| Ok(format!("{}{}", ticket.description, suffix)),
-                |ticket, response| {
-                    Ok(TicketSummarised {
-                        id: ticket.id,
-                        summary: response.text,
-                    })
-                },
-            )
-            .map_err(|error| binding_error("chat_handler", error))?;
-        let embedding_handler = EmbeddingTransformBuilder::new()
-            .logic_version("ticket-embedding-v1")
-            .dimensions(scenario.embedding_dimensions)
-            .build_typed::<TicketSummarised, TicketEmbedded>(
-                authority.embedding,
-                |ticket| Ok(vec![ticket.summary.clone()]),
-                |ticket, response| {
-                    Ok(TicketEmbedded {
-                        id: ticket.id,
-                        vectors: response.vectors,
-                    })
-                },
-            )
-            .map_err(|error| binding_error("embedding_handler", error))?;
-        let input = sources::ValuesSource::new([TicketRaised {
-            id: 7,
-            description: "Customer cannot sign in".to_string(),
-        }]);
+        let summarize = ai::infer(summarize);
+        let embed = ai::infer(embed);
+        let chat_breaker = circuit_breaker().consecutive_failures(5);
+        let embedding_breaker = circuit_breaker().consecutive_failures(5);
+        let input = sources::ValuesSource::new(tickets);
         let collected = CollectEmbedded { outputs };
 
         Ok(flow! {
@@ -341,16 +288,8 @@ fn build_flow(
             journals: disk_journals(journal_base),
             stages: {
                 input = source!(TicketRaised => input);
-                chat = effectful_transform!(
-                    TicketRaised -> TicketSummarised
-                    with ai_resilience()
-                    => chat_handler.at_least_once::<ChatCompletion>(),
-                );
-                embedding = effectful_transform!(
-                    TicketSummarised -> TicketEmbedded
-                    with ai_resilience()
-                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
-                );
+                chat = ai!(TicketRaised -> TicketSummarised with chat_breaker => summarize);
+                embedding = ai!(TicketSummarised -> TicketEmbedded with embedding_breaker => embed);
                 collected = sink!(TicketEmbedded => collected);
             },
 
@@ -361,6 +300,13 @@ fn build_flow(
             }
         })
     })
+}
+
+fn one_ticket() -> Vec<TicketRaised> {
+    vec![TicketRaised {
+        id: 7,
+        description: "Customer cannot sign in".to_string(),
+    }]
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {
@@ -424,46 +370,70 @@ fn count_json_key(value: &serde_json::Value, key: &str) -> usize {
     }
 }
 
+fn replay_args(archive: &Path, verb: &str) -> Vec<OsString> {
+    vec![
+        OsString::from("obzenflow"),
+        OsString::from(verb),
+        archive.as_os_str().to_os_string(),
+    ]
+}
+
 #[tokio::test]
 async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
-    let counters = AuthorityCounters::default();
+    let config = ai_config(temp.path(), None);
+    let (chat, embed) = (summarizing(), embedding());
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow(
+        .with_config_file(config.clone())
+        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .run_async(chat_and_embedding_flow(
             journal_base.clone(),
+            one_ticket(),
             live_outputs.clone(),
-            FlowScenario::baseline(Some(counters.clone())),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
         ))
         .await
-        .expect("live standalone AI flow succeeds");
+        .expect("live chat and embedding stages succeed");
 
     let expected = vec![TicketEmbedded {
         id: 7,
         vectors: vec![vec![0.1, 0.2, 0.3]],
     }];
     assert_eq!(*live_outputs.lock().unwrap(), expected);
-    assert_eq!(counters.chat_resolutions.load(Ordering::SeqCst), 1);
-    assert_eq!(counters.chat_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(counters.embedding_resolutions.load(Ordering::SeqCst), 1);
-    assert_eq!(counters.embedding_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(chat.connect_count(), 1);
+    assert_eq!(chat.call_count(), 1);
+    assert_eq!(embed.connect_count(), 1);
+    assert_eq!(embed.call_count(), 1);
 
     let live_archive = latest_run_dir(&journal_base);
-    for (stage, effect_type, label, schema, output_type) in [
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(live_archive.join("run_manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["stages"]["chat"]["ai_models"][0]["model"],
+        "fixture-chat"
+    );
+    assert_eq!(
+        manifest["stages"]["embedding"]["ai_models"][0]["model"],
+        "fixture-embedding",
+        "embeddings resolve from their own section"
+    );
+    for (stage, effect_type, schema, output_type) in [
         (
             "chat",
-            "obzenflow.ai.chat_completion",
-            "standalone.chat_completion",
+            CHAT_EFFECT_TYPE,
             3,
             TicketSummarised::event_type_name(),
         ),
         (
             "embedding",
-            "obzenflow.ai.embedding_generation",
-            "standalone.embedding_generation",
+            EMBEDDING_EFFECT_TYPE,
             1,
             TicketEmbedded::event_type_name(),
         ),
@@ -495,9 +465,9 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
         assert_eq!(output_positions.len(), 1);
         assert!(attempt_positions[0] < *record_position);
         assert!(*record_position < output_positions[0]);
-        assert_eq!(record.descriptor.label.as_str(), label);
+        assert_eq!(record.descriptor.label.as_str(), "ai.infer");
         assert_eq!(record.descriptor.schema_version, schema);
-        if effect_type == "obzenflow.ai.embedding_generation" {
+        if effect_type == EMBEDDING_EFFECT_TYPE {
             let EffectOutcomePayload::Succeeded { output } = &record.outcome else {
                 unreachable!()
             };
@@ -511,139 +481,152 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
                 output.pointer("/response/vector_dim"),
                 Some(&serde_json::json!(3))
             );
-            eprintln!(
-                "FLOWIP-128b representative embedding rows: effect_reply={} bytes, typed_output={} bytes",
-                serde_json::to_vec(record).unwrap().len(),
-                serde_json::to_vec(&events[output_positions[0]]).unwrap().len(),
-            );
         }
     }
 
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let (replay_chat, replay_embed) = (FakeChatModels::forbidden(), FakeEmbeddingModels::forbidden());
     FlowApplication::builder()
-        .with_cli_args(vec![
-            OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
-            live_archive.as_os_str().to_os_string(),
-        ])
-        .run_async(build_flow(
+        .with_cli_args(replay_args(&live_archive, "--replay-from"))
+        .with_config_file(config.clone())
+        .with_ai_models(fake_ai::providers(&replay_chat, &replay_embed))
+        .run_async(chat_and_embedding_flow(
             journal_base.clone(),
+            one_ticket(),
             replay_outputs.clone(),
-            FlowScenario::baseline(None),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
         ))
         .await
-        .expect("strict replay succeeds with an empty effect registry");
+        .expect("strict replay succeeds without connecting either family");
     assert_eq!(*replay_outputs.lock().unwrap(), expected);
+    assert_eq!(replay_chat.connect_count() + replay_embed.connect_count(), 0);
 
     mark_archive_incomplete(&live_archive);
-    let resume_counters = AuthorityCounters::default();
+    let (resume_chat, resume_embed) = (summarizing(), embedding());
     let resume_outputs = Arc::new(Mutex::new(Vec::new()));
+    let mut resume = replay_args(&live_archive, "--resume-from");
+    resume.push(OsString::from("--allow-incomplete-archive"));
     FlowApplication::builder()
-        .with_cli_args(vec![
-            OsString::from("obzenflow"),
-            OsString::from("--resume-from"),
-            live_archive.as_os_str().to_os_string(),
-            OsString::from("--allow-incomplete-archive"),
-        ])
-        .run_async(build_flow(
+        .with_cli_args(resume)
+        .with_config_file(config)
+        .with_ai_models(fake_ai::providers(&resume_chat, &resume_embed))
+        .run_async(chat_and_embedding_flow(
             journal_base,
+            one_ticket(),
             resume_outputs.clone(),
-            FlowScenario::baseline(Some(resume_counters.clone())),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
         ))
         .await
         .expect("committed resume prefix completes without live AI authority");
     assert_eq!(*resume_outputs.lock().unwrap(), expected);
-    assert_eq!(resume_counters.chat_resolutions.load(Ordering::SeqCst), 0);
-    assert_eq!(resume_counters.chat_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        resume_counters.embedding_resolutions.load(Ordering::SeqCst),
-        0
-    );
-    assert_eq!(resume_counters.embedding_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(resume_chat.connect_count(), 0);
+    assert_eq!(resume_chat.call_count(), 0);
+    assert_eq!(resume_embed.connect_count(), 0);
+    assert_eq!(resume_embed.call_count(), 0);
 }
 
 #[tokio::test]
-async fn descriptor_drift_fails_before_live_authority_is_resolved() {
-    let alternate_endpoint = Url::parse("http://127.0.0.1:11435").unwrap();
-    for (suffix, logic_version, endpoint, json_response, dimensions) in [
-        (
-            " changed",
-            "ticket-summary-v1",
-            None,
-            false,
-            EmbeddingDimensions::try_from(3).unwrap(),
-        ),
-        (
-            "",
-            "ticket-summary-v2",
-            None,
-            false,
-            EmbeddingDimensions::try_from(3).unwrap(),
-        ),
-        (
-            "",
-            "ticket-summary-v1",
-            Some(alternate_endpoint),
-            false,
-            EmbeddingDimensions::try_from(3).unwrap(),
-        ),
-        (
-            "",
-            "ticket-summary-v1",
-            None,
-            true,
-            EmbeddingDimensions::try_from(3).unwrap(),
-        ),
-        (
-            "",
-            "ticket-summary-v1",
-            None,
-            false,
-            EmbeddingDimensions::try_from(2).unwrap(),
-        ),
+async fn request_drift_fails_strict_replay_before_any_client_is_connected() {
+    let drifted = |suffix: &str, version: &str, json: bool| SummarizeTicket {
+        logic_version: version.to_string(),
+        prompt_suffix: suffix.to_string(),
+        json_response: json,
+        ..SummarizeTicket::baseline()
+    };
+    for (summarize, embed) in [
+        (drifted(" changed", "ticket-summary-v1", false), EmbedSummary::of_width(3)),
+        (drifted("", "ticket-summary-v2", false), EmbedSummary::of_width(3)),
+        (drifted("", "ticket-summary-v1", true), EmbedSummary::of_width(3)),
+        (SummarizeTicket::baseline(), EmbedSummary::of_width(2)),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let journal_base = temp.path().join("journals");
-        let live_counters = AuthorityCounters::default();
+        let config = ai_config(temp.path(), None);
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
-            .run_async(build_flow(
+            .with_config_file(config.clone())
+            .with_ai_models(fake_ai::providers(&summarizing(), &embedding()))
+            .run_async(chat_and_embedding_flow(
                 journal_base.clone(),
+                one_ticket(),
                 Arc::new(Mutex::new(Vec::new())),
-                FlowScenario::baseline(Some(live_counters)),
+                SummarizeTicket::baseline(),
+                EmbedSummary::of_width(3),
             ))
             .await
             .unwrap();
         let archive = latest_run_dir(&journal_base);
-        let replay_counters = AuthorityCounters::default();
+        let (chat_models, embedding_models) = (summarizing(), embedding());
         let result = FlowApplication::builder()
-            .with_cli_args(vec![
-                OsString::from("obzenflow"),
-                OsString::from("--replay-from"),
-                archive.as_os_str().to_os_string(),
-            ])
-            .run_async(build_flow(
+            .with_cli_args(replay_args(&archive, "--replay-from"))
+            .with_config_file(config)
+            .with_ai_models(fake_ai::providers(&chat_models, &embedding_models))
+            .run_async(chat_and_embedding_flow(
                 journal_base,
+                one_ticket(),
                 Arc::new(Mutex::new(Vec::new())),
-                FlowScenario {
-                    live_authority: Some(replay_counters.clone()),
-                    prompt_suffix: suffix.to_string(),
-                    chat_logic_version: logic_version.to_string(),
-                    chat_endpoint: endpoint,
-                    json_response,
-                    embedding_dimensions: dimensions,
-                },
+                summarize,
+                embed,
             ))
             .await;
-        assert!(result.is_err(), "descriptor drift must fail strict replay");
-        assert_eq!(replay_counters.chat_resolutions.load(Ordering::SeqCst), 0);
-        assert_eq!(replay_counters.chat_calls.load(Ordering::SeqCst), 0);
+        assert!(result.is_err(), "request drift must fail strict replay");
+        assert_eq!(chat_models.connect_count() + chat_models.call_count(), 0);
         assert_eq!(
-            replay_counters.embedding_resolutions.load(Ordering::SeqCst),
+            embedding_models.connect_count() + embedding_models.call_count(),
             0
         );
-        assert_eq!(replay_counters.embedding_calls.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_moves() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("journals");
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(ai_config(temp.path(), None))
+        .with_ai_models(fake_ai::providers(&summarizing(), &embedding()))
+        .run_async(chat_and_embedding_flow(
+            journal_base.clone(),
+            one_ticket(),
+            Arc::new(Mutex::new(Vec::new())),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
+        ))
+        .await
+        .unwrap();
+    let archive = latest_run_dir(&journal_base);
+
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+    let (chat, embed) = (FakeChatModels::forbidden(), FakeEmbeddingModels::forbidden());
+    FlowApplication::builder()
+        .with_cli_args(replay_args(&archive, "--replay-from"))
+        .with_config_file(ai_config(temp.path(), Some("http://127.0.0.1:11435")))
+        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .run_async(chat_and_embedding_flow(
+            journal_base.clone(),
+            one_ticket(),
+            outputs.clone(),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
+        ))
+        .await
+        .expect("strict replay binds the recorded endpoint, not the configured one");
+    assert_eq!(outputs.lock().unwrap().len(), 1);
+    assert_eq!(chat.connect_count() + embed.connect_count(), 0);
+
+    let replay_manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(latest_run_dir(&journal_base).join("run_manifest.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        replay_manifest["stages"]["chat"]["ai_models"][0]["endpoint"],
+        "ollama",
+        "the replay records the model it replayed"
+    );
 }
 
 #[path = "support/standalone_ai_gap_proofs.rs"]

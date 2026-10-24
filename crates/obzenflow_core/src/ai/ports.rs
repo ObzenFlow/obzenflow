@@ -3,10 +3,12 @@
 // https://obzenflow.dev
 
 use crate::ai::{
-    AiClientError, ChatRequest, ChatResponse, ChatTarget, EmbeddingRequest, EmbeddingResponse,
-    EmbeddingTarget,
+    AiClientError, AiEndpoint, AiModelProviderError, AiModelSpec, AiProvider, ChatModelDescription,
+    ChatRequest, ChatResponse, ChatTarget, EmbeddingModelDescription, EmbeddingRequest,
+    EmbeddingResponse, EmbeddingTarget,
 };
 use async_trait::async_trait;
+use std::sync::Arc;
 
 #[async_trait]
 pub trait ChatClient: Send + Sync + 'static {
@@ -27,4 +29,60 @@ pub trait EmbeddingClient: Send + Sync + 'static {
     fn target(&self) -> &EmbeddingTarget;
 
     async fn embed(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError>;
+}
+
+/// Describes and connects the chat models an operator configures. A host
+/// installs one in the build context; tests install a fake.
+pub trait ChatModelProvider: Send + Sync + 'static {
+    /// Whether endpoints of `provider` can serve chat through this provider.
+    fn serves(&self, provider: &AiProvider) -> bool;
+
+    /// Describe one configured model. Performs no I/O and reads no secret.
+    fn describe(
+        &self,
+        endpoint: &AiEndpoint,
+        model: &str,
+    ) -> Result<ChatModelDescription, AiModelProviderError>;
+
+    /// Rebuild the description of a recorded model. Performs no I/O.
+    fn describe_recorded(
+        &self,
+        spec: &AiModelSpec,
+    ) -> Result<ChatModelDescription, AiModelProviderError>;
+
+    /// Build the client that serves a described model. Called only when a
+    /// live call first needs it, never on strict replay.
+    fn connect(
+        &self,
+        endpoint: &AiEndpoint,
+        description: &ChatModelDescription,
+    ) -> Result<Arc<dyn ChatClient>, AiModelProviderError>;
+}
+
+/// Describes and connects the embedding models an operator configures.
+pub trait EmbeddingModelProvider: Send + Sync + 'static {
+    /// Whether endpoints of `provider` can serve embeddings through this
+    /// provider.
+    fn serves(&self, provider: &AiProvider) -> bool;
+
+    /// Describe one configured model. Performs no I/O and reads no secret.
+    fn describe(
+        &self,
+        endpoint: &AiEndpoint,
+        model: &str,
+    ) -> Result<EmbeddingModelDescription, AiModelProviderError>;
+
+    /// Rebuild the description of a recorded model. Performs no I/O.
+    fn describe_recorded(
+        &self,
+        spec: &AiModelSpec,
+    ) -> Result<EmbeddingModelDescription, AiModelProviderError>;
+
+    /// Build the client that serves a described model. Called only when a
+    /// live call first needs it, never on strict replay.
+    fn connect(
+        &self,
+        endpoint: &AiEndpoint,
+        description: &EmbeddingModelDescription,
+    ) -> Result<Arc<dyn EmbeddingClient>, AiModelProviderError>;
 }

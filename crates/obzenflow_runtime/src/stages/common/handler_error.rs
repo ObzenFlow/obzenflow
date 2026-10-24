@@ -83,10 +83,6 @@ pub enum HandlerError {
     Validation(String),
     /// Broader domain logic failure.
     Domain(String),
-    /// Typed AI chunk-planning failure consumed by the sealed map-reduce
-    /// planning adapter.
-    #[doc(hidden)]
-    AiMapReducePlanning(obzenflow_core::ai::AiMapReducePlanningFailure),
     /// A trusted framework or handler contract was contradicted at runtime.
     ///
     /// A call site enforcing a trusted runtime contract may promote this to a
@@ -121,7 +117,6 @@ impl HandlerError {
             HandlerError::Deserialization(_) => ErrorKind::Deserialization,
             HandlerError::Validation(_) => ErrorKind::Validation,
             HandlerError::Domain(_) => ErrorKind::Domain,
-            HandlerError::AiMapReducePlanning(_) => ErrorKind::Validation,
             // The effectful stateful supervisor intercepts its durable-state
             // contract violations before per-record error routing. `Unknown`
             // is retained for exhaustive callers that still inspect `kind()`.
@@ -179,9 +174,6 @@ impl fmt::Display for HandlerError {
             }
             HandlerError::Validation(msg) => write!(f, "Validation error: {msg}"),
             HandlerError::Domain(msg) => write!(f, "Domain error: {msg}"),
-            HandlerError::AiMapReducePlanning(cause) => {
-                write!(f, "AI map-reduce planning failure: {cause:?}")
-            }
             HandlerError::ContractViolation(msg) => {
                 write!(f, "Contract violation: {msg}")
             }
@@ -202,6 +194,12 @@ impl From<crate::effects::EffectError> for HandlerError {
             }
             error => Self::Other(error.to_string()),
         }
+    }
+}
+
+impl From<obzenflow_core::ai::AiUnavailable> for HandlerError {
+    fn from(unavailable: obzenflow_core::ai::AiUnavailable) -> Self {
+        Self::Remote(unavailable.to_string())
     }
 }
 

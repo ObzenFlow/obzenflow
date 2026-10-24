@@ -819,7 +819,7 @@ mod tests {
                 serde_json::json!({}),
             )
         };
-        let manifest = row("map_reduce.planning_manifest");
+        let manifest = row("map_reduce.grouping_ended");
         let partial = row("map_reduce.partial");
         let marker =
             ChainEventFactory::catch_up_complete_event(writer, ReaderGeneration(1), stage());

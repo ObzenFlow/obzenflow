@@ -62,6 +62,7 @@ struct LaunchParams {
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
     ingress_slots: Vec<HostedIngressBindingSlot>,
+    ai_models: Option<obzenflow_runtime::ai::AiModelProviders>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
@@ -219,6 +220,7 @@ pub struct FlowApplicationBuilder {
     cli_args: Option<Vec<OsString>>,
     /// FLOWIP-084l: registered hosted ingress, given `[server.ingress]` at launch.
     ingress_slots: Vec<HostedIngressBindingSlot>,
+    ai_models: Option<obzenflow_runtime::ai::AiModelProviders>,
     #[cfg(all(test, feature = "tokio-console"))]
     test_console_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
     #[cfg(all(test, feature = "warp-server"))]
@@ -399,6 +401,13 @@ impl FlowApplicationBuilder {
         self
     }
 
+    /// Serve `ai!` stages with these model providers instead of the built-in
+    /// ones, for a custom client or a test fake.
+    pub fn with_ai_models(mut self, providers: obzenflow_runtime::ai::AiModelProviders) -> Self {
+        self.ai_models = Some(providers);
+        self
+    }
+
     /// Run the flow in a blocking context (without #[tokio::main])
     ///
     /// This builds the tokio runtime, initializes observability, and runs the flow.
@@ -453,6 +462,7 @@ impl FlowApplicationBuilder {
             presentation: self.presentation,
             cli_args: self.cli_args,
             ingress_slots: self.ingress_slots,
+            ai_models: self.ai_models,
             #[cfg(all(test, feature = "tokio-console"))]
             test_console_bound_address: self.test_console_bound_address,
             #[cfg(all(test, feature = "warp-server"))]
@@ -613,6 +623,7 @@ impl FlowApplication {
             flow_handle_hooks,
             presentation,
             ingress_slots,
+            ai_models,
             #[cfg(all(test, feature = "warp-server"))]
             test_shutdown_signal,
             #[cfg(all(test, feature = "warp-server"))]
@@ -798,7 +809,8 @@ impl FlowApplication {
             // resolved snapshot; the build consumes it as an input.
             let build_context = obzenflow_runtime::run_context::FlowBuildContext::new(
                 config.runtime_config.clone(),
-            );
+            )
+            .with_ai_models(ai_models.unwrap_or_else(crate::ai::builtin_ai_models));
             let build_context = match metrics_exporter.clone() {
                 Some(exporter) => build_context.with_metrics_exporter(exporter),
                 None => build_context,

@@ -152,7 +152,7 @@ impl Effect for HandWrittenLedgerWrite {
     }
 }
 
-impl NamedEffect for HandWrittenLedgerWrite {
+impl BoundEffect for HandWrittenLedgerWrite {
     type BindingEvidence = SystemBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -494,7 +494,7 @@ impl Effect for VendorScore {
     }
 }
 
-impl NamedEffect for VendorScore {
+impl BoundEffect for VendorScore {
     type BindingEvidence = VendorEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {

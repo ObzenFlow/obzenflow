@@ -377,6 +377,16 @@ impl EffectsCore {
     pub(crate) fn project_named_effect<E: NamedEffect>(
         &mut self,
     ) -> Result<EffectBindingUse<E>, EffectError> {
+        self.project_bound_effect::<E>()
+    }
+
+    pub(crate) fn project_configured_effect<E: ConfiguredEffect>(
+        &mut self,
+    ) -> Result<EffectBindingUse<E>, EffectError> {
+        self.project_bound_effect::<E>()
+    }
+
+    fn project_bound_effect<E: BoundEffect>(&mut self) -> Result<EffectBindingUse<E>, EffectError> {
         self.gate_authoring()?;
         let declaration = match self.ctx.effect_declaration(E::EFFECT_TYPE) {
             Ok(declaration) => declaration,
@@ -839,10 +849,30 @@ impl EffectsCore {
         self.emit_fact(fact, true).await
     }
 
+    pub(crate) async fn emit_typed_facts(
+        &mut self,
+        facts: Vec<obzenflow_core::event::schema::TypedFact>,
+    ) -> Result<(), EffectError> {
+        for fact in facts {
+            self.emit_typed_fact(fact, false).await?;
+        }
+        Ok(())
+    }
+
     async fn emit_fact<T>(&mut self, fact: T, pre_effect: bool) -> Result<(), EffectError>
     where
         T: TypedPayload,
     {
+        let fact = obzenflow_core::event::schema::TypedFact::from_payload(fact)
+            .map_err(|error| EffectError::Serialization(error.to_string()))?;
+        self.emit_typed_fact(fact, pre_effect).await
+    }
+
+    async fn emit_typed_fact(
+        &mut self,
+        fact: obzenflow_core::event::schema::TypedFact,
+        pre_effect: bool,
+    ) -> Result<(), EffectError> {
         self.gate_authoring()?;
         if !self.ctx.emit_enabled {
             return Err(EffectError::EmitUnsupported {
@@ -850,12 +880,10 @@ impl EffectsCore {
             });
         }
 
-        let event_type = T::event_type_name();
+        let descriptor = fact.descriptor();
+        let event_type = fact.event_type.as_str().to_string();
         if !self.ctx.output_contract.is_empty()
-            && !self
-                .ctx
-                .output_contract
-                .contains_descriptor(&T::descriptor())
+            && !self.ctx.output_contract.contains_descriptor(&descriptor)
         {
             return Err(EffectError::UndeclaredOutput {
                 stage_key: self.ctx.stage_key.clone(),
@@ -863,21 +891,20 @@ impl EffectsCore {
             });
         }
         let routed_fact =
-            is_routable_output_fact(Some(&self.ctx.output_contract), &T::descriptor()) as usize;
+            is_routable_output_fact(Some(&self.ctx.output_contract), &descriptor) as usize;
         self.ensure_routed_fanout_capacity(routed_fact)?;
 
         let recorded_flow_id = self.namespace();
         let output_ordinal = self.reserve_output_ordinal()?;
-        let mut event = deterministic_typed_output_event(
-            self.ctx.writer_id,
-            &self.ctx.parent.authored(),
-            fact,
+        let parent = self.ctx.parent.authored();
+        let mut event = stamp_output_event(
+            fact.into_derived_event(self.ctx.writer_id, &parent, self.ctx.lineage),
+            &parent,
             &recorded_flow_id,
             &self.ctx.stage_key,
             self.ctx.input_seq,
             output_ordinal,
-            self.ctx.lineage,
-        )?;
+        );
         let plan = self.take_action(super::RecordedAction::Fact {
             id: event.id,
             event_type: obzenflow_core::EventType::from(event_type),

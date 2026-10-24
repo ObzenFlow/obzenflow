@@ -9,8 +9,8 @@
 pub use crate::application::FlowApplication;
 pub use crate::error::HandlerError;
 pub use crate::flow::{
-    ai_map_reduce, async_infinite_source, async_source, effectful_stateful, effectful_transform,
-    flow, handler_set, inference, infinite_source, join, merge, placeholder, sink, source,
-    stateful, transform, FlowDefinition,
+    ai, ai_map_reduce, async_infinite_source, async_source, effectful_stateful,
+    effectful_transform, flow, handler_set, inference, infinite_source, join, merge, placeholder,
+    sink, source, stateful, transform, FlowDefinition,
 };
 pub use crate::schema::{EffectOutcomeFacts, StageOutputFacts, TypedPayload};

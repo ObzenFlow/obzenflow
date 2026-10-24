@@ -179,6 +179,10 @@ pub enum FlowBuildError {
     #[error("flow binding '{binding}' configuration failed: {detail}")]
     BindingConfiguration { binding: String, detail: String },
 
+    /// An `ai!` stage could not bind its model or lower its members.
+    #[error("{0}")]
+    AiStage(String),
+
     #[error(
         "flow `{flow_name}` builds two systems named `{binding}` for `{effect_type}`; build `{binding}` once and name that value in each row"
     )]

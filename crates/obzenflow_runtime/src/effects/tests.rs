@@ -547,7 +547,7 @@ trait FixtureEffect: NamedEffect<BindingEvidence = FixtureEvidence> {
 
 macro_rules! fixture_effect {
     ($effect:ty, $field:ident) => {
-        impl NamedEffect for $effect {
+        impl BoundEffect for $effect {
             type BindingEvidence = FixtureEvidence;
 
             fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1272,7 +1272,7 @@ impl Effect for NamedAffineCountingEffect {
     }
 }
 
-impl NamedEffect for NamedAffineCountingEffect {
+impl BoundEffect for NamedAffineCountingEffect {
     type BindingEvidence = VersionedBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1316,7 +1316,7 @@ impl Effect for ZeroSlotNamedEffect {
     }
 }
 
-impl NamedEffect for ZeroSlotNamedEffect {
+impl BoundEffect for ZeroSlotNamedEffect {
     type BindingEvidence = VersionedBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {

@@ -2,20 +2,21 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime and journal proofs for joins adjacent to the generated AI composite.
-//! All inputs and chat responses are local fixtures; replay cannot resolve a client.
+//! Runtime and journal proofs for joins adjacent to a map-reduce `ai!` stage
+//! keyed by seed. All inputs and chat responses are local fixtures; replay
+//! cannot connect a client.
 
 mod replay_testkit;
 
-use async_trait::async_trait;
-use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion};
-use obzenflow_adapters::middleware::control::ai_resilience;
+#[path = "support/fake_ai.rs"]
+pub mod fake_ai;
+
+use fake_ai::FakeChatModels;
+use obzenflow::ai::{
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Partials,
+};
 use obzenflow_core::ai::{
-    AiClientError, AiFinalizeRole, AiMapReduceFinalizeFailed, AiMapReducePlanningManifest,
-    AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply, ChatMessage, ChatParams,
-    ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget, ChunkInfo, HeuristicTokenEstimator,
-    Many, ResolvedTokenEstimator, TokenCount, TokenEstimatorFallbackReason,
-    TokenEstimatorResolutionInfo,
+    AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceReduceFailed,
 };
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
@@ -23,17 +24,17 @@ use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::RunManifest;
-use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
+use obzenflow_core::{StageId, StageOutputs, TypedPayload, WriterId};
+use obzenflow_dsl::{ai, flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
-use obzenflow_runtime::effects::EffectBinding;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkWriteFailure, SourceError, TypedFiniteSourceHandler,
+    SinkWriteFailure, SourceError, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,6 +50,17 @@ struct Seed {
 
 impl TypedPayload for Seed {
     const EVENT_TYPE: &'static str = "test.ai_join.seed";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeedValue {
+    seed: u64,
+    key: u64,
+    value: u64,
+}
+
+impl TypedPayload for SeedValue {
+    const EVENT_TYPE: &'static str = "test.ai_join.seed_value";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -82,16 +94,12 @@ impl TypedPayload for Row {
 }
 
 #[derive(Debug, Default)]
-struct Counters {
-    source_reads: AtomicUsize,
-    resolutions: AtomicUsize,
-    chat_calls: AtomicUsize,
-}
+struct SourceReads(AtomicUsize);
 
 #[derive(Clone, Debug)]
 struct FixtureSource<T> {
     rows: VecDeque<T>,
-    counters: Arc<Counters>,
+    reads: Arc<SourceReads>,
 }
 
 impl<T: TypedPayload + Clone + Send + Sync + 'static> TypedFiniteSourceHandler
@@ -100,147 +108,90 @@ impl<T: TypedPayload + Clone + Send + Sync + 'static> TypedFiniteSourceHandler
     type Output = T;
 
     fn next(&mut self) -> Result<Option<Vec<T>>, SourceError> {
-        self.counters.source_reads.fetch_add(1, Ordering::SeqCst);
+        self.reads.0.fetch_add(1, Ordering::SeqCst);
         Ok(self.rows.pop_front().map(|row| vec![row]))
     }
 }
 
-struct DummyChat {
-    target: ChatTarget,
-    counters: Arc<Counters>,
-    forbidden: bool,
-}
+#[derive(Clone, Debug)]
+struct Explode;
 
-#[async_trait]
-impl ChatClient for DummyChat {
-    fn target(&self) -> &ChatTarget {
-        &self.target
-    }
+impl TypedTransformHandler for Explode {
+    type Input = Seed;
+    type Output = StageOutputs<SeedValue>;
 
-    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AiClientError> {
-        self.counters.chat_calls.fetch_add(1, Ordering::SeqCst);
-        assert!(!self.forbidden, "replay called the chat client");
-        Ok(ChatResponse {
-            text: "ok".into(),
-            tool_calls: Vec::new(),
-            usage: None,
-            raw: None,
-        })
+    fn process(&self, seed: Seed) -> Result<StageOutputs<SeedValue>, HandlerError> {
+        Ok(StageOutputs::many(seed.values.iter().map(|value| SeedValue {
+            seed: seed.id,
+            key: seed.key,
+            value: *value,
+        })))
     }
 }
 
-fn chat_binding(counters: Arc<Counters>, forbidden: bool) -> EffectBinding<ChatCompletion> {
-    let target = ChatTarget::new("fixture", "deterministic");
-    let estimator = ResolvedTokenEstimator::new(
-        Arc::new(HeuristicTokenEstimator::default()),
-        TokenEstimatorResolutionInfo::heuristic(
-            "deterministic",
-            TokenEstimatorFallbackReason::ExplicitHeuristic,
-            None,
-        ),
-    );
-    ChatBindingEvidence::new(target.clone(), estimator)
-        .unwrap()
-        .into_binding(Arc::new(move || {
-            counters.resolutions.fetch_add(1, Ordering::SeqCst);
-            assert!(!forbidden, "replay resolved the chat client");
-            let client: Arc<dyn ChatClient> = Arc::new(DummyChat {
-                target: target.clone(),
-                counters: counters.clone(),
-                forbidden,
-            });
-            Ok(client)
-        }))
-        .unwrap()
-}
-
-fn request(message: String) -> ChatRequestSpec {
-    ChatRequestSpec {
-        messages: vec![ChatMessage::user(message)],
-        params: ChatParams::default(),
-        tools: Vec::new(),
-        response_format: None,
-    }
-}
-
+#[derive(Clone, Copy)]
 struct SumMap;
 
-impl AiMapRole<u64, Partial> for SumMap {
-    fn prepare(
-        &self,
-        items: &[u64],
-        _chunk: &ChunkInfo,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        Ok(request(format!("sum {items:?}")))
+impl AiRole<Chunk<SeedValue>> for SumMap {
+    type Effect = ChatCompletion;
+    type Out = Partial;
+
+    fn prepare(&self, chunk: &Chunk<SeedValue>) -> Result<ChatRequestSpec, HandlerError> {
+        let values: Vec<u64> = chunk.iter().map(|item| item.value).collect();
+        Ok(ChatRequestSpec::new("Sum.", format!("sum {values:?}")))
     }
 
     fn interpret(
         &self,
-        items: Vec<u64>,
-        _chunk: ChunkInfo,
-        _request: ChatRequestSpec,
-        _reply: ChatCompletionReply,
-    ) -> Result<Partial, AiRoleLogicFailure> {
+        chunk: Chunk<SeedValue>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<Partial, HandlerError> {
+        outcome.replied()?;
         Ok(Partial {
-            total: items.into_iter().sum(),
+            total: chunk.iter().map(|item| item.value).sum(),
         })
     }
 }
 
-struct SumFinalize;
+#[derive(Clone, Copy)]
+struct SumReduce;
 
-impl AiFinalizeRole<Seed, Many<Partial>, Row> for SumFinalize {
+impl AiRole<Partials<SeedValue, Partial>> for SumReduce {
+    type Effect = ChatCompletion;
+    type Out = Row;
+
     fn prepare(
         &self,
-        seed: &Seed,
-        _collected: &Many<Partial>,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        Ok(request(format!("finalize {}", seed.id)))
+        input: &Partials<SeedValue, Partial>,
+    ) -> Result<ChatRequestSpec, HandlerError> {
+        Ok(ChatRequestSpec::new(
+            "Reduce.",
+            format!("reduce {}", input.items()[0].seed),
+        ))
     }
 
     fn interpret(
         &self,
-        seed: Seed,
-        collected: Many<Partial>,
-        _request: ChatRequestSpec,
-        _reply: ChatCompletionReply,
-    ) -> Result<Row, AiRoleLogicFailure> {
-        // A different payload family in the same finalize journal must never
-        // be decoded as Row by either side of a downstream join.
-        if seed.id == 4 {
-            return Err(AiRoleLogicFailure::Parse {
-                message: "deliberate fixture failure".into(),
-            });
+        input: Partials<SeedValue, Partial>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<Row, HandlerError> {
+        outcome.replied()?;
+        let first = &input.items()[0];
+        // A different payload family in the same reduce journal must never be
+        // decoded as Row by either side of a downstream join.
+        if first.seed == 4 {
+            return Err(HandlerError::Domain("deliberate fixture failure".into()));
         }
         Ok(Row {
-            id: seed.id,
-            key: seed.key,
-            total: collected.items.into_iter().map(|p| p.total).sum(),
+            id: first.seed,
+            key: first.key,
+            total: input.partials().iter().map(|partial| partial.total).sum(),
         })
     }
 }
 
-macro_rules! digest {
-    ($chat:expr) => {{
-        let chat = $chat;
-        let map_role = SumMap;
-        let finalize_role = SumFinalize;
-        ai_map_reduce!(
-            Seed -> Row => {
-                map: [u64] -> Partial
-                    uses at_least_once(ChatCompletion) via chat with ai_resilience() => map_role,
-                reduce: (Seed, [Partial]) -> Row
-                    uses at_least_once(ChatCompletion) via chat with ai_resilience() => finalize_role,
-            },
-            chunking: by_budget {
-                items: |seed: &Seed| seed.values.clone(),
-                render: |item: &u64, _ctx| item.to_string(),
-                budget: TokenCount::new(100),
-                max_items: Some(1),
-                oversize: error,
-            }
-        )
-    }};
+fn seed_of(item: &SeedValue) -> u64 {
+    item.seed
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -251,17 +202,9 @@ enum Placement {
 }
 
 impl Placement {
-    fn seed_stage(self) -> &'static str {
-        if matches!(self, Self::Before) {
-            "joined"
-        } else {
-            "seeds"
-        }
-    }
-
     fn result_stage(self) -> &'static str {
         if matches!(self, Self::Before) {
-            "digest__finalize"
+            "digest__reduce"
         } else {
             "joined"
         }
@@ -276,11 +219,6 @@ impl Placement {
                     total: 12,
                 },
                 Row {
-                    id: 2,
-                    key: 8,
-                    total: 0,
-                },
-                Row {
                     id: 3,
                     key: 7,
                     total: 18,
@@ -293,11 +231,6 @@ impl Placement {
                     total: 9,
                 },
                 Row {
-                    id: 102,
-                    key: 8,
-                    total: 0,
-                },
-                Row {
                     id: 103,
                     key: 7,
                     total: 9,
@@ -307,15 +240,14 @@ impl Placement {
     }
 }
 
-fn build_flow(
-    root: PathBuf,
-    placement: Placement,
-    counters: Arc<Counters>,
-    delivered: Arc<Mutex<Vec<Row>>>,
-    replay: bool,
-) -> FlowDefinition {
+fn build_flow(root: PathBuf, placement: Placement, reads: Arc<SourceReads>, delivered: Arc<Mutex<Vec<Row>>>) -> FlowDefinition {
     FlowDefinition::materialize(move |_| {
-        let chat = chat_binding(counters.clone(), replay);
+        let digest = ai::map(SumMap)
+            .key_by(seed_of as fn(&SeedValue) -> u64)
+            .chunks(1)
+            .reduce(SumReduce)
+            .on_eof();
+        let explode = Explode;
         let seeds = FixtureSource {
             rows: [
                 Seed {
@@ -340,7 +272,7 @@ fn build_flow(
                 },
             ]
             .into(),
-            counters: counters.clone(),
+            reads: reads.clone(),
         };
         let scales = FixtureSource {
             rows: [
@@ -349,7 +281,7 @@ fn build_flow(
                 Scale { key: 9, factor: 4 },
             ]
             .into(),
-            counters: counters.clone(),
+            reads: reads.clone(),
         };
         let queries = FixtureSource {
             rows: [
@@ -375,7 +307,7 @@ fn build_flow(
                 },
             ]
             .into(),
-            counters,
+            reads,
         };
         let output = CollectRows { delivered };
 
@@ -398,12 +330,14 @@ fn build_flow(
                         seeds = source!(Seed => seeds);
                         scales = source!(Scale => scales);
                         joined = join!(catalog scales: Scale, Seed -> Seed => joined);
-                        digest = digest!(chat);
+                        explode = transform!(Seed -> SeedValue => explode);
+                        digest = ai!(SeedValue -> Row => digest);
                         output = sink!(Row => output);
                     },
                     topology: {
                         (scales, seeds) |> joined;
-                        joined |> digest;
+                        joined |> explode;
+                        explode |> digest;
                         digest |> output;
                     }
                 }
@@ -423,12 +357,14 @@ fn build_flow(
                     stages: {
                         seeds = source!(Seed => seeds);
                         scales = source!(Scale => scales);
-                        digest = digest!(chat);
+                        explode = transform!(Seed -> SeedValue => explode);
+                        digest = ai!(SeedValue -> Row => digest);
                         joined = join!(catalog scales: Scale, Row -> Row => joined);
                         output = sink!(Row => output);
                     },
                     topology: {
-                        seeds |> digest;
+                        seeds |> explode;
+                        explode |> digest;
                         (scales, digest) |> joined;
                         joined |> output;
                     }
@@ -449,12 +385,14 @@ fn build_flow(
                     stages: {
                         seeds = source!(Seed => seeds);
                         queries = source!(Row => queries);
-                        digest = digest!(chat);
+                        explode = transform!(Seed -> SeedValue => explode);
+                        digest = ai!(SeedValue -> Row => digest);
                         joined = join!(catalog digest: Row, Row -> Row => joined);
                         output = sink!(Row => output);
                     },
                     topology: {
-                        seeds |> digest;
+                        seeds |> explode;
+                        explode |> digest;
                         (digest, queries) |> joined;
                         joined |> output;
                     }
@@ -494,65 +432,83 @@ fn typed<T: TypedPayload>(
         .collect()
 }
 
-fn assert_activation(row: &JournalRecord<ChainPayload>, expected: &CompositeActivationContext) {
-    assert_eq!(
-        row.composite_activations(),
-        std::slice::from_ref(expected),
-        "exact job contribution, without unrelated catalog entries"
-    );
+fn activation_set(row: &JournalRecord<ChainPayload>) -> BTreeSet<String> {
+    row.composite_activations()
+        .iter()
+        .map(|activation| format!("{activation:?}"))
+        .collect()
+}
+
+fn expected_set<'a>(activations: impl IntoIterator<Item = &'a CompositeActivationContext>) -> BTreeSet<String> {
+    activations
+        .into_iter()
+        .map(|activation| format!("{activation:?}"))
+        .collect()
 }
 
 async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
     let manifest = manifest(run);
-    let seed_records = stage_records(run, placement.seed_stage()).await;
-    let seeds = typed::<Seed>(&seed_records);
-    assert_eq!(seeds.len(), 4);
-    let activations: HashMap<_, _> = seeds
+    let item_records = stage_records(run, "explode").await;
+    let items = typed::<SeedValue>(&item_records);
+    assert_eq!(items.len(), 6, "the empty seed contributes no item");
+    let mut item_activations: BTreeMap<u64, Vec<CompositeActivationContext>> = BTreeMap::new();
+    for (item, row) in &items {
+        item_activations
+            .entry(item.seed)
+            .or_default()
+            .push(CompositeActivationContext::new(
+                obzenflow_core::id::CompositeId::new("ai_map_reduce:digest"),
+                row.envelope.provenance.event.id,
+                "in",
+                row.envelope.provenance.event.processing.event_time,
+            ));
+    }
+
+    let chunks = stage_records(run, "digest__chunk").await;
+    let groups = typed::<AiMapReduceMapInput<SeedValue>>(&chunks);
+    assert_eq!(groups.len(), 6, "one group per item at chunks(1)");
+    for (group, record) in &groups {
+        let seed = group.items[0].seed;
+        assert_eq!(group.key, Some(serde_json::json!(seed)), "groups never mix keys");
+        assert_eq!(activation_set(record).len(), 1);
+        assert!(expected_set(&item_activations[&seed]).is_superset(&activation_set(record)));
+    }
+    let ended = typed::<AiMapReduceGroupingEnded>(&chunks);
+    let group_counts: BTreeMap<String, u64> = ended
         .iter()
-        .map(|(seed, row)| {
+        .map(|(ended, _)| {
             (
-                seed.id,
-                CompositeActivationContext::new(
-                    obzenflow_core::id::CompositeId::new("ai_map_reduce:digest"),
-                    row.envelope.provenance.event.id,
-                    "in",
-                    row.envelope.provenance.event.processing.event_time,
-                ),
+                serde_json::to_string(&ended.key).unwrap(),
+                ended.group_count,
             )
         })
         .collect();
-    let by_event: HashMap<EventId, _> = seeds
-        .iter()
-        .map(|(seed, row)| (row.envelope.provenance.event.id, seed))
-        .collect();
-
-    let chunks = stage_records(run, "digest__chunk").await;
-    let plans = typed::<AiMapReducePlanningManifest>(&chunks);
     assert_eq!(
-        plans.len(),
-        4,
-        "one plan per joined or source seed, including the empty job"
+        group_counts,
+        BTreeMap::from([
+            ("1".to_string(), 3),
+            ("3".to_string(), 2),
+            ("4".to_string(), 1),
+        ])
     );
-    let mut counts = BTreeMap::new();
-    for (plan, record) in plans {
-        let seed = by_event[&plan.job_key];
-        assert_eq!(plan.seed_payload, serde_json::to_value(seed).unwrap());
-        assert_eq!(plan.chunk_count, seed.values.len());
-        assert_activation(record, &activations[&seed.id]);
-        counts.insert(seed.id, plan.chunk_count);
-    }
-    assert_eq!(counts, BTreeMap::from([(1, 3), (2, 0), (3, 2), (4, 1)]));
 
-    let finalize = stage_records(run, "digest__finalize").await;
-    let reduced = typed::<Row>(&finalize);
-    assert_eq!(reduced.len(), 3);
+    let reduce = stage_records(run, "digest__reduce").await;
+    let reduced = typed::<Row>(&reduce);
+    assert_eq!(reduced.len(), 2);
     for (row, record) in &reduced {
-        assert_activation(record, &activations[&row.id]);
+        assert_eq!(
+            activation_set(record),
+            expected_set(&item_activations[&row.id]),
+            "a reduced row carries exactly its own seed's contributions"
+        );
     }
-    let failed = typed::<AiMapReduceFinalizeFailed>(&finalize);
+    let failed = typed::<AiMapReduceReduceFailed>(&reduce);
     assert_eq!(failed.len(), 1, "the deliberate failure remains durable");
-    assert_eq!(failed[0].0.job_key, activations[&4].activation);
-    assert_activation(failed[0].1, &activations[&4]);
+    assert_eq!(failed[0].0.key, Some(serde_json::json!(4)));
+    assert_eq!(
+        activation_set(failed[0].1),
+        expected_set(&item_activations[&4])
+    );
 
     let results = stage_records(run, placement.result_stage()).await;
     let output = typed::<Row>(&results);
@@ -560,15 +516,14 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
     assert_eq!(values, placement.expected());
     for (value, record) in &output {
         let selected = if matches!(placement, Placement::Catalog) {
-            if value.key == 7 {
-                3
-            } else {
-                2
-            }
+            3
         } else {
             value.id
         };
-        assert_activation(record, &activations[&selected]);
+        assert_eq!(
+            activation_set(record),
+            expected_set(&item_activations[&selected])
+        );
     }
 
     let joins = stage_records(run, "joined").await;
@@ -601,10 +556,10 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
     finals.sort();
     assert_eq!(
         finals,
-        if matches!(placement, Placement::Stream) {
-            vec![3, 3]
-        } else {
-            vec![3, 4]
+        match placement {
+            Placement::Before => vec![3, 4],
+            Placement::Stream => vec![2, 3],
+            Placement::Catalog => vec![2, 4],
         }
     );
 
@@ -620,10 +575,10 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
             if matches!(placement, Placement::Before) {
                 4
             } else {
-                3
+                2
             },
         ),
-        ("digest__finalize", Row::descriptor(), 3),
+        ("digest__reduce", Row::descriptor(), 2),
     ] {
         let writer = WriterId::from(manifest.stages[stage].stage_id.parse::<StageId>().unwrap());
         let records = stage_records(run, stage).await;
@@ -646,8 +601,8 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
         assert_eq!(eofs.len(), 1);
         assert_eq!(*eofs[0].0, EofKind::Natural);
         assert_eq!(eofs[0].1[&kind].0, count);
-        if stage == "digest__finalize" {
-            assert_eq!(eofs[0].1[&AiMapReduceFinalizeFailed::descriptor()].0, 1);
+        if stage == "digest__reduce" {
+            assert_eq!(eofs[0].1[&AiMapReduceReduceFailed::descriptor()].0, 1);
         }
     }
 
@@ -717,14 +672,14 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
                 "scales",
                 Scale::descriptor(),
                 3,
-                "digest__finalize",
+                "digest__reduce",
                 Row::descriptor(),
-                3,
+                2,
             ),
             Placement::Catalog => (
-                "digest__finalize",
+                "digest__reduce",
                 Row::descriptor(),
-                3,
+                2,
                 "queries",
                 Row::descriptor(),
                 4,
@@ -760,8 +715,13 @@ async fn exercise(placement: Placement) {
     for mode in ["live", "replay"] {
         let replay = mode == "replay";
         let root = temp.path().join(mode);
-        let counters = Arc::new(Counters::default());
+        let reads = Arc::new(SourceReads::default());
         let delivered = Arc::new(Mutex::new(Vec::new()));
+        let models = if replay {
+            FakeChatModels::forbidden()
+        } else {
+            FakeChatModels::replying(|_| "ok".to_string())
+        };
         let mut args = vec![OsString::from("obzenflow")];
         if let Some(archive) = &live {
             args.push("--replay-from".into());
@@ -770,35 +730,35 @@ async fn exercise(placement: Placement) {
         let config = root.with_extension("toml");
         std::fs::write(
             &config,
-            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 3000\n",
+            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 3\nstall_timeout_ms = 3000\n\n\
+             [ai.models]\nmodel = \"deterministic\"\n",
         )
-        .expect("write the backpressure configuration");
+        .expect("write the run configuration");
         tokio::time::timeout(
             Duration::from_secs(30),
             FlowApplication::builder()
                 .with_cli_args(args)
                 .with_config_file(config)
+                .with_ai_models(models.providers())
                 .run_async(build_flow(
                     root.clone(),
                     placement,
-                    counters.clone(),
+                    reads.clone(),
                     delivered.clone(),
-                    replay,
                 )),
         )
         .await
         .expect("composition must release enforced backpressure")
         .expect("composition run completes");
         assert_eq!(
-            counters.resolutions.load(Ordering::SeqCst),
-            usize::from(!replay)
+            models.call_count(),
+            if replay { 0 } else { 9 },
+            "six map calls and three reduce calls; replay performs neither"
         );
-        assert_eq!(
-            counters.chat_calls.load(Ordering::SeqCst),
-            if replay { 0 } else { 10 },
-            "six map calls and four finalize calls; replay performs neither"
-        );
-        assert_eq!(counters.source_reads.load(Ordering::SeqCst) == 0, replay);
+        if replay {
+            assert_eq!(models.connect_count(), 0);
+        }
+        assert_eq!(reads.0.load(Ordering::SeqCst) == 0, replay);
         assert_eq!(*delivered.lock().unwrap(), placement.expected());
         let archive = run_dir(&root);
         let values = assert_journals(&archive, placement).await;
@@ -822,7 +782,7 @@ async fn exercise(placement: Placement) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn join_before_ai_map_reduce_preserves_jobs_backpressure_and_replay() {
+async fn join_before_ai_map_reduce_preserves_keys_backpressure_and_replay() {
     exercise(Placement::Before).await;
 }
 
@@ -835,10 +795,12 @@ async fn ai_map_reduce_as_join_stream_preserves_contributions_and_filters_failur
 async fn ai_map_reduce_as_join_catalog_selects_latest_contribution_and_replays() {
     exercise(Placement::Catalog).await;
 }
+
 #[derive(Clone)]
 struct CollectRows {
     delivered: Arc<Mutex<Vec<Row>>>,
 }
+
 #[async_trait::async_trait]
 impl obzenflow_runtime::stages::sink::InlineSink for CollectRows {
     type Input = Row;

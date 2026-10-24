@@ -24,6 +24,8 @@ use std::fmt;
 pub enum FlowMember {
     Stage(Box<dyn StageDescriptor>),
     Composite(Box<dyn CompositeDescriptor>),
+    /// An `ai!` stage, which lowers once the build context can bind its model.
+    Ai(Box<crate::dsl::ai_stage::AiStageDescriptor>),
 }
 
 impl FlowMember {
@@ -31,6 +33,7 @@ impl FlowMember {
         match self {
             Self::Stage(descriptor) => descriptor.name(),
             Self::Composite(descriptor) => descriptor.name(),
+            Self::Ai(descriptor) => descriptor.name(),
         }
     }
 
@@ -38,6 +41,7 @@ impl FlowMember {
         match self {
             Self::Stage(descriptor) => descriptor.set_name(name),
             Self::Composite(descriptor) => descriptor.set_name(name),
+            Self::Ai(descriptor) => descriptor.set_name(name),
         }
     }
 }
@@ -340,6 +344,11 @@ impl<'a> PortBuilder<'a> {
         self
     }
 
+    pub(crate) fn payload_hints(self, hints: Vec<TypeHint>) -> Self {
+        self.ctx.ports[self.index].payloads.extend(hints);
+        self
+    }
+
     pub fn default(self) -> Self {
         self.ctx.ports[self.index].default = true;
         self
@@ -500,48 +509,16 @@ pub struct CompositeExpansion {
 
 #[derive(Debug)]
 pub struct CompositeBuildError {
-    kind: CompositeBuildErrorKind,
     message: String,
-}
-
-#[derive(Debug)]
-enum CompositeBuildErrorKind {
-    StageResources,
-    BindingConfiguration { binding: String },
 }
 
 impl CompositeBuildError {
     pub(crate) fn new(message: String) -> Self {
-        Self {
-            kind: CompositeBuildErrorKind::StageResources,
-            message,
-        }
-    }
-
-    pub(crate) fn binding_configuration(
-        binding: impl Into<String>,
-        detail: impl Into<String>,
-    ) -> Self {
-        Self {
-            kind: CompositeBuildErrorKind::BindingConfiguration {
-                binding: binding.into(),
-            },
-            message: detail.into(),
-        }
+        Self { message }
     }
 
     pub(crate) fn into_flow_build_error(self) -> crate::dsl::FlowBuildError {
-        match self.kind {
-            CompositeBuildErrorKind::StageResources => {
-                crate::dsl::FlowBuildError::StageResourcesFailed(self.message)
-            }
-            CompositeBuildErrorKind::BindingConfiguration { binding } => {
-                crate::dsl::FlowBuildError::BindingConfiguration {
-                    binding,
-                    detail: self.message,
-                }
-            }
-        }
+        crate::dsl::FlowBuildError::StageResourcesFailed(self.message)
     }
 }
 

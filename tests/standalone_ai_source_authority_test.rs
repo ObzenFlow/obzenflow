@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-128b T1/T5 source authority and contraction guard.
+//! AI source authority and contraction guard: the members that run AI roles
+//! reach a model only through their effect, and the retired standalone
+//! surfaces stay absent.
 
 use std::path::{Path, PathBuf};
 
@@ -24,23 +26,22 @@ fn rust_sources_beneath(directory: &Path, sources: &mut Vec<PathBuf>) {
     }
 }
 
-fn guarded_standalone_sources() -> Vec<PathBuf> {
-    let ai = root().join("crates/obzenflow_adapters/src/ai");
+fn guarded_role_sources() -> Vec<PathBuf> {
     let mut sources = Vec::new();
-    rust_sources_beneath(&ai.join("transforms"), &mut sources);
-    rust_sources_beneath(&ai.join("builders"), &mut sources);
-    sources.push(ai.join("builders.rs"));
+    rust_sources_beneath(&root().join("crates/obzenflow_runtime/src/ai"), &mut sources);
+    sources.push(root().join("crates/obzenflow_adapters/src/ai/shapes.rs"));
+    sources.push(root().join("crates/obzenflow_dsl/src/dsl/ai_stage.rs"));
     sources.sort();
     sources
 }
 
 #[test]
-fn standalone_handlers_and_builders_have_no_direct_provider_call_authority() {
+fn ai_role_members_and_builders_have_no_direct_provider_call_authority() {
     let root = root();
-    let guarded = guarded_standalone_sources();
+    let guarded = guarded_role_sources();
     assert!(
-        guarded.len() >= 4,
-        "the recursive guard must cover builders.rs and the complete transform module"
+        guarded.len() >= 9,
+        "the guard must cover every runtime AI module, the builders and the lowering"
     );
     for path in guarded {
         let relative = path.strip_prefix(&root).unwrap().display();
@@ -50,31 +51,41 @@ fn standalone_handlers_and_builders_have_no_direct_provider_call_authority() {
             ".embed(",
             "Arc<dyn ChatClient>",
             "Arc<dyn EmbeddingClient>",
+            ".connect(",
         ] {
             assert!(
                 !source.contains(forbidden),
                 "{relative} regained direct provider authority through {forbidden}"
             );
         }
-        if source.contains("EffectfulTransformHandler for") {
-            assert!(
-                source.contains(".chat_completion(") || source.contains(".generate_embedding("),
-                "standalone handler {relative} must use its domain-named effect operation"
-            );
-            assert!(
-                !source.contains(".perform("),
-                "standalone handler {relative} must not reconstruct a raw effect invocation"
-            );
-        }
     }
+    let handlers =
+        std::fs::read_to_string(root.join("crates/obzenflow_runtime/src/ai/handlers.rs")).unwrap();
+    assert!(
+        handlers.contains("fx.perform::<E, At, SubsetProofEnd>(effect)"),
+        "generated AI members perform their call through the effect runtime"
+    );
 }
 
 #[test]
-fn retired_builder_implementation_and_public_exports_stay_absent() {
-    assert!(!root()
-        .join("crates/obzenflow_infra/src/ai/rig_builder.rs")
-        .exists());
-    let facade = std::fs::read_to_string(root().join("src/ai.rs")).unwrap();
+fn retired_standalone_surfaces_stay_absent() {
+    let root = root();
+    for retired in [
+        "crates/obzenflow_adapters/src/ai/transforms",
+        "crates/obzenflow_adapters/src/ai/builders.rs",
+        "crates/obzenflow_adapters/src/ai/operations.rs",
+        "crates/obzenflow_infra/src/ai/rig_builder.rs",
+        "crates/obzenflow_infra/src/ai/chat_effect_binding.rs",
+        "crates/obzenflow_infra/src/ai/embedding_effect_binding.rs",
+        "crates/obzenflow_infra/src/ai/model_config.rs",
+        "crates/obzenflow_dsl/src/dsl/inference.rs",
+        "crates/obzenflow_dsl/src/dsl/ai_effect.rs",
+        "crates/obzenflow_dsl/src/dsl/composites/ai_map_reduce.rs",
+        "crates/obzenflow_runtime/src/stages/common/handlers/inference.rs",
+    ] {
+        assert!(!root.join(retired).exists(), "{retired} returned");
+    }
+    let facade = std::fs::read_to_string(root.join("src/ai.rs")).unwrap();
     for retired in [
         "ChatRequestTemplate",
         "ChatTransformBuilderWithContext",
@@ -82,12 +93,28 @@ fn retired_builder_implementation_and_public_exports_stay_absent() {
         "EmbeddingTransformExt",
         "ModelChatBuilder",
         "ModelChatBuilderWithContext",
+        "ChatTransform",
+        "EmbeddingTransform",
+        "ChatEffects",
+        "EmbeddingEffects",
+        "ChatEffectBinding",
+        "EmbeddingEffectBinding",
+        "ModelConfig",
+        "InferenceHandler",
+        "AiMapRole",
+        "AiFinalizeRole",
+        "AiRoleLogicFailure",
+        "ChunkInfo",
+        "Many",
     ] {
         assert!(
             !facade.contains(retired),
             "retired public identifier {retired} was re-exported"
         );
     }
+    let middleware = std::fs::read_to_string(root.join("src/middleware.rs")).unwrap();
+    assert!(!middleware.contains("pub use obzenflow_adapters::middleware::control::{ai_resilience"));
+    assert!(!middleware.contains("AiResilience"));
 }
 
 #[test]

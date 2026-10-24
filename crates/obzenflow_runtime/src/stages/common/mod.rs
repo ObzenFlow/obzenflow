@@ -22,7 +22,7 @@ pub use heartbeat::LivenessSnapshots;
 // Re-export handler traits for convenience
 pub use handlers::{
     prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource,
-    HostedSubmission, InferenceHandler, IngressDecodeError, IngressDecoder, IngressReceiptSender,
+    HostedSubmission, IngressDecodeError, IngressDecoder, IngressReceiptSender,
     IngressRecord, InlineSink, ObserverHandler, ResourceManaged, SinkConnector, SinkDescription,
     SinkWriter, SinkWriterInitContext, SourceObservationSink, StatefulEmission, TransformHandler,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,

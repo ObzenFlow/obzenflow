@@ -188,8 +188,7 @@
 //! let _ = sink!(Out => Typed.idempotent());
 //! ```
 
-#[doc(hidden)]
-pub mod ai_effect;
+pub mod ai_stage;
 mod attachment_plan;
 mod backpressure_edges;
 mod binder;
@@ -206,8 +205,6 @@ pub mod error;
 #[doc(hidden)]
 pub mod flow_builder;
 mod flow_definition;
-#[doc(hidden)]
-pub mod inference;
 mod resume_edges;
 pub mod stage_descriptor;
 mod stage_macros;

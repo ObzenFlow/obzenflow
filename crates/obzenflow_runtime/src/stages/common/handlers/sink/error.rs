@@ -209,7 +209,6 @@ impl TryFrom<HandlerError> for SinkOperationError {
             HandlerError::Domain(detail) => Ok(Self::domain(detail)),
             HandlerError::Other(detail) => Ok(Self::other(detail)),
             HandlerError::Fatal(_)
-            | HandlerError::AiMapReducePlanning(_)
             | HandlerError::ContractViolation(_)
             | HandlerError::SinkOperation(_)
             | HandlerError::SinkWrite(_) => Err(SinkOperationErrorConversionError),

@@ -16,7 +16,7 @@ use obzenflow_core::config::{
 };
 use obzenflow_core::event::EffectType;
 use obzenflow_core::StageKey;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Where a knob is being resolved. Points are generated from the knob's
 /// target: Global-target knobs resolve at `Global`, Stage-target knobs once
@@ -280,6 +280,40 @@ pub fn materialize_flow_config(
     // runtime policy registry or state authority.
     let effect_consumers = ctx.dsl.effect_consumers();
     let stage_consumers = ctx.dsl.stage_consumers();
+    let owners = ctx.dsl.stage_owners();
+    let owner_of = |stage: &StageKey| owners.get(stage).cloned().unwrap_or_else(|| stage.clone());
+
+    let config_stages: BTreeSet<StageKey> = ctx.stages.iter().map(owner_of).collect();
+    let config_edges: BTreeSet<(StageKey, StageKey)> = ctx
+        .edges
+        .iter()
+        .map(|(up, down)| (owner_of(up), owner_of(down)))
+        .filter(|(up, down)| up != down || !owners.values().any(|owner| owner == up))
+        .collect();
+    let mut owner_effects: BTreeMap<StageKey, BTreeSet<EffectType>> = BTreeMap::new();
+    for (stage, effects) in &ctx.declared_effects {
+        owner_effects
+            .entry(owner_of(stage))
+            .or_default()
+            .extend(effects.iter().cloned());
+    }
+    let owner_stage_consumers: BTreeMap<&str, BTreeSet<StageKey>> = stage_consumers
+        .iter()
+        .map(|(key, stages)| (key.as_str(), stages.iter().map(owner_of).collect()))
+        .collect();
+    let owner_effect_consumers: BTreeMap<&str, BTreeSet<(StageKey, EffectType)>> =
+        effect_consumers
+            .iter()
+            .map(|(key, points)| {
+                (
+                    key.as_str(),
+                    points
+                        .iter()
+                        .map(|(stage, effect)| (owner_of(stage), effect.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
 
     let mut working = snapshot.candidates().clone();
     for candidate in ctx.dsl.entries() {
@@ -291,18 +325,41 @@ pub fn materialize_flow_config(
         for address in working.addresses_for(spec.key_path) {
             match &address.scope {
                 ConfigScope::Stage { stage } => {
-                    if !ctx.stages.contains(stage) {
+                    if let Some(owner) = owners.get(stage) {
+                        return Err(ConfigResolveError::GeneratedMember {
+                            table: super::schema::stage_table(spec, stage.as_str()),
+                            owner: owner.as_str().to_string(),
+                        });
+                    }
+                    if spec.key_path.starts_with("ai.")
+                        && !owner_effect_consumers
+                            .get(spec.key_path)
+                            .is_some_and(|points| points.iter().any(|(owner, _)| owner == stage))
+                    {
+                        return Err(ConfigResolveError::NoAiStage {
+                            table: super::schema::stage_table(spec, stage.as_str()),
+                        });
+                    }
+                    if !config_stages.contains(stage) {
                         return Err(ConfigResolveError::UnknownStage {
                             key_path: spec.key_path.to_string(),
                             stage: stage.as_str().to_string(),
-                            known: ctx.stages.iter().map(|s| s.as_str().to_string()).collect(),
+                            known: config_stages
+                                .iter()
+                                .map(|s| s.as_str().to_string())
+                                .collect(),
                         });
                     }
                     if matches!(spec.target, KnobTarget::StageConsumer)
-                        && !stage_consumers
+                        && !owner_stage_consumers
                             .get(spec.key_path)
                             .is_some_and(|consumers| consumers.contains(stage))
                     {
+                        if spec.key_path == super::ai::MAX_OPEN_KEYS_KEY {
+                            return Err(ConfigResolveError::UnkeyedAiStage {
+                                stage: stage.as_str().to_string(),
+                            });
+                        }
                         return Err(ConfigResolveError::UnattachedStageConsumer {
                             key_path: spec.key_path.to_string(),
                             stage: stage.as_str().to_string(),
@@ -312,7 +369,7 @@ pub fn materialize_flow_config(
                     // knob binds upstream, so an entry on a stage with no
                     // outgoing edges governs nothing.
                     if matches!(spec.target, KnobTarget::Edge { .. })
-                        && !ctx.edges.iter().any(|(up, _)| up == stage)
+                        && !config_edges.iter().any(|(up, _)| up == stage)
                     {
                         warnings.push(format!(
                             "config warning at {}: stage-scoped entry on '{}' has no effect; \
@@ -328,13 +385,21 @@ pub fn materialize_flow_config(
                     upstream,
                     downstream,
                 } => {
-                    if !ctx.edges.contains(&(upstream.clone(), downstream.clone())) {
+                    if let Some((member, owner)) = [upstream, downstream]
+                        .into_iter()
+                        .find_map(|stage| owners.get(stage).map(|owner| (stage, owner)))
+                    {
+                        return Err(ConfigResolveError::GeneratedMember {
+                            table: super::schema::stage_table(spec, member.as_str()),
+                            owner: owner.as_str().to_string(),
+                        });
+                    }
+                    if !config_edges.contains(&(upstream.clone(), downstream.clone())) {
                         return Err(ConfigResolveError::UnknownEdge {
                             key_path: spec.key_path.to_string(),
                             upstream: upstream.as_str().to_string(),
                             downstream: downstream.as_str().to_string(),
-                            known: ctx
-                                .edges
+                            known: config_edges
                                 .iter()
                                 .map(|(up, down)| format!("{}|>{}", up.as_str(), down.as_str()))
                                 .collect(),
@@ -348,15 +413,13 @@ pub fn materialize_flow_config(
                 let ConfigScope::Stage { stage } = &address.scope else {
                     unreachable!("candidate admission restricts exact effect subjects to stages")
                 };
-                let known: Vec<String> = ctx
-                    .declared_effects
+                let known: Vec<String> = owner_effects
                     .get(stage)
                     .into_iter()
                     .flat_map(|effects| effects.iter())
                     .map(|effect| effect.as_str().to_string())
                     .collect();
-                if !ctx
-                    .declared_effects
+                if !owner_effects
                     .get(stage)
                     .is_some_and(|effects| effects.contains(effect_type))
                 {
@@ -367,7 +430,7 @@ pub fn materialize_flow_config(
                         known,
                     });
                 }
-                if !effect_consumers
+                if !owner_effect_consumers
                     .get(spec.key_path)
                     .is_some_and(|points| points.contains(&(stage.clone(), effect_type.clone())))
                 {
@@ -442,7 +505,22 @@ pub fn materialize_flow_config(
                 .collect(),
         };
         for point in points {
-            if let Some(resolved) = resolve_at(spec, &point, &working)? {
+            let config_point = match &point {
+                ResolutionPoint::Stage(stage) => ResolutionPoint::Stage(owner_of(stage)),
+                ResolutionPoint::Effect { stage, effect_type } => ResolutionPoint::Effect {
+                    stage: owner_of(stage),
+                    effect_type: effect_type.clone(),
+                },
+                ResolutionPoint::Edge {
+                    upstream,
+                    downstream,
+                } => ResolutionPoint::Edge {
+                    upstream: owner_of(upstream),
+                    downstream: owner_of(downstream),
+                },
+                ResolutionPoint::Global | ResolutionPoint::Flow => point.clone(),
+            };
+            if let Some(resolved) = resolve_at(spec, &config_point, &working)? {
                 values
                     .entry(spec.key_path.to_string())
                     .or_default()

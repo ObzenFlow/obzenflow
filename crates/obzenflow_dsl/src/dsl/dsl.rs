@@ -140,6 +140,7 @@ macro_rules! flow {
                 let mut connections = Vec::new();
                 $crate::parse_topology!(connections, $($edge)*);
 
+                let members = $crate::dsl::ai_stage::lower_ai_members(members, &__build_ctx)?;
                 let lowered =
                     $crate::dsl::composites::lower_composites(members, connections)?;
 
@@ -311,6 +312,7 @@ macro_rules! test_flow {
             let mut connections = Vec::new();
             $crate::parse_topology!(connections, $($edge)*);
 
+            let members = $crate::dsl::ai_stage::lower_ai_members(members, &__build_ctx)?;
             let lowered =
                 $crate::dsl::composites::lower_composites(members, connections)?;
 

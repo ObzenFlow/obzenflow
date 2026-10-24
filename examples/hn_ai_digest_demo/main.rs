@@ -4,17 +4,12 @@
 
 //! HN AI Digest Demo — showcases Rig-backed LLM transforms.
 //!
-//! Pipeline (batch + map-reduce):
-//! `HttpPullSource` → format stories → accumulate into one batch → `ai_map_reduce!` digest → configured sink
+//! Pipeline (map-reduce):
+//! `HttpPullSource` → format stories → `ai!` digest → configured sink
 //!
-//! The `digest` stage is a single `ai_map_reduce!`: a `by_budget` chunking policy splits the batch
-//! into token-budgeted chunks, the `map` arm summarizes each chunk with one LLM call, and the
-//! `reduce` arm folds the chunk summaries into the final digest with one more LLM call.
-//!
-//! Oversize handling: if a single item is larger than the whole per-group budget, the chunker's
-//! `oversize: decompose { max_depth, exhaustion }` policy re-renders it at increasing decomposition
-//! depths. On exhaustion it either fails the plan or drops and records the item; it never silently
-//! truncates. For HN headlines this never fires in practice.
+//! The `digest` stage is one map-reduce `ai!` stage: each group of at most
+//! `group_max_stories` stories gets one LLM call from the map role, and at the end of input
+//! the reduce role folds the group summaries into the final digest with one more call.
 //!
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!
@@ -50,14 +45,12 @@
 //!   local connection settings with `cargo xtask postgres connection`, then run PostgreSQL output with
 //!   `cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.postgres.toml`.
 //!
-//! AI target configuration:
-//! - `[ai.models]` in the selected TOML file supplies provider, model, optional endpoint, and
-//!   the credential-reference name.
-//! - Local binding shape is validated during flow build. Secret lookup and unchecked client
-//!   construction are deferred until the first executable live effect; no provider/model
-//!   preflight occurs.
-//! - Strict replay resolves the same non-secret target but reads no secret and constructs no
-//!   client.
+//! AI model configuration:
+//! - `[ai.models]` in the selected TOML file picks the endpoint and model; another endpoint
+//!   is defined once under `[ai.endpoints.<name>]` with its provider, URL and credential name.
+//! - The endpoint and model are checked during flow build. Secret lookup and client
+//!   construction wait for the first live call; no provider or model preflight occurs.
+//! - Strict replay uses the model the run recorded, reads no secret and constructs no client.
 
 mod config;
 mod decoder;

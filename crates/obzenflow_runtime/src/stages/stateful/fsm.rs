@@ -404,7 +404,9 @@ pub enum StatefulAction<H> {
         drain_requested: bool,
     },
     ForwardTerminal,
-    ProduceFinalOutput,
+    ProduceFinalOutput {
+        drain_requested: bool,
+    },
     DrainFinalOutput,
     Host(crate::supervised_base::handler_supervised::SupervisorAction<StatefulEvent<H>>),
     /// Allocate resources (writer ID, subscriptions)
@@ -448,7 +450,9 @@ impl<H> Clone for StatefulAction<H> {
                 drain_requested: *drain_requested,
             },
             Self::ForwardTerminal => Self::ForwardTerminal,
-            Self::ProduceFinalOutput => Self::ProduceFinalOutput,
+            Self::ProduceFinalOutput { drain_requested } => Self::ProduceFinalOutput {
+                drain_requested: *drain_requested,
+            },
             Self::DrainFinalOutput => Self::DrainFinalOutput,
             Self::Host(action) => Self::Host(action.clone()),
 
@@ -476,7 +480,10 @@ impl<H> std::fmt::Debug for StatefulAction<H> {
                 .field("drain_requested", drain_requested)
                 .finish(),
             Self::ForwardTerminal => f.write_str("ForwardTerminal"),
-            Self::ProduceFinalOutput => f.write_str("ProduceFinalOutput"),
+            Self::ProduceFinalOutput { drain_requested } => f
+                .debug_struct("ProduceFinalOutput")
+                .field("drain_requested", drain_requested)
+                .finish(),
             Self::DrainFinalOutput => f.write_str("DrainFinalOutput"),
             Self::Host(action) => action.fmt(f),
 
@@ -704,7 +711,7 @@ impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> StatefulAction<H
         match self {
             StatefulAction::ValidateTerminal { .. }
             | StatefulAction::ForwardTerminal
-            | StatefulAction::ProduceFinalOutput
+            | StatefulAction::ProduceFinalOutput { .. }
             | StatefulAction::DrainFinalOutput
             | StatefulAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
                 "host action requires the supervised runner".into(),

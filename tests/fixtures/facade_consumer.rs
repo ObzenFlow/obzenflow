@@ -382,94 +382,73 @@ fn renamed_facade_macros_and_constructors_compile() {
 }
 
 use self::of::ai::{
-    AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatCompletion, ChatCompletionReply,
-    ChatMessage, ChatParams, ChatRequestSpec, ChunkInfo, InferenceHandler, Many, TokenCount,
+    AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Partials,
 };
 
 fn request() -> ChatRequestSpec {
-    ChatRequestSpec {
-        messages: vec![ChatMessage::user("Return a number.")],
-        params: ChatParams::default(),
-        tools: Vec::new(),
-        response_format: None,
-    }
+    ChatRequestSpec::new("Return numbers only.", "Return a number.")
 }
 
-impl InferenceHandler for Pure {
-    type Input = Fact;
-    type Output = Fact;
+impl AiRole<Fact> for Pure {
+    type Effect = ChatCompletion;
+    type Out = Fact;
+
     fn prepare(&self, _input: &Fact) -> Result<ChatRequestSpec, HandlerError> {
         Ok(request())
     }
+
     fn interpret(
         &self,
         input: Fact,
-        _request: ChatRequestSpec,
-        _reply: ChatCompletionReply,
+        outcome: AiOutcome<ChatCompletionReply>,
     ) -> Result<Fact, HandlerError> {
+        outcome.replied()?;
         Ok(input)
     }
 }
 
-impl AiMapRole<u64, Fact> for Pure {
-    fn prepare(
-        &self,
-        _items: &[u64],
-        _chunk: &ChunkInfo,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+impl AiRole<Chunk<Fact>> for Pure {
+    type Effect = ChatCompletion;
+    type Out = Fact;
+
+    fn prepare(&self, _chunk: &Chunk<Fact>) -> Result<ChatRequestSpec, HandlerError> {
         Ok(request())
     }
+
     fn interpret(
         &self,
-        items: Vec<u64>,
-        _chunk: ChunkInfo,
-        _request: ChatRequestSpec,
-        _reply: ChatCompletionReply,
-    ) -> Result<Fact, AiRoleLogicFailure> {
-        Ok(Fact(items.into_iter().sum()))
+        chunk: Chunk<Fact>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<Fact, HandlerError> {
+        outcome.replied()?;
+        Ok(Fact(chunk.iter().map(|fact| fact.0).sum()))
     }
 }
 
-impl AiFinalizeRole<Fact, Many<Fact>, Fact> for Pure {
-    fn prepare(
-        &self,
-        _seed: &Fact,
-        _collected: &Many<Fact>,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+impl AiRole<Partials<Fact, Fact>> for Pure {
+    type Effect = ChatCompletion;
+    type Out = Fact;
+
+    fn prepare(&self, _input: &Partials<Fact, Fact>) -> Result<ChatRequestSpec, HandlerError> {
         Ok(request())
     }
+
     fn interpret(
         &self,
-        seed: Fact,
-        _collected: Many<Fact>,
-        _request: ChatRequestSpec,
-        _reply: ChatCompletionReply,
-    ) -> Result<Fact, AiRoleLogicFailure> {
-        Ok(seed)
+        input: Partials<Fact, Fact>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<Fact, HandlerError> {
+        outcome.replied()?;
+        Ok(Fact(input.partials().iter().map(|fact| fact.0).sum()))
     }
 }
 
-fn ai_stages(chat: of::effects::EffectBinding<ChatCompletion>) {
-    let handler = Pure;
-    let _ = of::flow::inference!(
-        Fact -> Fact uses at_least_once(ChatCompletion)
-            via chat with of::middleware::ai_resilience() => handler
-    );
-    let map_role = Pure;
-    let finalize_role = Pure;
-    let _ = of::flow::ai_map_reduce!(
-        Fact -> Fact => {
-            map: [u64] -> Fact uses at_least_once(ChatCompletion)
-                via chat with of::middleware::ai_resilience() => map_role,
-            reduce: (Fact, [Fact]) -> Fact uses at_least_once(ChatCompletion)
-                via chat with of::middleware::ai_resilience() => finalize_role,
-        },
-        chunking: by_budget {
-            items: |seed: &Fact| vec![seed.0],
-            render: |item: &u64, _ctx| item.to_string(),
-            budget: TokenCount::new(100),
-            max_items: Some(1),
-            oversize: error,
-        }
-    );
+fn ai_stages() {
+    let breaker = of::middleware::circuit_breaker().consecutive_failures(5);
+    let infer = of::ai::infer(Pure);
+    let _ = ai!(Fact -> Fact with breaker => infer);
+    let tag = of::ai::map(Pure).chunks(1);
+    let _ = ai!(Fact -> Fact => tag);
+    let digest = of::ai::map(Pure).chunks(1).reduce(Pure).on_eof();
+    let _ = ai!(Fact -> Fact => digest);
 }

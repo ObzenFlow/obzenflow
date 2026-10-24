@@ -54,6 +54,8 @@ fn write_manifest(dir: &Path) {
                 .to_string(),
             inbound: Vec::new(),
             delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
+            ai_models: Vec::new(),
+            max_open_keys: None,
         },
     );
 

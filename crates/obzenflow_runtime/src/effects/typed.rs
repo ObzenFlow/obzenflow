@@ -5,8 +5,8 @@
 //! Compiler-checked effectful stage authoring facade (FLOWIP-120z).
 
 use super::{
-    assert_distinct_effect_set, Call, CallRequest, Effect, EffectBindingUse, EffectError,
-    EffectInvocationContext, EffectSet, EffectsCore, NamedEffect, StageCompletion,
+    assert_distinct_effect_set, Call, CallRequest, ConfiguredEffect, Effect, EffectBindingUse,
+    EffectError, EffectInvocationContext, EffectSet, EffectsCore, NamedEffect, StageCompletion,
 };
 use obzenflow_core::{
     assert_distinct_stage_fact_set, ChainEvent, Member, StageFactSet, SubsetOf, TypedPayload,
@@ -122,12 +122,33 @@ where
         self.core.project_named_effect::<E>()
     }
 
+    /// The configured binding this stage declared for `E`.
+    #[doc(hidden)]
+    pub fn project_configured_effect<E, At>(
+        &mut self,
+    ) -> Result<EffectBindingUse<E>, EffectError>
+    where
+        E: ConfiguredEffect + AllowedEffectsAllowEffect<AllowedEffects, At>,
+    {
+        self.core.project_configured_effect::<E>()
+    }
+
     /// Author one flat output fact declared by `Output`.
     pub async fn emit<T, At>(&mut self, fact: T) -> Result<(), EffectError>
     where
         T: TypedPayload + OutputAllowsFact<Output, At>,
     {
         self.core.emit(fact).await
+    }
+
+    pub(crate) async fn emit_carrier<C>(&mut self, carrier: C) -> Result<(), EffectError>
+    where
+        C: obzenflow_core::event::schema::TypedFactSet,
+    {
+        let facts = carrier
+            .into_facts()
+            .map_err(|error| EffectError::Serialization(error.to_string()))?;
+        self.core.emit_typed_facts(facts).await
     }
 
     /// Runtime-owned integration SPI that performs one declared first-party

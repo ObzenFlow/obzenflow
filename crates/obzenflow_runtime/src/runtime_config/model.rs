@@ -7,13 +7,13 @@
 //! surface as `Arc` handles. Rebuild-and-swap is the only mutation model
 //! (§7 snapshot lock); nothing here mutates in place.
 
+use super::ai::AiEndpointTables;
 use super::app::AppTable;
 use super::candidates::{CandidateSet, ConfigValue};
 use super::error::ConfigResolveError;
 use super::schema::{knob, knob_registry, KnobDefault, KnobSpec, Redaction};
 use obzenflow_core::config::{
     ConfigScope, ConfigSource, ConfigSubject, ConfigValueMeta, ResolvedForDoc, ResolvedValueDoc,
-    SecretRef,
 };
 
 /// A resolved value with both provenance axes.
@@ -58,6 +58,7 @@ pub struct ResolvedRuntimeConfig {
     candidates: CandidateSet,
     overlay: RuntimeConfigOverlay,
     app: AppTable,
+    ai_endpoints: AiEndpointTables,
 }
 
 impl ResolvedRuntimeConfig {
@@ -66,7 +67,18 @@ impl ResolvedRuntimeConfig {
             candidates,
             overlay: RuntimeConfigOverlay::default(),
             app: AppTable::default(),
+            ai_endpoints: AiEndpointTables::default(),
         }
+    }
+
+    /// Carry the configuration's `[ai.endpoints]` tables.
+    pub fn with_ai_endpoints(mut self, ai_endpoints: AiEndpointTables) -> Self {
+        self.ai_endpoints = ai_endpoints;
+        self
+    }
+
+    pub fn ai_endpoints(&self) -> &AiEndpointTables {
+        &self.ai_endpoints
     }
 
     /// Carry the config file's `[app]` table.
@@ -175,46 +187,26 @@ impl ResolvedRuntimeConfig {
             .collect()
     }
 
-    /// Typed `ai.models` section (global-target knobs, so the view rung is
-    /// final for them).
-    pub fn ai_models(&self) -> AiModelsConfig {
-        let text = |key: &str| {
-            self.resolve_view(key)
-                .expect("registry key")
-                .map(|resolved| Resolved {
-                    value: resolved
-                        .value
-                        .as_text()
-                        .expect("token/text knob resolves text")
-                        .to_string(),
-                    meta: resolved.meta,
-                })
-        };
-        AiModelsConfig {
-            provider: text("ai.models.provider").expect("provider has a built-in default"),
-            model: text("ai.models.model"),
-            base_url: text("ai.models.base_url"),
-            api_key_env: {
-                let resolved =
-                    text("ai.models.api_key_env").expect("api_key_env has a built-in default");
-                Resolved {
-                    value: SecretRef::new(resolved.value)
-                        .expect("api_key_env admits only environment-variable names"),
-                    meta: resolved.meta,
-                }
+    /// Resolve one registered knob at one declared effect of a named stage
+    /// before the complete per-flow effective view exists.
+    pub fn resolve_effect_value(
+        &self,
+        key_path: &str,
+        stage: impl Into<obzenflow_core::StageKey>,
+        effect_type: impl Into<obzenflow_core::event::EffectType>,
+    ) -> Result<Option<Resolved<ConfigValue>>, ConfigResolveError> {
+        let spec = knob(key_path).ok_or_else(|| ConfigResolveError::UnknownKnob {
+            key_path: key_path.to_string(),
+        })?;
+        super::resolve::resolve_at(
+            spec,
+            &super::resolve::ResolutionPoint::Effect {
+                stage: stage.into(),
+                effect_type: effect_type.into(),
             },
-        }
+            &self.candidates,
+        )
     }
-}
-
-/// Typed `[ai.models]` view (FLOWIP-010 absorption of `ModelConfig`'s env
-/// surface). `api_key_env` is the visible secret REFERENCE (§13).
-#[derive(Debug, Clone, PartialEq)]
-pub struct AiModelsConfig {
-    pub provider: Resolved<String>,
-    pub model: Option<Resolved<String>>,
-    pub base_url: Option<Resolved<String>>,
-    pub api_key_env: Resolved<SecretRef>,
 }
 
 /// Evidence/DTO rendering with schema-driven redaction (§13: resolved
@@ -331,21 +323,29 @@ mod tests {
     }
 
     #[test]
-    fn ai_models_typed_view_carries_provenance_and_the_visible_reference() {
+    fn an_ai_model_resolves_at_an_effect_point_with_provenance() {
         let mut set = CandidateSet::default();
         set.admit(ScopedCandidate::unqualified(
-            "ai.models.provider",
-            ConfigScope::Global,
+            "ai.models.model",
+            ConfigScope::stage("digest"),
             ConfigSource::File,
-            ConfigValue::Text("openai".to_string()),
+            ConfigValue::Text("llama3.1:70b".to_string()),
         ))
         .unwrap();
         let snapshot = ResolvedRuntimeConfig::new(set);
-        let ai = snapshot.ai_models();
-        assert_eq!(ai.provider.value, "openai");
-        assert_eq!(ai.provider.meta.source, ConfigSource::File);
-        assert_eq!(ai.api_key_env.value.env_name(), "OPENAI_API_KEY");
-        assert_eq!(ai.api_key_env.meta.source, ConfigSource::Default);
+        let model = snapshot
+            .resolve_effect_value("ai.models.model", "digest", "obzenflow.ai.chat_completion")
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.value, ConfigValue::Text("llama3.1:70b".to_string()));
+        assert_eq!(model.meta.source, ConfigSource::File);
+        assert_eq!(model.meta.scope, ConfigScope::stage("digest"));
+        let endpoint = snapshot
+            .resolve_effect_value("ai.models.endpoint", "digest", "obzenflow.ai.chat_completion")
+            .unwrap()
+            .unwrap();
+        assert_eq!(endpoint.value, ConfigValue::Text("ollama".to_string()));
+        assert_eq!(endpoint.meta.source, ConfigSource::Default);
     }
 
     #[test]

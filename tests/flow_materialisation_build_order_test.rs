@@ -6,62 +6,62 @@
 
 #![cfg(feature = "ai")]
 
+use obzenflow::ai::{self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec};
 use obzenflow::stages::sinks;
 use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
-use obzenflow_infra::ai::ChatEffectBinding;
+use obzenflow_dsl::{ai, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::bootstrap_config;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const GENERIC_FAILURE_SENTINEL: &str = "FLOWIP-133b materializer sentinel";
 const UNSET_SECRET_ENV: &str = "FLOWIP_133B_BUILD_ORDER_MUST_NOT_RESOLVE_THIS_SECRET";
 
 #[derive(Clone, Copy, Debug)]
 enum FailureKind {
     MissingModel,
-    InvalidEndpoint,
-    GenericAfterRegistration,
+    UnknownEndpoint,
+    FailureAfterBinding,
 }
 
 impl FailureKind {
     fn slug(self) -> &'static str {
         match self {
             Self::MissingModel => "missing-model",
-            Self::InvalidEndpoint => "invalid-endpoint",
-            Self::GenericAfterRegistration => "generic-after-registration",
+            Self::UnknownEndpoint => "unknown-endpoint",
+            Self::FailureAfterBinding => "failure-after-binding",
         }
     }
 
-    fn ai_config(self) -> &'static str {
+    fn ai_config(self) -> String {
         match self {
-            Self::MissingModel => r#"provider = "ollama""#,
-            Self::InvalidEndpoint => {
-                r#"provider = "openai_compatible"
-model = "fixture-model"
-base_url = "not a valid URL""#
+            Self::MissingModel => "[ai.models]\nendpoint = \"ollama\"\n".to_string(),
+            Self::UnknownEndpoint => {
+                "[ai.models]\nendpoint = \"grok\"\nmodel = \"fixture-model\"\n".to_string()
             }
-            Self::GenericAfterRegistration => {
-                r#"provider = "openai"
-model = "fixture-model"
-api_key_env = "FLOWIP_133B_BUILD_ORDER_MUST_NOT_RESOLVE_THIS_SECRET""#
-            }
+            Self::FailureAfterBinding => format!(
+                "[ai.endpoints.compat]\nprovider = \"openai_compatible\"\n\
+                 base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"{UNSET_SECRET_ENV}\"\n\n\
+                 [ai.models]\nendpoint = \"compat\"\nmodel = \"fixture-model\"\n"
+            ),
         }
     }
 
     fn expected_error(self) -> &'static str {
         match self {
             Self::MissingModel => {
-                "ai.models.model is required for the single-target ChatEffectBinding"
+                "stage `brief`: no model configured for obzenflow.ai.chat_completion; set ai.models.model, or model under [ai.models.stages.brief]"
             }
-            Self::InvalidEndpoint => "invalid ai.models.base_url",
-            Self::GenericAfterRegistration => GENERIC_FAILURE_SENTINEL,
+            Self::UnknownEndpoint => {
+                "config: stage `brief` names endpoint `grok`, which is not defined"
+            }
+            Self::FailureAfterBinding => "topology references unknown binding 'unbound'",
         }
     }
 }
@@ -73,48 +73,76 @@ impl TypedPayload for ProbeEvent {
     const EVENT_TYPE: &'static str = "test.flowip_133b.build_order.probe";
 }
 
+#[derive(Clone, Copy)]
+struct Echo;
+
+impl AiRole<ProbeEvent> for Echo {
+    type Effect = ChatCompletion;
+    type Out = ProbeEvent;
+
+    fn prepare(&self, _input: &ProbeEvent) -> Result<ChatRequestSpec, HandlerError> {
+        Ok(ChatRequestSpec::new("Echo.", "probe"))
+    }
+
+    fn interpret(
+        &self,
+        input: ProbeEvent,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<ProbeEvent, HandlerError> {
+        outcome.replied()?;
+        Ok(input)
+    }
+}
+
 fn materialised_failure_probe(
     kind: FailureKind,
     marker: u64,
     journal_base: PathBuf,
     factory_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    FlowDefinition::materialize(move |runtime_config| {
+    FlowDefinition::materialize(move |_runtime_config| {
         factory_calls.fetch_add(1, Ordering::SeqCst);
 
         // The host bootstrap must already be installed when materialisation starts.
         let bootstrap = bootstrap_config();
         assert_eq!(bootstrap.shutdown_timeout, Duration::from_secs(marker));
 
-        let _chat =
-            ChatEffectBinding::from_config(&runtime_config.ai_models()).map_err(|error| {
-                FlowBuildError::BindingConfiguration {
-                    binding: "chat".to_string(),
-                    detail: error.to_string(),
-                }
-            })?;
-
-        if matches!(kind, FailureKind::GenericAfterRegistration) {
-            // Client resolution is deliberately deferred: reaching this sentinel proves
-            // that neither secret lookup nor client construction ran eagerly.
-            return Err(FlowBuildError::StageResourcesFailed(
-                GENERIC_FAILURE_SENTINEL.to_string(),
-            ));
-        }
-
         let input = sources::ValuesSource::new(Vec::<ProbeEvent>::new());
+        let brief = ai::infer(Echo);
         let output = sinks::ConsoleSink::<ProbeEvent, _>::new(sinks::DebugFormatter);
+
+        if matches!(kind, FailureKind::FailureAfterBinding) {
+            // The AI stage binds before topology validation runs, so reaching
+            // this topology error proves that binding neither resolved the
+            // unset secret nor constructed a client.
+            return Ok(flow! {
+                name: "flowip_133b_build_order_probe",
+                journals: disk_journals(journal_base),
+                stages: {
+                    input = source!(ProbeEvent => input);
+                    brief = ai!(ProbeEvent -> ProbeEvent => brief);
+                    output = sink!(ProbeEvent => output);
+                },
+
+                topology: {
+                    input |> brief;
+                    brief |> unbound;
+                }
+            });
+        }
 
         Ok(flow! {
             name: "flowip_133b_build_order_probe",
             journals: disk_journals(journal_base),
             stages: {
                 input = source!(ProbeEvent => input);
+                brief = ai!(ProbeEvent -> ProbeEvent => brief);
                 output = sink!(ProbeEvent => output);
             },
 
             topology: {
-                input |> output;
+                input |> brief;
+                brief |> output;
             }
         })
     })
@@ -130,9 +158,7 @@ shutdown_timeout_secs = {marker}
 [metrics]
 enabled = false
 
-[ai.models]
-{ai_config}
-"#
+{ai_config}"#
         ),
     )
     .expect("write build-order test config");
@@ -149,8 +175,8 @@ async fn materialisation_runs_after_bootstrap_and_before_run_substrate_creation(
     let tempdir = tempfile::tempdir().expect("build-order tempdir");
     let cases = [
         (FailureKind::MissingModel, 41_u64),
-        (FailureKind::InvalidEndpoint, 42_u64),
-        (FailureKind::GenericAfterRegistration, 43_u64),
+        (FailureKind::UnknownEndpoint, 42_u64),
+        (FailureKind::FailureAfterBinding, 43_u64),
     ];
 
     // Keep the three host runs sequential because bootstrap installation is
@@ -160,7 +186,7 @@ async fn materialisation_runs_after_bootstrap_and_before_run_substrate_creation(
         std::fs::create_dir_all(&case_root).expect("create build-order case directory");
         let config_path = case_root.join("obzenflow.toml");
         let journal_base = case_root.join("journals-must-not-exist");
-        write_config(&config_path, marker, kind.ai_config());
+        write_config(&config_path, marker, &kind.ai_config());
 
         let factory_calls = Arc::new(AtomicUsize::new(0));
         let flow = materialised_failure_probe(

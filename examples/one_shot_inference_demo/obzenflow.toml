@@ -6,5 +6,5 @@ window = 3
 stall_timeout_ms = 30000
 
 [ai.models]
-provider = "ollama"
+endpoint = "ollama"
 model = "llama3.1:8b"

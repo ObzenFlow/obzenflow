@@ -2,28 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! AI-related adapters.
-//!
-//! This module contains runtime-facing handler implementations (transforms),
-//! and error mapping for AI provider calls.
+//! AI effects and the handler values `ai!` stages are built from.
 
-mod builders;
 pub mod effects;
-pub mod error_mapping;
-mod operations;
-pub mod transforms;
+mod error_mapping;
+mod shapes;
 
-pub use builders::{ChatTransformBuilder, EmbeddingTransformBuilder};
 pub use effects::{
     ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, ChatCompletionBuildError,
     EmbeddingBindingEvidence, EmbeddingBindingEvidenceBuildError, EmbeddingGeneration,
     EmbeddingGenerationBuildError, CHAT_CLIENT, EMBEDDING_CLIENT,
 };
-pub use error_mapping::effect_error_to_handler_error;
-pub use operations::{
-    ChatBindingMetadata, ChatEffects, ChatOperationError, EmbeddingBindingMetadata,
-    EmbeddingEffects, EmbeddingOperationError,
+pub use shapes::{
+    infer, map, Chunked, Infer, Keyed, Map, MapReduce, TriggeredMapReduce, Unkeyed,
 };
 #[doc(hidden)]
-pub use transforms::InferenceHandlerAdapter;
-pub use transforms::{ChatTransform, EmbeddingTransform};
+pub use shapes::{AiKeySpec, AiTrigger, InferHasNoKey, KeyByBeforeChunks};

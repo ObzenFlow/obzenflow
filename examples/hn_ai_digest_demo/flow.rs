@@ -8,46 +8,31 @@ use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::Result;
 use obzenflow::ai::{
-    AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
-    ChatRequestSpec, ChatResponse, ChatTarget, Many,
-};
-use obzenflow::ai::{
-    ChatBindingMetadata, ChatCompletion, ChatEffectBinding, ChunkInfo, EstimateSource, Prompt,
-    SystemPrompt, TokenCount, UserPrompt,
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk,
+    EstimateSource, Partials, Prompt, SystemPrompt, UserPrompt,
 };
 use obzenflow::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
-use obzenflow::effects::EffectBinding;
 use obzenflow::error::HandlerError;
 use obzenflow::flow::FlowBuildError;
-use obzenflow::flow::{
-    ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition,
-};
+use obzenflow::flow::{ai, async_source, flow, sink, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::ai_resilience;
 use obzenflow::middleware::{circuit_breaker, rate_limit};
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
 use obzenflow::stages::sinks::SinkRedeliverySafety;
 use obzenflow::stages::sources::{http_pull_config, HttpPullSource};
-use obzenflow::stages::{sinks, stateful, transforms};
+use obzenflow::stages::{sinks, transforms};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, time::Duration};
 
 const HN_SOURCE_BREAKER_FAILURES: u32 = 3;
 const HN_SOURCE_BREAKER_COOLDOWN_SECS: u64 = 2;
+const HN_AI_BREAKER_FAILURES: u32 = 5;
 const HN_DIGEST_TABLE: &str = "hn_digest_summaries";
 const HN_DIGEST_INSERT: &str = "(source_mode, source_identity, ai_provider, ai_model, \
 token_estimator, interests, story_ids, output_markdown) \
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct HnTopStories {
-    stories: Vec<FormattedStory>,
-}
-
-impl TypedPayload for HnTopStories {
-    const EVENT_TYPE: &'static str = "hn.top_stories";
-}
+const SYSTEM_PROMPT: &str = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnDigestGroupSummary {
@@ -66,12 +51,11 @@ struct HnDigestSummary {
     ai_model: String,
     token_estimator: EstimateSource,
     stories_fetched: usize,
-    budget_per_group: TokenCount,
     groups: usize,
     interests: Option<String>,
     chat_prompt_system: SystemPrompt,
     chat_prompt_user: UserPrompt,
-    input: HnTopStories,
+    stories: Vec<FormattedStory>,
     group_summaries: Vec<HnDigestGroupSummary>,
     output_markdown: String,
 }
@@ -92,7 +76,6 @@ impl PostgresBind for HnDigestPostgresBinder {
             EstimateSource::Tokenizer => "tokenizer",
         };
         let story_ids = digest
-            .input
             .stories
             .iter()
             .map(|story| story.id.to_string())
@@ -121,69 +104,100 @@ fn build_digest_postgres_sink(
         .build()?)
 }
 
-struct DigestMapCtx {
+#[derive(Clone)]
+struct HnDigest {
     interests: Option<String>,
+    mode: String,
+    base_url: String,
 }
 
-struct HnMapRole {
-    system_prompt: SystemPrompt,
-    context: DigestMapCtx,
-}
+impl AiRole<Chunk<FormattedStory>> for HnDigest {
+    type Effect = ChatCompletion;
+    type Out = HnDigestGroupSummary;
 
-impl HnMapRole {
-    fn new(system_prompt: SystemPrompt, context: DigestMapCtx) -> Self {
-        Self {
-            system_prompt,
-            context,
-        }
-    }
-}
-
-impl AiMapRole<FormattedStory, HnDigestGroupSummary> for HnMapRole {
-    fn prepare(
-        &self,
-        items: &[FormattedStory],
-        chunk: &ChunkInfo,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        let user_prompt = digest_map_prompt(&self.context, items, chunk).map_err(|error| {
-            AiRoleLogicFailure::Prompt {
-                message: error.to_string(),
-            }
-        })?;
-        Ok(ChatRequestSpec {
-            messages: vec![
-                ChatMessage::system(self.system_prompt.as_str()),
-                ChatMessage::user(user_prompt.as_str()),
-            ],
-            params: ChatParams {
-                temperature: Some(0.2),
-                max_tokens: Some(800),
-                ..ChatParams::default()
-            },
-            tools: Vec::new(),
-            response_format: None,
-        })
+    fn prepare(&self, chunk: &Chunk<FormattedStory>) -> Result<ChatRequestSpec, HandlerError> {
+        let lines = chunk
+            .numbered()
+            .map(|(n, story)| render_story_line(n, story));
+        let user = digest_map_prompt(self.interests.as_deref(), chunk.len(), lines);
+        Ok(ChatRequestSpec::new(SYSTEM_PROMPT, user.as_str())
+            .temperature(0.2)
+            .max_tokens(320))
     }
 
     fn interpret(
         &self,
-        _items: Vec<FormattedStory>,
-        _chunk: ChunkInfo,
-        _request: ChatRequestSpec,
-        reply: ChatCompletionReply,
-    ) -> Result<HnDigestGroupSummary, AiRoleLogicFailure> {
-        digest_map_parse(&self.context, reply.response).map_err(|error| AiRoleLogicFailure::Parse {
-            message: error.to_string(),
+        _chunk: Chunk<FormattedStory>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<HnDigestGroupSummary, HandlerError> {
+        let reply = outcome.replied()?;
+        Ok(HnDigestGroupSummary {
+            output_markdown: strip_accidental_story_echo(reply.text()),
         })
     }
 }
 
+impl AiRole<Partials<FormattedStory, HnDigestGroupSummary>> for HnDigest {
+    type Effect = ChatCompletion;
+    type Out = HnDigestSummary;
+
+    fn prepare(
+        &self,
+        input: &Partials<FormattedStory, HnDigestGroupSummary>,
+    ) -> Result<ChatRequestSpec, HandlerError> {
+        let user = digest_reduce_prompt(self.interests.as_deref(), input.partials());
+        Ok(ChatRequestSpec::new(SYSTEM_PROMPT, user.as_str())
+            .temperature(0.2)
+            .max_tokens(800))
+    }
+
+    fn interpret(
+        &self,
+        input: Partials<FormattedStory, HnDigestGroupSummary>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<HnDigestSummary, HandlerError> {
+        let reply = outcome.replied()?;
+        let markdown = render_digest_links(reply.text(), input.items())?;
+        Ok(self.summary(input, &reply, markdown))
+    }
+}
+
+impl HnDigest {
+    fn summary(
+        &self,
+        input: Partials<FormattedStory, HnDigestGroupSummary>,
+        reply: &ChatCompletionReply,
+        output_markdown: String,
+    ) -> HnDigestSummary {
+        let (stories, group_summaries) = input.into_parts();
+        HnDigestSummary {
+            mode: self.mode.clone(),
+            base_url: self.base_url.clone(),
+            ai_provider: reply.observability.provider.to_string(),
+            ai_model: reply.observability.model.clone(),
+            token_estimator: reply
+                .observability
+                .estimated_input_resolution
+                .as_ref()
+                .map_or(EstimateSource::Heuristic, |resolution| resolution.source),
+            stories_fetched: stories.len(),
+            groups: group_summaries.len(),
+            interests: self.interests.clone(),
+            chat_prompt_system: SYSTEM_PROMPT.into(),
+            chat_prompt_user: UserPrompt::raw(reply.request().user_prompt().unwrap_or_default()),
+            stories,
+            group_summaries,
+            output_markdown,
+        }
+    }
+}
+
 fn digest_map_prompt(
-    ctx: &DigestMapCtx,
-    stories: &[FormattedStory],
-    chunk_info: &ChunkInfo,
-) -> Result<UserPrompt, HandlerError> {
-    let min_citations = stories.len().min(6);
+    interests: Option<&str>,
+    story_count: usize,
+    lines: impl IntoIterator<Item = String>,
+) -> UserPrompt {
+    let min_citations = story_count.min(6);
 
     let rules: Vec<String> = vec![
         "Do not invent facts that are not implied by the titles.".to_string(),
@@ -196,7 +210,7 @@ fn digest_map_prompt(
     ];
 
     let mut p = Prompt::new();
-    p.text_if(ctx.interests.as_deref(), |i| format!("My interests: {i}"))
+    p.text_if(interests, |i| format!("My interests: {i}"))
         .text("Summarise these Hacker News stories (titles + URLs are provided as input).")
         .rules(rules)
         .labeled(
@@ -211,105 +225,15 @@ Notable stories:\n\
 - Title: 1 sentence [^n]\n\
 - Title: 1 sentence [^n]",
         )
-        .fenced_lines(
-            "Input stories (numbered; do not repeat)",
-            chunk_info.iter_rendered(),
-        );
+        .fenced_lines("Input stories (numbered; do not repeat)", lines);
 
-    Ok(p.finish())
-}
-
-fn digest_map_parse(
-    _ctx: &DigestMapCtx,
-    response: ChatResponse,
-) -> Result<HnDigestGroupSummary, HandlerError> {
-    Ok(HnDigestGroupSummary {
-        output_markdown: strip_accidental_story_echo(&response.text),
-    })
-}
-
-struct DigestReduceCtx {
-    interests: Option<String>,
-    mode_label: String,
-    base_url: String,
-    ai_provider: String,
-    ai_model: String,
-    token_estimator: EstimateSource,
-    budget_per_group: TokenCount,
-    chat_prompt_system: SystemPrompt,
-}
-
-struct HnFinalizeRole {
-    context: DigestReduceCtx,
-}
-
-impl HnFinalizeRole {
-    fn new(context: DigestReduceCtx) -> Self {
-        Self { context }
-    }
-}
-
-impl AiFinalizeRole<HnTopStories, Many<HnDigestGroupSummary>, HnDigestSummary> for HnFinalizeRole {
-    fn prepare(
-        &self,
-        seed: &HnTopStories,
-        collected: &Many<HnDigestGroupSummary>,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        let user_prompt =
-            digest_reduce_prompt(&self.context, seed, &collected.items).map_err(|error| {
-                AiRoleLogicFailure::Prompt {
-                    message: error.to_string(),
-                }
-            })?;
-        Ok(ChatRequestSpec {
-            messages: vec![
-                ChatMessage::system(self.context.chat_prompt_system.as_str()),
-                ChatMessage::user(user_prompt.as_str()),
-            ],
-            params: ChatParams {
-                temperature: Some(0.2),
-                max_tokens: Some(800),
-                ..ChatParams::default()
-            },
-            tools: Vec::new(),
-            response_format: None,
-        })
-    }
-
-    fn interpret(
-        &self,
-        seed: HnTopStories,
-        collected: Many<HnDigestGroupSummary>,
-        request: ChatRequestSpec,
-        reply: ChatCompletionReply,
-    ) -> Result<HnDigestSummary, AiRoleLogicFailure> {
-        let user_prompt = request
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role.as_str() == "user")
-            .map(|message| UserPrompt::raw(message.content.clone()))
-            .ok_or_else(|| AiRoleLogicFailure::Prompt {
-                message: "retained request has no user message".to_string(),
-            })?;
-        digest_reduce_parse(
-            &self.context,
-            seed,
-            collected.items,
-            user_prompt,
-            reply.response,
-        )
-        .map_err(|error| AiRoleLogicFailure::Parse {
-            message: error.to_string(),
-        })
-    }
+    p.finish()
 }
 
 fn digest_reduce_prompt(
-    ctx: &DigestReduceCtx,
-    _seed: &HnTopStories,
+    interests: Option<&str>,
     summaries: &[HnDigestGroupSummary],
-) -> Result<UserPrompt, HandlerError> {
+) -> UserPrompt {
     let rules: Vec<String> = vec![
         "Do not invent facts that are not implied by the titles.".to_string(),
         "Start the response immediately with \"## What's topical today\" (no intro).".to_string(),
@@ -320,7 +244,7 @@ fn digest_reduce_prompt(
     ];
 
     let mut p = Prompt::new();
-    p.text_if(ctx.interests.as_deref(), |i| format!("My interests: {i}"))
+    p.text_if(interests, |i| format!("My interests: {i}"))
         .text("Write a concise Markdown digest of the following Hacker News chunk summaries.")
         .rules(rules)
         .indexed_sections("Chunk summaries", summaries, |idx, summary| {
@@ -330,58 +254,17 @@ fn digest_reduce_prompt(
             )
         });
 
-    Ok(p.finish())
-}
-
-fn digest_reduce_parse(
-    ctx: &DigestReduceCtx,
-    seed: HnTopStories,
-    summaries: Vec<HnDigestGroupSummary>,
-    user_prompt: UserPrompt,
-    response: ChatResponse,
-) -> Result<HnDigestSummary, HandlerError> {
-    let groups = summaries.len();
-    let stories_fetched = seed.stories.len();
-    let output_markdown = render_digest_links(&response.text, &seed.stories)?;
-
-    Ok(HnDigestSummary {
-        mode: ctx.mode_label.clone(),
-        base_url: ctx.base_url.clone(),
-        ai_provider: ctx.ai_provider.clone(),
-        ai_model: ctx.ai_model.clone(),
-        token_estimator: ctx.token_estimator,
-        stories_fetched,
-        budget_per_group: ctx.budget_per_group,
-        groups,
-        interests: ctx.interests.clone(),
-        chat_prompt_system: ctx.chat_prompt_system.clone(),
-        chat_prompt_user: user_prompt,
-        input: seed,
-        group_summaries: summaries,
-        output_markdown,
-    })
-}
-
-fn resolve_hn_group_budget(budget_override: Option<TokenCount>, target: &ChatTarget) -> TokenCount {
-    budget_override.unwrap_or_else(|| {
-        TokenCount::new(if target.provider.as_str() == "ollama" {
-            2_500
-        } else {
-            6_000
-        })
-    })
+    p.finish()
 }
 
 pub(crate) struct HnFlowOptions {
     pub journal_base: std::path::PathBuf,
-    pub chat_binding_override: Option<EffectBinding<ChatCompletion>>,
 }
 
 impl Default for HnFlowOptions {
     fn default() -> Self {
         Self {
             journal_base: std::path::PathBuf::from("target/hn-ai-digest-logs"),
-            chat_binding_override: None,
         }
     }
 }
@@ -396,21 +279,17 @@ pub(crate) fn settings_flow_definition() -> FlowDefinition {
 }
 
 pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions) -> FlowDefinition {
-    FlowDefinition::materialize(move |runtime_config| {
+    FlowDefinition::materialize(move |_runtime_config| {
         let HnRunInputs {
             max_stories,
             poll_timeout_secs,
             source_rate_limit,
-            budget_per_group_override,
             max_stories_per_group,
             interests,
             mode_label,
             base_url,
         } = inputs;
-        let HnFlowOptions {
-            journal_base,
-            chat_binding_override,
-        } = options;
+        let HnFlowOptions { journal_base } = options;
 
         // The mock server binds an ephemeral loopback port for each process.
         // Its guard stays in the host; only this owned endpoint enters the
@@ -421,30 +300,16 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             base_url.to_string()
         };
 
-        let chat = match chat_binding_override {
-            Some(binding) => binding,
-            None => ChatEffectBinding::from_config(&runtime_config.ai_models())?,
-        };
-        let chat_target = chat.target().clone();
-        let budget_per_group = resolve_hn_group_budget(budget_per_group_override, &chat_target);
-        let system_prompt: SystemPrompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
-            .into();
-        let map_role = HnMapRole::new(
-            system_prompt.clone(),
-            DigestMapCtx {
-                interests: interests.clone(),
-            },
-        );
-        let finalize_role = HnFinalizeRole::new(DigestReduceCtx {
-            mode_label,
-            base_url: base_url_for_summary,
-            ai_provider: chat_target.provider.to_string(),
-            ai_model: chat_target.model.clone(),
-            token_estimator: chat.estimator().source(),
-            budget_per_group,
+        let roles = HnDigest {
             interests,
-            chat_prompt_system: system_prompt,
-        });
+            mode: mode_label,
+            base_url: base_url_for_summary,
+        };
+        let digest = ai::map(roles.clone())
+            .chunks(max_stories_per_group)
+            .reduce(roles)
+            .on_eof();
+        let ai_breaker = circuit_breaker().consecutive_failures(HN_AI_BREAKER_FAILURES);
         let decoder = hn_story_decoder(base_url, max_stories);
         let http_source_config = http_pull_config()
             .map_err(|error| {
@@ -462,11 +327,6 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             })?;
         let hn_source = HttpPullSource::new(decoder, http_source_config);
         let formatter = transforms::map(|story: HnStory| format_story(story));
-        let digest_seed =
-            stateful::reduce(HnTopStories::default(), |acc, story: &FormattedStory| {
-                acc.stories.push(story.clone());
-            })
-            .emit_on_eof();
         let source_breaker = circuit_breaker()
             .consecutive_failures(HN_SOURCE_BREAKER_FAILURES)
             .open_for(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS));
@@ -493,41 +353,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                     source_limiter
                 } => hn_source);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
-                batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
-
-                // Type bridge:
-                // - map's `[FormattedStory]` comes from `HnTopStories.stories` via
-                //   `items: |seed: &HnTopStories| seed.stories.clone()`.
-                // - map's render uses `ChunkRenderContext.item_ordinal` to assign stable story numbers.
-                // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
-                digest = ai_map_reduce!(
-                    HnTopStories -> HnDigestSummary => {
-                        map: [FormattedStory] -> HnDigestGroupSummary
-                        uses at_least_once(ChatCompletion)
-                            via chat
-                            with ai_resilience()
-                        => map_role,
-
-                        reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary
-                        uses at_least_once(ChatCompletion)
-                            via chat
-                            with ai_resilience()
-                        => finalize_role,
-                    },
-                    chunking: by_budget {
-                        items: |seed: &HnTopStories| seed.stories.clone(),
-                        render: |story: &FormattedStory, ctx| {
-                            render_story_line(ctx.item_ordinal + 1, story)
-                        },
-                        budget: budget_per_group,
-                        max_items: max_stories_per_group,
-                        oversize: decompose {
-                            max_depth: 5,
-                            exhaustion: fail,
-                        },
-                        snapshot_excluded_items_limit: 25,
-                    }
-                );
+                digest = ai!(FormattedStory -> HnDigestSummary with ai_breaker => digest);
                 digest_summary = sink!(
                     HnDigestSummary => handler_set!(console_sink, postgres_sink)
                 )?;
@@ -535,8 +361,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
 
             topology: {
                 hn_stories |> formatter;
-                formatter |> batch;
-                batch |> digest;
+                formatter |> digest;
                 digest |> digest_summary;
             }
         })
@@ -598,10 +423,7 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out.push_str(&format!("ai_model: {}\n", summary.ai_model));
     out.push_str(&format!("token_estimator: {:?}\n", summary.token_estimator));
     out.push_str(&format!("stories_fetched: {}\n", summary.stories_fetched));
-    out.push_str(&format!(
-        "groups: {} (budget_per_group: {})\n",
-        summary.groups, summary.budget_per_group
-    ));
+    out.push_str(&format!("groups: {}\n", summary.groups));
 
     if let Some(interests) = &summary.interests {
         if !interests.trim().is_empty() {
@@ -621,7 +443,7 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
 
     out.push_str("\n\nInput data (stories)\n");
     out.push_str("--------------------\n");
-    for (n, story) in summary.input.stories.iter().enumerate() {
+    for (n, story) in summary.stories.iter().enumerate() {
         let n = n + 1;
         let title = truncate_chars(story.title.trim(), 140);
         let author = truncate_chars(story.author.trim(), 60);
@@ -756,7 +578,7 @@ fn markdown_link_destination(value: &str) -> String {
         .replace('>', "%3E")
 }
 
-fn render_story_line(n: usize, story: &FormattedStory) -> String {
+fn render_story_line(n: u64, story: &FormattedStory) -> String {
     let title = story.title.trim();
     let url = story.url.trim();
 

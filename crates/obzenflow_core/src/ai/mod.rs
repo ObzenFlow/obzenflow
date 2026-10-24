@@ -16,20 +16,23 @@ mod hashing;
 mod map_reduce;
 mod model_profile;
 mod observability;
+mod outcome;
 mod ports;
+mod provider;
 mod structured_output;
 mod token_estimation;
 mod types;
+mod windowing;
 
-pub use canonical::{canonical_json_bytes_v1, AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V1};
+pub use canonical::{canonical_json_bytes_v2, AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V2};
 pub use chat_budget::{
     plan_chat_input_budget, ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec,
     ChatBudgetTemplate,
 };
 pub use chunking::{
-    plan_chunks_by_budget, ChunkEnvelope, ChunkExclusionReason, ChunkInfo, ChunkPlan,
-    ChunkPlanningConfig, ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary,
-    ChunkRenderContext, OversizeExhaustion, OversizePolicy,
+    plan_chunks_by_budget, ChunkEnvelope, ChunkExclusionReason, ChunkPlan, ChunkPlanningConfig,
+    ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
+    OversizeExhaustion, OversizePolicy,
 };
 pub use error::{AiClientError, StructuredOutputError};
 pub use hashing::{
@@ -40,17 +43,21 @@ pub use hashing::{
     LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
-    AiFinalizeRole, AiMapReduceChunkFailed, AiMapReduceFinalizeFailed, AiMapReduceJobFailed,
-    AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningFailure,
-    AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
-    AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, AiRoleLogicFailure, Many,
+    AiMapReduceChunkFailed, AiMapReduceGroupFailure, AiMapReduceGroupingEnded,
+    AiMapReduceMapInput, AiMapReduceReduceFailed, AiMapReduceReduceInput, AiMapReduceRoleFailure,
+    AiMapReduceTaggedPartial, AiMapReduceWindowFailed,
 };
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{
     attach_llm_observability, read_llm_observability, LlmCacheInfo, LlmCacheMode, LlmHashes,
     LlmObservability,
 };
-pub use ports::{ChatClient, EmbeddingClient};
+pub use outcome::{AiOutcome, AiProviderFailureKind, AiUnavailable, AiUnavailableCause};
+pub use ports::{ChatClient, ChatModelProvider, EmbeddingClient, EmbeddingModelProvider};
+pub use provider::{
+    AiEndpoint, AiModelProviderError, AiModelSpec, ChatModelDescription,
+    EmbeddingModelDescription,
+};
 pub use structured_output::{StructuredOutputSchema, StructuredOutputSpec, ValidationHook};
 pub use token_estimation::{
     remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator,
@@ -58,10 +65,14 @@ pub use token_estimation::{
     TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 pub use types::{
-    AiProvider, CanonicalizationComponent, ChatBindingFingerprint, ChatCompletionReply,
-    ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatResponseFormat,
-    ChatRole, ChatTarget, EmbeddingBindingFingerprint, EmbeddingDimensions,
-    EmbeddingDimensionsError, EmbeddingGenerationReply, EmbeddingParams, EmbeddingRequest,
-    EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, SystemPrompt, ToolCall,
-    ToolDefinition, Usage, UsageSource, UserPrompt, CHAT_CLIENT_PORT, EMBEDDING_CLIENT_PORT,
+    AiProvider, CanonicalizationComponent, ChatBindingFingerprint, ChatCompletionOutcome,
+    ChatCompletionReply, ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
+    ChatResponseFormat, ChatRole, ChatTarget, EmbeddingBindingFingerprint, EmbeddingDimensions,
+    EmbeddingDimensionsError, EmbeddingGenerationOutcome, EmbeddingGenerationReply,
+    EmbeddingParams, EmbeddingRequest, EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget,
+    SystemPrompt, ToolCall, ToolDefinition, Usage, UsageSource, UserPrompt, CHAT_CLIENT_PORT,
+    EMBEDDING_CLIENT_PORT,
+};
+pub use windowing::{
+    AiKey, Chunk, GroupClosedBy, GroupOrdinal, Partials, ReduceTrigger, WindowOrdinal,
 };

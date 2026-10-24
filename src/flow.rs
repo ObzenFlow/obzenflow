@@ -67,8 +67,8 @@
 //! keeps its own schema, and the conversions remain visible in the topology.
 
 pub use obzenflow_dsl::{
-    ai_map_reduce, async_infinite_source, async_source, effectful_stateful, effectful_transform,
-    flow, handler_set, inference, infinite_source, join, merge, placeholder, sink, source,
-    stateful, transform, FlowBuildError, FlowBuildFailure, FlowDefinition, StageCreationError,
-    StageCreationResult,
+    ai, ai_map_reduce, async_infinite_source, async_source, effectful_stateful,
+    effectful_transform, flow, handler_set, inference, infinite_source, join, merge, placeholder,
+    sink, source, stateful, transform, FlowBuildError, FlowBuildFailure, FlowDefinition,
+    StageCreationError, StageCreationResult,
 };

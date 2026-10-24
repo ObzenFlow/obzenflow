@@ -451,9 +451,9 @@ mod tests {
             serde_json::Value::Null,
         );
         let partial = AiMapReduceTaggedPartial {
-            job_key: source.id,
-            chunk_index: 0,
-            chunk_count: 1,
+            key: None,
+            group: obzenflow_core::ai::GroupOrdinal::new(0),
+            items: vec![serde_json::Value::Null],
             partial: serde_json::json!({"execution_type": "business-value", "items": [1, null]}),
         }
         .to_event(writer);

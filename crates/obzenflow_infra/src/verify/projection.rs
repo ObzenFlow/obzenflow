@@ -31,10 +31,7 @@
 //! writer ids, the comparing runs' own flow ids, vector clocks,
 //! `replay_context` (present on every `Data` row of a replay run by design),
 //! `runtime_context`, `observability`, `ingress_context`, and cycle metadata.
-//! Payloads are compared as parsed values, never bytes. Framework-owned
-//! `ai.map_reduce.*` payloads normalise their top-level `job_key`: that key is
-//! the composite input event id and is deliberately run-scoped, just like the
-//! top-level event ids excluded by this projection. All remaining protocol and
+//! Payloads are compared as parsed values, never bytes. All protocol and
 //! domain content is compared positionally.
 //!
 //! Rows carrying `effect_provenance` additionally expose their deterministic
@@ -121,7 +118,6 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
                     payload_schema_version: event.payload_schema_version,
                 },
                 payload: comparable_data_payload(
-                    matches!(payload, ChainPayload::CompositeData(_)),
                     event.effect_provenance.is_some(),
                     &payload.contract_body().ok()?,
                 ),
@@ -157,7 +153,7 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
     }
 }
 
-fn comparable_data_payload(composite: bool, effect_lane: bool, payload: &Value) -> Value {
+fn comparable_data_payload(effect_lane: bool, payload: &Value) -> Value {
     let mut payload = payload.clone();
     if effect_lane {
         if let Some(cursor) = payload
@@ -169,16 +165,6 @@ fn comparable_data_payload(composite: bool, effect_lane: bool, payload: &Value) 
                 "recorded_flow_id".to_string(),
                 Value::String("<recorded-flow-namespace>".to_string()),
             );
-        }
-    }
-    if composite {
-        if let Some(object) = payload.as_object_mut() {
-            if object.contains_key("job_key") {
-                object.insert(
-                    "job_key".to_string(),
-                    Value::String("<run-local-composite-activation>".to_string()),
-                );
-            }
         }
     }
     payload
@@ -214,14 +200,14 @@ fn effect_identity(event: &ChainEvent) -> Option<EffectIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::ai::AiMapReduceTaggedPartial;
+    use obzenflow_core::ai::{AiMapReduceTaggedPartial, GroupOrdinal};
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::payloads::effect_payload::{
         EffectCursor, EffectDescriptor, EffectProvenance,
     };
     use obzenflow_core::event::provenance::replay_context::ReplayContext;
     use obzenflow_core::event::EventKind;
-    use obzenflow_core::{EventId, StageId, WriterId};
+    use obzenflow_core::{StageId, WriterId};
 
     fn writer() -> WriterId {
         WriterId::from(StageId::new())
@@ -252,13 +238,13 @@ mod tests {
     }
 
     #[test]
-    fn ai_map_reduce_job_keys_are_normalised_as_run_local_identity() {
+    fn ai_map_reduce_keys_and_ordinals_compare_as_content() {
         use obzenflow_core::TypedPayload;
         let event = AiMapReduceTaggedPartial {
-            job_key: EventId::new(),
-            chunk_index: 0,
-            chunk_count: 2,
-            partial: json!({"id": 7}),
+            key: Some(json!("thread-7")),
+            group: GroupOrdinal::new(1),
+            items: vec![json!({"id": 7})],
+            partial: json!({"summary": "s"}),
         }
         .to_event(writer());
         let Some(ProjectedRow::Positional(row)) = project(&event) else {
@@ -267,26 +253,12 @@ mod tests {
         assert_eq!(
             row.payload,
             json!({
-                "job_key": "<run-local-composite-activation>",
-                "chunk_index": 0,
-                "chunk_count": 2,
-                "partial": {"id": 7}
+                "key": "thread-7",
+                "group": 1,
+                "items": [{"id": 7}],
+                "partial": {"summary": "s"}
             })
         );
-    }
-
-    #[test]
-    fn user_payload_job_keys_remain_comparable_domain_content() {
-        let event = ChainEventFactory::data_event(
-            writer(),
-            "orders.batch",
-            std::num::NonZeroU32::MIN,
-            json!({"job_key": "customer-visible-key"}),
-        );
-        let Some(ProjectedRow::Positional(row)) = project(&event) else {
-            panic!("user data row must project positionally");
-        };
-        assert_eq!(row.payload, json!({"job_key": "customer-visible-key"}));
     }
 
     #[test]

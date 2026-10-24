@@ -4,55 +4,71 @@
 
 //! AI facade for ObzenFlow
 //!
-//! Standalone chat and embedding handlers are ordinary typed effectful
-//! transforms. Their deterministic builders live in the adapters layer;
-//! infrastructure-owned bindings carry credential-free request identity and a
-//! pending provider package that the flow builder collects from the binding
-//! each transform holds. A materialised flow constructs them in this order:
+//! An `ai!` stage runs an AI role, domain logic around one model call. The
+//! role prepares each request and interprets each outcome; the handler value
+//! chooses the stage's shape, and configuration chooses its model:
 //!
 //! ```ignore
-//! let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
-//! let chat_handler = ChatTransformBuilder::new()
-//!     .logic_version("ticket-summary-v1")
-//!     .system("Summarise the ticket concisely.")
-//!     .build_typed::<TicketRaised, TicketSummarised>(chat, prompt, map_response)?;
+//! use obzenflow::ai::{self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec};
 //!
-//! let stage = effectful_transform!(
-//!     TicketRaised -> TicketSummarised
-//!     with ai_resilience()
-//!     => chat_handler.at_least_once::<ChatCompletion>(),
-//! );
+//! impl AiRole<TicketRaised> for Summarise {
+//!     type Effect = ChatCompletion;
+//!     type Out = TicketSummarised;
+//!
+//!     fn prepare(&self, ticket: &TicketRaised) -> Result<ChatRequestSpec, HandlerError> {
+//!         Ok(ChatRequestSpec::new("Summarise the ticket concisely.", ticket.body.clone()))
+//!     }
+//!
+//!     fn interpret(
+//!         &self,
+//!         ticket: TicketRaised,
+//!         outcome: AiOutcome<ChatCompletionReply>,
+//!     ) -> Result<TicketSummarised, HandlerError> {
+//!         let reply = outcome.replied()?;
+//!         Ok(TicketSummarised::new(ticket.id, reply.text()))
+//!     }
+//! }
+//!
+//! let summarise = ai::infer(Summarise);
+//! let breaker = circuit_breaker().consecutive_failures(5);
+//! // inside flow!: summarise = ai!(TicketRaised -> TicketSummarised with breaker => summarise);
 //! ```
 //!
-//! The provider is resolved only for a live effect miss. Exact replay returns
-//! the recorded reply before consulting that live authority.
+//! `ai::map(role).chunks(n)` calls the role once per group of at most `n`
+//! items, and `.reduce(role).on_eof()` or `.every_n_chunks(k)` reduces each
+//! window of partials. Each stage's endpoint and model resolve from
+//! `[ai.models]` or `[ai.embeddings]`, and strict replay serves recorded
+//! outcomes from the models the run recorded.
 
 pub use obzenflow_adapters::ai::{
-    ChatBindingMetadata, ChatCompletion, ChatCompletionBuildError, ChatEffects, ChatOperationError,
-    ChatTransform, ChatTransformBuilder, EmbeddingBindingMetadata, EmbeddingEffects,
-    EmbeddingGeneration, EmbeddingGenerationBuildError, EmbeddingOperationError,
-    EmbeddingTransform, EmbeddingTransformBuilder,
+    infer, map, ChatCompletion, ChatCompletionBuildError, Chunked, EmbeddingGeneration,
+    EmbeddingGenerationBuildError, Infer, Keyed, Map, MapReduce, TriggeredMapReduce, Unkeyed,
 };
 
-pub use obzenflow_runtime::stages::InferenceHandler;
+pub use obzenflow_runtime::ai::{AiEffect, AiModelProviders, AiReply, AiRequest, AiRole};
 
 pub use obzenflow_core::ai::{
     plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget,
-    AiFinalizeRole, AiMapRole, AiRoleLogicFailure, ChatBindingFingerprint, ChatBudgetError,
-    ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate, ChatCompletionReply,
-    ChatMessage, ChatModelProfile, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
-    ChatResponseFormat, ChatRole, ChatTarget, ChunkEnvelope, ChunkExclusionReason, ChunkInfo,
+    AiClientError, AiEndpoint, AiKey, AiModelProviderError, AiModelSpec, AiOutcome, AiProvider,
+    AiProviderFailureKind, AiUnavailable, AiUnavailableCause, ChatBindingFingerprint,
+    ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate,
+    ChatClient, ChatCompletionOutcome, ChatCompletionReply, ChatMessage, ChatModelDescription,
+    ChatModelProfile, ChatModelProvider, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
+    ChatResponseFormat, ChatRole, ChatTarget, Chunk, ChunkEnvelope, ChunkExclusionReason,
     ChunkPlan, ChunkPlanningConfig, ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary,
-    ChunkRenderContext, ContextWindowSource, EmbeddingBindingFingerprint, EmbeddingDimensions,
-    EmbeddingGenerationReply, EmbeddingParams, EmbeddingRequest, EmbeddingRequestSpec,
-    EmbeddingResponse, EmbeddingTarget, EstimateSource, HeuristicTokenEstimator, Many,
-    OversizeExhaustion, OversizePolicy, ResolvedTokenEstimator, SplitGroup, SystemPrompt,
-    TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
+    ChunkRenderContext, ContextWindowSource, EmbeddingBindingFingerprint, EmbeddingClient,
+    EmbeddingDimensions, EmbeddingGenerationOutcome, EmbeddingGenerationReply,
+    EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingParams, EmbeddingRequest,
+    EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, EstimateSource, GroupOrdinal,
+    HeuristicTokenEstimator, OversizeExhaustion, OversizePolicy, Partials,
+    ResolvedTokenEstimator, SplitGroup, SystemPrompt, TokenCount, TokenEstimate,
+    TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
     TokenEstimatorResolutionInfo, ToolCall, ToolDefinition, Usage, UsageSource, UserPrompt,
+    WindowOrdinal,
 };
 
 pub use obzenflow_infra::ai::{
-    boxed_estimator_for_model, estimator_for_model, resolve_chat_model_profile,
+    boxed_estimator_for_model, builtin_ai_models, estimator_for_model, resolve_chat_model_profile,
     resolve_estimator_for_model, Prompt,
 };
 
@@ -60,7 +76,4 @@ pub use obzenflow_infra::ai::{
 pub use obzenflow_infra::ai::TiktokenEstimator;
 
 #[cfg(feature = "ai")]
-pub use obzenflow_infra::ai::{
-    ChatEffectBinding, ChatEffectBindingError, EmbeddingEffectBinding, EmbeddingEffectBindingError,
-    ModelConfig,
-};
+pub use obzenflow_infra::ai::{NativeEmbeddingModelProvider, RigChatModelProvider};
