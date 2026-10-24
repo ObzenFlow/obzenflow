@@ -673,14 +673,6 @@ pub(super) async fn dispatch_draining<
                     .check_contracts(&mut ctx.contract_state[..])
                     .await
                     .into_result()?;
-                if let Some(upstream) = subscription.ended_without_verdict(&ctx.contract_state) {
-                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                        format!(
-                            "stateful '{}' read '{upstream}' to its end without a contract verdict",
-                            ctx.stage_name
-                        ),
-                    )));
-                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

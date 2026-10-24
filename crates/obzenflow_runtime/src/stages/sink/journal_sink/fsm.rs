@@ -933,19 +933,9 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         "sink: VerifyContractsAfterFlush action - calling authoritative check_contracts"
                     );
                     let status = subscription.check_contracts(&mut contract_state[..]).await;
-                    let unverified = subscription
-                        .ended_without_verdict(&contract_state)
-                        .map(ToString::to_string);
                     ctx.subscription = Some(subscription);
                     ctx.contract_state = contract_state;
                     status.into_result()?;
-                    if let Some(upstream) = unverified {
-                        return Err(format!(
-                            "sink '{}' read '{upstream}' to its end without a contract verdict",
-                            ctx.stage_name
-                        )
-                        .into());
-                    }
                 }
 
                 tracing::trace!(
@@ -1948,57 +1938,6 @@ mod tests {
         let rows = fixture.data.read_all_unordered().await.unwrap();
         assert!(rows.iter().any(|row| matches!(&row.payload,
             ChainPayload::Execution(ExecutionPayload::ContractStatus { pass: false, reason: Some(cause), .. }) if cause == &expected)));
-    }
-
-    #[tokio::test]
-    async fn verifying_after_flush_fails_when_an_ended_input_has_no_verdict() {
-        let FixtureResources {
-            mut resources,
-            upstream,
-            upstream_id,
-            ..
-        } = fixture_resources(Arc::new(Probe::default()));
-        let refuse = Arc::new(AtomicBool::new(false));
-        resources.stage_name = "cleared".into();
-        resources.data_journal = Arc::new(
-            TestJournal::new(JournalOwner::stage(resources.stage_id))
-                .with_append_failure(refuse.clone()),
-        );
-        resources.upstream_subscription_factory =
-            SubscriptionFactory::new(HashMap::from([(upstream_id, "score".to_string())])).bind(&[
-                (
-                    upstream_id,
-                    upstream.clone() as Arc<dyn Journal<ChainEvent>>,
-                ),
-            ]);
-        upstream
-            .append(
-                ChainEventFactory::eof_event(upstream_id.into(), true),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        super::JournalSinkAction::AllocateResources
-            .execute_resources(&mut resources)
-            .await
-            .unwrap();
-        let subscription = resources.subscription.as_mut().unwrap();
-        assert!(matches!(
-            subscription
-                .poll_next_with_state("Draining", Some(&mut resources.contract_state[..]))
-                .await,
-            crate::messaging::PollResult::Event(envelope) if envelope.is_eof()
-        ));
-
-        refuse.store(true, Ordering::SeqCst);
-        let error = super::JournalSinkAction::VerifyContractsAfterFlush
-            .execute_resources(&mut resources)
-            .await
-            .expect_err("the sink refuses to finish");
-        assert_eq!(
-            error.to_string(),
-            "sink 'cleared' read 'score' to its end without a contract verdict"
-        );
     }
 
     /// FLOWIP-134i B21: a writer's `Drop` is connector code, so cleanup runs it

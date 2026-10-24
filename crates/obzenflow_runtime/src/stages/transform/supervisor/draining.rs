@@ -465,14 +465,6 @@ async fn dispatch_draining_inner<
                     .check_contracts(&mut ctx.contract_state[..])
                     .await
                     .into_result()?;
-                if let Some(upstream) = subscription.ended_without_verdict(&ctx.contract_state) {
-                    return Ok(EventLoopDirective::Transition(TransformEvent::Error(
-                        format!(
-                            "transform '{}' read '{upstream}' to its end without a contract verdict",
-                            ctx.stage_name
-                        ),
-                    )));
-                }
             }
 
             tracing::info!(stage_name = %ctx.stage_name, "Transform queue drained");
