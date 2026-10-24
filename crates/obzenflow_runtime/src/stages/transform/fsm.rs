@@ -414,6 +414,10 @@ pub enum TransformState<H> {
     /// Received EOF, finishing processing remaining events
     Draining,
 
+    /// Cycle entry point that has written its EOF and reads each input from
+    /// inside its cycle to its end
+    ClosingCycle,
+
     /// All events processed, EOF forwarded downstream
     Drained,
 
@@ -439,6 +443,7 @@ impl<H> Clone for TransformState<H> {
             Self::Initialized => Self::Initialized,
             Self::Running => Self::Running,
             Self::Draining => Self::Draining,
+            Self::ClosingCycle => Self::ClosingCycle,
             Self::Drained => Self::Drained,
             Self::Failed(msg) => Self::Failed(msg.clone()),
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
@@ -460,6 +465,7 @@ impl<H> std::fmt::Debug for TransformState<H> {
             Self::Initialized => write!(f, "Initialized"),
             Self::Running => write!(f, "Running"),
             Self::Draining => write!(f, "Draining"),
+            Self::ClosingCycle => write!(f, "ClosingCycle"),
             Self::Drained => write!(f, "Drained"),
             Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
@@ -481,6 +487,7 @@ impl<H: Send + Sync> PartialEq for TransformState<H> {
             (TransformState::Initialized, TransformState::Initialized) => true,
             (TransformState::Running, TransformState::Running) => true,
             (TransformState::Draining, TransformState::Draining) => true,
+            (TransformState::ClosingCycle, TransformState::ClosingCycle) => true,
             (TransformState::Drained, TransformState::Drained) => true,
             (TransformState::Failed(a), TransformState::Failed(b)) => a == b,
             _ => false,
@@ -502,6 +509,7 @@ impl<H: Send + Sync + 'static> StateVariant for TransformState<H> {
             TransformState::Initialized => "Initialized",
             TransformState::Running => "Running",
             TransformState::Draining => "Draining",
+            TransformState::ClosingCycle => "ClosingCycle",
             TransformState::Drained => "Drained",
             TransformState::Failed(_) => "Failed",
             TransformState::_Phantom(_) => unreachable!("PhantomData variant"),
@@ -564,6 +572,12 @@ pub enum TransformEvent<H> {
     /// Draining complete
     DrainComplete,
 
+    /// A cycle entry point finished draining its own work
+    CycleDrained,
+
+    /// Every input from inside the cycle reached its end
+    CycleClosed,
+
     /// Unrecoverable error occurred
     Error(String),
 
@@ -585,6 +599,8 @@ impl<H> Clone for TransformEvent<H> {
             Self::ReceivedEOF => Self::ReceivedEOF,
             Self::BeginDrain => Self::BeginDrain,
             Self::DrainComplete => Self::DrainComplete,
+            Self::CycleDrained => Self::CycleDrained,
+            Self::CycleClosed => Self::CycleClosed,
             Self::Error(msg) => Self::Error(msg.clone()),
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -604,6 +620,8 @@ impl<H> std::fmt::Debug for TransformEvent<H> {
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::DrainComplete => write!(f, "DrainComplete"),
+            Self::CycleDrained => write!(f, "CycleDrained"),
+            Self::CycleClosed => write!(f, "CycleClosed"),
             Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -629,7 +647,9 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             | Self::Ready
             | Self::ReceivedEOF
             | Self::BeginDrain
-            | Self::DrainComplete => None,
+            | Self::DrainComplete
+            | Self::CycleDrained
+            | Self::CycleClosed => None,
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
     }
@@ -648,6 +668,8 @@ impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
             TransformEvent::ReceivedEOF => "ReceivedEOF",
             TransformEvent::BeginDrain => "BeginDrain",
             TransformEvent::DrainComplete => "DrainComplete",
+            TransformEvent::CycleDrained => "CycleDrained",
+            TransformEvent::CycleClosed => "CycleClosed",
             TransformEvent::Error(_) => "Error",
             TransformEvent::_Phantom(_) => unreachable!("PhantomData variant"),
         }

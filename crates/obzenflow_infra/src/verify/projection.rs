@@ -24,8 +24,8 @@
 //!
 //! Rows excluded: `Delivery` receipts, `Observability`/lifecycle rows, and
 //! all other flow control (reader telemetry is wall-clock-gated by design;
-//! checkpoint, drain, abort, and source contracts describe how a run executed
-//! rather than what it concluded).
+//! checkpoint, drain and abort describe how a run executed rather than what
+//! it concluded).
 //!
 //! Fields excluded everywhere: envelope wall-clock metadata, `processing_time`,
 //! writer ids, the comparing runs' own flow ids, vector clocks,

@@ -810,7 +810,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
 async fn every_required_finalization_append_must_commit_before_one_final_report() {
     // Includes both aggregate and selected-feed findings and policy verdicts,
     // plus the gap and violation facts produced by an actual missing input.
-    for failed_append in 0..10 {
+    for failed_append in 0..9 {
         let upstream = StageId::new();
         let reader = StageId::new();
         let input: Arc<dyn Journal<ChainEvent>> =
@@ -888,7 +888,7 @@ async fn every_required_finalization_append_must_commit_before_one_final_report(
         let mut progress = [ReaderProgress::new(upstream)];
         drive_subscription_to_eof(&mut subscription, &mut progress).await;
         let _ = subscription.check_contracts(&mut progress).await;
-        // The successful path has nine required evidence appends and one final.
+        // The successful path has eight required evidence appends and one final.
         assert!(
             attempts.load(Ordering::SeqCst) > failed_append,
             "failure injection must be exercised: {failed_append}"

@@ -2463,7 +2463,7 @@ fn check_transform_state<H>(state: &TransformState<H>) -> crate::stage_handle_ad
         TransformState::Cancelled(_) => StageStatus::Cancelled,
         TransformState::Initialized => StageStatus::Ready,
         TransformState::Running => StageStatus::Running,
-        TransformState::Draining => StageStatus::Draining,
+        TransformState::Draining | TransformState::ClosingCycle => StageStatus::Draining,
         TransformState::Drained => StageStatus::Drained,
         TransformState::Failed(_) => StageStatus::Failed,
         TransformState::_Phantom(_) => unreachable!("phantom stage state is never entered"),

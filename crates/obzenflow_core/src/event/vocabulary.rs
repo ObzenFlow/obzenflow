@@ -41,7 +41,6 @@ event_names! {
         LIVE_RESUMED => "live_resumed",
     },
     source => "source" {
-        CONTRACT_DECLARED => "contract_declared",
         PRODUCTION_FINALIZED => "production_finalized",
         OPEN_FAILED => "open_failed",
         READER_ACQUIRED => "reader_acquired",
@@ -68,7 +67,6 @@ event_names! {
         VERIFICATION_PASSED => "verification_passed",
         VERIFICATION_FAILED => "verification_failed",
         VERIFICATION_PENDING => "verification_pending",
-        VERIFICATION_SKIPPED => "verification_skipped",
     },
     circuit_breaker => "circuit_breaker" {
         OPENED => "opened",

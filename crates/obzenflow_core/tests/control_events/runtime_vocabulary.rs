@@ -61,10 +61,6 @@ fn stream_and_subscription_wire_names_match_the_contract() {
             "runtime.pipeline.abort_requested",
         ),
         (
-            json!({"flow_control_type":"source_contract", "source_id":stage, "journal_path":"orders.log", "journal_index":0}),
-            "runtime.source.contract_declared",
-        ),
-        (
             json!({"flow_control_type":"production_final", "produced_count":0, "produced_by_event_type":[], "end_kind":"natural"}),
             "runtime.source.production_finalized",
         ),
@@ -439,13 +435,8 @@ fn contract_wire_names_preserve_all_findings_and_both_policy_verdicts() {
         ("failed", violation, "runtime.contract.verification_failed"),
         (
             "pending",
-            json!({"reason":"evaluation_unavailable", "evidence":evidence}),
+            json!({"reason":"writer_advertisement_unavailable", "evidence":evidence}),
             "runtime.contract.verification_pending",
-        ),
-        (
-            "skipped",
-            json!({"reason":"no_production_expectation", "evidence":evidence}),
-            "runtime.contract.verification_skipped",
         ),
     ] {
         let payload = serde_json::from_value(json!({
@@ -474,6 +465,56 @@ fn contract_wire_names_preserve_all_findings_and_both_policy_verdicts() {
             "execution",
         );
     }
+}
+
+#[test]
+fn removed_contract_spellings_no_longer_decode() {
+    let upstream = StageId::new();
+    let reader = StageId::new();
+    let evidence = json!({
+        "contract_name":"SourceContract", "upstream_stage":upstream,
+        "downstream_stage":reader, "evaluated_at":"2026-10-02T00:00:00Z",
+        "details":{"evidence_type":"custom", "details":{}}
+    });
+    let mut source_evidence = evidence.clone();
+    source_evidence["details"] = json!({
+        "evidence_type":"source", "declaration_received":true,
+        "expected_count":null, "produced_count":91
+    });
+    for (status, body) in [
+        ("passed", source_evidence),
+        (
+            "skipped",
+            json!({"reason":"no_production_expectation", "evidence":evidence}),
+        ),
+        (
+            "pending",
+            json!({"reason":"producer_declaration_unavailable", "evidence":evidence}),
+        ),
+        (
+            "pending",
+            json!({"reason":"production_count_unavailable", "evidence":evidence}),
+        ),
+        (
+            "pending",
+            json!({"reason":"evaluation_unavailable", "evidence":evidence}),
+        ),
+    ] {
+        assert!(
+            serde_json::from_value::<ExecutionPayload>(json!({
+                "execution_type":"contract_result", "upstream":upstream, "reader":reader,
+                "contract_name":"SourceContract", "status":status, "phase":"final",
+                "result":{"outcome":status, "evidence":body}
+            }))
+            .is_err(),
+            "{status}: {body}"
+        );
+    }
+    assert!(serde_json::from_value::<FlowControlPayload>(json!({
+        "flow_control_type":"source_contract", "source_id":upstream,
+        "journal_path":"orders.log", "journal_index":0
+    }))
+    .is_err());
 }
 
 #[test]

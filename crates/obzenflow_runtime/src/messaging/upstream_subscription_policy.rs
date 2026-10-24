@@ -7,11 +7,11 @@ use obzenflow_core::{ContractResult, StageId, ViolationCause};
 
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 
-/// Strictness mode for source at-least-once contracts.
+/// Strictness mode for contract checks on edges from sources.
 ///
 /// This is a minimal, flow-wide toggle for how contract failures on
 /// *source* edges influence pipeline behaviour:
-/// - `Abort` (default): any failed source contract aborts the pipeline.
+/// - `Abort` (default): any failed check on an edge from a source aborts the pipeline.
 /// - `Warn`: failures are logged and surfaced via contract events, but
 ///   do not cause a pipeline abort. This is intended as a transitional
 ///   mode until full contract strictness plumbing lands in 090d.

@@ -34,7 +34,6 @@ pub use chain_event::{
     ChainEvent, ChainEventFactory, ChainPayload, CircuitBreakerAttemptSettledEventParams,
     CircuitBreakerOpenedEventParams, CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams,
     ConsumptionProgressEventParams, CorrelationContext, RecoveryCompletedEventParams,
-    SourceContractEventParams,
 };
 pub use envelope::EventEnvelope;
 pub use journal_event::JournalEvent;

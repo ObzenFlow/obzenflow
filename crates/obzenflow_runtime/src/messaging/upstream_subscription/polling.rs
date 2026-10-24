@@ -243,7 +243,7 @@ where
     /// Admitting them to delivery would make per-reader delivered ordinals
     /// timing-dependent and break the canonical merge's determinism. Only
     /// behavioural flow control (EOF, drain, watermarks, checkpoints,
-    /// pipeline abort, source contracts) participates in transport order.
+    /// pipeline abort) participates in transport order.
     fn transport_filter_skips(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
         if !matches!(self.delivery_filter, DeliveryFilter::TransportOnly) {
             return false;
@@ -502,7 +502,6 @@ where
             reader_index,
             stage_id,
             contract_chain_event,
-            original_chain_event,
             reader_seq_for_contracts,
         );
 
@@ -708,7 +707,6 @@ where
         reader_index: usize,
         stage_id: StageId,
         contract_chain_event: Option<&ChainEvent>,
-        original_chain_event: Option<&ChainEvent>,
         reader_seq_for_contracts: Option<SeqNo>,
     ) {
         let (Some(chain_event), Some(reader_stage)) = (
@@ -725,12 +723,8 @@ where
             .and_then(|slot| slot.as_mut())
         {
             let reader_seq = reader_seq_for_contracts.unwrap_or(SeqNo(0));
-            // The reader slot chooses the edge. Each contract declares whether
-            // its evidence population is the upstream-authored prefix or every
-            // physical delivery on that edge.
             chain.on_edge_delivery(
                 chain_event,
-                original_chain_event.unwrap_or(chain_event),
                 reader_stage,
                 reader_seq,
                 stage_id,

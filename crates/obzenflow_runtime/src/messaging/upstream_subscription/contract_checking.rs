@@ -36,7 +36,6 @@ fn contract_result_labels_for_emission(
             Some(v.cause.cause_label().to_string()),
         ),
         ContractResult::Pending { .. } => (ContractResultStatusLabel::Pending, None),
-        ContractResult::Skipped { .. } => (ContractResultStatusLabel::Skipped, None),
     }
 }
 
@@ -71,7 +70,7 @@ fn merge_edge_status(
 ) {
     if let ContractStatus::Violated { upstream, cause } = &edge {
         if advisory.contains(upstream) {
-            tracing::warn!(%upstream, ?cause, "source contract failure is advisory under configured warning policy");
+            tracing::warn!(%upstream, ?cause, "contract failure on an edge from a source is advisory under the configured warning policy");
             return;
         }
     }

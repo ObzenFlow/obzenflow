@@ -339,12 +339,35 @@ impl BackpressureRegistry {
     /// Compute edge_in_flight for a single (upstream, downstream) pair.
     /// Returns None if the edge is not tracked.
     pub fn edge_in_flight(&self, upstream: StageId, downstream: StageId) -> Option<u64> {
+        self.edge_counts(upstream, downstream)
+            .map(EdgeCounts::in_flight)
+    }
+
+    /// The writer's admitted rows and the reader's acknowledged rows on one
+    /// tracked edge. Returns None if the edge is not tracked.
+    pub fn edge_counts(&self, upstream: StageId, downstream: StageId) -> Option<EdgeCounts> {
         let stage = self.stages.get(&upstream)?;
         let edge = self.edges.get(&(upstream, downstream))?;
 
-        let effective_writer = stage.effective_writer.load(Ordering::Acquire);
-        let reader_seq = edge.reader_seq.load(Ordering::Acquire);
-        Some(effective_writer.saturating_sub(reader_seq))
+        Some(EdgeCounts {
+            written: stage.effective_writer.load(Ordering::Acquire),
+            read: edge.reader_seq.load(Ordering::Acquire),
+        })
+    }
+}
+
+/// Rows the writer of one tracked edge has admitted, including reservations,
+/// and rows its reader has acknowledged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EdgeCounts {
+    pub written: u64,
+    pub read: u64,
+}
+
+impl EdgeCounts {
+    /// Rows admitted by the writer and not yet acknowledged by the reader.
+    pub fn in_flight(self) -> u64 {
+        self.written.saturating_sub(self.read)
     }
 }
 

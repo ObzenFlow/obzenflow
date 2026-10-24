@@ -107,16 +107,13 @@ fn json_body(text: &str) -> Value {
 }
 
 #[test]
-fn forwarded_declarations_show_the_author_and_forwarding_stage() {
+fn forwarded_control_rows_show_the_author_and_forwarding_stage() {
     let mut source = fact(1, 100, &[], json!({}));
     source.kind = RunRecordKind::FlowSignal;
     if let RunRecordData::Chain(row) = &mut source.record {
         row.payload = ChainPayload::FlowControl(
-            serde_json::from_value(json!({
-                "flow_control_type": "source_contract", "source_id": id(1),
-                "journal_path": format!("stage_{}", id(1)), "journal_index": 0
-            }))
-            .unwrap(),
+            serde_json::from_value(json!({"flow_control_type": "watermark", "timestamp": 0}))
+                .unwrap(),
         );
         row.envelope.provenance.event.event_kind = row.payload.kind();
         row.envelope.provenance.event.event_type = row
@@ -133,11 +130,13 @@ fn forwarded_declarations_show_the_author_and_forwarding_stage() {
         renderer.include_runtime = true;
         renderer.compact = compact;
         let own = render_record(&mut renderer, &source);
-        assert!(own.contains("runtime.source.contract_declared ← thermometer"));
+        assert!(own.contains("runtime.stream.watermark_declared ← thermometer"));
         assert!(!own.contains("forwarded by"));
         let text = render_record(&mut renderer, &forwarded);
         assert!(
-            text.contains("runtime.source.contract_declared ← thermometer (forwarded by classify)"),
+            text.contains(
+                "runtime.stream.watermark_declared ← thermometer (forwarded by classify)"
+            ),
             "{text}"
         );
         if !compact {

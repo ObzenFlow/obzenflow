@@ -12,13 +12,12 @@ use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::types::{Count, JournalIndex, JournalPath};
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, SourceContractEventParams};
+use obzenflow_core::event::types::Count;
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
@@ -731,14 +730,6 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
             }
 
             FiniteSourceAction::PublishRunning => {
-                let Some(writer_id) = ctx.writer_id else {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        "No writer ID available to publish running event; skipping running event and source_contract"
-                    );
-                    return Ok(());
-                };
-
                 // Write running event to system journal
                 crate::stages::common::supervision::lifecycle_actions::publish_running(
                     &ctx.data_journal,
@@ -752,42 +743,9 @@ impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
                 )
                 .await?;
 
-                // Emit writer-side source contract with runtime defaults (expected_count unknown)
-                let contract = ChainEventFactory::source_contract_event(
-                    writer_id,
-                    SourceContractEventParams {
-                        expected_count: None, // unknown until 010 config plumbing
-                        source_id: ctx.stage_id,
-                        route: None, // not available here
-                        journal_path: JournalPath(ctx.stage_id.to_string()),
-                        journal_index: JournalIndex(0),
-                        writer_seq: None,   // unknown at start
-                        vector_clock: None, // not captured at start
-                    },
-                )
-                .with_flow_context(make_flow_context(
-                    &ctx.flow_name,
-                    &ctx.flow_id.to_string(),
-                    &ctx.stage_name,
-                    ctx.stage_id,
-                    StageType::FiniteSource,
-                ));
-
-                crate::supervised_base::publication::append(
-                    &ctx.data_journal,
-                    contract,
-                    Default::default(),
-                )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to append source_contract: {e}"
-                    ))
-                })?;
-
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Finite source published running event and source_contract"
+                    "Finite source published running event"
                 );
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
@@ -1217,22 +1175,16 @@ pub(crate) mod tests {
                         }
                     }
                     let events = ctx.resources_mut().unwrap().data_journal.read_causally_ordered().await.unwrap();
-                    assert_eq!(events.iter().filter(|env| matches!(env.payload,
-                        ChainPayload::FlowControl(FlowControlPayload::SourceContract { .. }))).count(),
-                        usize::from($finite));
                     let eof = events.iter().find(|env| env.is_eof()).expect("authored EOF");
                     assert_eq!(eof.envelope.observability.as_ref().unwrap().runtime_snapshot.as_ref().unwrap().fsm_state, "Finalizing");
-                    for env in &events {
-                        if matches!(env.payload, ChainPayload::FlowControl(
-                            FlowControlPayload::SourceContract { .. })) {
-                            assert_eq!(env.envelope.provenance.event.writer_id, WriterId::from(stage_id));
-                            assert_eq!(env.envelope.provenance.event.flow_context.stage_id, stage_id);
-                            assert_eq!(env.envelope.provenance.event.flow_context.stage_name, ctx.resources_mut().unwrap().stage_name);
-                            assert_eq!(env.envelope.provenance.event.flow_context.stage_type, StageType::FiniteSource);
-                            assert_eq!(env.envelope.provenance.event.flow_context.flow_name, ctx.resources_mut().unwrap().flow_name);
-                            assert_eq!(env.envelope.provenance.event.flow_context.flow_id, ctx.resources_mut().unwrap().flow_id.to_string());
-                        }
-                    }
+                    let authored = &eof.envelope.provenance.event;
+                    assert_eq!(authored.writer_id, WriterId::from(stage_id));
+                    assert_eq!(authored.flow_context.stage_id, stage_id);
+                    assert_eq!(authored.flow_context.stage_name, ctx.resources_mut().unwrap().stage_name);
+                    assert_eq!(authored.flow_context.stage_type,
+                        if $finite { StageType::FiniteSource } else { StageType::InfiniteSource });
+                    assert_eq!(authored.flow_context.flow_name, ctx.resources_mut().unwrap().flow_name);
+                    assert_eq!(authored.flow_context.flow_id, ctx.resources_mut().unwrap().flow_id.to_string());
 
                     // Failure is visible in the pending state before settlement actions.
                     for initial in [$state::Created, $state::Initializing, $state::Initialized,

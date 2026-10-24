@@ -94,6 +94,47 @@ fn expected_contract_keys_fallback_to_legacy_stage_pair_without_feed_plan() {
     assert!(keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
 }
 
+#[test]
+fn edges_from_sources_carry_the_contracts_the_runtime_evaluates() {
+    let [source, transform, sink, audit] = [(); 4].map(|_| StageId::new());
+    let topology = Topology::new_unvalidated(
+        vec![
+            StageInfo::new(source.to_topology_id(), "source", StageType::FiniteSource),
+            StageInfo::new(
+                transform.to_topology_id(),
+                "transform",
+                StageType::Transform,
+            ),
+            StageInfo::new(sink.to_topology_id(), "sink", StageType::Sink),
+            StageInfo::new(audit.to_topology_id(), "audit", StageType::Sink),
+        ],
+        [(source, transform), (transform, sink), (source, audit)]
+            .into_iter()
+            .map(|(from, to)| {
+                DirectedEdge::new(
+                    from.to_topology_id(),
+                    to.to_topology_id(),
+                    EdgeKind::Forward,
+                )
+            })
+            .collect(),
+    )
+    .expect("topology");
+
+    let attachments = derive_contract_attachments(&topology, &FeedPlan::default(), HashMap::new());
+
+    let transport = TransportContract::NAME.to_string();
+    let delivery = DeliveryContract::NAME.to_string();
+    assert_eq!(
+        attachments,
+        HashMap::from([
+            ((source, transform), vec![transport.clone()]),
+            ((transform, sink), vec![transport.clone(), delivery.clone()]),
+            ((source, audit), vec![transport, delivery]),
+        ])
+    );
+}
+
 pub async fn metrics_preparation_failure_joins_every_supplied_stage(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {

@@ -57,7 +57,9 @@ mod tests {
     #[test]
     fn exact_string_epoch_is_the_only_accepted_shape() {
         let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
-        let future_version = format!("{}.0", major.parse::<u64>().unwrap() + 1);
+        let major = major.parse::<u64>().unwrap();
+        let previous_version = format!("{}.0", major - 1);
+        let future_version = format!("{}.0", major + 1);
         assert!(require_current_journal_schema_version(&serde_json::json!({
             "journal_schema_version": JOURNAL_SCHEMA_VERSION
         }))
@@ -68,6 +70,10 @@ mod tests {
             (serde_json::json!({"journal_schema_version": 3.0}), "3.0"),
             (serde_json::json!({"journal_schema_version": "3.0"}), "3.0"),
             (serde_json::json!({"journal_schema_version": "2.0"}), "2.0"),
+            (
+                serde_json::json!({"journal_schema_version": previous_version}),
+                previous_version.as_str(),
+            ),
             (
                 serde_json::json!({"journal_schema_version": future_version}),
                 future_version.as_str(),
