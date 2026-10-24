@@ -33,7 +33,7 @@ pub use model::{ChainEvent, ChainPayload, CorrelationContext, ReplayDisposition}
 pub use params::{
     CircuitBreakerAttemptSettledEventParams, CircuitBreakerOpenedEventParams,
     CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
-    RecoveryCompletedEventParams, SourceContractEventParams,
+    RecoveryCompletedEventParams,
 };
 
 #[cfg(test)]

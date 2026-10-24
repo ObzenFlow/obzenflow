@@ -266,7 +266,6 @@ impl ChainPayload {
                 | FlowControlPayload::Checkpoint { .. }
                 | FlowControlPayload::Drain
                 | FlowControlPayload::PipelineAbort { .. }
-                | FlowControlPayload::SourceContract { .. }
                 | FlowControlPayload::ConsumptionProgress { .. }
                 | FlowControlPayload::ConsumptionGap { .. }
                 | FlowControlPayload::ConsumptionFinal { .. }

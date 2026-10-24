@@ -847,6 +847,129 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn draining_fails_when_an_ended_input_has_no_verdict() {
+        use crate::execution::{RuntimeExecution, RuntimeMode};
+        use crate::stages::source::finite::fsm::tests::TestJournal;
+        use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let stage_id = StageId::new();
+        let upstream_id = StageId::new();
+        let upstream: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(upstream_id)));
+        upstream
+            .append(
+                ChainEventFactory::eof_event(WriterId::from(upstream_id), true),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let data: Arc<dyn Journal<ChainEvent>> = Arc::new(
+            TestJournal::new(JournalOwner::stage(stage_id)).with_append_failure(refuse.clone()),
+        );
+        let flow_id = obzenflow_core::FlowId::new();
+        let instrumentation =
+            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new());
+        let runtime_execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        let mut resources = StatefulResources {
+            handler: Some(Arc::new(NoopStateful)),
+            stage_id,
+            stage_name: "day_totals".into(),
+            observers: Default::default(),
+            flow_name: "verdict_flow".into(),
+            flow_id,
+            current_state: (),
+            data_journal: data.clone(),
+            effect_history: None,
+            current_run_history: crate::effects::CurrentRunHistory::new(data.clone()),
+            runtime_execution: runtime_execution.clone(),
+            effect_ports: Default::default(),
+            effect_declarations: Vec::new(),
+            last_input_position: None,
+            error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            bus: Arc::new(crate::message_bus::FsmMessageBus::new()),
+            writer_id: None,
+            lineage_policy: Default::default(),
+            subscription: None,
+            contract_state: Vec::new(),
+            last_contract_check: None,
+            control_strategy: Arc::new(
+                crate::stages::common::control_strategies::JonestownSignalStrategy,
+            ),
+            processing_context: Default::default(),
+            buffered_eof: None,
+            terminal_envelope: None,
+            terminal_eof_kind: None,
+            last_consumed_envelope: None,
+            instrumentation: instrumentation.clone(),
+            upstream_subscription_factory:
+                crate::stages::resources_builder::SubscriptionFactory::new(
+                    std::collections::HashMap::from([(upstream_id, "price".to_string())]),
+                )
+                .bind(&[(upstream_id, upstream)]),
+            events_since_last_heartbeat: 0,
+            heartbeat_interval: 0,
+            last_data_event_time: None,
+            emit_interval: None,
+            backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+            output_contract: crate::feed_plan::StageOutputContract::empty(),
+            backpressure_readers: Default::default(),
+            pending_outputs: Default::default(),
+            pending_transition: None,
+            pending_ack_upstream: None,
+            backpressure_pulse:
+                crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
+            backpressure_stall: Default::default(),
+            heartbeat: None,
+            catch_up: crate::stages::common::supervision::catch_up::CatchUpHandle::producing(
+                make_flow_context(
+                    "verdict_flow",
+                    &flow_id.to_string(),
+                    "day_totals",
+                    stage_id,
+                    StageType::Stateful,
+                ),
+                data,
+                instrumentation,
+                runtime_execution,
+            ),
+        };
+        StatefulAction::AllocateResources
+            .execute_resources(&mut resources)
+            .await
+            .unwrap();
+        let mut context = StatefulContext::new(resources);
+        let mut supervisor = StatefulSupervisor::<NoopStateful> {
+            name: "day_totals".into(),
+            stage_id,
+            subscription: None,
+            _marker: PhantomData,
+        };
+
+        assert!(matches!(
+            supervisor
+                .dispatch_state(&StatefulState::Draining, &mut context)
+                .await
+                .unwrap(),
+            EventLoopDirective::Continue
+        ));
+        refuse.store(true, Ordering::SeqCst);
+        match supervisor
+            .dispatch_state(&StatefulState::Draining, &mut context)
+            .await
+            .unwrap()
+        {
+            EventLoopDirective::Transition(StatefulEvent::Error(message)) => assert_eq!(
+                message,
+                "stateful 'day_totals' read 'price' to its end without a contract verdict"
+            ),
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+    }
+
     #[test]
     fn contract_violation_uses_stage_fatal_error_transition() {
         let input = ChainEventFactory::data_event(

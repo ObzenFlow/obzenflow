@@ -453,9 +453,7 @@ where
                 .readers
                 .iter()
                 .map(|slot| {
-                    let mut chain = ContractChain::new()
-                        .with_contract(TransportContract::new())
-                        .with_contract(obzenflow_core::SourceContract::new());
+                    let mut chain = ContractChain::new().with_contract(TransportContract::new());
                     if include_delivery_contract {
                         chain = chain.with_contract(DeliveryContract::default());
                     }
@@ -468,7 +466,7 @@ where
                                 max_cycle_depth: cycle_cfg.max_iterations.as_u16(),
                                 ..Default::default()
                             };
-                            chain = chain.with_contract(
+                            chain = chain.with_divergence(
                                 obzenflow_core::DivergenceContract::with_thresholds(
                                     cycle_cfg.scc_id,
                                     thresholds,

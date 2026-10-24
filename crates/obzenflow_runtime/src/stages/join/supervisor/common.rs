@@ -418,3 +418,33 @@ pub(in crate::stages::join) async fn emit_join_heartbeat_if_due<
     ctx.events_since_last_heartbeat = 0;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::{StageId, WriterId};
+
+    #[test]
+    fn control_rows_reach_observers_as_their_signal_kind() {
+        let writer = WriterId::from(StageId::new());
+        for (event, kind) in [
+            (
+                ChainEventFactory::eof_event(writer, true),
+                JoinSignalKind::Eof,
+            ),
+            (
+                ChainEventFactory::drain_event(writer),
+                JoinSignalKind::Drain,
+            ),
+            (
+                ChainEventFactory::watermark_event(writer, 1, None),
+                JoinSignalKind::OtherControl,
+            ),
+        ] {
+            let snapshot = signal_snapshot(Some(JoinSide::Stream), &event).expect("a signal");
+            assert_eq!(snapshot.signal(), kind);
+            assert_eq!(snapshot.side(), Some(JoinSide::Stream));
+        }
+    }
+}

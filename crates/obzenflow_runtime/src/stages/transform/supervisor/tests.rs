@@ -439,14 +439,7 @@ impl TransformHandler for CountingFilterHandler {
     }
 }
 
-async fn build_transform_harness<
-    H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-    F: FnOnce(StageId) -> H,
->(
-    handler_factory: F,
-    upstream_window: u64,
-    transform_window: u64,
-) -> (
+type TransformHarness<H> = (
     TransformSupervisor<H>,
     TransformContext<H>,
     BackpressureRegistry,
@@ -455,7 +448,35 @@ async fn build_transform_harness<
     StageId,
     Arc<dyn Journal<ChainEvent>>,
     Arc<dyn Journal<ChainEvent>>,
-) {
+);
+
+async fn build_transform_harness<
+    H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    F: FnOnce(StageId) -> H,
+>(
+    handler_factory: F,
+    upstream_window: u64,
+    transform_window: u64,
+) -> TransformHarness<H> {
+    build_transform_harness_with_data_journal(
+        handler_factory,
+        |t| Arc::new(TestJournal::new(JournalOwner::stage(t))),
+        upstream_window,
+        transform_window,
+    )
+    .await
+}
+
+async fn build_transform_harness_with_data_journal<
+    H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    F: FnOnce(StageId) -> H,
+    J: FnOnce(StageId) -> Arc<dyn Journal<ChainEvent>>,
+>(
+    handler_factory: F,
+    data_journal_factory: J,
+    upstream_window: u64,
+    transform_window: u64,
+) -> TransformHarness<H> {
     let mut builder = TopologyBuilder::new();
     let s_top = builder.add_stage(Some("s".to_string()));
     let t_top = builder.add_stage(Some("t".to_string()));
@@ -481,8 +502,7 @@ async fn build_transform_harness<
 
     let upstream_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(JournalOwner::stage(s)));
-    let data_journal: Arc<dyn Journal<ChainEvent>> =
-        Arc::new(TestJournal::new(JournalOwner::stage(t)));
+    let data_journal = data_journal_factory(t);
     let error_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(JournalOwner::stage(t)));
 
@@ -1210,6 +1230,54 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
         (250_000_000..300_000_000).contains(&waited),
         "one control-cap chunk of the credit wait recorded, got {waited}"
     );
+}
+
+#[tokio::test]
+async fn draining_fails_when_an_ended_input_has_no_verdict() {
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refuse_for_journal = refuse.clone();
+    let (mut supervisor, mut ctx, _, s, _, _, upstream, _) =
+        build_transform_harness_with_data_journal(
+            |_| FilterHandler,
+            move |t| {
+                Arc::new(
+                    crate::stages::source::finite::fsm::tests::TestJournal::new(
+                        JournalOwner::stage(t),
+                    )
+                    .with_append_failure(refuse_for_journal),
+                )
+            },
+            1,
+            1,
+        )
+        .await;
+    upstream
+        .append(
+            ChainEventFactory::eof_event(WriterId::from(s), true),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&TransformState::Draining, &mut ctx)
+            .await
+            .unwrap(),
+        EventLoopDirective::Continue
+    ));
+    refuse.store(true, Ordering::SeqCst);
+    match supervisor
+        .dispatch_state(&TransformState::Draining, &mut ctx)
+        .await
+        .unwrap()
+    {
+        EventLoopDirective::Transition(TransformEvent::Error(message)) => assert_eq!(
+            message,
+            "transform 't' read 's' to its end without a contract verdict"
+        ),
+        other => panic!("expected the refusal, got {other:?}"),
+    }
 }
 
 #[tokio::test]

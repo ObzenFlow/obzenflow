@@ -501,8 +501,8 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
         .expect("join observation assertion lock");
     assert_eq!(
         observations.len(),
-        6,
-        "two deliveries and the stream's contract and EOF signals must produce exactly six callbacks: {observations:?}"
+        5,
+        "two deliveries and the stream's EOF signal must produce exactly five callbacks: {observations:?}"
     );
     assert_eq!(
         observations
@@ -517,8 +517,8 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
             .iter()
             .filter(|occurrence| matches!(occurrence, Occurrence::Signal { .. }))
             .count(),
-        2,
-        "the stream contract and EOF each have one before-input signal callback"
+        1,
+        "the stream EOF has one before-input signal callback"
     );
     for (side, event_type) in [
         (JoinSide::Reference, Reference::event_type_name()),
@@ -545,12 +545,6 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
         side: JoinSide::Stream,
         event_type: StreamInput::event_type_name(),
         output_count: Some(1),
-    }));
-    assert!(observations.contains(&Occurrence::Signal {
-        phase: Phase::Before,
-        side: Some(JoinSide::Stream),
-        signal: JoinSignalKind::OtherControl,
-        output_count: None,
     }));
     assert!(observations.contains(&Occurrence::Signal {
         phase: Phase::Before,

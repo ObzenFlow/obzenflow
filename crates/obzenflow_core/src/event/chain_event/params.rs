@@ -7,21 +7,9 @@ use crate::event::payloads::execution_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerOpenTrigger,
 };
 use crate::event::types::{
-    Count, DurationMs, EventId, JournalIndex, JournalPath, RouteKey, SeqNo, ViolationCause,
+    Count, DurationMs, EventId, JournalIndex, JournalPath, SeqNo, ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
-use crate::id::StageId;
-
-#[derive(Debug, Clone)]
-pub struct SourceContractEventParams {
-    pub expected_count: Option<Count>,
-    pub source_id: StageId,
-    pub route: Option<RouteKey>,
-    pub journal_path: JournalPath,
-    pub journal_index: JournalIndex,
-    pub writer_seq: Option<SeqNo>,
-    pub vector_clock: Option<VectorClock>,
-}
 
 #[derive(Debug, Clone)]
 pub struct ConsumptionProgressEventParams {

@@ -15,8 +15,9 @@ use obzenflow::journal::read::{
     RunJournalKind, RunRecordData,
 };
 use obzenflow::journal::{EffectOutcomePayload, JournalRecord};
+use obzenflow_core::contracts::{ContractEvidenceDetails, ContractPhase};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{ContractResult, StageId, WriterId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -883,5 +884,60 @@ fn every_edge_records_one_passing_contract_verdict() {
             .iter()
             .map(|edge| (edge.to_string(), 1))
             .collect::<BTreeMap<_, _>>()
+    );
+
+    let edges_from_sources = &edges[..5];
+    let names: BTreeMap<StageId, &str> = archive
+        .stage_ids
+        .iter()
+        .map(|(name, id)| (*id, name.as_str()))
+        .collect();
+    let mut source_transport: BTreeMap<String, Vec<(Option<u64>, u64)>> = BTreeMap::new();
+    for (_, row) in &archive.rows {
+        assert_ne!(row.event_type(), "runtime.source.contract_declared");
+        let ChainPayload::Execution(ExecutionPayload::ContractResult {
+            upstream,
+            reader,
+            contract_name,
+            phase,
+            result,
+            ..
+        }) = &row.payload
+        else {
+            continue;
+        };
+        assert_ne!(contract_name.as_str(), "SourceContract");
+        let edge = format!("{} -> {}", names[upstream], names[reader]);
+        if *phase != ContractPhase::Final || !edges_from_sources.contains(&edge.as_str()) {
+            continue;
+        }
+        let ContractEvidenceDetails::Transport {
+            advertised_writer_seq,
+            consumed_count,
+        } = result.details()
+        else {
+            continue;
+        };
+        assert!(matches!(**result, ContractResult::Passed(_)), "{edge}");
+        source_transport
+            .entry(edge)
+            .or_default()
+            .push((advertised_writer_seq.map(|seq| seq.0), consumed_count.0));
+    }
+    assert_eq!(
+        source_transport
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        edges_from_sources.iter().copied().collect()
+    );
+    for (edge, counts) in &source_transport {
+        for (advertised, consumed) in counts {
+            assert_eq!(*advertised, Some(*consumed), "{edge}");
+        }
+    }
+    assert_eq!(
+        source_transport["account_history -> profile"],
+        [(Some(91), 91)]
     );
 }
