@@ -20,6 +20,8 @@ use super::control::policy::{
     EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy, SinkPolicy, SourcePolicy,
 };
 use super::control::provider::PendingControlRegistration;
+use super::control::circuit_breaker::CircuitBreakerMiddleware;
+use super::control::{ControlMiddlewareAggregator, RateLimiterMiddleware};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
 use obzenflow_core::{StageId, StageKey};
@@ -320,7 +322,16 @@ pub enum ProtectedUnit {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProtectedUnitId {
     pub stage_id: StageId,
+    pub owner: ProtectedUnitOwner,
     pub unit: ProtectedUnit,
+}
+
+/// The authored object a protected unit belongs to. A composite's members share
+/// one policy instance per unit and name the composite in their evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProtectedUnitOwner {
+    Stage,
+    Composite(StageKey),
 }
 
 /// The authored object owning an attachment. Placement is resolved separately;
@@ -1018,10 +1029,12 @@ pub struct MiddlewareMaterializationContext<'a> {
     bound_surface: MiddlewareSurface,
     expected_claim: MaterializationClaim,
     stage_id: StageId,
+    owner: ProtectedUnitOwner,
     effect_type: Option<EffectTypeKey>,
     attachment_id: MiddlewareAttachmentId,
     invocation_token: Arc<()>,
     pending: Mutex<Vec<PendingControlRegistration>>,
+    control: Option<&'a ControlMiddlewareAggregator>,
 }
 
 impl<'a> MiddlewareMaterializationContext<'a> {
@@ -1043,6 +1056,7 @@ impl<'a> MiddlewareMaterializationContext<'a> {
             bound_surface: request.surface.clone(),
             expected_claim: declaration.materialization_claim(),
             stage_id: request.protected_unit.stage_id,
+            owner: request.protected_unit.owner.clone(),
             effect_type,
             attachment_id: MiddlewareAttachmentId::from_declaration_and_request(
                 declaration,
@@ -1050,7 +1064,35 @@ impl<'a> MiddlewareMaterializationContext<'a> {
             ),
             invocation_token: Arc::new(()),
             pending: Mutex::new(Vec::new()),
+            control: None,
         }
+    }
+
+    pub(crate) fn with_control(mut self, control: &'a ControlMiddlewareAggregator) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    pub(crate) fn owner(&self) -> &ProtectedUnitOwner {
+        &self.owner
+    }
+
+    /// The authored stage this unit's evidence names.
+    pub fn unit_name(&self) -> StageKey {
+        match &self.owner {
+            ProtectedUnitOwner::Stage => StageKey::from(self.config.name.as_str()),
+            ProtectedUnitOwner::Composite(composite) => composite.clone(),
+        }
+    }
+
+    pub(crate) fn shared_breaker(&self) -> Option<Arc<CircuitBreakerMiddleware>> {
+        self.control?
+            .shared_breaker(&self.owner, self.effect_type.as_ref())
+    }
+
+    pub(crate) fn shared_limiter(&self) -> Option<Arc<RateLimiterMiddleware>> {
+        self.control?
+            .shared_limiter(&self.owner, self.effect_type.as_ref())
     }
 
     fn ensure_claim(&self, claimant: MaterializationClaim) -> Result<(), MiddlewareAuthorityError> {
@@ -1468,6 +1510,7 @@ mod tests {
         });
         let unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Ingress(IngressUnitId {
                 source_stage_key: stage_key,
                 target,
@@ -1571,6 +1614,7 @@ mod tests {
         let surface = MiddlewareSurface::SourcePoll(SourcePollSurface { stage_id });
         let protected_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
         };
         let request = MiddlewareAttachmentRequest {
@@ -1605,6 +1649,7 @@ mod tests {
         });
         let effect_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Effect(EffectUnitId {
                 effect_type: EffectTypeKey::from("http"),
             }),
@@ -1626,6 +1671,7 @@ mod tests {
         });
         let other_stage_unit = ProtectedUnitId {
             stage_id: other_stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
         };
         let other_stage_request = MiddlewareAttachmentRequest {
@@ -1658,6 +1704,7 @@ mod tests {
                 MiddlewareSurface::SourcePoll(SourcePollSurface { stage_id }),
                 ProtectedUnitId {
                     stage_id,
+                    owner: ProtectedUnitOwner::Stage,
                     unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
                 },
             ),
@@ -1669,6 +1716,7 @@ mod tests {
                 }),
                 ProtectedUnitId {
                     stage_id,
+                    owner: ProtectedUnitOwner::Stage,
                     unit: ProtectedUnit::Effect(EffectUnitId {
                         effect_type: EffectTypeKey::from("matrix.effect"),
                     }),
@@ -1681,6 +1729,7 @@ mod tests {
                 }),
                 ProtectedUnitId {
                     stage_id,
+                    owner: ProtectedUnitOwner::Stage,
                     unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
                         target: SinkDeliveryTarget::Stage,
                     }),
@@ -1691,6 +1740,7 @@ mod tests {
                 MiddlewareSurface::Handler { stage_id },
                 ProtectedUnitId {
                     stage_id,
+                    owner: ProtectedUnitOwner::Stage,
                     unit: ProtectedUnit::Handler,
                 },
             ),
@@ -1698,6 +1748,7 @@ mod tests {
                 MiddlewareSurface::Stateful { stage_id },
                 ProtectedUnitId {
                     stage_id,
+                    owner: ProtectedUnitOwner::Stage,
                     unit: ProtectedUnit::Stateful,
                 },
             ),
@@ -1705,6 +1756,7 @@ mod tests {
                 MiddlewareSurface::Join { stage_id },
                 ProtectedUnitId {
                     stage_id,
+                    owner: ProtectedUnitOwner::Stage,
                     unit: ProtectedUnit::Join,
                 },
             ),
@@ -1712,6 +1764,7 @@ mod tests {
                 MiddlewareSurface::StageLifecycle { stage_id },
                 ProtectedUnitId {
                     stage_id,
+                    owner: ProtectedUnitOwner::Stage,
                     unit: ProtectedUnit::StageLifecycle,
                 },
             ),
@@ -1859,6 +1912,7 @@ mod tests {
         });
         let http_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Effect(EffectUnitId {
                 effect_type: EffectTypeKey::from("http"),
             }),
@@ -1870,6 +1924,7 @@ mod tests {
         });
         let sql_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Effect(EffectUnitId {
                 effect_type: EffectTypeKey::from("sql"),
             }),
@@ -1902,6 +1957,7 @@ mod tests {
         });
         let stage_sink_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
                 target: SinkDeliveryTarget::Stage,
             }),
@@ -1913,6 +1969,7 @@ mod tests {
         });
         let configured_sink_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
                 target: SinkDeliveryTarget::Configured(configured_target),
             }),
@@ -1958,6 +2015,7 @@ mod tests {
         });
         let admission_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Ingress(IngressUnitId {
                 source_stage_key: stage_key.clone(),
                 target: admission_target,
@@ -1972,6 +2030,7 @@ mod tests {
         });
         let endpoint_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Ingress(IngressUnitId {
                 source_stage_key: stage_key,
                 target: endpoint_target,
@@ -2005,6 +2064,7 @@ mod tests {
         let surface = MiddlewareSurface::SourcePoll(SourcePollSurface { stage_id });
         let protected_unit = ProtectedUnitId {
             stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Effect(EffectUnitId {
                 effect_type: EffectTypeKey::from("http"),
             }),

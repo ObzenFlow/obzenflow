@@ -577,7 +577,8 @@ where
             DIRECT_FACT_BOUND,
         )
         .with_implementation_middleware(self.middleware)
-        .with_ai_model::<R::Effect>(self.binding.spec);
+        .with_ai_model::<R::Effect>(self.binding.spec)
+        .with_policy_owner(&self.name);
         let map = wrap_typed_descriptor(
             Box::new(map),
             output_metadata::<R::Out>(TypeHint::exact_payload::<AiMapReduceMapInput<T>>(), Vec::new()),
@@ -750,7 +751,8 @@ where
             DIRECT_FACT_BOUND,
         )
         .with_implementation_middleware(member_middleware(&self.middleware))
-        .with_ai_model::<R::Effect>(self.map_binding.spec);
+        .with_ai_model::<R::Effect>(self.map_binding.spec)
+        .with_policy_owner(&self.name);
         let map = wrap_typed_descriptor(
             Box::new(map),
             StageTypingMetadata::transform(
@@ -792,7 +794,8 @@ where
             DIRECT_FACT_BOUND,
         )
         .with_implementation_middleware(member_middleware(&self.middleware))
-        .with_ai_model::<S::Effect>(self.reduce_binding.spec);
+        .with_ai_model::<S::Effect>(self.reduce_binding.spec)
+        .with_policy_owner(&self.name);
         let reduce = wrap_typed_descriptor(
             Box::new(reduce),
             output_metadata::<S::Out>(

@@ -9,8 +9,11 @@
 //! control-plane port so runtime services can consume read-only control state
 //! without depending on adapter middleware traits.
 
-use crate::middleware::EffectTypeKey;
+use super::circuit_breaker::CircuitBreakerMiddleware;
+use super::rate_limiter::RateLimiterMiddleware;
+use crate::middleware::{EffectTypeKey, ProtectedUnitOwner};
 use obzenflow_core::id::StageId;
+use obzenflow_core::StageKey;
 use obzenflow_runtime::control_plane::{
     CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider,
     RateLimiterSnapshotter,
@@ -35,17 +38,22 @@ struct RateLimiterRegistration {
 /// bounded by the stage's declared `effects:` set.
 type ControlKey = (StageId, Option<EffectTypeKey>);
 
+/// A policy shared by the members of one authored composite, per effect.
+type SharedKey = (StageKey, Option<EffectTypeKey>);
+
 pub(crate) enum PendingControlRegistration {
     CircuitBreaker {
         stage_id: StageId,
         effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
         state_view: Arc<dyn CircuitBreakerStateView>,
+        shared: Arc<CircuitBreakerMiddleware>,
     },
     RateLimiter {
         stage_id: StageId,
         effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<RateLimiterSnapshotter>,
+        shared: Arc<RateLimiterMiddleware>,
     },
 }
 
@@ -73,11 +81,43 @@ impl PendingControlRegistration {
 pub struct ControlMiddlewareAggregator {
     circuit_breakers: RwLock<HashMap<ControlKey, CircuitBreakerRegistration>>,
     rate_limiters: RwLock<HashMap<ControlKey, RateLimiterRegistration>>,
+    shared_breakers: RwLock<HashMap<SharedKey, Arc<CircuitBreakerMiddleware>>>,
+    shared_limiters: RwLock<HashMap<SharedKey, Arc<RateLimiterMiddleware>>>,
 }
 
 impl ControlMiddlewareAggregator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn shared_breaker(
+        &self,
+        owner: &ProtectedUnitOwner,
+        effect_type: Option<&EffectTypeKey>,
+    ) -> Option<Arc<CircuitBreakerMiddleware>> {
+        let ProtectedUnitOwner::Composite(composite) = owner else {
+            return None;
+        };
+        self.shared_breakers
+            .read()
+            .expect("ControlMiddlewareAggregator: shared_breakers poisoned read lock")
+            .get(&(composite.clone(), effect_type.cloned()))
+            .cloned()
+    }
+
+    pub(crate) fn shared_limiter(
+        &self,
+        owner: &ProtectedUnitOwner,
+        effect_type: Option<&EffectTypeKey>,
+    ) -> Option<Arc<RateLimiterMiddleware>> {
+        let ProtectedUnitOwner::Composite(composite) = owner else {
+            return None;
+        };
+        self.shared_limiters
+            .read()
+            .expect("ControlMiddlewareAggregator: shared_limiters poisoned read lock")
+            .get(&(composite.clone(), effect_type.cloned()))
+            .cloned()
     }
 
     /// Atomically commit one checked factory invocation's staged authority.
@@ -87,6 +127,7 @@ impl ControlMiddlewareAggregator {
     pub(crate) fn commit_batch(
         &self,
         pending: Vec<PendingControlRegistration>,
+        owner: &ProtectedUnitOwner,
     ) -> Result<(), String> {
         let mut circuit_breakers = self
             .circuit_breakers
@@ -131,6 +172,10 @@ impl ControlMiddlewareAggregator {
             }
         }
 
+        let composite = match owner {
+            ProtectedUnitOwner::Stage => None,
+            ProtectedUnitOwner::Composite(composite) => Some(composite),
+        };
         for registration in pending {
             match registration {
                 PendingControlRegistration::CircuitBreaker {
@@ -138,7 +183,16 @@ impl ControlMiddlewareAggregator {
                     effect_type,
                     metrics_fn,
                     state_view,
+                    shared,
                 } => {
+                    if let Some(composite) = composite {
+                        self.shared_breakers
+                            .write()
+                            .expect(
+                                "ControlMiddlewareAggregator: shared_breakers poisoned write lock",
+                            )
+                            .insert((composite.clone(), effect_type.clone()), shared);
+                    }
                     circuit_breakers.insert(
                         (stage_id, effect_type),
                         CircuitBreakerRegistration {
@@ -151,7 +205,16 @@ impl ControlMiddlewareAggregator {
                     stage_id,
                     effect_type,
                     metrics_fn,
+                    shared,
                 } => {
+                    if let Some(composite) = composite {
+                        self.shared_limiters
+                            .write()
+                            .expect(
+                                "ControlMiddlewareAggregator: shared_limiters poisoned write lock",
+                            )
+                            .insert((composite.clone(), effect_type.clone()), shared);
+                    }
                     rate_limiters.insert(
                         (stage_id, effect_type),
                         RateLimiterRegistration { metrics_fn },

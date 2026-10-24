@@ -7127,6 +7127,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
             ChainEventFactory::circuit_breaker_attempt_settled(
                 evidence_writer,
                 CircuitBreakerAttemptSettledEventParams {
+                    unit: "effectful".into(),
                     cursor: identity.cursor.clone(),
                     attempt,
                     health_classification: CircuitBreakerHealthClassification::Ignored,

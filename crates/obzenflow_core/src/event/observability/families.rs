@@ -213,6 +213,7 @@ mod tests {
         for effect_type in [None, Some("payments".into()), Some("email".into())] {
             for delayed_events in [0, 10] {
                 let key = record_family(&ObservationRecord::RateLimiterActivity {
+                    unit: "stage".into(),
                     effect_type: effect_type.clone(),
                     window_ms: 100,
                     delayed_events,
@@ -228,6 +229,7 @@ mod tests {
             }
             assert!(
                 keys.insert(record_family(&ObservationRecord::RateLimiterUtilisation {
+                    unit: "stage".into(),
                     effect_type,
                     utilization_percent: 0.0,
                     events_in_window: 0,

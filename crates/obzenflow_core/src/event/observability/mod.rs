@@ -9,7 +9,7 @@ use super::types::DurationMs;
 use crate::ai::LlmObservability;
 use crate::id::FlowId;
 use crate::time::MetricsDuration;
-use crate::{EventId, ReaderGeneration, StageId, WriterId};
+use crate::{EventId, ReaderGeneration, StageId, StageKey, WriterId};
 use serde::{Deserialize, Serialize};
 
 mod validation;
@@ -116,6 +116,7 @@ pub enum ObservationRecord {
         metadata: LlmObservability,
     },
     CircuitBreakerSummary {
+        unit: StageKey,
         #[serde(skip_serializing_if = "Option::is_none")]
         effect_type: Option<String>,
         window_duration_s: u64,
@@ -132,6 +133,7 @@ pub enum ObservationRecord {
         time_in_half_open_seconds: f64,
     },
     RateLimiterActivity {
+        unit: StageKey,
         #[serde(skip_serializing_if = "Option::is_none")]
         effect_type: Option<String>,
         window_ms: u64,
@@ -141,6 +143,7 @@ pub enum ObservationRecord {
         limit_rate: f64,
     },
     RateLimiterUtilisation {
+        unit: StageKey,
         #[serde(skip_serializing_if = "Option::is_none")]
         effect_type: Option<String>,
         utilization_percent: f64,

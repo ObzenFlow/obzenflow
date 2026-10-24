@@ -529,19 +529,23 @@ impl MiddlewareFactory for EffectPlanFactory {
         })?;
         let breaker = breaker
             .as_ref()
-            .map(|value| {
-                CircuitBreakerFactory::from_effect_breaker(value)
+            .map(|value| match context.shared_breaker() {
+                Some(shared) => Ok(Arc::new(shared.handle_for(context.config.stage_id))),
+                None => CircuitBreakerFactory::from_effect_breaker(value)
                     .build_middleware_keyed(
                         context.config,
                         context,
                         MaterializationClaim::EffectResilience,
                         Some(effect.effect_type.clone()),
                     )
-                    .map(|(state, _)| Arc::new(state))
+                    .map(|(state, _)| Arc::new(state)),
             })
             .transpose()?;
         let limiter = limiter
             .map(|value| {
+                if let Some(shared) = context.shared_limiter() {
+                    return Ok(Arc::new(shared.handle_for(context.config.stage_id)));
+                }
                 let config = value.validate().map_err(|e| {
                     MiddlewareFactoryError::invalid_configuration(
                         "rate_limiter",
@@ -1180,6 +1184,7 @@ impl EffectResilienceMiddleware {
                 ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
                     self.writer_id,
                     CircuitBreakerAttemptSettledEventParams {
+                        unit: breaker.unit().clone(),
                         cursor: identity.cursor.clone(),
                         attempt,
                         health_classification: evidence_classification(classification.as_ref()),
@@ -1432,6 +1437,7 @@ impl EffectResilienceMiddleware {
             ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
                 self.writer_id,
                 CircuitBreakerAttemptSettledEventParams {
+                    unit: breaker.unit().clone(),
                     cursor: identity.cursor.clone(),
                     attempt,
                     health_classification: evidence_classification(classification.as_ref()),
@@ -1580,6 +1586,7 @@ impl EffectResilienceMiddleware {
             ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
                 self.writer_id,
                 CircuitBreakerAttemptSettledEventParams {
+                    unit: breaker.unit().clone(),
                     cursor: identity.cursor.clone(),
                     attempt,
                     health_classification: evidence_classification(classification.as_ref()),

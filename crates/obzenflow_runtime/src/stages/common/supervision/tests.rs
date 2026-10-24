@@ -1037,6 +1037,7 @@ async fn atomic_group_accounts_every_member_in_its_owned_history() {
                     event: ChainEventFactory::execution_event(
                         stage.into(),
                         ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+                            unit: "stage".into(),
                             success_count: 1,
                             recovery_duration_ms: 1,
                         }),

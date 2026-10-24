@@ -143,14 +143,10 @@ impl SinkPolicyEvidence {
                 limit_rate,
                 ..
             } => valid_float(*current_rate) && valid_float(*limit_rate),
-            RateLimiterFact::ModeChange {
-                mode_from: _,
-                mode_to: _,
-                limit_rate,
-            } => valid_float(*limit_rate),
-            RateLimiterFact::ConfigChanged { old_rate, new_rate } => {
-                valid_float(*old_rate) && valid_float(*new_rate)
-            }
+            RateLimiterFact::ModeChange { limit_rate, .. } => valid_float(*limit_rate),
+            RateLimiterFact::ConfigChanged {
+                old_rate, new_rate, ..
+            } => valid_float(*old_rate) && valid_float(*new_rate),
         };
         if !valid {
             return Err(SinkPolicyEvidenceError::InvalidDiagnostic);
@@ -260,6 +256,7 @@ mod tests {
     #[test]
     fn every_sink_legal_breaker_and_limiter_variant_is_explicitly_allowed() {
         assert_allowed_breaker(CircuitBreakerFact::Opened {
+            unit: "sink".into(),
             cooldown_ms: 5_000,
             error_rate: 0.5,
             failure_count: 2,
@@ -270,18 +267,22 @@ mod tests {
             last_error: Some("redacted".into()),
         });
         assert_allowed_breaker(CircuitBreakerFact::Closed {
+            unit: "sink".into(),
             success_count: 3,
             recovery_duration_ms: 20,
         });
         assert_allowed_breaker(CircuitBreakerFact::Rejected {
+            unit: "sink".into(),
             reason: CircuitBreakerRejectionReason::CircuitOpen,
             cooldown_remaining_ms: Some(10),
             circuit_open_duration_ms: Some(30),
         });
         assert_allowed_breaker(CircuitBreakerFact::HalfOpen {
+            unit: "sink".into(),
             test_request_count: 1,
         });
         assert_allowed_breaker(CircuitBreakerFact::StateChanged {
+            unit: "sink".into(),
             from_state: CircuitState::Closed,
             to_state: CircuitState::Open,
             timestamp: 1,
@@ -299,16 +300,19 @@ mod tests {
 
         for event in [
             RateLimiterFact::Delayed {
+                unit: "sink".into(),
                 delay_ms: 1,
                 current_rate: 2.0,
                 limit_rate: 1.0,
             },
             RateLimiterFact::ModeChange {
+                unit: "sink".into(),
                 mode_from: RateLimiterMode::Normal,
                 mode_to: RateLimiterMode::Limiting,
                 limit_rate: 1.0,
             },
             RateLimiterFact::ConfigChanged {
+                unit: "sink".into(),
                 old_rate: 1.0,
                 new_rate: 2.0,
             },
@@ -320,6 +324,7 @@ mod tests {
     #[test]
     fn effect_settlement_cannot_be_published_as_sink_policy_evidence() {
         assert_rejected_breaker(CircuitBreakerFact::AttemptSettled {
+            unit: "sink".into(),
             cursor: cursor(),
             attempt: 1,
             health_classification: CircuitBreakerHealthClassification::TransientFailure,
@@ -335,6 +340,7 @@ mod tests {
     fn evidence_text_numbers_and_batch_capacity_fail_closed() {
         assert!(matches!(
             SinkPolicyEvidence::circuit_breaker(CircuitBreakerFact::Opened {
+                unit: "sink".into(),
                 cooldown_ms: 5_000,
                 error_rate: f64::NAN,
                 failure_count: 1,
@@ -355,6 +361,7 @@ mod tests {
             batch
                 .try_push(
                     SinkPolicyEvidence::circuit_breaker(CircuitBreakerFact::Closed {
+                        unit: "sink".into(),
                         success_count: 1,
                         recovery_duration_ms: 1,
                     })
@@ -366,6 +373,7 @@ mod tests {
         assert!(matches!(
             batch.try_push(
                 SinkPolicyEvidence::circuit_breaker(CircuitBreakerFact::HalfOpen {
+                    unit: "sink".into(),
                     test_request_count: 1,
                 })
                 .unwrap()

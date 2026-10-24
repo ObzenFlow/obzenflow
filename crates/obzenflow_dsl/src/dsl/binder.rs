@@ -16,7 +16,8 @@ use obzenflow_adapters::middleware::{
     EffectUnitId, HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
     MiddlewareAttachmentRequest, MiddlewareAttachmentSite, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareSurface, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
-    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
+    ProtectedUnitOwner, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy,
+    SourcePolicy,
     SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 use obzenflow_core::event::context::StageType;
@@ -170,6 +171,7 @@ fn with_binding_request<T>(
     };
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit,
     };
     let request = MiddlewareAttachmentRequest {
@@ -252,6 +254,7 @@ pub(crate) fn materialize_source_poll(
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
     };
     let request = MiddlewareAttachmentRequest {
@@ -286,6 +289,7 @@ pub(crate) fn bind_effect_policy(
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect: &EffectDeclaration,
     authored_site: MiddlewareAttachmentSite,
+    owner: &ProtectedUnitOwner,
 ) -> Result<EffectPolicyAttachment, String> {
     let factory = declared_factory.factory;
     let declaration = declared_factory.declaration;
@@ -297,6 +301,7 @@ pub(crate) fn bind_effect_policy(
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: owner.clone(),
         unit: ProtectedUnit::Effect(EffectUnitId {
             effect_type: EffectTypeKey::from(effect_type),
         }),
@@ -342,6 +347,7 @@ pub(crate) fn materialize_effect_observer(
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::Effect(EffectUnitId {
             effect_type: EffectTypeKey::from(effect_type),
         }),
@@ -396,6 +402,7 @@ pub(crate) fn materialize_observer(
     };
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: match surface_kind {
             MiddlewareSurfaceKind::SourcePoll => ProtectedUnit::SourcePoll(SourcePollUnitId),
             MiddlewareSurfaceKind::SinkDelivery => {
@@ -435,6 +442,7 @@ pub(crate) fn materialize_sink_delivery(
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
             target: SinkDeliveryTarget::Stage,
         }),
@@ -485,6 +493,7 @@ pub(crate) fn materialize_ingress(
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::Ingress(IngressUnitId {
             source_stage_key: stage_key,
             target,

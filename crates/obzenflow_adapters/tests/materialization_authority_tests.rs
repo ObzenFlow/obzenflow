@@ -14,7 +14,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOverrideKey,
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
-    ProtectedUnit, ProtectedUnitId,
+    ProtectedUnit, ProtectedUnitId, ProtectedUnitOwner,
 };
 use obzenflow_core::event::{context::StageType, EffectType};
 use obzenflow_core::{StageId, StageKey};
@@ -188,6 +188,7 @@ impl MiddlewareFactory for DelegatingFactory {
             });
             let protected_unit = ProtectedUnitId {
                 stage_id: request.protected_unit.stage_id,
+                owner: request.protected_unit.owner.clone(),
                 unit: ProtectedUnit::Effect(EffectUnitId {
                     effect_type: EffectTypeKey::from(RETARGET_EFFECT),
                 }),
@@ -351,6 +352,7 @@ fn materialize_with_safety(
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::Effect(EffectUnitId {
             effect_type: EffectTypeKey::from(EFFECT),
         }),

@@ -271,6 +271,7 @@ impl CircuitBreakerFactory {
             threshold,
             self.config.open_for,
             config.stage_id,
+            context.unit_name(),
         );
         middleware.failure_mode = self.config.failure_mode.clone();
         middleware.rate_window = rate_window;
@@ -332,6 +333,7 @@ impl CircuitBreakerFactory {
             })
         });
 
+        let middleware = Arc::new(middleware);
         context
             .stage_control_registration(
                 claimant,
@@ -340,6 +342,7 @@ impl CircuitBreakerFactory {
                     effect_type,
                     metrics_fn: snapshotter,
                     state_view: state_view.clone(),
+                    shared: middleware.clone(),
                 },
             )
             .map_err(|error| {
@@ -349,7 +352,7 @@ impl CircuitBreakerFactory {
                     error,
                 )
             })?;
-        Ok((middleware, state_view))
+        Ok((middleware.handle_for(config.stage_id), state_view))
     }
 }
 

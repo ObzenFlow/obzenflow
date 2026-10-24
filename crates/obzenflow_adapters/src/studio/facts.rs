@@ -92,10 +92,19 @@ fn stage_frame(
         }
         ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_) => {
             let context = &envelope.envelope.provenance.event.flow_context;
-            let update = middleware.message(context.stage_id, payload)?;
+            let unit = super::middleware::policy_unit(payload)?;
+            let update = middleware.message(
+                &super::middleware::fact_unit(
+                    context.stage_id,
+                    &context.stage_name,
+                    unit.as_str(),
+                ),
+                payload,
+            )?;
             StudioMessage::MiddlewareLifecycle {
                 stage_id: context.stage_id,
                 stage_name: Some(&context.stage_name),
+                unit: unit.as_str(),
                 flow_id: Some(&context.flow_id),
                 flow_name: Some(&context.flow_name),
                 origin: super::messages::MiddlewareEventOrigin {

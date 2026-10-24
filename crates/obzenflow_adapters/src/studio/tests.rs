@@ -224,6 +224,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
         stage,
         7,
         ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
+            unit: "worker".into(),
             mode_from: RateLimiterMode::Normal,
             mode_to: RateLimiterMode::Limiting,
             limit_rate: 10.0,
@@ -246,7 +247,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
         serde_json::from_str::<Value>(&snapshot.data).unwrap(),
         json!({
             "timestamp_ms": 456, "flow_id": "flow", "flow_name": "demo", "vector_clock": envelope.envelope.provenance.journal.vector_clock,
-            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "rate_limiter": {"mode": "limiting", "revision": 7, "state_updated_at_ms": envelope.envelope.provenance.event.processing.event_time}}]
+            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "unit": "worker", "rate_limiter": {"mode": "limiting", "revision": 7, "state_updated_at_ms": envelope.envelope.provenance.event.processing.event_time}}]
         })
     );
     let running = fact(SystemPayload::PipelineLifecycle(
@@ -646,6 +647,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     let factual =
         |revision, middleware| Input::Fact(Box::new(middleware_fact(stage, revision, middleware)));
     let summary = |successes| ObservationRecord::CircuitBreakerSummary {
+        unit: "worker".into(),
         effect_type: None,
         window_duration_s: 5,
         requests_processed: 20,
@@ -665,6 +667,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             7,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+                unit: "worker".into(),
                 cooldown_ms: 5_000,
                 error_rate: 0.5,
                 failure_count: 2,
@@ -679,12 +682,14 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             8,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+                unit: "worker".into(),
                 test_request_count: 1,
             }),
         ),
         factual(
             9,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+                unit: "worker".into(),
                 success_count: 1,
                 recovery_duration_ms: 250,
             }),
@@ -692,6 +697,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         measured(
             1000,
             ObservationRecord::RateLimiterUtilisation {
+                unit: "worker".into(),
                 effect_type: None,
                 utilization_percent: 25.0,
                 events_in_window: 5,
@@ -701,6 +707,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             7,
             ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
+                unit: "worker".into(),
                 mode_from: RateLimiterMode::Normal,
                 mode_to: RateLimiterMode::Limiting,
                 limit_rate: 10.0,
@@ -709,6 +716,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         measured(
             1001,
             ObservationRecord::RateLimiterActivity {
+                unit: "worker".into(),
                 effect_type: None,
                 window_ms: 1000,
                 delayed_events: 3,
@@ -720,6 +728,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             8,
             ExecutionPayload::RateLimiter(RateLimiterFact::ConfigChanged {
+                unit: "worker".into(),
                 old_rate: 10.0,
                 new_rate: 20.0,
             }),
@@ -801,6 +810,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     let Input::Fact(carrier) = factual(
         10,
         ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+            unit: "worker".into(),
             test_request_count: 1,
         }),
     ) else {

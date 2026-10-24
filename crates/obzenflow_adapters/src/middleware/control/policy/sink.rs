@@ -232,7 +232,7 @@ mod tests {
         MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
         MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
         MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
-        MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+        MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId, ProtectedUnitOwner,
     };
     use obzenflow_core::StageId;
     use obzenflow_runtime::pipeline::config::StageConfig;
@@ -324,6 +324,7 @@ mod tests {
         });
         let unit = ProtectedUnitId {
             stage_id: config.stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::SinkDelivery(crate::middleware::SinkDeliveryUnitId {
                 target: crate::middleware::SinkDeliveryTarget::Stage,
             }),

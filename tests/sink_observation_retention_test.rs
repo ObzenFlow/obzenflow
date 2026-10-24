@@ -262,6 +262,7 @@ impl SinkPolicy for TestPolicy {
             _ctx.try_push_evidence(
                 obzenflow_runtime::stages::sink::journal_sink::SinkPolicyEvidence::circuit_breaker(
                     CircuitBreakerFact::Closed {
+                        unit: "output".into(),
                         success_count: observation as u64,
                         recovery_duration_ms: 1,
                     },

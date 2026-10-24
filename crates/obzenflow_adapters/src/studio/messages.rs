@@ -100,6 +100,7 @@ pub(super) enum StudioMessage<'a> {
         stage_id: StageId,
         #[serde(skip_serializing_if = "Option::is_none")]
         stage_name: Option<&'a str>,
+        unit: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         flow_id: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -582,6 +583,8 @@ pub(super) struct StageMiddlewareSnapshot<'a> {
     pub stage_id: StageId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub circuit_breaker: Option<&'a CircuitBreakerSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]

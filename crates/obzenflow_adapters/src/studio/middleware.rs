@@ -12,7 +12,8 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainPayload;
-use obzenflow_core::{web::SseFrame, StageId};
+use obzenflow_core::metrics::ControlUnit;
+use obzenflow_core::{web::SseFrame, StageId, StageKey};
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Default)]
@@ -20,9 +21,35 @@ pub(super) struct MiddlewareView {
     flow_id: Option<String>,
     flow_name: Option<String>,
     stage_names: HashMap<StageId, String>,
-    circuit_breakers: HashMap<StageId, CircuitBreakerSnapshot>,
-    rate_limiters: HashMap<StageId, RateLimiterSnapshot>,
+    writers: HashMap<ControlUnit, StageId>,
+    circuit_breakers: HashMap<ControlUnit, CircuitBreakerSnapshot>,
+    rate_limiters: HashMap<ControlUnit, RateLimiterSnapshot>,
     last_vector_clock: Option<VectorClock>,
+}
+
+pub(super) fn policy_unit(payload: &ExecutionPayload) -> Option<&StageKey> {
+    match payload {
+        ExecutionPayload::CircuitBreaker(fact) => Some(fact.unit()),
+        ExecutionPayload::RateLimiter(fact) => Some(fact.unit()),
+        _ => None,
+    }
+}
+
+/// The unit a breaker or limiter fact names, keyed as the stage itself when the
+/// writing stage owns it.
+pub(super) fn fact_unit(stage_id: StageId, stage_name: &str, unit: &str) -> ControlUnit {
+    if unit == stage_name {
+        ControlUnit::Stage(stage_id)
+    } else {
+        ControlUnit::Composite(unit.into())
+    }
+}
+
+fn unit_label(unit: &ControlUnit, stage_names: &HashMap<StageId, String>) -> Option<String> {
+    match unit {
+        ControlUnit::Stage(stage_id) => stage_names.get(stage_id).cloned(),
+        ControlUnit::Composite(composite) => Some(composite.as_str().to_owned()),
+    }
 }
 
 fn circuit_label(state: CircuitState) -> &'static str {
@@ -58,30 +85,46 @@ impl MiddlewareView {
         self.flow_id.get_or_insert_with(|| context.flow_id.clone());
         self.flow_name
             .get_or_insert_with(|| context.flow_name.clone());
-        let revision = record.local_sequence();
-        match self.message(stage_id, middleware) {
+        let Some(unit) = policy_unit(middleware) else {
+            return;
+        };
+        let unit = fact_unit(stage_id, &context.stage_name, unit.as_str());
+        let observed = (
+            record.envelope.provenance.event.processing.event_time,
+            record.local_sequence(),
+        );
+        match self.message(&unit, middleware) {
             Some(MiddlewareUpdate::CircuitBreaker(CircuitBreakerUpdate::StateChange {
                 state_to,
                 ..
             })) => {
-                let entry = self.circuit_breakers.entry(stage_id).or_default();
-                if entry.revision.is_none_or(|previous| revision > previous) {
-                    entry.state = Some(state_to.into());
-                    entry.revision = Some(revision);
-                    entry.state_updated_at_ms =
-                        Some(record.envelope.provenance.event.processing.event_time);
+                let state_to = state_to.to_owned();
+                let entry = self.circuit_breakers.entry(unit.clone()).or_default();
+                if entry
+                    .state_updated_at_ms
+                    .zip(entry.revision)
+                    .is_none_or(|previous| observed > previous)
+                {
+                    entry.state = Some(state_to);
+                    entry.state_updated_at_ms = Some(observed.0);
+                    entry.revision = Some(observed.1);
+                    self.writers.insert(unit, stage_id);
                 }
             }
             Some(MiddlewareUpdate::RateLimiter(RateLimiterUpdate::ModeChange {
                 mode_to, ..
             })) => {
                 let mode = mode_to.to_owned();
-                let entry = self.rate_limiters.entry(stage_id).or_default();
-                if entry.revision.is_none_or(|previous| revision > previous) {
+                let entry = self.rate_limiters.entry(unit.clone()).or_default();
+                if entry
+                    .state_updated_at_ms
+                    .zip(entry.revision)
+                    .is_none_or(|previous| observed > previous)
+                {
                     entry.mode = Some(mode);
-                    entry.revision = Some(revision);
-                    entry.state_updated_at_ms =
-                        Some(record.envelope.provenance.event.processing.event_time);
+                    entry.state_updated_at_ms = Some(observed.0);
+                    entry.revision = Some(observed.1);
+                    self.writers.insert(unit, stage_id);
                 }
             }
             _ => {}
@@ -90,14 +133,14 @@ impl MiddlewareView {
 
     pub(super) fn message<'a>(
         &'a self,
-        stage_id: StageId,
+        unit: &ControlUnit,
         middleware: &'a ExecutionPayload,
     ) -> Option<MiddlewareUpdate<'a>> {
         Some(match middleware {
             ExecutionPayload::CircuitBreaker(event) => {
                 let state_from = self
                     .circuit_breakers
-                    .get(&stage_id)
+                    .get(unit)
                     .and_then(|snapshot| snapshot.state.as_deref());
                 MiddlewareUpdate::CircuitBreaker(match event {
                     CircuitBreakerFact::Opened {
@@ -109,6 +152,7 @@ impl MiddlewareView {
                         slow_call_rate,
                         slow_call_count,
                         last_error,
+                        ..
                     } => CircuitBreakerUpdate::StateChange {
                         state_from,
                         state_to: "open",
@@ -126,6 +170,7 @@ impl MiddlewareView {
                     CircuitBreakerFact::Closed {
                         success_count,
                         recovery_duration_ms,
+                        ..
                     } => CircuitBreakerUpdate::StateChange {
                         state_from,
                         state_to: "closed",
@@ -134,7 +179,9 @@ impl MiddlewareView {
                             recovery_duration_ms: *recovery_duration_ms,
                         },
                     },
-                    CircuitBreakerFact::HalfOpen { test_request_count } => {
+                    CircuitBreakerFact::HalfOpen {
+                        test_request_count, ..
+                    } => {
                         CircuitBreakerUpdate::StateChange {
                             state_from,
                             state_to: "half_open",
@@ -147,6 +194,7 @@ impl MiddlewareView {
                         from_state,
                         to_state,
                         timestamp,
+                        ..
                     } => CircuitBreakerUpdate::StateChange {
                         state_from: Some(circuit_label(*from_state)),
                         state_to: circuit_label(*to_state),
@@ -161,6 +209,7 @@ impl MiddlewareView {
                 mode_from,
                 mode_to,
                 limit_rate,
+                ..
             }) => MiddlewareUpdate::RateLimiter(RateLimiterUpdate::ModeChange {
                 mode_from: limiter_label(*mode_from),
                 mode_to: limiter_label(*mode_to),
@@ -177,10 +226,11 @@ impl MiddlewareView {
             return Vec::new();
         };
         let timestamp_ms = packet.capture.observed_at_ms;
+        let stage_unit = ControlUnit::Stage(stage_id);
         let mut updates = Vec::new();
         if let Some(runtime) = &packet.runtime {
             if let Some(cb) = &runtime.circuit_breaker {
-                let entry = self.circuit_breakers.entry(stage_id).or_default();
+                let entry = self.circuit_breakers.entry(stage_unit.clone()).or_default();
                 let totals = entry.totals.get_or_insert_with(Default::default);
                 totals.successes_total = Some(cb.successes_total);
                 totals.failures_total = Some(cb.failures_total);
@@ -196,7 +246,7 @@ impl MiddlewareView {
                 ));
             }
             if let Some(rl) = &runtime.rate_limiter {
-                let entry = self.rate_limiters.entry(stage_id).or_default();
+                let entry = self.rate_limiters.entry(stage_unit.clone()).or_default();
                 if rl.bucket_capacity > 0.0 {
                     entry
                         .window
@@ -241,7 +291,7 @@ impl MiddlewareView {
                         time_in_open_s: Some(*time_in_open_seconds),
                         time_in_half_open_s: Some(*time_in_half_open_seconds),
                     };
-                    let entry = self.circuit_breakers.entry(stage_id).or_default();
+                    let entry = self.circuit_breakers.entry(stage_unit.clone()).or_default();
                     entry.totals = Some(totals.clone());
                     entry.totals_observed_at_ms = Some(timestamp_ms);
                     updates.push(MiddlewareUpdate::CircuitBreaker(
@@ -258,13 +308,14 @@ impl MiddlewareView {
                     utilization_percent,
                     events_in_window,
                     window_size_ms,
+                    ..
                 } => {
                     let window = RateLimiterWindow {
                         utilization_pct: Some(*utilization_percent),
                         events_in_window: Some(*events_in_window),
                         window_size_ms: Some(*window_size_ms),
                     };
-                    let entry = self.rate_limiters.entry(stage_id).or_default();
+                    let entry = self.rate_limiters.entry(stage_unit.clone()).or_default();
                     entry.window = Some(window.clone());
                     entry.window_observed_at_ms = Some(timestamp_ms);
                     updates.push(MiddlewareUpdate::RateLimiter(
@@ -278,6 +329,7 @@ impl MiddlewareView {
                     delay_ms_total,
                     delay_ms_max,
                     limit_rate,
+                    ..
                 } => updates.push(MiddlewareUpdate::RateLimiter(
                     RateLimiterUpdate::ActivityPulse {
                         window_ms: *window_ms,
@@ -328,19 +380,26 @@ impl MiddlewareView {
         if self.circuit_breakers.is_empty() && self.rate_limiters.is_empty() {
             return None;
         }
-        let stage_ids: BTreeSet<_> = self
+        let units: BTreeSet<_> = self
             .circuit_breakers
             .keys()
             .chain(self.rate_limiters.keys())
-            .copied()
+            .cloned()
             .collect();
-        let middleware = stage_ids
+        let middleware = units
             .into_iter()
-            .map(|stage_id| StageMiddlewareSnapshot {
-                stage_id,
-                stage_name: self.stage_names.get(&stage_id).map(String::as_str),
-                circuit_breaker: self.circuit_breakers.get(&stage_id),
-                rate_limiter: self.rate_limiters.get(&stage_id),
+            .filter_map(|unit| {
+                let stage_id = match &unit {
+                    ControlUnit::Stage(stage_id) => *stage_id,
+                    ControlUnit::Composite(_) => *self.writers.get(&unit)?,
+                };
+                Some(StageMiddlewareSnapshot {
+                    stage_id,
+                    stage_name: self.stage_names.get(&stage_id).map(String::as_str),
+                    unit: unit_label(&unit, &self.stage_names),
+                    circuit_breaker: self.circuit_breakers.get(&unit),
+                    rate_limiter: self.rate_limiters.get(&unit),
+                })
             })
             .collect();
         Some(

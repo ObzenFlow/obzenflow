@@ -105,12 +105,13 @@ pub fn materialize_factory_checked_with_declaration(
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> Result<CheckedMiddlewareSurfaceAttachment, MiddlewareBindingError> {
     validate_attachment_request(declaration, &request)?;
-    let context = MiddlewareMaterializationContext::new(config, stage_type, declaration, &request);
+    let context = MiddlewareMaterializationContext::new(config, stage_type, declaration, &request)
+        .with_control(control_middleware);
     let attachment = factory.materialize(request, &context)?;
     validate_materialized_attachment(declaration, &request, &attachment)?;
     context.validate_returned_attachment(&attachment)?;
     control_middleware
-        .commit_batch(context.take_pending())
+        .commit_batch(context.take_pending(), context.owner())
         .map_err(MiddlewareBindingError::AuthorityCommit)?;
     Ok(CheckedMiddlewareSurfaceAttachment::from_validated(
         declaration.label,

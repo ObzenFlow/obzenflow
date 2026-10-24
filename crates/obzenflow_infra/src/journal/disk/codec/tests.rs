@@ -522,9 +522,9 @@ fn complete_observation_record() -> JournalRecord<ChainPayload> {
         "sli":{"availability":1.0,"error_budget_remaining":-0.0,"latency_budget_used":0.125},
         "records":[
             {"observation_type":"llm","metadata":{"schema_version":1,"provider":"fixture","model":"complete-model","hashes":{"version":"sha256-v1","prompt_hash":"a","params_hash":"b","schema_hash":"c"},"usage":{"source":"provider","input_tokens":1001,"output_tokens":1000,"total_tokens":2001},"cache":{"mode":"replay","hit":true}}},
-            {"observation_type":"circuit_breaker_summary","effect_type":"effect","window_duration_s":1,"requests_processed":2,"requests_rejected":3,"observed_state":"open","consecutive_failures":4,"rejection_rate":-0.0,"successes_total":5,"failures_total":6,"opened_total":7,"time_in_closed_seconds":0.0,"time_in_open_seconds":0.5,"time_in_half_open_seconds":0.25},
-            {"observation_type":"rate_limiter_activity","effect_type":"effect","window_ms":1,"delayed_events":2,"delay_ms_total":3,"delay_ms_max":4,"limit_rate":-0.0},
-            {"observation_type":"rate_limiter_utilisation","utilization_percent":0.25,"events_in_window":u64::MAX,"window_size_ms":0},
+            {"observation_type":"circuit_breaker_summary","unit":"stage","effect_type":"effect","window_duration_s":1,"requests_processed":2,"requests_rejected":3,"observed_state":"open","consecutive_failures":4,"rejection_rate":-0.0,"successes_total":5,"failures_total":6,"opened_total":7,"time_in_closed_seconds":0.0,"time_in_open_seconds":0.5,"time_in_half_open_seconds":0.25},
+            {"observation_type":"rate_limiter_activity","unit":"stage","effect_type":"effect","window_ms":1,"delayed_events":2,"delay_ms_total":3,"delay_ms_max":4,"limit_rate":-0.0},
+            {"observation_type":"rate_limiter_utilisation","unit":"stage","utilization_percent":0.25,"events_in_window":u64::MAX,"window_size_ms":0},
             {"observation_type":"backpressure_activity","window_ms":0,"delayed_events":1,"delay_ms_total":2,"delay_ms_max":3,"min_credit":0,"limiting_downstream_stage_id":StageId::new()},
             {"observation_type":"resource_usage","cpu_percent":-0.0,"memory_bytes":u64::MAX,"thread_count":null},
             {"observation_type":"http_pull","requests_total":u64::MAX,"responses_2xx":1,"responses_4xx":2,"responses_5xx":3,"rate_limited_total":4,"retries_total":5,"events_decoded_total":6,"wait_seconds_rate_limit":-0.0,"wait_seconds_poll_interval":0.25,"wait_seconds_backoff":0.5},

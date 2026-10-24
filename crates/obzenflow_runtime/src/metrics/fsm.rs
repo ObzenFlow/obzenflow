@@ -22,7 +22,8 @@ use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{SinkOperationPhase, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{
-    BoundaryMetricsView, ContractMetricEdgeKey, ContractMetricsSnapshot, Percentile, StageMetadata,
+    BoundaryMetricsView, ContractMetricEdgeKey, ContractMetricsSnapshot, ControlUnit, Percentile,
+    StageMetadata,
 };
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::web::HttpMethod;
@@ -198,6 +199,14 @@ impl std::ops::DerefMut for MetricsAggregatorContext {
     }
 }
 
+/// The newest breaker state a protected unit's facts reported.
+#[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
+pub struct ObservedCircuitState {
+    pub value: f64,
+    pub event_time: u64,
+}
+
 /// Simple metrics storage
 #[derive(Default)]
 #[doc(hidden)]
@@ -231,7 +240,7 @@ pub struct MetricsStore {
     pub system_vector_clocks: HashMap<SystemId, u64>,
 
     // Middleware observability accumulation (FLOWIP-059a)
-    pub circuit_breaker_state: HashMap<StageId, f64>,
+    pub circuit_breaker_state: HashMap<ControlUnit, ObservedCircuitState>,
     pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
     pub circuit_breaker_consecutive_failures: HashMap<StageId, f64>,
     pub circuit_breaker_requests_total: HashMap<StageId, u64>,
@@ -705,7 +714,11 @@ impl MetricsAggregatorResources {
             .collect();
 
         // FLOWIP-059a: Middleware metrics
-        snapshot.circuit_breaker_state = store.circuit_breaker_state.clone();
+        snapshot.circuit_breaker_state = store
+            .circuit_breaker_state
+            .iter()
+            .map(|(unit, observed)| (unit.clone(), observed.value))
+            .collect();
         snapshot.circuit_breaker_rejection_rate = store.circuit_breaker_rejection_rate.clone();
         snapshot.circuit_breaker_consecutive_failures =
             store.circuit_breaker_consecutive_failures.clone();
@@ -1333,7 +1346,6 @@ impl MetricsAggregatorAction {
                     let store = &mut ctx.metrics_store;
                     let mut selected = false;
                     let mut http_seen = false;
-                    let mut circuit_seen = false;
                     let mut lifecycle_seen = false;
                     for envelope in events.iter() {
                         if let Some(packet) = &envelope.envelope.observability {
@@ -1488,11 +1500,26 @@ impl MetricsAggregatorAction {
                                     }
                                     _ => None,
                                 };
-                                if !circuit_seen {
-                                    if let Some(state) = state {
-                                        store.circuit_breaker_state.insert(stage_id, state);
-                                        circuit_seen = true;
-                                    }
+                                if let Some(value) = state {
+                                    let unit = if fact.unit().as_str() == event.flow_context.stage_name
+                                    {
+                                        ControlUnit::Stage(stage_id)
+                                    } else {
+                                        ControlUnit::Composite(fact.unit().clone())
+                                    };
+                                    let observed = ObservedCircuitState {
+                                        value,
+                                        event_time: event.processing.event_time,
+                                    };
+                                    store
+                                        .circuit_breaker_state
+                                        .entry(unit)
+                                        .and_modify(|current| {
+                                            if observed.event_time > current.event_time {
+                                                *current = observed;
+                                            }
+                                        })
+                                        .or_insert(observed);
                                 }
                             }
                         }

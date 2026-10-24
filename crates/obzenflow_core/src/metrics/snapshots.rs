@@ -17,7 +17,7 @@ use crate::event::payloads::system_payload::{
 };
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::SinkOperationPhase;
-use crate::id::{FlowId, StageId};
+use crate::id::{FlowId, StageId, StageKey};
 use crate::metrics::composite::{
     CompositeContract, CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
     CompositePortTraffic,
@@ -96,8 +96,8 @@ pub struct AppMetricsSnapshot {
     /// Dropped events by flow name
     pub dropped_events: HashMap<StageId, f64>,
 
-    /// Circuit breaker state by stage (0=closed, 0.5=half_open, 1=open)
-    pub circuit_breaker_state: HashMap<StageId, f64>,
+    /// Circuit breaker state by protected unit (0=closed, 0.5=half_open, 1=open)
+    pub circuit_breaker_state: HashMap<ControlUnit, f64>,
 
     /// Circuit breaker rejection rate by stage (0.0-1.0)
     pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
@@ -517,6 +517,15 @@ pub struct JournalMetricsSnapshot {
 pub struct StageInfraMetrics {
     /// Events currently being processed
     pub in_flight: u64,
+}
+
+/// The protected unit whose control state a series reports.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ControlUnit {
+    /// A policy owned by one stage.
+    Stage(StageId),
+    /// A policy shared by the generated members of an authored composite.
+    Composite(StageKey),
 }
 
 /// Stage metadata for display and categorization

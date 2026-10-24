@@ -152,7 +152,8 @@ pub use carrier::{
     MiddlewareAttachmentSite, MiddlewareAttachmentValidationError, MiddlewareAuthorityError,
     MiddlewareCapability, MiddlewareDeclaration, MiddlewareMaterializationContext,
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
-    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
+    ProtectedUnitId, ProtectedUnitOwner, SinkConfiguredTargetKey, SinkDeliverySurface,
+    SinkDeliveryTarget,
     SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
     SourceStageIngressOwner,
 };

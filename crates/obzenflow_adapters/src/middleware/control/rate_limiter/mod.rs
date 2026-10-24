@@ -73,7 +73,7 @@ use crate::middleware::{
     EffectTypeKey, MaterializationClaim, MiddlewareContext, MiddlewareMaterializationContext,
 };
 
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, StageKey, WriterId};
 use obzenflow_runtime::control_plane::{RateLimiterMetrics, RateLimiterSnapshotter};
 use std::sync::Arc;
 // FLOWIP-114o: the limiter's token-bucket refill and stats windows read
@@ -104,6 +104,7 @@ pub struct RateLimiterMiddleware {
     /// This must match the stage's writer_id so vector-clock watermarks and
     /// stage attribution remain correct in downstream consumers.
     writer_id: WriterId,
+    unit: StageKey,
 }
 
 impl RateLimiterMiddleware {
@@ -118,6 +119,15 @@ impl RateLimiterMiddleware {
         claimant: MaterializationClaim,
     ) -> Result<Self, String> {
         Self::new_keyed(stage_id, config, context, claimant, None)
+    }
+
+    /// The same bucket, with evidence written by another member stage.
+    pub(in crate::middleware::control) fn handle_for(&self, stage_id: StageId) -> Self {
+        Self {
+            core: self.core.clone(),
+            writer_id: WriterId::from(stage_id),
+            unit: self.unit.clone(),
+        }
     }
 
     /// Construct a limiter registered under a per-effect key (FLOWIP-120c):
@@ -149,7 +159,9 @@ impl RateLimiterMiddleware {
             }
         );
 
-        let (middleware, snapshotter) = Self::build_unregistered(stage_id, config);
+        let (middleware, snapshotter) =
+            Self::build_unregistered(stage_id, context.unit_name(), config);
+        let middleware = Arc::new(middleware);
         context
             .stage_control_registration(
                 claimant,
@@ -157,15 +169,17 @@ impl RateLimiterMiddleware {
                     stage_id,
                     effect_type,
                     metrics_fn: snapshotter,
+                    shared: middleware.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
 
-        Ok(middleware)
+        Ok(middleware.handle_for(stage_id))
     }
 
     fn build_unregistered(
         stage_id: StageId,
+        unit: StageKey,
         config: ValidatedRateLimiterConfig,
     ) -> (Self, Arc<RateLimiterSnapshotter>) {
         let core = Arc::new(RateLimiterCore::new(config));
@@ -187,6 +201,7 @@ impl RateLimiterMiddleware {
             Self {
                 core,
                 writer_id: WriterId::from(stage_id),
+                unit,
             },
             snapshotter,
         )
@@ -199,6 +214,7 @@ impl RateLimiterMiddleware {
     fn maybe_emit_activity_pulse(&self, ctx: &mut MiddlewareContext) {
         if let Some(pulse) = self.core.take_due_pulse(Instant::now()) {
             ctx.observe(ObservationRecord::RateLimiterActivity {
+                unit: self.unit.clone(),
                 effect_type: None,
                 window_ms: pulse.window_ms,
                 delayed_events: pulse.delayed_events,
@@ -215,6 +231,7 @@ impl RateLimiterMiddleware {
                 ctx.write_control_event(rate_limiter_event(
                     self.writer_id,
                     RateLimiterFact::ModeChange {
+                        unit: self.unit.clone(),
                         mode_from: from.into(),
                         mode_to: to.into(),
                         limit_rate: self.limit_rate(),
@@ -222,6 +239,7 @@ impl RateLimiterMiddleware {
                 ));
             }
             ctx.observe(ObservationRecord::RateLimiterUtilisation {
+                unit: self.unit.clone(),
                 effect_type: None,
                 utilization_percent: summary.utilization_percent,
                 events_in_window: summary.events_in_window,
@@ -239,7 +257,7 @@ impl RateLimiterMiddleware {
     async fn acquire_permit_async(&self, ctx: &mut MiddlewareContext) {
         let writer_id = self.writer_id;
         acquire_admission(&self.core, |info: RateLimitDelayEvent| {
-            ctx.write_control_event(delayed_event(writer_id, info));
+            ctx.write_control_event(delayed_event(writer_id, &self.unit, info));
         })
         .await;
     }
@@ -250,7 +268,7 @@ impl RateLimiterMiddleware {
     ) -> RateLimitReservation {
         let writer_id = self.writer_id;
         acquire_reservation(&self.core, |info: RateLimitDelayEvent| {
-            ctx.write_control_event(delayed_event(writer_id, info));
+            ctx.write_control_event(delayed_event(writer_id, &self.unit, info));
         })
         .await
     }
@@ -292,7 +310,7 @@ fn test_middleware(
     let validated =
         config::validated_rate_limiter_config(events_per_second, burst_capacity, cost_per_event)
             .expect("test middleware configuration should be valid");
-    RateLimiterMiddleware::build_unregistered(stage_id, validated).0
+    RateLimiterMiddleware::build_unregistered(stage_id, StageKey::from("limited"), validated).0
 }
 
 #[cfg(test)]
@@ -347,6 +365,7 @@ mod tests {
     fn snapshotter_omits_a_contended_bucket_without_holding_stats() {
         let (middleware, snapshotter) = RateLimiterMiddleware::build_unregistered(
             StageId::new(),
+            StageKey::from("limited"),
             validated_rate_limiter_config(10.0, Some(10.0), 1.0).unwrap(),
         );
         let bucket = middleware.core.bucket_for_test().lock().unwrap();
@@ -410,6 +429,7 @@ mod tests {
             if let Some((from, to)) = transition {
                 let ChainPayload::Execution(ExecutionPayload::RateLimiter(
                     RateLimiterFact::ModeChange {
+                        unit,
                         mode_from,
                         mode_to,
                         limit_rate,
@@ -419,6 +439,7 @@ mod tests {
                     panic!("typed mode change");
                 };
                 assert_eq!((*mode_from, *mode_to), (from, to));
+                assert_eq!(unit.as_str(), "limited");
                 assert_eq!(*limit_rate, 100.0);
             }
             let measured = samples(&observations);

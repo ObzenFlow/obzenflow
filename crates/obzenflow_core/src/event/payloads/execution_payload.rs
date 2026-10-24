@@ -19,7 +19,7 @@ use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::{Count, DurationMs};
 use crate::event::vocabulary;
 use crate::journal::{ArchiveStatus, StatusDerivation};
-use crate::StageId;
+use crate::{StageId, StageKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -224,6 +224,7 @@ pub enum CircuitState {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CircuitBreakerFact {
     Opened {
+        unit: StageKey,
         /// Configured minimum wait before another probe is permitted.
         cooldown_ms: u64,
         /// Failure rate in the population that caused this transition, not the
@@ -241,10 +242,12 @@ pub enum CircuitBreakerFact {
         last_error: Option<String>,
     },
     Closed {
+        unit: StageKey,
         success_count: u64,
         recovery_duration_ms: u64,
     },
     Rejected {
+        unit: StageKey,
         #[serde(default)]
         reason: CircuitBreakerRejectionReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,9 +256,11 @@ pub enum CircuitBreakerFact {
         circuit_open_duration_ms: Option<u64>,
     },
     HalfOpen {
+        unit: StageKey,
         test_request_count: u32,
     },
     AttemptSettled {
+        unit: StageKey,
         cursor: EffectCursor,
         attempt: u32,
         health_classification: CircuitBreakerHealthClassification,
@@ -264,6 +269,7 @@ pub enum CircuitBreakerFact {
         admission_wait_ms: u64,
     },
     StateChanged {
+        unit: StageKey,
         from_state: CircuitState,
         to_state: CircuitState,
         timestamp: u64,
@@ -271,6 +277,18 @@ pub enum CircuitBreakerFact {
 }
 
 impl CircuitBreakerFact {
+    /// The authored stage whose breaker wrote this fact.
+    pub fn unit(&self) -> &StageKey {
+        match self {
+            Self::Opened { unit, .. }
+            | Self::Closed { unit, .. }
+            | Self::Rejected { unit, .. }
+            | Self::HalfOpen { unit, .. }
+            | Self::AttemptSettled { unit, .. }
+            | Self::StateChanged { unit, .. } => unit,
+        }
+    }
+
     pub fn event_type(&self) -> &'static str {
         match self {
             Self::Opened { .. }
@@ -393,22 +411,34 @@ impl RecoveryFact {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RateLimiterFact {
     Delayed {
+        unit: StageKey,
         delay_ms: u64,
         current_rate: f64,
         limit_rate: f64,
     },
     ModeChange {
+        unit: StageKey,
         mode_from: RateLimiterMode,
         mode_to: RateLimiterMode,
         limit_rate: f64,
     },
     ConfigChanged {
+        unit: StageKey,
         old_rate: f64,
         new_rate: f64,
     },
 }
 
 impl RateLimiterFact {
+    /// The authored stage whose rate limiter wrote this fact.
+    pub fn unit(&self) -> &StageKey {
+        match self {
+            Self::Delayed { unit, .. }
+            | Self::ModeChange { unit, .. }
+            | Self::ConfigChanged { unit, .. } => unit,
+        }
+    }
+
     pub fn event_type(&self) -> &'static str {
         match self {
             Self::Delayed { .. } => vocabulary::rate_limiter::WAIT_STARTED,
@@ -802,7 +832,7 @@ mod tests {
     #[test]
     fn opened_fact_requires_and_round_trips_its_cooldown() {
         let mut opening_json = serde_json::json!({
-            "action": "opened", "error_rate": 1.0, "failure_count": 3,
+            "action": "opened", "unit": "orders", "error_rate": 1.0, "failure_count": 3,
             "trigger": "consecutive_failures", "observed_calls": 3,
             "cooldown_ms": 5_000
         });

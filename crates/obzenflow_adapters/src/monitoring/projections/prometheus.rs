@@ -9,10 +9,10 @@ use obzenflow_core::event::observability::{HttpPullState, WaitReason};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{SinkOperationPhase, SinkWritePhase};
 use obzenflow_core::metrics::{
-    AppMetricsSnapshot, ContractMetricEdgeKey, HistogramSnapshot, InfraMetricsSnapshot,
-    StageMetadata,
+    AppMetricsSnapshot, ContractMetricEdgeKey, ControlUnit, HistogramSnapshot,
+    InfraMetricsSnapshot, StageMetadata,
 };
-use obzenflow_core::{FlowId, StageId};
+use obzenflow_core::{FlowId, StageId, StageKey};
 use std::error::Error;
 use std::fmt::Write;
 
@@ -857,14 +857,20 @@ impl PrometheusProjection {
             writeln!(output, "# HELP obzenflow_circuit_breaker_state Circuit breaker state (0=closed, 0.5=half_open, 1=open)")?;
             writeln!(output, "# TYPE obzenflow_circuit_breaker_state gauge")?;
 
-            for (stage_id, value) in &snapshot.circuit_breaker_state {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
-                    writeln!(
-                        output,
-                        "obzenflow_circuit_breaker_state{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        value
-                    )?;
+            for (unit, value) in &snapshot.circuit_breaker_state {
+                let labels = match unit {
+                    ControlUnit::Stage(stage_id) => snapshot
+                        .stage_metadata
+                        .get(stage_id)
+                        .map(|metadata| format_stage_labels(stage_id, metadata)),
+                    ControlUnit::Composite(composite) => snapshot
+                        .stage_metadata
+                        .values()
+                        .next()
+                        .map(|metadata| format_composite_unit_labels(composite, metadata)),
+                };
+                if let Some(labels) = labels {
+                    writeln!(output, "obzenflow_circuit_breaker_state{{{labels}}} {value}")?;
                 }
             }
             writeln!(output)?;
@@ -2785,6 +2791,22 @@ fn escape_label(value: &str) -> String {
 ///
 /// All stage-scoped metrics MUST use this function to ensure consistent labeling.
 /// Returns the standard label set: flow, flow_id (when available), stage, stage_id
+fn format_composite_unit_labels(composite: &StageKey, metadata: &StageMetadata) -> String {
+    match &metadata.flow_id {
+        Some(flow_id) => format!(
+            "flow=\"{}\",flow_id=\"{}\",stage=\"{}\"",
+            escape_label(&metadata.flow_name),
+            escape_label(&flow_id.to_string()),
+            escape_label(composite.as_str()),
+        ),
+        None => format!(
+            "flow=\"{}\",stage=\"{}\"",
+            escape_label(&metadata.flow_name),
+            escape_label(composite.as_str()),
+        ),
+    }
+}
+
 fn format_stage_labels(stage_id: &StageId, metadata: &StageMetadata) -> String {
     let stage_id_str = stage_id.to_string();
     let reference_mode = metadata

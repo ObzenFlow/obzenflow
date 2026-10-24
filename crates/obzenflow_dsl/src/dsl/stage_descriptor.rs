@@ -1696,6 +1696,7 @@ fn materialize_effect_boundary(
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect_declarations: &[EffectDeclaration],
     effect_policies: &[EffectPolicyAttachment],
+    owner: &obzenflow_adapters::middleware::ProtectedUnitOwner,
 ) -> Result<Arc<dyn EffectBoundary>, String> {
     let inline_policy_declarations: Vec<MiddlewareDeclaration> = effect_policies
         .iter()
@@ -1748,6 +1749,7 @@ fn materialize_effect_boundary(
             control_middleware,
             effect_declaration,
             attachment.authored_site,
+            owner,
         )?;
         effect_chains
             .entry(attachment.effect_type)
@@ -1777,6 +1779,7 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     generated_owner_kind: &'static str,
     ai_models: Vec<obzenflow_core::ai::AiModelSpec>,
     ai_sections: Vec<(&'static str, &'static str)>,
+    policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner,
 }
 
 impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
@@ -1827,7 +1830,14 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             generated_owner_kind: "role",
             ai_models: Vec::new(),
             ai_sections: Vec::new(),
+            policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner::Stage,
         }
+    }
+
+    pub(crate) fn with_policy_owner(mut self, composite: &str) -> Self {
+        self.policy_owner =
+            obzenflow_adapters::middleware::ProtectedUnitOwner::Composite(composite.into());
+        self
     }
 
     pub(crate) fn with_implementation_middleware(
@@ -2092,6 +2102,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             &control_middleware,
             &effect_declarations,
             &self.effect_policies,
+            &self.policy_owner,
         )?;
 
         let observers = effect_observers;
@@ -2845,6 +2856,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             &control_middleware,
             &effect_declarations,
             &self.effect_policies,
+            &obzenflow_adapters::middleware::ProtectedUnitOwner::Stage,
         )?;
 
         let observers = effect_observers;
