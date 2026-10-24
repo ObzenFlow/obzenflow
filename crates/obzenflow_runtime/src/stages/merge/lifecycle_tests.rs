@@ -248,3 +248,44 @@ async fn failure_is_visible_while_the_running_publication_is_blocked() {
     };
     assert!(failure.cause.to_string().contains("original failure"));
 }
+
+#[tokio::test]
+async fn a_failed_verdict_write_fails_the_merge_before_it_completes() {
+    let fixture = fixture();
+    let batch_id = fixture.batch_id;
+    fixture
+        .batch
+        .append(
+            ChainEventFactory::eof_event(batch_id.into(), true),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    fixture.data.fail_matching_append(move |event| {
+        matches!(
+            &event.payload,
+            ChainPayload::Execution(ExecutionPayload::ContractStatus { upstream, .. })
+                if *upstream == batch_id
+        )
+    });
+    fixture.handle.initialize().await.unwrap();
+    fixture
+        .handle
+        .wait_for_milestone(StageMilestone::Initialized)
+        .await
+        .unwrap();
+    fixture.handle.ready().await.unwrap();
+
+    let LifecycleExit::Failed(failure) = fixture.handle.wait_for_stage_exit().await else {
+        panic!("a merge whose verdict write fails ends failed")
+    };
+    assert!(failure.cause.to_string().contains("Journal is full"));
+    let records = fixture.data.read_all_unordered().await.unwrap();
+    assert!(!records.iter().any(|record| matches!(
+        &record.payload,
+        ChainPayload::Execution(
+            ExecutionPayload::ContractStatus { .. }
+                | ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed { .. })
+        )
+    )));
+}

@@ -863,8 +863,10 @@ pub(crate) mod tests {
         }
     }
 
+    type AppendMatch<T> = Box<dyn Fn(&T) -> bool + Send + Sync>;
+
     type AppendGate<T> = (
-        Box<dyn Fn(&T) -> bool + Send + Sync>,
+        AppendMatch<T>,
         Arc<tokio::sync::Notify>,
         Arc<tokio::sync::Notify>,
     );
@@ -874,6 +876,7 @@ pub(crate) mod tests {
         id: JournalId,
         fail_appends: Arc<std::sync::atomic::AtomicBool>,
         append_gate: Mutex<Option<AppendGate<T>>>,
+        append_failure: Mutex<Option<AppendMatch<T>>>,
         owner: Option<JournalOwner>,
         events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
@@ -906,11 +909,19 @@ pub(crate) mod tests {
             self
         }
 
+        pub(crate) fn fail_matching_append(
+            &self,
+            matches: impl Fn(&T) -> bool + Send + Sync + 'static,
+        ) {
+            *self.append_failure.lock().unwrap() = Some(Box::new(matches));
+        }
+
         pub(crate) fn new(owner: JournalOwner) -> Self {
             Self {
                 id: JournalId::new(),
                 fail_appends: Arc::default(),
                 append_gate: Mutex::new(None),
+                append_failure: Mutex::new(None),
                 owner: Some(owner),
                 events: Arc::new(Mutex::new(Vec::new())),
             }
@@ -952,7 +963,13 @@ pub(crate) mod tests {
                 entered.notify_one();
                 release.notified().await;
             }
-            if self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
+            let fails_once = self
+                .append_failure
+                .lock()
+                .unwrap()
+                .take_if(|matches| matches(&event))
+                .is_some();
+            if fails_once || self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(JournalError::Full);
             }
             let event = options.capture.prepare(0, event);
