@@ -312,7 +312,7 @@ async fn assert_delivery_contract_pass(base_path: &Path) -> Result<()> {
                 }) if contract_name.as_str() == DeliveryContract::NAME => match status {
                     ContractResultStatusLabel::Passed => seen_delivery_contract_pass = true,
                     ContractResultStatusLabel::Failed => seen_delivery_contract_fail = true,
-                    ContractResultStatusLabel::Pending | ContractResultStatusLabel::Skipped => {}
+                    ContractResultStatusLabel::Pending => {}
                 },
                 _ => {}
             }

@@ -176,7 +176,6 @@ pub enum ContractResultStatusLabel {
     Passed,
     Failed,
     Pending,
-    Skipped,
 }
 
 impl ContractResultStatusLabel {
@@ -185,7 +184,6 @@ impl ContractResultStatusLabel {
             Self::Passed => vocabulary::contract::VERIFICATION_PASSED,
             Self::Failed => vocabulary::contract::VERIFICATION_FAILED,
             Self::Pending => vocabulary::contract::VERIFICATION_PENDING,
-            Self::Skipped => vocabulary::contract::VERIFICATION_SKIPPED,
         }
     }
 
@@ -194,7 +192,6 @@ impl ContractResultStatusLabel {
             Self::Passed => "passed",
             Self::Failed => "failed",
             Self::Pending => "pending",
-            Self::Skipped => "skipped",
         }
     }
 }
@@ -213,7 +210,6 @@ impl std::str::FromStr for ContractResultStatusLabel {
             "passed" => Ok(Self::Passed),
             "failed" => Ok(Self::Failed),
             "pending" => Ok(Self::Pending),
-            "skipped" => Ok(Self::Skipped),
             _ => Err(()),
         }
     }

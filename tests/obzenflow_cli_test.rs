@@ -1076,7 +1076,6 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_eq!(journal_numbers(&verbose), numbers);
     assert!(verbose.contains("RUNTIME"));
     for label in [
-        "flow_signal/source.contract_declared@1",
         "execution/contract.continuation_allowed@1",
         "execution/circuit_breaker.call_classified@1",
         "execution/resilience.attempts_reported@1",
@@ -1408,16 +1407,16 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             .as_str()
             .unwrap()
     };
-    let manual_review = event_table(&verbose, data_file("manual_review"), &registrations);
+    let validate_order = event_table(&verbose, data_file("validate_order"), &registrations);
     for source in ["store_orders", "web_orders"] {
         assert_eq!(
-            manual_review[&(
-                "flow_signal/runtime.source.contract_declared@1".into(),
+            validate_order[&(
+                "flow_signal/runtime.stream.eof_declared@1".into(),
                 source.into(),
                 "FiniteSource".into()
             )],
             1,
-            "forwarded declarations retain their author, not the sink journal owner"
+            "forwarded control rows retain their author, not the journal owner"
         );
     }
     assert_eq!(

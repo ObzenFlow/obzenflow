@@ -19,16 +19,7 @@ pub enum ContractPhase {
 #[serde(rename_all = "snake_case")]
 pub enum PendingReason {
     ProgressOnly,
-    ProducerDeclarationUnavailable,
-    ProductionCountUnavailable,
     WriterAdvertisementUnavailable,
-    EvaluationUnavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkippedReason {
-    NoProductionExpectation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,11 +36,6 @@ pub enum ContractEvidenceDetails {
     Transport {
         advertised_writer_seq: Option<SeqNo>,
         consumed_count: Count,
-    },
-    Source {
-        declaration_received: bool,
-        expected_count: Option<Count>,
-        produced_count: Option<Count>,
     },
     Delivery {
         consumed_total: u64,

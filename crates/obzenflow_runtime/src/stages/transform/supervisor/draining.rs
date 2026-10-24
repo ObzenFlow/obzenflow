@@ -468,9 +468,16 @@ async fn dispatch_draining_inner<
             }
 
             tracing::info!(stage_name = %ctx.stage_name, "Transform queue drained");
-            Ok(EventLoopDirective::Transition(
-                TransformEvent::DrainComplete,
-            ))
+            let drained = if ctx
+                .cycle_guard_config
+                .as_ref()
+                .is_some_and(|cfg| cfg.is_entry_point)
+            {
+                TransformEvent::CycleDrained
+            } else {
+                TransformEvent::DrainComplete
+            };
+            Ok(EventLoopDirective::Transition(drained))
         }
         PollResult::Error(e) => {
             tracing::error!(

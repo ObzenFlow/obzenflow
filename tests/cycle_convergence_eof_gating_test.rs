@@ -2,15 +2,20 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+mod replay_testkit;
+
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_core::contracts::ContractPhase;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
-    ChainEvent, PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload,
+    ChainEvent, ChainPayload, PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload,
 };
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, StageOutputs};
+use obzenflow_core::{CycleDepth, DeliveryContract, StageOutputs, TransportContract};
 use obzenflow_dsl::{
     async_infinite_source, async_source, flow, sink, source, test_flow, transform, FlowDefinition,
 };
@@ -41,6 +46,7 @@ impl TypedPayload for SeedEvent {
 const KIND_SEED: &str = "seed";
 const KIND_ITER: &str = "iter";
 const KIND_DONE: &str = "done";
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -142,6 +148,85 @@ async fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+async fn final_contract_results(run_dir: &Path) -> BTreeMap<String, Vec<String>> {
+    let manifest = replay_testkit::archive_manifest(run_dir);
+    let stages = manifest["stages"].as_object().expect("manifest stages");
+    let names: HashMap<&str, &str> = stages
+        .iter()
+        .map(|(name, stage)| (stage["stage_id"].as_str().expect("stage id"), name.as_str()))
+        .collect();
+    let mut finals: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for stage in stages.keys() {
+        for record in replay_testkit::read_stage_envelopes_appended(run_dir, stage).await {
+            if let ChainPayload::Execution(ExecutionPayload::ContractResult {
+                upstream,
+                reader,
+                contract_name,
+                phase: ContractPhase::Final,
+                ..
+            }) = &record.payload
+            {
+                finals
+                    .entry(format!(
+                        "{} -> {}",
+                        names[upstream.to_string().as_str()],
+                        names[reader.to_string().as_str()]
+                    ))
+                    .or_default()
+                    .push(contract_name.to_string());
+            }
+        }
+    }
+    finals
+}
+
+async fn assert_entry_closes_its_cycle_before_completing(
+    run_dir: &Path,
+    entry: &str,
+    member: &str,
+) {
+    let entry_writer = replay_testkit::stage_writer(run_dir, entry);
+    let member_writer = replay_testkit::stage_writer(run_dir, member);
+    let rows = replay_testkit::read_stage_envelopes_appended(run_dir, entry).await;
+    let position = |describe: &str, found: &dyn Fn(&ChainPayload) -> bool| {
+        rows.iter()
+            .position(|row| found(&row.payload))
+            .unwrap_or_else(|| panic!("{entry}'s journal records {describe}"))
+    };
+    let own_eof = position("its own EOF", &|payload| {
+        matches!(
+            payload,
+            ChainPayload::FlowControl(FlowControlPayload::Eof {
+                writer_id: Some(writer),
+                ..
+            }) if *writer == entry_writer
+        )
+    });
+    let cycle_verdict = position("a verdict on the edge back from its cycle", &|payload| {
+        matches!(
+            payload,
+            ChainPayload::Execution(ExecutionPayload::ContractStatus {
+                upstream,
+                pass: true,
+                ..
+            }) if obzenflow_core::WriterId::from(*upstream) == member_writer
+        )
+    });
+    let completed = position("its completion", &|payload| {
+        matches!(
+            payload,
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                StageLifecycleFact::Completed { .. }
+            ))
+        )
+    });
+    assert!(
+        own_eof < cycle_verdict && cycle_verdict < completed,
+        "{entry} writes its EOF, then the verdict on the edge back from {member}, then completes \
+         (positions {own_eof}, {cycle_verdict}, {completed})"
+    );
 }
 
 #[derive(Clone, Debug)]
@@ -323,6 +408,7 @@ impl InlineSink for DoneCounterSink {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let journal_root = unique_journal_dir("cycle_buffers_external_eof");
+    let journal_root_for_flow = journal_root.clone();
     let gate =
         BackpressureAckGate::install("eof_entry", "eof_iter", 0).map_err(anyhow::Error::msg)?;
 
@@ -340,7 +426,7 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let harness = test_flow! {
         build_context: enforced_backpressure(1, 5_000),
         name: "cycle_buffers_external_eof_until_scc_quiescent",
-        journals: disk_journals(journal_root),
+        journals: disk_journals(journal_root_for_flow.clone()),
 
         stages: {
             src = async_source!(SeedEvent => source);
@@ -420,6 +506,44 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
             1,
         )
         .await?;
+
+    let run_dir = replay_testkit::latest_run_dir(&journal_root);
+    assert_eq!(
+        replay_testkit::passing_verdicts(&run_dir).await,
+        replay_testkit::one_verdict_per_edge(&[
+            "eof_entry -> eof_iter",
+            "eof_entry -> snk",
+            "eof_iter -> eof_entry",
+            "src -> eof_entry",
+        ]),
+        "every edge records one passing verdict, the edge back into the entry point included"
+    );
+    assert_eq!(
+        final_contract_results(&run_dir).await,
+        BTreeMap::from([
+            (
+                "eof_entry -> eof_iter".to_string(),
+                vec![TransportContract::NAME.to_string()]
+            ),
+            (
+                "eof_entry -> snk".to_string(),
+                vec![
+                    TransportContract::NAME.to_string(),
+                    DeliveryContract::NAME.to_string()
+                ]
+            ),
+            (
+                "eof_iter -> eof_entry".to_string(),
+                vec![TransportContract::NAME.to_string()]
+            ),
+            (
+                "src -> eof_entry".to_string(),
+                vec![TransportContract::NAME.to_string()]
+            ),
+        ]),
+        "edges inside the cycle end with their transport result and no divergence result"
+    );
+    assert_entry_closes_its_cycle_before_completing(&run_dir, "eof_entry", "eof_iter").await;
 
     Ok(())
 }

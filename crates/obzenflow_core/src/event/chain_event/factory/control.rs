@@ -5,7 +5,6 @@
 use super::{current_timestamp, ChainEventFactory};
 use crate::event::chain_event::{
     ChainEvent, ChainPayload, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
-    SourceContractEventParams,
 };
 use crate::event::payloads::flow_control_payload::{
     CheckpointId, EofKind, FlowControlPayload, WatermarkStageId,
@@ -118,34 +117,6 @@ impl ChainEventFactory {
         Self::framework_event(
             writer_id,
             ChainPayload::FlowControl(FlowControlPayload::PipelineAbort { reason, upstream }),
-        )
-    }
-
-    /// Create a source contract event
-    pub fn source_contract_event(
-        writer_id: WriterId,
-        params: SourceContractEventParams,
-    ) -> ChainEvent {
-        let SourceContractEventParams {
-            expected_count,
-            source_id,
-            route,
-            journal_path,
-            journal_index,
-            writer_seq,
-            vector_clock,
-        } = params;
-        Self::framework_event(
-            writer_id,
-            ChainPayload::FlowControl(FlowControlPayload::SourceContract {
-                expected_count,
-                source_id,
-                route,
-                journal_path,
-                journal_index,
-                writer_seq,
-                vector_clock,
-            }),
         )
     }
 

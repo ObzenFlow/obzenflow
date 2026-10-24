@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{ContractStatus, ContractTracker, ReaderProgress, StageKey, UpstreamSubscription};
+use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
 use crate::messaging::upstream_subscription_policy::{EdgeContext, EdgeContractDecision};
 use obzenflow_core::contracts::{
     ContractPhase, SubscriptionFeed, SubscriptionReceipts, SubscriptionScope, SubscriptionSelection,
@@ -36,7 +36,6 @@ fn contract_result_labels_for_emission(
             Some(v.cause.cause_label().to_string()),
         ),
         ContractResult::Pending { .. } => (ContractResultStatusLabel::Pending, None),
-        ContractResult::Skipped { .. } => (ContractResultStatusLabel::Skipped, None),
     }
 }
 
@@ -71,7 +70,7 @@ fn merge_edge_status(
 ) {
     if let ContractStatus::Violated { upstream, cause } = &edge {
         if advisory.contains(upstream) {
-            tracing::warn!(%upstream, ?cause, "source contract failure is advisory under configured warning policy");
+            tracing::warn!(%upstream, ?cause, "contract failure on an edge from a source is advisory under the configured warning policy");
             return;
         }
     }
@@ -493,19 +492,6 @@ where
     ) -> ContractStatus {
         self.check_contracts_with_mode(reader_progress, ContractCheckMode::DiagnosticsOnly)
             .await
-    }
-
-    pub(crate) fn ended_without_verdict(
-        &self,
-        reader_progress: &[ReaderProgress],
-    ) -> Option<&StageKey> {
-        self.contract_tracker.as_ref()?;
-        reader_progress
-            .iter()
-            .enumerate()
-            .find(|(index, progress)| self.state.is_reader_eof(*index) && !progress.final_emitted)
-            .and_then(|(index, _)| self.readers.get(index))
-            .map(|slot| &slot.stage_key)
     }
 
     async fn check_contracts_with_mode(

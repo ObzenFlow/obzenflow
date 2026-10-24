@@ -185,7 +185,7 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
         (&source, "sensor.value@unit/reading", 10),
         (&source, "sensor.value@unit/reading", 1),
         (&source, "sensor.value", 1),
-        (&source, "runtime.source.contract_declared", 1),
+        (&source, "runtime.stream.watermark_declared", 1),
         (&second_author, "sensor.value@unit/reading", 1),
     ] {
         let mut record = author.clone();
@@ -236,7 +236,7 @@ fn journal_summary_preserves_distinct_authors_punctuation_and_lexical_versions()
     assert_eq!(
         rows,
         [
-            vec!["1", "fact/runtime.source.contract_declared@1", "shared"],
+            vec!["1", "fact/runtime.stream.watermark_declared@1", "shared"],
             vec!["1", "fact/sensor.value@1", "shared"],
             vec!["1", "fact/sensor.value@unit/reading@1", "shared"],
             vec!["1", "fact/sensor.value@unit/reading@10", "shared"],

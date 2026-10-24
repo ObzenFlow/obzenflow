@@ -9,6 +9,7 @@
 //! - `draining.rs` — Draining state event loop
 //! - `tests.rs`    — All unit tests
 
+mod closing;
 mod direct_fact_continuation;
 mod draining;
 mod running;
@@ -18,6 +19,7 @@ mod tests;
 use super::fsm::{
     TransformAction, TransformContext, TransformEvent, TransformResources, TransformState,
 };
+use crate::backpressure::{BackpressureRegistry, EdgeCounts};
 use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::snapshot_stage_accounting;
@@ -169,6 +171,23 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                 };
                 on TransformEvent::DrainComplete => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     Box::pin(async move { Ok(Transition { next_state: TransformState::Finalizing, actions: vec![TransformAction::DrainHandler, TransformAction::ForwardEOF, TransformAction::SendCompletion, TransformAction::Cleanup, TransformAction::Host(SupervisorAction::CloseMailbox), TransformAction::Host(SupervisorAction::SettlePublications), TransformAction::Host(SupervisorAction::Emit(TransformEvent::FinalizationCompleted))] }) })
+                };
+                on TransformEvent::CycleDrained => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: TransformState::ClosingCycle, actions: vec![TransformAction::DrainHandler, TransformAction::ForwardEOF] }) })
+                };
+                on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    let TransformEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: TransformState::failure(cause.clone()),
+                        actions: vec![TransformAction::SendFailure { message: cause }, TransformAction::Cleanup, TransformAction::Host(SupervisorAction::CloseMailbox), TransformAction::Host(SupervisorAction::SettlePublications), TransformAction::Host(SupervisorAction::Emit(TransformEvent::TerminationSettled))],
+                    }) })
+                };
+            }
+
+            state TransformState::ClosingCycle {
+                on TransformEvent::CycleClosed => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: TransformState::Finalizing, actions: vec![TransformAction::SendCompletion, TransformAction::Cleanup, TransformAction::Host(SupervisorAction::CloseMailbox), TransformAction::Host(SupervisorAction::SettlePublications), TransformAction::Host(SupervisorAction::Emit(TransformEvent::FinalizationCompleted))] }) })
                 };
                 on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     let TransformEvent::Error(cause) = event else { unreachable!() };
@@ -347,7 +366,10 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
         state: &Self::State,
         context: &mut Self::Context,
     ) -> Option<OwnedDispatch<Self>> {
-        if !matches!(state, TransformState::Running | TransformState::Draining) {
+        if !matches!(
+            state,
+            TransformState::Running | TransformState::Draining | TransformState::ClosingCycle
+        ) {
             return None;
         }
         let resources = context.resources.take()?;
@@ -398,6 +420,10 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
 
             TransformState::Draining => {
                 draining::dispatch_draining(self, state, ctx.resources_mut()?).await
+            }
+
+            TransformState::ClosingCycle => {
+                closing::dispatch_closing_cycle(self, state, ctx.resources_mut()?).await
             }
 
             TransformState::Drained => {
@@ -562,28 +588,28 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
             return Ok(None);
         }
 
-        for &(upstream, downstream) in &cfg.scc_internal_edges {
-            match ctx
-                .backpressure_registry
-                .edge_in_flight(upstream, downstream)
-            {
-                Some(0) => continue,
-                Some(_) => {
-                    ctx.buffered_terminal_envelope = Some(buffered);
-                    return Ok(None);
-                }
-                None => {
-                    tracing::error!(
-                        stage_name = %ctx.stage_name,
-                        scc_id = %cfg.scc_id,
-                        upstream = ?upstream,
-                        downstream = ?downstream,
-                        "SCC-internal edge has no backpressure tracking; refusing to release terminal"
-                    );
-                    ctx.buffered_terminal_envelope = Some(buffered);
-                    return Ok(None);
-                }
+        let passes =
+            cycle_counts(&ctx.backpressure_registry, &cfg.scc_internal_edges).and_then(|first| {
+                cycle_counts(&ctx.backpressure_registry, &cfg.scc_internal_edges)
+                    .map(|second| (first, second))
+            });
+        let (first, second) = match passes {
+            Ok(passes) => passes,
+            Err((upstream, downstream)) => {
+                tracing::error!(
+                    stage_name = %ctx.stage_name,
+                    scc_id = %cfg.scc_id,
+                    upstream = ?upstream,
+                    downstream = ?downstream,
+                    "SCC-internal edge has no backpressure tracking; refusing to release terminal"
+                );
+                ctx.buffered_terminal_envelope = Some(buffered);
+                return Ok(None);
             }
+        };
+        if !cycle_is_quiescent(&first, &second) {
+            ctx.buffered_terminal_envelope = Some(buffered);
+            return Ok(None);
         }
 
         tracing::info!(
@@ -615,4 +641,22 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         .await?;
         Ok(())
     }
+}
+
+fn cycle_counts(
+    registry: &BackpressureRegistry,
+    edges: &[(StageId, StageId)],
+) -> Result<Vec<EdgeCounts>, (StageId, StageId)> {
+    edges
+        .iter()
+        .map(|&(upstream, downstream)| {
+            registry
+                .edge_counts(upstream, downstream)
+                .ok_or((upstream, downstream))
+        })
+        .collect()
+}
+
+fn cycle_is_quiescent(first: &[EdgeCounts], second: &[EdgeCounts]) -> bool {
+    first == second && first.iter().all(|counts| counts.in_flight() == 0)
 }

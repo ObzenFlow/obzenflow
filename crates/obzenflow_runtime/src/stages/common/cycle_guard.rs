@@ -27,7 +27,6 @@ enum SignalKind {
     Eof,
     Drain,
     PipelineAbort,
-    SourceContract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -125,7 +124,6 @@ impl CycleGuard {
             FlowControlPayload::Eof { .. } => SignalKind::Eof,
             FlowControlPayload::Drain => SignalKind::Drain,
             FlowControlPayload::PipelineAbort { .. } => SignalKind::PipelineAbort,
-            FlowControlPayload::SourceContract { .. } => SignalKind::SourceContract,
             // Allow repeated watermarks/checkpoints as they represent advancing
             // state. The event-id dedup above is sufficient to prevent cycle
             // amplification.

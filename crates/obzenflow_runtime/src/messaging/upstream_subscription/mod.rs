@@ -426,6 +426,13 @@ where
         self.last_delivered_upstream_stage
     }
 
+    pub(crate) fn upstream_key(&self, stage_id: StageId) -> Option<&StageKey> {
+        self.readers
+            .iter()
+            .find(|slot| slot.stage_id == stage_id)
+            .map(|slot| &slot.stage_key)
+    }
+
     pub fn last_delivered_stage_input_position(&self) -> Option<StageInputPosition> {
         self.last_delivered_stage_input_position
     }

@@ -576,19 +576,12 @@ async fn final_append_failure_keeps_final_emitted_false() {
 }
 
 #[tokio::test]
-async fn an_ended_reader_without_a_final_verdict_is_reported_until_one_lands() {
+async fn an_ended_reader_gets_its_final_verdict_on_the_next_check() {
     let upstream_stage = StageId::new();
     let upstream_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(JournalOwner::stage(upstream_stage)));
     let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-
-    let mut unchecked = UpstreamSubscription::new_with_names("test_owner", &upstreams)
-        .await
-        .unwrap();
-    unchecked.state.mark_reader_eof(0);
-    assert!(unchecked.ended_without_verdict(&reader_progress).is_none());
-
     let contract_stage = StageId::new();
     let contract_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(JournalOwner::stage(contract_stage)));
@@ -597,34 +590,33 @@ async fn an_ended_reader_without_a_final_verdict_is_reported_until_one_lands() {
         .unwrap()
         .with_contracts(ContractsWiring {
             writer_id: WriterId::from(contract_stage),
-            contract_journal,
+            contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
             reader_stage: None,
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
             cycle_guard_config: None,
         });
-    assert!(subscription
-        .ended_without_verdict(&reader_progress)
-        .is_none());
 
     subscription.state.mark_reader_eof(0);
-    assert_eq!(
-        subscription
-            .ended_without_verdict(&reader_progress)
-            .map(ToString::to_string),
-        Some("upstream".to_string())
-    );
-
     assert!(subscription
         .check_contracts(&mut reader_progress)
         .await
         .into_result()
         .is_ok());
+
     assert!(reader_progress[0].final_emitted);
-    assert!(subscription
-        .ended_without_verdict(&reader_progress)
-        .is_none());
+    let events = contract_journal.read_causally_ordered().await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|env| matches!(
+                &env.payload,
+                ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { pass: true, .. })
+            ))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -810,7 +802,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
 async fn every_required_finalization_append_must_commit_before_one_final_report() {
     // Includes both aggregate and selected-feed findings and policy verdicts,
     // plus the gap and violation facts produced by an actual missing input.
-    for failed_append in 0..10 {
+    for failed_append in 0..9 {
         let upstream = StageId::new();
         let reader = StageId::new();
         let input: Arc<dyn Journal<ChainEvent>> =
@@ -888,7 +880,7 @@ async fn every_required_finalization_append_must_commit_before_one_final_report(
         let mut progress = [ReaderProgress::new(upstream)];
         drive_subscription_to_eof(&mut subscription, &mut progress).await;
         let _ = subscription.check_contracts(&mut progress).await;
-        // The successful path has nine required evidence appends and one final.
+        // The successful path has eight required evidence appends and one final.
         assert!(
             attempts.load(Ordering::SeqCst) > failed_append,
             "failure injection must be exercised: {failed_append}"

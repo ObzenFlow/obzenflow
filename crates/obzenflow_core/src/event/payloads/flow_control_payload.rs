@@ -7,7 +7,7 @@
 use std::fmt;
 
 use crate::event::types::{
-    Count, DurationMs, JournalIndex, JournalPath, ReaderGeneration, RouteKey, SeqNo, ViolationCause,
+    Count, DurationMs, JournalIndex, JournalPath, ReaderGeneration, SeqNo, ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
 use crate::event::vocabulary;
@@ -202,21 +202,6 @@ pub enum FlowControlPayload {
         upstream: Option<StageId>,
     },
 
-    /// Source declares expected production contract
-    #[serde(rename = "source_contract")]
-    SourceContract {
-        expected_count: Option<Count>,
-        source_id: StageId,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        route: Option<RouteKey>,
-        journal_path: JournalPath,
-        journal_index: JournalIndex,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        writer_seq: Option<SeqNo>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        vector_clock: Option<VectorClock>,
-    },
-
     /// Producer-authored totals at the same committed frontier as its EOF.
     ProductionFinal {
         produced_count: Count,
@@ -326,7 +311,6 @@ impl FlowControlPayload {
             Self::Checkpoint { .. } => vocabulary::stream::CHECKPOINT_DECLARED,
             Self::Drain => vocabulary::stream::DRAIN_REQUESTED,
             Self::PipelineAbort { .. } => vocabulary::pipeline::ABORT_REQUESTED,
-            Self::SourceContract { .. } => vocabulary::source::CONTRACT_DECLARED,
             Self::ConsumptionProgress { .. } => vocabulary::subscription::PROGRESS_REPORTED,
             Self::ConsumptionGap { .. } => vocabulary::subscription::GAP_DETECTED,
             Self::ProductionFinal { .. } => vocabulary::source::PRODUCTION_FINALIZED,
@@ -352,7 +336,7 @@ impl FlowControlPayload {
     /// behavioural flow control.
     ///
     /// The stage journal carries two lanes. Behavioural flow control (EOF,
-    /// drain, watermarks, checkpoints, pipeline abort, source contracts)
+    /// drain, watermarks, checkpoints, pipeline abort)
     /// participates in transport order: it is delivered to downstream
     /// subscriptions and takes per-reader ordinals in the canonical
     /// deterministic merge. Production and subscription reports (progress, gaps,
@@ -362,10 +346,7 @@ impl FlowControlPayload {
     /// delivery so per-reader ordinals stay a pure function of the per-input
     /// streams across live, replay, and resume.
     ///
-    /// `SourceContract` is behavioural: it is emitted exactly once,
-    /// deterministically, at source startup and is consumed by downstream
-    /// contract chains. `InputSelection` stays in the writing stage's journal,
-    /// like the reports.
+    /// `InputSelection` stays in the writing stage's journal, like the reports.
     ///
     /// Deliberately an exhaustive match with no wildcard arm: adding a new
     /// variant must force a lane decision here.
@@ -383,8 +364,7 @@ impl FlowControlPayload {
             | Self::CatchUpComplete { .. }
             | Self::Checkpoint { .. }
             | Self::Drain
-            | Self::PipelineAbort { .. }
-            | Self::SourceContract { .. } => false,
+            | Self::PipelineAbort { .. } => false,
         }
     }
 }
