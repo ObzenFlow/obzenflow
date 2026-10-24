@@ -5,7 +5,9 @@
 //! Transform supervisor tests
 
 use super::*;
-use crate::backpressure::{BackpressurePlan, BackpressureRegistry, DirectFactAdmission};
+use crate::backpressure::{
+    BackpressurePlan, BackpressureRegistry, DirectFactAdmission, EdgeCounts,
+};
 use crate::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectPortRegistry, LogicalEffectBindingName,
 };
@@ -75,15 +77,7 @@ async fn build_cycle_entry_harness<
     F: FnOnce(StageId) -> H,
 >(
     handler_factory: F,
-) -> (
-    TransformSupervisor<H>,
-    TransformContext<H>,
-    BackpressureRegistry,
-    StageId,
-    StageId,
-    StageId,
-    Arc<dyn Journal<ChainEvent>>,
-) {
+) -> TransformHarness<H> {
     let mut builder = TopologyBuilder::new();
     let s_top = builder.add_stage(Some("s".to_string())); // external upstream
     let t_top = builder.add_stage(Some("t".to_string())); // entry point
@@ -210,7 +204,16 @@ async fn build_cycle_entry_harness<
         _marker: std::marker::PhantomData,
     };
 
-    (supervisor, ctx, registry, s, t, u, upstream_journal)
+    (
+        supervisor,
+        ctx,
+        registry,
+        s,
+        t,
+        u,
+        upstream_journal,
+        internal_journal,
+    )
 }
 
 struct TestJournal<T: JournalEvent> {
@@ -1559,7 +1562,7 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
 
 #[tokio::test]
 async fn entry_point_buffers_external_eof_until_scc_quiescent() {
-    let (mut supervisor, mut ctx, registry, s, t, u, upstream_journal) =
+    let (mut supervisor, mut ctx, registry, s, t, u, upstream_journal, _) =
         build_cycle_entry_harness(|_| FilterHandler).await;
 
     // Simulate in-flight cycle work on u -> t so the buffered EOF cannot be released immediately.
@@ -1658,7 +1661,7 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
 
 #[tokio::test]
 async fn entry_point_buffers_drain_until_scc_quiescent() {
-    let (mut supervisor, mut ctx, registry, s, t, u, upstream_journal) =
+    let (mut supervisor, mut ctx, registry, s, t, u, upstream_journal, _) =
         build_cycle_entry_harness(|_| FilterHandler).await;
 
     // Simulate in-flight cycle work on u -> t so the buffered Drain cannot be released immediately.
@@ -1769,7 +1772,7 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
 async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completion() {
     tokio::time::pause();
 
-    let (mut eof_supervisor, mut eof_ctx, registry, s, _t, u, upstream_journal) =
+    let (mut eof_supervisor, mut eof_ctx, registry, s, _t, u, upstream_journal, _) =
         build_cycle_entry_harness(|_| FilterHandler).await;
     let u_writer = registry.writer(u);
     u_writer.reserve(1).expect("reserve").commit(1);
@@ -1887,5 +1890,160 @@ async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completi
             .direct_fact_continuation
             .is_some(),
         "a credit-parked admission must prevent DrainComplete"
+    );
+}
+
+async fn drain_cycle_entry_to_closing(
+    supervisor: &mut TransformSupervisor<FilterHandler>,
+    ctx: &mut TransformContext<FilterHandler>,
+    upstream_journal: &Arc<dyn Journal<ChainEvent>>,
+    s: StageId,
+) {
+    upstream_journal
+        .append(
+            ChainEventFactory::eof_event(WriterId::from(s), true),
+            Default::default(),
+        )
+        .await
+        .expect("append eof");
+    let running = TransformState::<FilterHandler>::Running;
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&running, ctx)
+            .await
+            .expect("buffer eof"),
+        EventLoopDirective::Continue
+    ));
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&running, ctx)
+            .await
+            .expect("release eof"),
+        EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
+    ));
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&TransformState::Draining, ctx)
+            .await
+            .expect("drain"),
+        EventLoopDirective::Transition(TransformEvent::CycleDrained)
+    ));
+}
+
+#[tokio::test]
+async fn entry_point_reads_its_cycle_to_its_end_before_closing() {
+    let (mut supervisor, mut ctx, _registry, s, t, u, upstream_journal, internal_journal) =
+        build_cycle_entry_harness(|_| FilterHandler).await;
+    drain_cycle_entry_to_closing(&mut supervisor, &mut ctx, &upstream_journal, s).await;
+
+    let closing = TransformState::<FilterHandler>::ClosingCycle;
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&closing, &mut ctx)
+            .await
+            .expect("wait for the cycle"),
+        EventLoopDirective::Continue
+    ));
+
+    let mut cycle_eof = ChainEventFactory::eof_event(WriterId::from(u), true);
+    if let ChainPayload::FlowControl(
+        obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
+            writer_seq,
+            ..
+        },
+    ) = &mut cycle_eof.payload
+    {
+        *writer_seq = Some(obzenflow_core::event::types::SeqNo(0));
+    }
+    internal_journal
+        .append(cycle_eof, Default::default())
+        .await
+        .expect("append the cycle's eof");
+
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&closing, &mut ctx)
+            .await
+            .expect("read the cycle's eof"),
+        EventLoopDirective::Continue
+    ));
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&closing, &mut ctx)
+            .await
+            .expect("close the cycle"),
+        EventLoopDirective::Transition(TransformEvent::CycleClosed)
+    ));
+
+    let rows = ctx
+        .resources_mut()
+        .unwrap()
+        .data_journal
+        .read_causally_ordered()
+        .await
+        .expect("read data journal");
+    assert!(
+        rows.iter().any(|row| matches!(
+            &row.payload,
+            ChainPayload::Execution(ExecutionPayload::ContractStatus {
+                upstream,
+                reader,
+                pass: true,
+                ..
+            }) if *upstream == u && *reader == t
+        )),
+        "the edge back into the entry point records a passing verdict"
+    );
+}
+
+#[tokio::test]
+async fn entry_point_fails_on_a_cycle_row_after_its_cycle_closed() {
+    let (mut supervisor, mut ctx, _registry, s, _t, u, upstream_journal, internal_journal) =
+        build_cycle_entry_harness(|_| FilterHandler).await;
+    drain_cycle_entry_to_closing(&mut supervisor, &mut ctx, &upstream_journal, s).await;
+
+    internal_journal
+        .append(
+            ChainEventFactory::data_event(
+                WriterId::from(u),
+                "cycle.iteration",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            ),
+            Default::default(),
+        )
+        .await
+        .expect("append a late cycle row");
+
+    match supervisor
+        .dispatch_state(&TransformState::ClosingCycle, &mut ctx)
+        .await
+        .expect("read the late row")
+    {
+        EventLoopDirective::Transition(TransformEvent::Error(message)) => assert_eq!(
+            message,
+            "transform 't' read a row from 'u' after its cycle closed"
+        ),
+        other => panic!("expected the late row to fail the stage, got {other:?}"),
+    }
+}
+
+#[test]
+fn quiescence_needs_two_identical_passes_with_nothing_in_flight() {
+    let counts = |written, read| EdgeCounts { written, read };
+    let idle = [counts(5, 5), counts(4, 4)];
+    assert!(cycle_is_quiescent(&idle, &idle));
+    assert!(
+        !cycle_is_quiescent(&idle, &[counts(6, 5), counts(4, 4)]),
+        "a row admitted between passes is in flight"
+    );
+    assert!(
+        !cycle_is_quiescent(&idle, &[counts(6, 6), counts(4, 4)]),
+        "a row that moved between passes breaks agreement"
+    );
+    let busy = [counts(5, 4), counts(4, 4)];
+    assert!(
+        !cycle_is_quiescent(&busy, &busy),
+        "agreeing passes with a row in flight"
     );
 }
