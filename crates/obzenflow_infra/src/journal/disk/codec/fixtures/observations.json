@@ -249,6 +249,7 @@
         },
         {
           "observation_type": "circuit_breaker_summary",
+          "unit": "unknown",
           "effect_type": "effect",
           "window_duration_s": 1,
           "requests_processed": 2,
@@ -265,6 +266,7 @@
         },
         {
           "observation_type": "rate_limiter_activity",
+          "unit": "unknown",
           "effect_type": "effect",
           "window_ms": 1,
           "delayed_events": 2,
@@ -274,6 +276,7 @@
         },
         {
           "observation_type": "rate_limiter_utilisation",
+          "unit": "unknown",
           "utilization_percent": 0.25,
           "events_in_window": 18446744073709551615,
           "window_size_ms": 0

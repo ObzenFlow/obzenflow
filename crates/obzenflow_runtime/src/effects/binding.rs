@@ -39,7 +39,7 @@ mod private {
 /// Closed strategy selected by an [`Effect`] for binding authority.
 pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
-    const BINDING_NOUN: &'static str;
+    const DRIFT_BINDING: super::DriftBinding;
 
     #[doc(hidden)]
     fn invocation_binding(effect: &E) -> EffectInvocationBinding;
@@ -638,7 +638,7 @@ where
     B: EffectBindingEvidence,
     E: BoundEffect<BindingEvidence = B>,
 {
-    const BINDING_NOUN: &'static str = "binding";
+    const DRIFT_BINDING: super::DriftBinding = super::DriftBinding::Named;
 
     fn invocation_binding(effect: &E) -> EffectInvocationBinding {
         effect.binding_use().erased()
@@ -650,7 +650,7 @@ where
     B: EffectBindingEvidence,
     E: BoundEffect<BindingEvidence = B>,
 {
-    const BINDING_NOUN: &'static str = "model";
+    const DRIFT_BINDING: super::DriftBinding = super::DriftBinding::Model;
 
     fn invocation_binding(effect: &E) -> EffectInvocationBinding {
         effect.binding_use().erased()

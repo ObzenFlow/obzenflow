@@ -196,7 +196,7 @@ fn descriptor_drift<E: Effect>(
         Box::new(super::DescriptorDrift::between(
             offered,
             recorded,
-            <E::BindingMode as EffectBindingMode<E>>::BINDING_NOUN,
+            <E::BindingMode as EffectBindingMode<E>>::DRIFT_BINDING,
         ))
     })
 }
@@ -2248,7 +2248,7 @@ impl EffectsCore {
                         Some(Box::new(super::DescriptorDrift::between(
                             &descriptor,
                             &record.descriptor,
-                            "binding",
+                            super::DriftBinding::Named,
                         ))),
                     ));
                 }

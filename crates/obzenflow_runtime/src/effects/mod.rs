@@ -122,7 +122,7 @@ pub use declaration::{
 pub use effect_set::{
     assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectSet, EffectTypeDisjoint,
 };
-pub use error::{DescriptorComponent, DescriptorDrift, EffectError};
+pub use error::{DescriptorComponent, DescriptorDrift, DriftBinding, EffectError};
 pub use fault::{BindingAuthorityFault, BindingMismatchKind};
 #[cfg(test)]
 pub(crate) use history::current_cursor_history;

@@ -174,18 +174,43 @@ pub enum DescriptorComponent {
     StageLogicVersion,
 }
 
+/// The kind of binding a drifted effect has, which words its diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriftBinding {
+    /// A model chosen by configuration, as an AI effect has.
+    Model,
+    /// A named binding the stage's handler holds.
+    Named,
+}
+
+impl DriftBinding {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Named => "binding",
+        }
+    }
+
+    fn request_changed(self) -> &'static str {
+        match self {
+            Self::Model => "the request differs from the recording (prompt or parameters changed)",
+            Self::Named => "the request differs from the recording",
+        }
+    }
+}
+
 /// Which recorded descriptor components an offered call changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescriptorDrift {
     pub differs: Vec<DescriptorComponent>,
-    pub binding_noun: &'static str,
+    pub binding: DriftBinding,
 }
 
 impl DescriptorDrift {
     pub(crate) fn between(
         offered: &EffectDescriptor,
         recorded: &EffectDescriptor,
-        binding_noun: &'static str,
+        binding: DriftBinding,
     ) -> Self {
         let mut differs = Vec::new();
         if offered.effect_type != recorded.effect_type
@@ -202,10 +227,7 @@ impl DescriptorDrift {
         if offered.stage_logic_version != recorded.stage_logic_version {
             differs.push(DescriptorComponent::StageLogicVersion);
         }
-        Self {
-            differs,
-            binding_noun,
-        }
+        Self { differs, binding }
     }
 }
 
@@ -219,12 +241,9 @@ impl std::fmt::Display for DescriptorDrift {
                     "the effect's type, label or schema version differs from the recording"
                         .to_string()
                 }
-                DescriptorComponent::Request => {
-                    "the request differs from the recording (prompt or parameters changed)"
-                        .to_string()
-                }
+                DescriptorComponent::Request => self.binding.request_changed().to_string(),
                 DescriptorComponent::Binding => {
-                    format!("the {} differs from the recording", self.binding_noun)
+                    format!("the {} differs from the recording", self.binding.noun())
                 }
                 DescriptorComponent::StageLogicVersion => {
                     "the stage logic version differs from the recording".to_string()
@@ -232,7 +251,7 @@ impl std::fmt::Display for DescriptorDrift {
             })
             .collect::<Vec<_>>();
         let matching = [
-            (DescriptorComponent::Binding, self.binding_noun),
+            (DescriptorComponent::Binding, self.binding.noun()),
             (
                 DescriptorComponent::StageLogicVersion,
                 "stage logic version",
