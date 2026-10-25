@@ -205,47 +205,47 @@ fn stage_and_middleware_wire_names_match_the_contract() {
             "supervisor.stage.orders%2Ev2.failed",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"opened", "cooldown_ms":10, "error_rate":1.0, "failure_count":1, "trigger":"consecutive_failures", "observed_calls":1}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"opened", "cooldown_ms":10, "error_rate":1.0, "failure_count":1, "trigger":"consecutive_failures", "observed_calls":1}),
             "runtime.circuit_breaker.opened",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"closed", "success_count":1, "recovery_duration_ms":1}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"closed", "success_count":1, "recovery_duration_ms":1}),
             "runtime.circuit_breaker.closed",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"half_open", "test_request_count":1}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"half_open", "test_request_count":1}),
             "runtime.circuit_breaker.half_open_entered",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"rejected"}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"rejected"}),
             "runtime.circuit_breaker.admission_rejected",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"attempt_settled", "cursor":cursor, "attempt":1, "health_classification":"success", "slow":false, "dependency_elapsed_ms":1, "admission_wait_ms":0}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"attempt_settled", "cursor":cursor, "attempt":1, "health_classification":"success", "slow":false, "dependency_elapsed_ms":1, "admission_wait_ms":0}),
             "runtime.circuit_breaker.call_classified",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"state_changed", "from_state":"closed", "to_state":"open", "timestamp":1}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"state_changed", "from_state":"closed", "to_state":"open", "timestamp":1}),
             "runtime.circuit_breaker.opened",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"state_changed", "from_state":"open", "to_state":"half_open", "timestamp":1}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"state_changed", "from_state":"open", "to_state":"half_open", "timestamp":1}),
             "runtime.circuit_breaker.half_open_entered",
         ),
         (
-            json!({"execution_type":"resilience_occurrence", "action":"state_changed", "from_state":"half_open", "to_state":"closed", "timestamp":1}),
+            json!({"execution_type":"resilience_occurrence", "unit":"orders.v2", "action":"state_changed", "from_state":"half_open", "to_state":"closed", "timestamp":1}),
             "runtime.circuit_breaker.closed",
         ),
         (
-            json!({"execution_type":"rate_limiter", "action":"delayed", "delay_ms":1, "current_rate":1.0, "limit_rate":1.0}),
+            json!({"execution_type":"rate_limiter", "unit":"orders.v2", "action":"delayed", "delay_ms":1, "current_rate":1.0, "limit_rate":1.0}),
             "runtime.rate_limiter.wait_started",
         ),
         (
-            json!({"execution_type":"rate_limiter", "action":"mode_change", "mode_from":"normal", "mode_to":"limiting", "limit_rate":1.0}),
+            json!({"execution_type":"rate_limiter", "unit":"orders.v2", "action":"mode_change", "mode_from":"normal", "mode_to":"limiting", "limit_rate":1.0}),
             "runtime.rate_limiter.mode_changed",
         ),
         (
-            json!({"execution_type":"rate_limiter", "action":"config_changed", "old_rate":1.0, "new_rate":2.0}),
+            json!({"execution_type":"rate_limiter", "unit":"orders.v2", "action":"config_changed", "old_rate":1.0, "new_rate":2.0}),
             "runtime.rate_limiter.configuration_changed",
         ),
         (

@@ -4,12 +4,10 @@
 
 use super::mock_server::spawn_mock_hn_server;
 use anyhow::{Context, Result};
-use obzenflow::ai::TokenCount;
 use obzenflow::env::env_var_or;
 use obzenflow::stages::sinks::postgres::PostgresConnection;
 use obzenflow::stages::sources::Url;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU64;
 
 #[path = "../support/postgres_transport.rs"]
 mod postgres_transport;
@@ -68,14 +66,12 @@ pub(crate) struct HnSettings {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct DigestSettings {
-    group_budget_tokens: Option<NonZeroU64>,
     group_max_stories: usize,
 }
 
 impl Default for DigestSettings {
     fn default() -> Self {
         Self {
-            group_budget_tokens: None,
             group_max_stories: DEFAULT_HN_GROUP_MAX_STORIES,
         }
     }
@@ -107,14 +103,7 @@ impl HnSettings {
             max_stories: self.max_stories,
             poll_timeout_secs: self.poll_timeout_secs,
             source_rate_limit: DEFAULT_HN_SOURCE_RATE_LIMIT,
-            budget_per_group_override: self
-                .digest
-                .group_budget_tokens
-                .map(|tokens| TokenCount::new(tokens.get())),
-            max_stories_per_group: match self.digest.group_max_stories {
-                0 => None,
-                stories => Some(stories),
-            },
+            max_stories_per_group: self.digest.group_max_stories,
             interests: self.interests,
             mode_label: mode_label.to_string(),
             base_url,
@@ -127,8 +116,7 @@ pub struct HnRunInputs {
     pub max_stories: usize,
     pub poll_timeout_secs: u64,
     pub source_rate_limit: f64,
-    pub budget_per_group_override: Option<TokenCount>,
-    pub max_stories_per_group: Option<usize>,
+    pub max_stories_per_group: usize,
     pub interests: Option<String>,
     pub mode_label: String,
     pub base_url: Url,

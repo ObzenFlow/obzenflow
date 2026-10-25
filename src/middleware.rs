@@ -30,6 +30,9 @@
 //! use obzenflow::middleware::CheckedCircuitBreakerBuilder;
 //! ```
 //! ```compile_fail
+//! use obzenflow::middleware::ai_resilience;
+//! ```
+//! ```compile_fail
 //! use obzenflow::middleware::EffectResilience;
 //! ```
 //! ```compile_fail
@@ -43,7 +46,7 @@ pub use obzenflow_core::event::context::StageType;
 pub use obzenflow_core::event::vector_clock::VectorClock;
 
 pub use obzenflow_adapters::middleware::control::rate_limiter::RateLimiterConfigError;
-pub use obzenflow_adapters::middleware::control::{ai_resilience, ControlConfigurationError};
+pub use obzenflow_adapters::middleware::control::ControlConfigurationError;
 pub use obzenflow_adapters::middleware::{
     circuit_breaker, effect_observer, handler_observer, join_observer, rate_limit, retry,
     sink_delivery_observer, source_poll_observer, stage_lifecycle_observer, stateful_observer,

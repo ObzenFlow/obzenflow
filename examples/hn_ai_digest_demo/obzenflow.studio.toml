@@ -3,13 +3,11 @@
 # The runtime registers with the phonebook and the browser attaches directly
 # to this process's port; the phonebook never proxies the data path.
 #
-# This is the composite showcase: the `digest` ai_map_reduce! renders as one
-# collapsed node in Studio (FLOWIP-128a), not four `digest__*` member stages.
+# Studio renders the `digest` map-reduce `ai!` stage as one collapsed node.
 #
 # The HN feed is mocked by default (set source = "live" under [app] for the
-# real API). The AI target is resolved from the checked [ai.models] snapshot
-# below. The client and any credential remain deferred until the first
-# executable live effect.
+# real API). The stage's endpoint and model resolve from [ai.models] below.
+# The client and any credential remain deferred until the first live call.
 
 [runtime.backpressure.flow]
 mode = "enforce"
@@ -17,8 +15,11 @@ window = 3
 stall_timeout_ms = 30000
 
 [ai.models]
-provider = "ollama"
+endpoint = "ollama"
 model = "llama3.1:8b"
+
+[sinks]
+handler = "console_sink"
 
 [server]
 enabled = true

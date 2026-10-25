@@ -20,7 +20,7 @@ pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     prove_journal_form, EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig,
-    HostedIngressSource, HostedSubmission, InferenceHandler, IngressDecodeError, IngressDecoder,
+    HostedIngressSource, HostedSubmission, IngressDecodeError, IngressDecoder,
     IngressReceiptSender, IngressRecord, InlineSink, ObserverHandler, ProcessingContext,
     ResourceManaged, SignalDecision, SignalGate, SinkConnector, SinkDescription, SinkWriter,
     SinkWriterInitContext, SourceObservationSink, StatefulEmission, TypedAsyncFiniteSourceHandler,

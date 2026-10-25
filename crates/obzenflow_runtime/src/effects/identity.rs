@@ -194,10 +194,27 @@ pub fn deterministic_typed_output_event<Out>(
 where
     Out: TypedPayload,
 {
-    let output_ordinal = output_ordinal.into();
     let fact = obzenflow_core::event::schema::TypedFact::from_payload(output)
         .map_err(|e| EffectError::Serialization(e.to_string()))?;
-    let mut event = fact.into_derived_event(writer_id, parent, lineage);
+    Ok(stamp_output_event(
+        fact.into_derived_event(writer_id, parent, lineage),
+        parent,
+        recorded_flow_id,
+        stage_key,
+        input_seq,
+        output_ordinal,
+    ))
+}
+
+pub(crate) fn stamp_output_event(
+    mut event: ChainEvent,
+    parent: &ChainEvent,
+    recorded_flow_id: impl AsRef<str>,
+    stage_key: impl AsRef<str>,
+    input_seq: StageInputPosition,
+    output_ordinal: impl Into<EffectOutputOrdinal>,
+) -> ChainEvent {
+    let output_ordinal = output_ordinal.into();
     event.id = deterministic_payload_event_id(
         recorded_flow_id,
         stage_key,
@@ -214,5 +231,5 @@ where
             |time, activation| time.max(activation.entered_at_ms),
         )
     };
-    Ok(event)
+    event
 }

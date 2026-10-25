@@ -6,63 +6,71 @@
 //! closed protocol shape; application values nested inside it remain untouched.
 
 use crate::ai::{
-    AiMapReduceChunkFailed, AiMapReduceFinalizeFailed, AiMapReduceJobFailed, AiMapReduceMapInput,
-    AiMapReducePlanningFailed, AiMapReducePlanningManifest, AiMapReduceReduceInput,
-    AiMapReduceTaggedPartial, ChunkEnvelope,
+    AiMapReduceChunkFailed, AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceReduceFailed,
+    AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapReduceWindowFailed,
 };
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum CompositeDataPayload {
-    MapInput(AiMapReduceMapInput<ChunkEnvelope<Value>>),
-    PlanningManifest(AiMapReducePlanningManifest),
-    TaggedPartial(AiMapReduceTaggedPartial<Value>),
-    ReduceInput(AiMapReduceReduceInput<Value, Value>),
-    PlanningFailed(AiMapReducePlanningFailed),
+    MapInput(AiMapReduceMapInput<Value>),
+    GroupingEnded(AiMapReduceGroupingEnded),
+    TaggedPartial(AiMapReduceTaggedPartial<Value, Value>),
     ChunkFailed(AiMapReduceChunkFailed),
-    JobFailed(AiMapReduceJobFailed),
-    FinalizeFailed(AiMapReduceFinalizeFailed),
+    ReduceInput(AiMapReduceReduceInput<Value, Value>),
+    WindowFailed(AiMapReduceWindowFailed),
+    ReduceFailed(AiMapReduceReduceFailed),
 }
 
 impl CompositeDataPayload {
-    pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
-        match self {
-            Self::ReduceInput(_) | Self::ChunkFailed(_) => std::num::NonZeroU32::new(2).unwrap(),
-            _ => std::num::NonZeroU32::MIN,
-        }
+    /// The payload schema version this build writes and reads for a composite
+    /// protocol event type.
+    pub fn schema_version_of(event_type: &str) -> Option<std::num::NonZeroU32> {
+        let version = match event_type {
+            "ai.map_reduce.map_input" | "ai.map_reduce.tagged_partial" => 2,
+            "ai.map_reduce.chunk_failed" | "ai.map_reduce.reduce_input" => 3,
+            "ai.map_reduce.grouping_ended"
+            | "ai.map_reduce.window_failed"
+            | "ai.map_reduce.reduce_failed" => 1,
+            _ => return None,
+        };
+        std::num::NonZeroU32::new(version)
+    }
+
+    pub fn payload_schema_version(&self) -> std::num::NonZeroU32 {
+        Self::schema_version_of(self.event_type())
+            .expect("every composite payload variant has a schema version")
     }
 
     pub const fn event_type(&self) -> &'static str {
         match self {
             Self::MapInput(_) => "ai.map_reduce.map_input",
-            Self::PlanningManifest(_) => "ai.map_reduce.planning_manifest",
+            Self::GroupingEnded(_) => "ai.map_reduce.grouping_ended",
             Self::TaggedPartial(_) => "ai.map_reduce.tagged_partial",
-            Self::ReduceInput(_) => "ai.map_reduce.reduce_input",
-            Self::PlanningFailed(_) => "ai.map_reduce.planning_failed",
             Self::ChunkFailed(_) => "ai.map_reduce.chunk_failed",
-            Self::JobFailed(_) => "ai.map_reduce.job_failed",
-            Self::FinalizeFailed(_) => "ai.map_reduce.finalize_failed",
+            Self::ReduceInput(_) => "ai.map_reduce.reduce_input",
+            Self::WindowFailed(_) => "ai.map_reduce.window_failed",
+            Self::ReduceFailed(_) => "ai.map_reduce.reduce_failed",
         }
     }
 
     pub fn decode(event_type: &str, payload: Value) -> Result<Self, serde_json::Error> {
         match event_type {
             "ai.map_reduce.map_input" => serde_json::from_value(payload).map(Self::MapInput),
-            "ai.map_reduce.planning_manifest" => {
-                serde_json::from_value(payload).map(Self::PlanningManifest)
+            "ai.map_reduce.grouping_ended" => {
+                serde_json::from_value(payload).map(Self::GroupingEnded)
             }
             "ai.map_reduce.tagged_partial" => {
                 serde_json::from_value(payload).map(Self::TaggedPartial)
             }
-            "ai.map_reduce.reduce_input" => serde_json::from_value(payload).map(Self::ReduceInput),
-            "ai.map_reduce.planning_failed" => {
-                serde_json::from_value(payload).map(Self::PlanningFailed)
-            }
             "ai.map_reduce.chunk_failed" => serde_json::from_value(payload).map(Self::ChunkFailed),
-            "ai.map_reduce.job_failed" => serde_json::from_value(payload).map(Self::JobFailed),
-            "ai.map_reduce.finalize_failed" => {
-                serde_json::from_value(payload).map(Self::FinalizeFailed)
+            "ai.map_reduce.reduce_input" => serde_json::from_value(payload).map(Self::ReduceInput),
+            "ai.map_reduce.window_failed" => {
+                serde_json::from_value(payload).map(Self::WindowFailed)
+            }
+            "ai.map_reduce.reduce_failed" => {
+                serde_json::from_value(payload).map(Self::ReduceFailed)
             }
             _ => Err(<serde_json::Error as serde::de::Error>::custom(
                 "event descriptor does not match payload",
@@ -75,13 +83,12 @@ impl Serialize for CompositeDataPayload {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::MapInput(payload) => payload.serialize(serializer),
-            Self::PlanningManifest(payload) => payload.serialize(serializer),
+            Self::GroupingEnded(payload) => payload.serialize(serializer),
             Self::TaggedPartial(payload) => payload.serialize(serializer),
-            Self::ReduceInput(payload) => payload.serialize(serializer),
-            Self::PlanningFailed(payload) => payload.serialize(serializer),
             Self::ChunkFailed(payload) => payload.serialize(serializer),
-            Self::JobFailed(payload) => payload.serialize(serializer),
-            Self::FinalizeFailed(payload) => payload.serialize(serializer),
+            Self::ReduceInput(payload) => payload.serialize(serializer),
+            Self::WindowFailed(payload) => payload.serialize(serializer),
+            Self::ReduceFailed(payload) => payload.serialize(serializer),
         }
     }
 }

@@ -11,9 +11,7 @@
 
 use super::candidates::ConfigValue;
 use super::flow_view::BackpressureMode;
-use obzenflow_core::config::{
-    is_env_name, ConfigAddress, ConfigScope, ConfigSubject, InvalidSecretRef,
-};
+use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSubject};
 
 pub const SINK_HANDLER_KEY: &str = "sinks.handler";
 pub const CIRCUIT_BREAKER_CONSECUTIVE_FAILURES_KEY: &str =
@@ -95,9 +93,6 @@ pub enum KnobType {
         allowed: &'static [&'static str],
     },
     Path,
-    /// An environment-variable name, the visible half of a secret reference.
-    /// Refusals never echo the text.
-    EnvName,
 }
 
 impl KnobType {
@@ -136,13 +131,6 @@ impl KnobType {
             }
             (Self::Text, ConfigValue::Text(_)) => Ok(()),
             (Self::Path, ConfigValue::Text(_)) => Ok(()),
-            (Self::EnvName, ConfigValue::Text(v)) => {
-                if is_env_name(v) {
-                    Ok(())
-                } else {
-                    Err(InvalidSecretRef.to_string())
-                }
-            }
             (Self::Token { allowed }, ConfigValue::Text(v)) => {
                 if allowed.contains(&v.as_str()) {
                     Ok(())
@@ -261,6 +249,15 @@ impl KnobSpec {
 
         let path = self.file_path.unwrap_or(self.key_path);
         let table = path.rsplit_once('.').map_or(path, |(table, _)| table);
+        if let (ConfigScope::Stage { stage }, ConfigSubject::Effect { effect_type }) =
+            (&address.scope, &address.subject)
+        {
+            return format!(
+                "[{table}.stages.{}.by_type.\"{}\"]",
+                stage.as_str(),
+                effect_type.as_str()
+            );
+        }
         match &address.scope {
             ConfigScope::Global => format!("[{table}]"),
             ConfigScope::Flow => format!("[{table}.flow]"),
@@ -275,6 +272,17 @@ impl KnobSpec {
             ),
         }
     }
+}
+
+/// The file table that configures one stage for a knob, such as
+/// `middleware.stages.digest` or `ai.models.stages.digest`.
+pub fn stage_table(spec: &KnobSpec, stage: &str) -> String {
+    if middleware_file_component(spec.key_path).is_some() {
+        return format!("middleware.stages.{stage}");
+    }
+    let path = spec.file_path.unwrap_or(spec.key_path);
+    let table = path.rsplit_once('.').map_or(path, |(table, _)| table);
+    format!("{table}.stages.{stage}")
 }
 
 /// Explicit parser layout for the effect knobs. Do not infer this by splitting
@@ -313,7 +321,6 @@ pub fn canonical_env_name(key_path: &str) -> String {
 }
 
 const TOKENS_STRICT_MODE: &[&str] = &["abort", "warn"];
-const TOKENS_AI_PROVIDER: &[&str] = &["ollama", "openai", "openai_compatible"];
 const TOKENS_CIRCUIT_BREAKER_MODE: &[&str] = &["consecutive", "rate_based"];
 const TOKENS_RETRY_KIND: &[&str] = &["fixed", "exponential"];
 
@@ -324,23 +331,33 @@ pub fn knob_registry() -> &'static [KnobSpec] {
     REGISTRY.get_or_init(|| {
         vec![
             KnobSpec {
-                key_path: "ai.models.api_key_env",
+                key_path: "ai.embeddings.endpoint",
                 file_path: None,
-                value_type: KnobType::EnvName,
-                target: KnobTarget::Global,
-                default: KnobDefault::Value(ConfigValue::Text("OPENAI_API_KEY".to_string())),
+                value_type: KnobType::Text,
+                target: KnobTarget::Effect,
+                default: KnobDefault::Value(ConfigValue::Text("ollama".to_string())),
                 mutability: Mutability::Restartful,
                 role: KnobRole::Configuration,
-                // The reference NAME is the non-secret shape (§13).
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
             KnobSpec {
-                key_path: "ai.models.base_url",
+                key_path: "ai.embeddings.model",
                 file_path: None,
                 value_type: KnobType::Text,
-                target: KnobTarget::Global,
+                target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: "ai.models.endpoint",
+                file_path: None,
+                value_type: KnobType::Text,
+                target: KnobTarget::Effect,
+                default: KnobDefault::Value(ConfigValue::Text("ollama".to_string())),
                 mutability: Mutability::Restartful,
                 role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
@@ -350,21 +367,8 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 key_path: "ai.models.model",
                 file_path: None,
                 value_type: KnobType::Text,
-                target: KnobTarget::Global,
+                target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
-                mutability: Mutability::Restartful,
-                role: KnobRole::Configuration,
-                redaction: Redaction::Plain,
-                env: EnvBinding::Canonical,
-            },
-            KnobSpec {
-                key_path: "ai.models.provider",
-                file_path: None,
-                value_type: KnobType::Token {
-                    allowed: TOKENS_AI_PROVIDER,
-                },
-                target: KnobTarget::Global,
-                default: KnobDefault::Value(ConfigValue::Text("ollama".to_string())),
                 mutability: Mutability::Restartful,
                 role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
@@ -627,6 +631,20 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 },
                 target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                role: KnobRole::Configuration,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: "runtime.ai.max_open_keys",
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u32::MAX as u64,
+                },
+                target: KnobTarget::StageConsumer,
+                default: KnobDefault::Value(ConfigValue::U64(super::ai::DEFAULT_MAX_OPEN_KEYS)),
                 mutability: Mutability::Restartful,
                 role: KnobRole::Configuration,
                 redaction: Redaction::Plain,
@@ -948,7 +966,6 @@ pub fn schema_view() -> Vec<KnobSchemaDoc> {
                     KnobType::Text => "text".to_string(),
                     KnobType::Token { allowed } => format!("token ({})", allowed.join(" | ")),
                     KnobType::Path => "path".to_string(),
-                    KnobType::EnvName => "env_name".to_string(),
                 },
                 target: target.to_string(),
                 admissible_scopes: admissible_scopes.into_iter().map(str::to_string).collect(),
@@ -1030,26 +1047,6 @@ mod tests {
                 "runtime.resume.resume_from",
                 "runtime.resume.verify",
             ]
-        );
-    }
-
-    #[test]
-    fn api_key_env_admits_only_environment_variable_names_without_echoing() {
-        let spec = knob("ai.models.api_key_env").unwrap();
-        assert_eq!(spec.value_type, KnobType::EnvName);
-        assert!(spec
-            .value_type
-            .validate(&ConfigValue::Text("PARTNER_API_KEY".to_string()))
-            .is_ok());
-        let sentinel = "sk_live_51HSENTINEL";
-        let message = spec
-            .value_type
-            .validate(&ConfigValue::Text(sentinel.to_string()))
-            .unwrap_err();
-        assert_eq!(
-            message,
-            "expected an environment variable name: uppercase letters, digits and \
-             underscores, not starting with a digit"
         );
     }
 

@@ -113,6 +113,7 @@ enum ReconstructionRefusal {
         cursor: EffectCursor,
         expected: EffectDescriptorHash,
         recorded: EffectDescriptorHash,
+        drift: Option<Box<super::DescriptorDrift>>,
     },
     Unrecorded {
         cursor: EffectCursor,
@@ -157,10 +158,12 @@ impl ReconstructionRefusal {
                 cursor,
                 expected,
                 recorded,
+                drift,
             } => EffectError::DescriptorMismatch {
                 cursor: cursor.clone(),
                 expected: expected.clone(),
                 recorded: recorded.clone(),
+                drift: drift.clone(),
             },
             Self::Unrecorded { cursor } => EffectError::MissingRecordedEffect {
                 cursor: cursor.clone(),
@@ -183,6 +186,19 @@ impl ReconstructionRefusal {
             }
         }
     }
+}
+
+fn descriptor_drift<E: Effect>(
+    offered: &EffectDescriptor,
+    recorded: Option<&EffectDescriptor>,
+) -> Option<Box<super::DescriptorDrift>> {
+    recorded.map(|recorded| {
+        Box::new(super::DescriptorDrift::between(
+            offered,
+            recorded,
+            <E::BindingMode as EffectBindingMode<E>>::DRIFT_BINDING,
+        ))
+    })
 }
 
 fn action_plan_mismatch(
@@ -332,11 +348,13 @@ impl EffectsCore {
         cursor: &EffectCursor,
         expected: &EffectDescriptorHash,
         recorded: &EffectDescriptorHash,
+        drift: Option<Box<super::DescriptorDrift>>,
     ) -> EffectError {
         self.refuse(ReconstructionRefusal::DescriptorMismatch {
             cursor: cursor.clone(),
             expected: expected.clone(),
             recorded: recorded.clone(),
+            drift,
         })
     }
 
@@ -377,6 +395,50 @@ impl EffectsCore {
     pub(crate) fn project_named_effect<E: NamedEffect>(
         &mut self,
     ) -> Result<EffectBindingUse<E>, EffectError> {
+        self.project_bound_effect::<E>()
+    }
+
+    pub(crate) fn configured_effect_for_next_cursor<E, R>(
+        &mut self,
+        mut build: impl FnMut(EffectBindingUse<E>) -> Result<E, R>,
+    ) -> Result<Result<E, R>, EffectError>
+    where
+        E: ConfiguredEffect,
+    {
+        let configured = self.project_bound_effect::<E>()?;
+        let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
+        let recorded = match self.ctx.effect_history.as_ref() {
+            Some(history) if declaration.has_recorded_bindings() => history
+                .recorded_descriptor_hash(&self.next_cursor())
+                .cloned(),
+            _ => None,
+        };
+        let Some(recorded) = recorded else {
+            return Ok(build(configured));
+        };
+        for binding in declaration.bindings() {
+            let Some(candidate) = binding.typed_projection::<E>() else {
+                continue;
+            };
+            let effect = match build(candidate) {
+                Ok(effect) => effect,
+                Err(error) => return Ok(Err(error)),
+            };
+            let descriptor = descriptor_for_effect(
+                &effect,
+                self.ctx.stage_logic_version.clone(),
+                E::EFFECT_TYPE,
+                E::SCHEMA_VERSION,
+                binding.identity(),
+            )?;
+            if descriptor_hash(&descriptor)? == recorded {
+                return Ok(Ok(effect));
+            }
+        }
+        Ok(build(configured))
+    }
+
+    fn project_bound_effect<E: BoundEffect>(&mut self) -> Result<EffectBindingUse<E>, EffectError> {
         self.gate_authoring()?;
         let declaration = match self.ctx.effect_declaration(E::EFFECT_TYPE) {
             Ok(declaration) => declaration,
@@ -839,10 +901,30 @@ impl EffectsCore {
         self.emit_fact(fact, true).await
     }
 
+    pub(crate) async fn emit_typed_facts(
+        &mut self,
+        facts: Vec<obzenflow_core::event::schema::TypedFact>,
+    ) -> Result<(), EffectError> {
+        for fact in facts {
+            self.emit_typed_fact(fact, false).await?;
+        }
+        Ok(())
+    }
+
     async fn emit_fact<T>(&mut self, fact: T, pre_effect: bool) -> Result<(), EffectError>
     where
         T: TypedPayload,
     {
+        let fact = obzenflow_core::event::schema::TypedFact::from_payload(fact)
+            .map_err(|error| EffectError::Serialization(error.to_string()))?;
+        self.emit_typed_fact(fact, pre_effect).await
+    }
+
+    async fn emit_typed_fact(
+        &mut self,
+        fact: obzenflow_core::event::schema::TypedFact,
+        pre_effect: bool,
+    ) -> Result<(), EffectError> {
         self.gate_authoring()?;
         if !self.ctx.emit_enabled {
             return Err(EffectError::EmitUnsupported {
@@ -850,12 +932,10 @@ impl EffectsCore {
             });
         }
 
-        let event_type = T::event_type_name();
+        let descriptor = fact.descriptor();
+        let event_type = fact.event_type.as_str().to_string();
         if !self.ctx.output_contract.is_empty()
-            && !self
-                .ctx
-                .output_contract
-                .contains_descriptor(&T::descriptor())
+            && !self.ctx.output_contract.contains_descriptor(&descriptor)
         {
             return Err(EffectError::UndeclaredOutput {
                 stage_key: self.ctx.stage_key.clone(),
@@ -863,21 +943,20 @@ impl EffectsCore {
             });
         }
         let routed_fact =
-            is_routable_output_fact(Some(&self.ctx.output_contract), &T::descriptor()) as usize;
+            is_routable_output_fact(Some(&self.ctx.output_contract), &descriptor) as usize;
         self.ensure_routed_fanout_capacity(routed_fact)?;
 
         let recorded_flow_id = self.namespace();
         let output_ordinal = self.reserve_output_ordinal()?;
-        let mut event = deterministic_typed_output_event(
-            self.ctx.writer_id,
-            &self.ctx.parent.authored(),
-            fact,
+        let parent = self.ctx.parent.authored();
+        let mut event = stamp_output_event(
+            fact.into_derived_event(self.ctx.writer_id, &parent, self.ctx.lineage),
+            &parent,
             &recorded_flow_id,
             &self.ctx.stage_key,
             self.ctx.input_seq,
             output_ordinal,
-            self.ctx.lineage,
-        )?;
+        );
         let plan = self.take_action(super::RecordedAction::Fact {
             id: event.id,
             event_type: obzenflow_core::EventType::from(event_type),
@@ -947,6 +1026,11 @@ impl EffectsCore {
         self.gate_authoring()?;
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
         let invocation = <E::BindingMode as EffectBindingMode<E>>::invocation_binding(&effect);
+        let chosen = declaration
+            .bindings()
+            .find(|binding| binding.compare_invocation(&invocation).is_ok())
+            .map(|binding| declaration.for_binding_use(binding));
+        let declaration = chosen.unwrap_or(declaration);
         if let Err(mismatch) = declaration.binding().compare_invocation(&invocation) {
             let kind = match mismatch {
                 super::binding::BindingMatchError::Family => {
@@ -1039,6 +1123,7 @@ impl EffectsCore {
         }
         match selection {
             EffectHistorySelection::Hit(records) => {
+                let recorded = records.first().map(|record| &record.descriptor);
                 for started in &selected.attempts {
                     if started.descriptor_hash != descriptor_hash
                         || started.effect_type.as_str() != E::EFFECT_TYPE
@@ -1047,6 +1132,7 @@ impl EffectsCore {
                             &cursor,
                             &descriptor_hash,
                             &started.descriptor_hash,
+                            descriptor_drift::<E>(&descriptor, recorded),
                         ));
                     }
                 }
@@ -1057,6 +1143,7 @@ impl EffectsCore {
                             &cursor,
                             &descriptor_hash,
                             &record.descriptor_hash,
+                            descriptor_drift::<E>(&descriptor, Some(&record.descriptor)),
                         ));
                     }
                 }
@@ -1119,10 +1206,16 @@ impl EffectsCore {
                     if started.descriptor_hash != descriptor_hash
                         || started.effect_type.as_str() != E::EFFECT_TYPE
                     {
+                        let recorded = selected
+                            .attempt_events
+                            .get(&started.attempt)
+                            .and_then(|event| event.effect_provenance.as_ref())
+                            .map(|provenance| &provenance.descriptor);
                         return Err(self.refuse_descriptor(
                             &cursor,
                             &descriptor_hash,
                             &started.descriptor_hash,
+                            descriptor_drift::<E>(&descriptor, recorded),
                         ));
                     }
                 }
@@ -1449,7 +1542,8 @@ impl EffectsCore {
             effect_type: EffectType::new(E::EFFECT_TYPE),
             attempt,
             outcome_group_id: outcome_group_id.clone(),
-            causal_input_id: self.ctx.parent.envelope.provenance.event.id,
+            causal_input_id: recovery_causal_input_id
+                .unwrap_or(self.ctx.parent.envelope.provenance.event.id),
         };
         let mut start_event = build_effect_attempt_started_event(
             self.ctx.writer_id,
@@ -2151,6 +2245,11 @@ impl EffectsCore {
                         &cursor,
                         &descriptor_hash,
                         &record.descriptor_hash,
+                        Some(Box::new(super::DescriptorDrift::between(
+                            &descriptor,
+                            &record.descriptor,
+                            super::DriftBinding::Named,
+                        ))),
                     ));
                 }
                 let output_result = self.recorded_outcome(decode_effect_outcome(&record.outcome));

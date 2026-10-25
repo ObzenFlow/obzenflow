@@ -5,6 +5,7 @@
 #![doc = include_str!("../README.md")]
 
 // Core modules
+pub mod ai;
 pub mod backpressure;
 pub mod bootstrap;
 pub(crate) mod classified_de;
@@ -115,7 +116,7 @@ pub mod prelude {
 
     // Handlers
     pub use crate::stages::{
-        EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource, InferenceHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource,
         IngressDecodeError, IngressDecoder, IngressRecord, InlineSink, ObserverHandler,
         ResourceManaged, SinkConnector, SinkDescription, SinkWriter, SourceError,
         SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,

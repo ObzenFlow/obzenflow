@@ -9,8 +9,8 @@ use super::binding::{
     EffectPortSlotRequirement, NoPortMetadata,
 };
 use super::{
-    BindingAuthorityFault, EffectBinding, EffectDeclaration, EffectPortSlot,
-    LogicalEffectBindingName, NamedEffect,
+    BindingAuthorityFault, BoundEffect, EffectBinding, EffectDeclaration, EffectPortSlot,
+    LogicalEffectBindingName,
 };
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -217,7 +217,7 @@ pub(super) struct PendingRegistrationPackage {
 }
 
 impl PendingRegistrationPackage {
-    fn new<E: NamedEffect>(
+    fn new<E: BoundEffect>(
         logical_name: LogicalEffectBindingName,
         coordinate: BindingCoordinate,
         system: Option<Arc<SystemPort>>,
@@ -254,7 +254,7 @@ impl std::fmt::Debug for PendingRegistrationPackage {
 }
 
 /// Public type-safe builder shared by integration facades, applications, and fixtures.
-pub struct EffectRegistrationBuilder<E: NamedEffect> {
+pub struct EffectRegistrationBuilder<E: BoundEffect> {
     logical_name: LogicalEffectBindingName,
     evidence: E::BindingEvidence,
     expected: Vec<EffectPortSlotRequirement>,
@@ -263,7 +263,7 @@ pub struct EffectRegistrationBuilder<E: NamedEffect> {
     _effect: PhantomData<fn() -> E>,
 }
 
-impl<E: NamedEffect> EffectRegistrationBuilder<E> {
+impl<E: BoundEffect> EffectRegistrationBuilder<E> {
     pub fn new(logical_name: LogicalEffectBindingName, evidence: E::BindingEvidence) -> Self {
         Self {
             logical_name,
@@ -494,7 +494,7 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
     }
 }
 
-impl<E: NamedEffect> std::fmt::Debug for EffectRegistrationBuilder<E> {
+impl<E: BoundEffect> std::fmt::Debug for EffectRegistrationBuilder<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let effect_type = if validate_effect_type(E::EFFECT_TYPE).is_ok() {
             E::EFFECT_TYPE
@@ -537,10 +537,14 @@ impl EffectPortRegistry {
         > = HashMap::new();
         let mut same_system = Vec::new();
 
-        for declaration in declarations {
-            let logical_name = declaration.binding().logical_name();
-            let registration = declaration.binding().registration;
-            let package = declaration.binding().pending_package().ok_or_else(|| {
+        for (declaration, binding) in declarations.into_iter().flat_map(|declaration| {
+            declaration
+                .bindings()
+                .map(move |binding| (declaration, binding))
+        }) {
+            let logical_name = binding.logical_name();
+            let registration = binding.registration;
+            let package = binding.pending_package().ok_or_else(|| {
                 EffectRegistrationCollectionError::MissingPackage {
                     binding: logical_name.clone(),
                     effect_type: declaration.effect_type(),
@@ -662,25 +666,26 @@ impl EffectPortRegistry {
         &self,
         declaration: &EffectDeclaration,
     ) -> Result<(), BindingAuthorityFault> {
-        let logical_name = declaration.binding().logical_name();
-        let registration = declaration.binding().registration;
-        let slots = declaration.binding().slots();
+        for binding in declaration.bindings() {
+            let logical_name = binding.logical_name();
 
-        if !self.installed_coordinates.contains(&registration) {
-            return Err(BindingAuthorityFault::registration_missing(
-                declaration.effect_type(),
-                logical_name.clone(),
-            ));
-        }
+            if !self.installed_coordinates.contains(&binding.registration) {
+                return Err(BindingAuthorityFault::registration_missing(
+                    declaration.effect_type(),
+                    logical_name.clone(),
+                ));
+            }
 
-        if slots
-            .iter()
-            .any(|slot| !self.recipes.contains_key(&slot.coordinate))
-        {
-            return Err(BindingAuthorityFault::registration_missing(
-                declaration.effect_type(),
-                logical_name.clone(),
-            ));
+            if binding
+                .slots()
+                .iter()
+                .any(|slot| !self.recipes.contains_key(&slot.coordinate))
+            {
+                return Err(BindingAuthorityFault::registration_missing(
+                    declaration.effect_type(),
+                    logical_name.clone(),
+                ));
+            }
         }
 
         Ok(())
@@ -950,7 +955,7 @@ mod tests {
         }
     }
 
-    impl NamedEffect for BoundEffect {
+    impl crate::effects::BoundEffect for BoundEffect {
         type BindingEvidence = Evidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -989,7 +994,7 @@ mod tests {
         }
     }
 
-    impl NamedEffect for CanaryBoundEffect {
+    impl crate::effects::BoundEffect for CanaryBoundEffect {
         type BindingEvidence = CanaryEvidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1028,7 +1033,7 @@ mod tests {
         }
     }
 
-    impl NamedEffect for InvalidIdentifierEffect {
+    impl crate::effects::BoundEffect for InvalidIdentifierEffect {
         type BindingEvidence = Evidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1067,7 +1072,7 @@ mod tests {
         }
     }
 
-    impl NamedEffect for TwoSlotEffect {
+    impl crate::effects::BoundEffect for TwoSlotEffect {
         type BindingEvidence = Evidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1106,7 +1111,7 @@ mod tests {
         }
     }
 
-    impl NamedEffect for DuplicateLabelEffect {
+    impl crate::effects::BoundEffect for DuplicateLabelEffect {
         type BindingEvidence = Evidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1122,7 +1127,7 @@ mod tests {
         LogicalEffectBindingName::new("fixture").unwrap()
     }
 
-    fn collect<E: NamedEffect>(binding: &EffectBinding<E>) -> EffectPortRegistry {
+    fn collect<E: crate::effects::NamedEffect>(binding: &EffectBinding<E>) -> EffectPortRegistry {
         let declaration = EffectDeclaration::named(binding);
         EffectPortRegistry::collect_from_declarations([&declaration]).unwrap()
     }

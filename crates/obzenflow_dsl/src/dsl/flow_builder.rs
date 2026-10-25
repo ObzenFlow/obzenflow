@@ -262,15 +262,6 @@ where
             descriptors.insert(name, descriptor);
         }
 
-        // FLOWIP-114c: build the subgraph membership map from lowering
-        // artifacts BEFORE topology stages are assembled, so the StageInfo
-        // entries passed to `validate_edge_typing` carry `subgraph_id`.
-        // Without this, the validator's composite-internal-edge skip rule
-        // cannot fire (it reads `topology.stage_info(...).subgraph`), and
-        // any flow using `ai_map_reduce!` would surface its mixed internal
-        // selected feeds as a SingleEdge mismatch at the validator boundary.
-        // The same map is reused downstream when assembling the
-        // annotated topology returned to the caller.
         let mut subgraph_membership_map: HashMap<StageId, obzenflow_topology::StageSubgraphMembership> =
             HashMap::new();
         for (stage_name, membership) in lowering_artifacts.stage_subgraphs {
@@ -596,7 +587,37 @@ where
             use obzenflow_runtime::runtime_config::DslCandidates;
 
             let mut __dsl_candidates = DslCandidates::default();
+            let mut __config_owner: HashMap<&str, &str> = HashMap::new();
+            for spec in lowering_artifacts
+                .subgraphs
+                .iter()
+                .filter(|spec| crate::dsl::ai_stage::is_ai_composite_kind(&spec.kind))
+            {
+                for member in &spec.member_stage_names {
+                    __dsl_candidates.declare_stage_owner(member.as_str(), spec.binding.as_str());
+                    __config_owner.insert(member.as_str(), spec.binding.as_str());
+                }
+            }
             for (_name, descriptor) in descriptors.iter() {
+                let config_stage = __config_owner
+                    .get(descriptor.name())
+                    .copied()
+                    .unwrap_or(descriptor.name());
+                for (section, effect_type) in descriptor.ai_config_sections() {
+                    for knob in ["endpoint", "model"] {
+                        __dsl_candidates.declare_effect_consumption(
+                            format!("{section}.{knob}"),
+                            obzenflow_core::StageKey::from(descriptor.name()),
+                            obzenflow_core::event::EffectType::from(effect_type),
+                        );
+                    }
+                }
+                if descriptor.max_open_keys().is_some() {
+                    __dsl_candidates.declare_stage_consumption(
+                        obzenflow_runtime::runtime_config::MAX_OPEN_KEYS_KEY,
+                        obzenflow_core::StageKey::from(descriptor.name()),
+                    );
+                }
                 if __configured_sink_stages.contains(descriptor.name()) {
                     __dsl_candidates.declare_stage_consumption(
                         obzenflow_runtime::runtime_config::SINK_HANDLER_KEY,
@@ -613,7 +634,7 @@ where
                     for default in factory.dsl_config_defaults() {
                         __dsl_candidates.declare(
                             default.key_path,
-                            ConfigScope::stage(descriptor.name()),
+                            ConfigScope::stage(config_stage),
                             default.value,
                         );
                     }
@@ -631,7 +652,7 @@ where
                     for default in factory.dsl_config_defaults() {
                         __dsl_candidates.declare_for_effect(
                             default.key_path,
-                            obzenflow_core::StageKey::from(descriptor.name()),
+                            obzenflow_core::StageKey::from(config_stage),
                             obzenflow_core::event::EffectType::from(attachment.effect_type),
                             default.value,
                         );
@@ -1159,6 +1180,8 @@ where
                     error_journal_file,
                     inbound,
                     delivery_order,
+                    ai_models: descriptor.ai_model_specs(),
+                    max_open_keys: descriptor.max_open_keys(),
                 },
             );
         }
@@ -1237,6 +1260,10 @@ where
         manifest_capabilities.insert(
             obzenflow_core::journal::archive::manifest::EFFECT_BINDING_DESCRIPTOR_CAPABILITY
                 .to_string(),
+            1,
+        );
+        manifest_capabilities.insert(
+            obzenflow_core::journal::archive::manifest::AI_MODEL_SPECS_CAPABILITY.to_string(),
             1,
         );
         if !bounded_direct_fact_admission.is_empty() {

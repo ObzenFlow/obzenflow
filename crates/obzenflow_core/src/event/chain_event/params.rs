@@ -10,6 +10,7 @@ use crate::event::types::{
     Count, DurationMs, EventId, JournalIndex, JournalPath, SeqNo, ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
+use crate::StageKey;
 
 #[derive(Debug, Clone)]
 pub struct ConsumptionProgressEventParams {
@@ -60,6 +61,7 @@ pub struct CircuitBreakerSummaryEventParams {
 
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerOpenedEventParams {
+    pub unit: StageKey,
     pub cooldown_ms: u64,
     pub trigger: CircuitBreakerOpenTrigger,
     pub observed_calls: u64,
@@ -72,6 +74,7 @@ pub struct CircuitBreakerOpenedEventParams {
 
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerAttemptSettledEventParams {
+    pub unit: StageKey,
     pub cursor: EffectCursor,
     pub attempt: u32,
     pub health_classification: CircuitBreakerHealthClassification,

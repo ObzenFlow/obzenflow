@@ -547,7 +547,7 @@ trait FixtureEffect: NamedEffect<BindingEvidence = FixtureEvidence> {
 
 macro_rules! fixture_effect {
     ($effect:ty, $field:ident) => {
-        impl NamedEffect for $effect {
+        impl BoundEffect for $effect {
             type BindingEvidence = FixtureEvidence;
 
             fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1272,7 +1272,7 @@ impl Effect for NamedAffineCountingEffect {
     }
 }
 
-impl NamedEffect for NamedAffineCountingEffect {
+impl BoundEffect for NamedAffineCountingEffect {
     type BindingEvidence = VersionedBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -1316,7 +1316,7 @@ impl Effect for ZeroSlotNamedEffect {
     }
 }
 
-impl NamedEffect for ZeroSlotNamedEffect {
+impl BoundEffect for ZeroSlotNamedEffect {
     type BindingEvidence = VersionedBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -6319,7 +6319,13 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
         fatal.reason,
         obzenflow_core::event::StageFatalReason::DescriptorMismatch
     );
-    assert!(fatal.detail.starts_with("effect descriptor mismatch"));
+    assert!(
+        fatal.detail.ends_with(
+            "the effect's type, label or schema version differs from the recording; binding and stage logic version match"
+        ),
+        "{}",
+        fatal.detail
+    );
     assert!(
         replay.ensure_authoring_open().is_err(),
         "nothing authored after the refusal commits"
@@ -7127,6 +7133,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
             ChainEventFactory::circuit_breaker_attempt_settled(
                 evidence_writer,
                 CircuitBreakerAttemptSettledEventParams {
+                    unit: "effectful".into(),
                     cursor: identity.cursor.clone(),
                     attempt,
                     health_classification: CircuitBreakerHealthClassification::Ignored,

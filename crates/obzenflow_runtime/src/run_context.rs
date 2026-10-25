@@ -13,6 +13,7 @@
 //! It also holds the build's one extraction of the `[app]` table until the
 //! flow build records it; the snapshot stays immutable.
 
+use crate::ai::AiModelProviders;
 use crate::runtime_config::{ApplicationSettingsError, ResolvedRuntimeConfig};
 use obzenflow_core::metrics::MetricsSnapshotExporter;
 use serde::de::DeserializeOwned;
@@ -24,6 +25,7 @@ pub struct FlowBuildContext {
     runtime_config: Arc<ResolvedRuntimeConfig>,
     metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
     app_settings: Arc<OnceLock<serde_json::Value>>,
+    ai_models: AiModelProviders,
 }
 
 impl FlowBuildContext {
@@ -32,7 +34,18 @@ impl FlowBuildContext {
             runtime_config,
             metrics_exporter: None,
             app_settings: Arc::new(OnceLock::new()),
+            ai_models: AiModelProviders::default(),
         }
+    }
+
+    /// Install the model providers this build binds AI stages with.
+    pub fn with_ai_models(mut self, providers: AiModelProviders) -> Self {
+        self.ai_models = providers;
+        self
+    }
+
+    pub fn ai_models(&self) -> &AiModelProviders {
+        &self.ai_models
     }
 
     pub fn with_metrics_exporter(mut self, exporter: Arc<dyn MetricsSnapshotExporter>) -> Self {
@@ -90,6 +103,7 @@ impl std::fmt::Debug for FlowBuildContext {
             .field("runtime_config", &self.runtime_config)
             .field("metrics_enabled", &self.metrics_exporter.is_some())
             .field("app_settings_extracted", &self.app_settings.get().is_some())
+            .field("ai_models", &self.ai_models)
             .finish()
     }
 }

@@ -154,6 +154,7 @@ pub struct EffectDeclaration {
     idempotency_key_policy: IdempotencyKeyPolicy,
     syntax: EffectDeclarationSyntax,
     pub(crate) binding: EffectDeclarationBinding,
+    recorded: Vec<EffectDeclarationBinding>,
     /// Event-sourcing meaning selected by the effect type.
     outcome_kind: EffectOutcomeKind,
     /// Public facts this effect may author. Recorded replies project an empty
@@ -171,55 +172,17 @@ pub(super) enum EffectDeclarationSyntax {
     Transactional,
 }
 
-mod declaration_diagnostic_sealed {
-    use super::*;
-
-    pub trait BindingFor<E: Effect> {}
-
-    impl<E> BindingFor<E> for EffectBinding<E> where E: NamedEffect {}
-}
-
-/// Compiler-facing proof that the binding after `via` in an `inference!` or
-/// `ai_map_reduce!` row is the exact typed binding of the declared effect.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "binding `{Self}` does not match declared effect `{E}`",
-    label = "the binding selected by `via` belongs to a different effect",
-    note = "use the `EffectBinding<{E}>` produced for the effect named before `via`"
-)]
-pub trait EffectBindingFor<E: Effect>: declaration_diagnostic_sealed::BindingFor<E> {
-    #[doc(hidden)]
-    fn at_least_once_declaration_for(&self) -> EffectDeclaration;
-}
-
-#[diagnostic::do_not_recommend]
-impl<E> EffectBindingFor<E> for EffectBinding<E>
-where
-    E: NamedEffect,
-{
-    fn at_least_once_declaration_for(&self) -> EffectDeclaration {
-        EffectDeclaration::for_binding::<E>(
-            self.declaration_binding(),
-            EffectDeclarationSyntax::AtLeastOnce,
-        )
-    }
-}
-
-#[doc(hidden)]
-pub fn declare_named_at_least_once_effect<E, B>(binding: &B) -> EffectDeclaration
-where
-    E: Effect,
-    B: EffectBindingFor<E> + ?Sized,
-{
-    binding.at_least_once_declaration_for()
-}
-
 impl EffectDeclaration {
     /// Produce the declaration form retained by stage resources after package collection.
     #[doc(hidden)]
     pub fn runtime_projection(&self) -> Self {
         let mut declaration = self.clone();
         declaration.binding = declaration.binding.runtime_projection();
+        declaration.recorded = declaration
+            .recorded
+            .iter()
+            .map(EffectDeclarationBinding::runtime_projection)
+            .collect();
         declaration
     }
 
@@ -260,6 +223,7 @@ impl EffectDeclaration {
             idempotency_key_policy,
             syntax,
             binding,
+            recorded: Vec::new(),
             outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
             public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
                 E::Outcome,
@@ -348,6 +312,17 @@ impl EffectDeclaration {
         )
     }
 
+    #[doc(hidden)]
+    pub fn configured<E>(binding: &EffectBinding<E>) -> Self
+    where
+        E: ConfiguredEffect,
+    {
+        Self::for_binding::<E>(
+            binding.declaration_binding(),
+            EffectDeclarationSyntax::AtLeastOnce,
+        )
+    }
+
     /// Explicit transactional acknowledgement for a named effect.
     pub fn transactional<E>(binding: &EffectBinding<E>) -> Self
     where
@@ -359,12 +334,42 @@ impl EffectDeclaration {
         )
     }
 
+    #[doc(hidden)]
+    pub fn configured_with_recorded<'a, E>(
+        binding: &EffectBinding<E>,
+        recorded: impl IntoIterator<Item = &'a EffectBinding<E>>,
+    ) -> Self
+    where
+        E: ConfiguredEffect,
+    {
+        let mut declaration = Self::configured(binding);
+        declaration.recorded = recorded
+            .into_iter()
+            .map(EffectBinding::declaration_binding)
+            .collect();
+        declaration
+    }
+
     pub(crate) fn binding_identity(&self) -> obzenflow_core::EffectBindingIdentity {
         self.binding.identity()
     }
 
     pub(crate) fn binding(&self) -> &EffectDeclarationBinding {
         &self.binding
+    }
+
+    pub(crate) fn bindings(&self) -> impl Iterator<Item = &EffectDeclarationBinding> {
+        std::iter::once(&self.binding).chain(&self.recorded)
+    }
+
+    pub(crate) fn has_recorded_bindings(&self) -> bool {
+        !self.recorded.is_empty()
+    }
+
+    pub(crate) fn for_binding_use(&self, binding: &EffectDeclarationBinding) -> Self {
+        let mut declaration = self.clone();
+        declaration.binding = binding.clone();
+        declaration
     }
 }
 

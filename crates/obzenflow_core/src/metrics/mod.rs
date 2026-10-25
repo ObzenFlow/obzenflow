@@ -32,7 +32,7 @@ pub use primitives::{Counter, Gauge, Histogram};
 pub use snapshot_exporter::MetricsSnapshotExporter;
 pub use snapshots::{
     AiChunkingMetricsSnapshot, AppMetricsSnapshot, ContractMetricEdgeKey, ContractMetricResultKey,
-    ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel,
+    ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel, ControlUnit,
     FlowLifecycleMetricsSnapshot, FlowMetricsSnapshot, HistogramSnapshot, InfraMetricsSnapshot,
     JournalMetricsSnapshot, SinkOperationFailureMetric, StageInfraMetrics, StageMetadata,
     StageMetricsSnapshot,

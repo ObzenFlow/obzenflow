@@ -71,6 +71,19 @@ pub enum ConfigResolveError {
     },
     /// A key path with no registry entry reached the resolver.
     UnknownKnob { key_path: String },
+    /// An `[ai.*]` stage table names a stage that performs no effect of the
+    /// table's family.
+    NoAiStage { table: String },
+    /// An open-key limit set for an AI stage whose items have no key.
+    UnkeyedAiStage { stage: String },
+    /// An entry names a member the build generated for an authored stage.
+    GeneratedMember { table: String, owner: String },
+    /// A middleware entry for an AI stage that lists no middleware reading it.
+    UnlistedAiControl {
+        table: String,
+        key_path: String,
+        stage: String,
+    },
 }
 
 impl fmt::Display for ConfigResolveError {
@@ -157,6 +170,25 @@ impl fmt::Display for ConfigResolveError {
             Self::UnknownKnob { key_path } => {
                 write!(f, "config error at {key_path}: unknown configuration key")
             }
+            Self::NoAiStage { table } => {
+                write!(f, "config: [{table}] names no AI stage in this flow")
+            }
+            Self::UnkeyedAiStage { stage } => write!(
+                f,
+                "config: [runtime.ai.stages.{stage}] sets max_open_keys, but `{stage}` has no key"
+            ),
+            Self::GeneratedMember { table, owner } => write!(
+                f,
+                "config: [{table}] names a generated member of `{owner}`; configure `{owner}`"
+            ),
+            Self::UnlistedAiControl {
+                table,
+                key_path,
+                stage,
+            } => write!(
+                f,
+                "config: [{table}] sets {key_path}, but `{stage}` lists no middleware in `with` that reads it"
+            ),
         }
     }
 }

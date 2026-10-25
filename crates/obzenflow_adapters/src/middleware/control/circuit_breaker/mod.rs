@@ -22,7 +22,7 @@ use obzenflow_core::event::{
     ChainEventFactory, CircuitBreakerOpenedEventParams, EffectFailureCode, EffectFailureSource,
     RetryDisposition,
 };
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, StageKey, WriterId};
 use obzenflow_runtime::control_plane::cb_state;
 use obzenflow_runtime::effects::EffectError;
 use std::num::NonZeroU32;
@@ -132,8 +132,13 @@ impl CircuitBreakerOpenEvidence {
         }
     }
 
-    fn into_event_params(self, cooldown: Duration) -> CircuitBreakerOpenedEventParams {
+    fn into_event_params(
+        self,
+        unit: StageKey,
+        cooldown: Duration,
+    ) -> CircuitBreakerOpenedEventParams {
         CircuitBreakerOpenedEventParams {
+            unit,
             cooldown_ms: cooldown.as_millis().min(u64::MAX as u128) as u64,
             trigger: self.trigger,
             observed_calls: self.observed_calls,
@@ -246,11 +251,11 @@ pub(crate) struct CircuitBreakerMiddleware {
     /// Serialises breaker transitions with recovery admission/continuation
     /// checks. This makes the open epoch and state one logical snapshot for
     /// effect recovery without changing the externally shared state view.
-    effect_recovery_state_gate: Mutex<()>,
+    effect_recovery_state_gate: Arc<Mutex<()>>,
     /// Monotonic count of successful transitions into Open. Recovery sessions
     /// capture the value at initial admission and reject any later physical
     /// continuation after it changes, even if the circuit is Closed again.
-    effect_recovery_open_epoch: AtomicU64,
+    effect_recovery_open_epoch: Arc<AtomicU64>,
     /// FLOWIP-115a: the probe generation reserved by the source boundary policy,
     /// read by observation to classify the probe. The RAII guard releases the
     /// slot and clears this marker on cancellation.
@@ -274,6 +279,7 @@ pub(crate) struct CircuitBreakerMiddleware {
     /// This must match the stage's writer_id so vector-clock watermarks and
     /// stage attribution remain correct in downstream consumers.
     writer_id: WriterId,
+    unit: StageKey,
     /// Optional typed failure-only health override.
     failure_classification_classifier: Option<FailureClassificationClassifier>,
     /// Policy controlling behaviour while the circuit is HalfOpen.
@@ -302,21 +308,63 @@ impl CircuitBreakerMiddleware {
     /// Create a new circuit breaker with the given failure threshold
     #[cfg(test)]
     pub(crate) fn new(threshold: usize) -> Self {
-        Self::construct(threshold, Duration::from_secs(60), None, None)
+        Self::construct(
+            threshold,
+            Duration::from_secs(60),
+            None,
+            StageKey::from("breaker"),
+            None,
+        )
     }
 
     pub(in crate::middleware::control) fn with_cooldown_for_stage(
         threshold: usize,
         cooldown: Duration,
         stage_id: StageId,
+        unit: StageKey,
     ) -> Self {
-        Self::construct(threshold, cooldown, Some(stage_id), None)
+        Self::construct(threshold, cooldown, Some(stage_id), unit, None)
+    }
+
+    pub(in crate::middleware::control) fn handle_for(&self, stage_id: StageId) -> Self {
+        Self {
+            state: self.state.clone(),
+            success_count: self.success_count.clone(),
+            failure_count: self.failure_count.clone(),
+            failure_mode: self.failure_mode.clone(),
+            rate_window: self.rate_window.clone(),
+            cooldown: self.cooldown,
+            opened_at: self.opened_at.clone(),
+            probe_in_flight: self.probe_in_flight.clone(),
+            probe_gate: self.probe_gate.clone(),
+            probe_generation: self.probe_generation.clone(),
+            effect_recovery_state_gate: self.effect_recovery_state_gate.clone(),
+            effect_recovery_open_epoch: self.effect_recovery_open_epoch.clone(),
+            source_pending_probe: self.source_pending_probe.clone(),
+            stats: self.stats.clone(),
+            last_state_change: self.last_state_change.clone(),
+            requests_total: self.requests_total.clone(),
+            successes_total: self.successes_total.clone(),
+            failures_total: self.failures_total.clone(),
+            slow_total: self.slow_total.clone(),
+            rejections_total: self.rejections_total.clone(),
+            opened_total: self.opened_total.clone(),
+            time_in_closed: self.time_in_closed.clone(),
+            time_in_open: self.time_in_open.clone(),
+            time_in_half_open: self.time_in_half_open.clone(),
+            writer_id: WriterId::from(stage_id),
+            unit: self.unit.clone(),
+            failure_classification_classifier: self.failure_classification_classifier.clone(),
+            half_open_policy: self.half_open_policy.clone(),
+            rate_limited_counts_as_failure: self.rate_limited_counts_as_failure,
+        }
     }
 
     fn construct(
         threshold: usize,
         cooldown: Duration,
         stage_id: Option<StageId>,
+        unit: StageKey,
         shared_state: Option<Arc<AtomicU8>>,
     ) -> Self {
         debug_assert!(
@@ -337,8 +385,8 @@ impl CircuitBreakerMiddleware {
             probe_in_flight: Arc::new(AtomicU32::new(0)),
             probe_gate: Arc::new(Mutex::new(())),
             probe_generation: Arc::new(AtomicU64::new(0)),
-            effect_recovery_state_gate: Mutex::new(()),
-            effect_recovery_open_epoch: AtomicU64::new(0),
+            effect_recovery_state_gate: Arc::new(Mutex::new(())),
+            effect_recovery_open_epoch: Arc::new(AtomicU64::new(0)),
             source_pending_probe: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(CircuitBreakerStats {
                 requests_processed: 0,
@@ -358,10 +406,15 @@ impl CircuitBreakerMiddleware {
             writer_id: stage_id
                 .map(WriterId::from)
                 .unwrap_or_else(|| WriterId::from(StageId::new())),
+            unit,
             failure_classification_classifier: None,
             half_open_policy: HalfOpenPolicy::default(),
             rate_limited_counts_as_failure: false,
         }
+    }
+
+    pub(in crate::middleware::control) fn unit(&self) -> &StageKey {
+        &self.unit
     }
 
     fn current_state(&self) -> CircuitState {
@@ -778,12 +831,13 @@ impl CircuitBreakerMiddleware {
                     .expect("every transition into Open must carry decision-point evidence");
                 ChainEventFactory::circuit_breaker_opened(
                     self.writer_id,
-                    evidence.into_event_params(self.cooldown),
+                    evidence.into_event_params(self.unit.clone(), self.cooldown),
                 )
             }
             (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::execution_event(
                 self.writer_id,
                 ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+                    unit: self.unit.clone(),
                     test_request_count: 0,
                 }),
             ),
@@ -794,6 +848,7 @@ impl CircuitBreakerMiddleware {
                 ChainEventFactory::execution_event(
                     self.writer_id,
                     ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+                        unit: self.unit.clone(),
                         success_count,
                         recovery_duration_ms,
                     }),
@@ -802,6 +857,7 @@ impl CircuitBreakerMiddleware {
             _ => ChainEventFactory::execution_event(
                 self.writer_id,
                 ExecutionPayload::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                    unit: self.unit.clone(),
                     from_state: old_state.into(),
                     to_state: new_state.into(),
                     timestamp: SystemTime::now()
@@ -1070,6 +1126,7 @@ impl CircuitBreakerMiddleware {
 
             // Emit a circuit breaker summary event
             ctx.observe(ObservationRecord::CircuitBreakerSummary {
+                unit: self.unit.clone(),
                 effect_type: None,
                 window_duration_s: stats.last_summary.elapsed().as_secs(),
                 requests_processed: stats.requests_processed,

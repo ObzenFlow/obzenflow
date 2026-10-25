@@ -2,14 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Remaining FLOWIP-128b acceptance proofs for T2, T4, T7, T8, and T9.
-
 use super::*;
-use obzenflow::ai::{ChatTransform, EmbeddingTransform};
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use fake_ai::{chat_model, embedding_model, runtime_config};
+use obzenflow::ai::{AiClientError, EmbeddingResponse};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::EffectAttemptStarted;
 use obzenflow_dsl::infinite_source;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_runtime::bootstrap::{
@@ -17,131 +14,30 @@ use obzenflow_runtime::bootstrap::{
 };
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
+use obzenflow_runtime::runtime_config::AiEndpointTables;
 use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use std::future::pending;
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
 
 const MAX_MEASURED_EMBEDDING_DIMENSIONS: u32 = 3_072;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum MapperFailure {
-    #[default]
-    None,
-    BeforeEffect,
-    AfterEffect,
-    EmptyEmbeddingInputs,
-}
-
-#[derive(Clone, Debug, Default)]
-struct MapperCounters {
-    request: Arc<AtomicUsize>,
-    response: Arc<AtomicUsize>,
-}
-
-type GapHandlers = (
-    ChatTransform<TicketRaised, TicketSummarised>,
-    EmbeddingTransform<TicketSummarised, TicketEmbedded>,
-);
-type GapHandlerBuildResult = Result<GapHandlers, Box<FlowBuildError>>;
-
-#[derive(Debug)]
-struct FailingChatClient {
-    target: ChatTarget,
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl ChatClient for FailingChatClient {
-    fn target(&self) -> &ChatTarget {
-        &self.target
-    }
-
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiClientError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(request.target().logically_matches(&self.target));
+fn failing_chat() -> FakeChatModels {
+    FakeChatModels::with_reply(|_| {
         Err(AiClientError::Remote {
             message: "fixture provider unavailable".to_string(),
         })
-    }
+    })
 }
 
-#[derive(Debug)]
-struct GatedChatClient {
-    target: ChatTarget,
-    calls: Arc<AtomicUsize>,
-    release: Arc<Semaphore>,
-}
-
-#[async_trait]
-impl ChatClient for GatedChatClient {
-    fn target(&self) -> &ChatTarget {
-        &self.target
-    }
-
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AiClientError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(request.target().logically_matches(&self.target));
-        self.release
-            .acquire()
-            .await
-            .expect("the T8 provider gate remains open")
-            .forget();
-        Ok(ChatResponse {
-            text: "concise summary".to_string(),
-            tool_calls: Vec::new(),
-            usage: None,
-            raw: None,
-        })
-    }
-}
-
-#[derive(Debug)]
-struct AmbiguousEmbeddingClient {
-    target: EmbeddingTarget,
-    calls: Arc<AtomicUsize>,
-    physical_success: Arc<Notify>,
-}
-
-#[async_trait]
-impl EmbeddingClient for AmbiguousEmbeddingClient {
-    fn target(&self) -> &EmbeddingTarget {
-        &self.target
-    }
-
-    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
-        assert!(request.logically_targets(&self.target));
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        // The externally visible operation has succeeded, but its response has
-        // not crossed back into the effect runtime. Cutting the run here is
-        // the honest execute-to-commit ambiguity window.
-        self.physical_success.notify_one();
-        pending().await
-    }
-}
-
-#[derive(Debug)]
-struct WideEmbeddingClient {
-    target: EmbeddingTarget,
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl EmbeddingClient for WideEmbeddingClient {
-    fn target(&self) -> &EmbeddingTarget {
-        &self.target
-    }
-
-    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
-        assert!(request.logically_targets(&self.target));
-        self.calls.fetch_add(1, Ordering::SeqCst);
+fn wide_embedding() -> FakeEmbeddingModels {
+    FakeEmbeddingModels::with_reply(|request| {
         let width = request
             .params
             .dimensions
-            .expect("the T9 fixture requests its measured width");
+            .expect("the measured fixture requests its width");
         Ok(EmbeddingResponse {
             vectors: request
                 .inputs
@@ -151,131 +47,29 @@ impl EmbeddingClient for WideEmbeddingClient {
             vector_dim: width,
             usage: None,
         })
+    })
+}
+
+fn summarize_with(failure: MapperFailure, counters: MapperCounters) -> SummarizeTicket {
+    SummarizeTicket {
+        failure,
+        counters,
+        ..SummarizeTicket::baseline()
     }
 }
 
-fn fixture_targets() -> (ChatTarget, EmbeddingTarget) {
-    let (chat, embedding) = base_bindings(None).expect("fixture bindings");
-    (
-        chat.evidence().target().clone(),
-        embedding.evidence().target().clone(),
-    )
+fn embed_with(failure: MapperFailure, width: u32) -> EmbedSummary {
+    EmbedSummary {
+        empty_inputs: failure == MapperFailure::EmptyEmbeddingInputs,
+        ..EmbedSummary::of_width(width)
+    }
 }
 
-fn successful_authority(counters: AuthorityCounters) -> AiAuthority {
-    live_authority(None, Some(counters)).expect("fixture authority")
-}
-
-fn empty_authority() -> AiAuthority {
-    live_authority(None, None).expect("fixture replay authority")
-}
-
-fn handlers(
-    authority: &AiAuthority,
-    mapper_failure: MapperFailure,
-    mapper_counters: MapperCounters,
-    embedding_dimensions: EmbeddingDimensions,
-) -> GapHandlerBuildResult {
-    let request_calls = mapper_counters.request;
-    let response_calls = mapper_counters.response;
-    let chat = ChatTransformBuilder::new()
-        .logic_version("gap-proof-chat-v1")
-        .system("Summarise support tickets concisely.")
-        .build_typed::<TicketRaised, TicketSummarised>(
-            authority.chat.clone(),
-            move |ticket| {
-                request_calls.fetch_add(1, Ordering::SeqCst);
-                if mapper_failure == MapperFailure::BeforeEffect {
-                    return Err(HandlerError::Validation(
-                        "fixture request mapping failed".to_string(),
-                    ));
-                }
-                Ok(ticket.description.clone())
-            },
-            move |ticket, response| {
-                response_calls.fetch_add(1, Ordering::SeqCst);
-                if mapper_failure == MapperFailure::AfterEffect {
-                    return Err(HandlerError::Domain(
-                        "fixture response mapping failed".to_string(),
-                    ));
-                }
-                Ok(TicketSummarised {
-                    id: ticket.id,
-                    summary: response.text,
-                })
-            },
-        )
-        .map_err(|error| Box::new(binding_error("chat_handler", error)))?;
-    let embedding = EmbeddingTransformBuilder::new()
-        .logic_version("gap-proof-embedding-v1")
-        .dimensions(embedding_dimensions)
-        .build_typed::<TicketSummarised, TicketEmbedded>(
-            authority.embedding.clone(),
-            move |ticket| {
-                if mapper_failure == MapperFailure::EmptyEmbeddingInputs {
-                    Ok(Vec::new())
-                } else {
-                    Ok(vec![ticket.summary.clone()])
-                }
-            },
-            |ticket, response| {
-                Ok(TicketEmbedded {
-                    id: ticket.id,
-                    vectors: response.vectors,
-                })
-            },
-        )
-        .map_err(|error| Box::new(binding_error("embedding_handler", error)))?;
-    Ok((chat, embedding))
-}
-
-fn finite_flow(
-    journal_base: PathBuf,
-    tickets: Vec<TicketRaised>,
-    outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-    authority: AiAuthority,
-    mapper_failure: MapperFailure,
-    mapper_counters: MapperCounters,
-    embedding_dimensions: EmbeddingDimensions,
-) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let (chat_handler, embedding_handler) = handlers(
-            &authority,
-            mapper_failure,
-            mapper_counters.clone(),
-            embedding_dimensions,
-        )
-        .map_err(|error| *error)?;
-        let input = sources::ValuesSource::new(tickets.clone());
-        let collected = CollectEmbedded {
-            outputs: outputs.clone(),
-        };
-
-        Ok(flow! {
-            name: "standalone_ai_gap_proof",
-            journals: disk_journals(journal_base.clone()),
-            stages: {
-                input = source!(TicketRaised => input);
-                chat = effectful_transform!(
-                    TicketRaised -> TicketSummarised
-                    with ai_resilience()
-                    => chat_handler.at_least_once::<ChatCompletion>(),
-                );
-                embedding = effectful_transform!(
-                    TicketSummarised -> TicketEmbedded
-                    with ai_resilience()
-                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
-                );
-                collected = sink!(TicketEmbedded => collected);
-            },
-
-            topology: {
-                input |> chat;
-                chat |> embedding;
-                embedding |> collected;
-            }
-        })
-    })
+fn ticket(id: u64, description: &str) -> Vec<TicketRaised> {
+    vec![TicketRaised {
+        id,
+        description: description.to_string(),
+    }]
 }
 
 #[derive(Clone, Debug)]
@@ -315,37 +109,23 @@ fn resumable_flow(
     first_id: u64,
     count: u64,
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-    authority: AiAuthority,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let (chat_handler, embedding_handler) = handlers(
-            &authority,
-            MapperFailure::None,
-            MapperCounters::default(),
-            EmbeddingDimensions::try_from(3).unwrap(),
-        )
-        .map_err(|error| *error)?;
+        let summarize = ai::infer(SummarizeTicket::baseline());
+        let embed = ai::infer(EmbedSummary::of_width(3));
+        let chat_breaker = circuit_breaker().consecutive_failures(5);
+        let embedding_breaker = circuit_breaker().consecutive_failures(5);
         let input =
             crate::replay_testkit::ReattachingSource(BoundedTicketSource::new(first_id, count));
-        let collected = CollectEmbedded {
-            outputs: outputs.clone(),
-        };
+        let collected = CollectEmbedded { outputs };
 
         Ok(flow! {
             name: "standalone_ai_resume_tail",
-            journals: disk_journals(journal_base.clone()),
+            journals: disk_journals(journal_base),
             stages: {
                 input = infinite_source!(TicketRaised => input);
-                chat = effectful_transform!(
-                    TicketRaised -> TicketSummarised
-                    with ai_resilience()
-                    => chat_handler.at_least_once::<ChatCompletion>(),
-                );
-                embedding = effectful_transform!(
-                    TicketSummarised -> TicketEmbedded
-                    with ai_resilience()
-                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
-                );
+                chat = ai!(TicketRaised -> TicketSummarised with chat_breaker => summarize);
+                embedding = ai!(TicketSummarised -> TicketEmbedded with embedding_breaker => embed);
                 collected = sink!(TicketEmbedded => collected);
             },
 
@@ -386,37 +166,23 @@ impl TypedFiniteSourceHandler for TwoTicketSource {
 fn control_interleaving_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-    authority: AiAuthority,
     mapper_counters: MapperCounters,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let (chat_handler, embedding_handler) = handlers(
-            &authority,
-            MapperFailure::None,
-            mapper_counters.clone(),
-            EmbeddingDimensions::try_from(3).unwrap(),
-        )
-        .map_err(|error| *error)?;
+        let summarize = ai::infer(summarize_with(MapperFailure::None, mapper_counters));
+        let embed = ai::infer(EmbedSummary::of_width(3));
+        let chat_breaker = circuit_breaker().consecutive_failures(5);
+        let embedding_breaker = circuit_breaker().consecutive_failures(5);
         let input = TwoTicketSource::default();
-        let collected = CollectEmbedded {
-            outputs: outputs.clone(),
-        };
+        let collected = CollectEmbedded { outputs };
 
         Ok(flow! {
             name: "standalone_ai_control_interleaving",
-            journals: disk_journals(journal_base.clone()),
+            journals: disk_journals(journal_base),
             stages: {
                 input = source!(TicketRaised => input);
-                chat = effectful_transform!(
-                    TicketRaised -> TicketSummarised
-                    with ai_resilience()
-                    => chat_handler.at_least_once::<ChatCompletion>(),
-                );
-                embedding = effectful_transform!(
-                    TicketSummarised -> TicketEmbedded
-                    with ai_resilience()
-                    => embedding_handler.at_least_once::<EmbeddingGeneration>(),
-                );
+                chat = ai!(TicketRaised -> TicketSummarised with chat_breaker => summarize);
+                embedding = ai!(TicketSummarised -> TicketEmbedded with embedding_breaker => embed);
                 collected = sink!(TicketEmbedded => collected);
             },
 
@@ -489,7 +255,7 @@ async fn wait_for_outputs(outputs: &Mutex<Vec<TicketEmbedded>>, expected: usize)
         }
     })
     .await
-    .expect("timed out waiting for standalone AI outputs");
+    .expect("timed out waiting for AI stage outputs");
 }
 
 async fn wait_for_running(handle: &FlowHandle) {
@@ -503,18 +269,27 @@ async fn wait_for_running(handle: &FlowHandle) {
         }
     })
     .await
-    .expect("standalone AI flow reaches Running");
+    .expect("the AI flow reaches Running");
+}
+
+fn models_context(chat: &FakeChatModels, embed: &FakeEmbeddingModels) -> FlowBuildContext {
+    FlowBuildContext::new(runtime_config(
+        [
+            chat_model("fixture-chat"),
+            embedding_model("fixture-embedding"),
+        ],
+        AiEndpointTables::default(),
+    ))
+    .with_ai_models(fake_ai::providers(chat, embed))
 }
 
 async fn run_resumable_until(
     flow: FlowDefinition,
+    context: FlowBuildContext,
     outputs: &Mutex<Vec<TicketEmbedded>>,
     expected: usize,
 ) {
-    let handle = flow
-        .build(FlowBuildContext::for_tests())
-        .await
-        .expect("resumable standalone AI flow builds");
+    let handle = flow.build(context).await.expect("resumable AI flow builds");
     wait_for_running(&handle).await;
     wait_for_outputs(outputs, expected).await;
     handle.stop().await.expect("test flow accepts stop");
@@ -533,7 +308,7 @@ async fn bootstrap_for_resume(archive_path: PathBuf) -> BootstrapConfig {
     };
     let archive = DiskReplayArchive::open(archive_path, true)
         .await
-        .expect("the T2 resume archive opens");
+        .expect("the resume archive opens");
     BootstrapConfig {
         replay: Some(replay),
         archive_evidence: Some(archive.evidence()),
@@ -547,34 +322,24 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
     let recorded_outputs = Arc::new(Mutex::new(Vec::new()));
-    let recorded_counters = AuthorityCounters::default();
+    let (recorded_chat, recorded_embed) = (summarizing(), embedding());
     run_resumable_until(
-        resumable_flow(
-            journal_base.clone(),
-            1,
-            1,
-            recorded_outputs.clone(),
-            successful_authority(recorded_counters.clone()),
-        ),
+        resumable_flow(journal_base.clone(), 1, 1, recorded_outputs.clone()),
+        models_context(&recorded_chat, &recorded_embed),
         &recorded_outputs,
         1,
     )
     .await;
-    assert_eq!(recorded_counters.chat_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(recorded_counters.embedding_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorded_chat.call_count(), 1);
+    assert_eq!(recorded_embed.call_count(), 1);
     let recorded_archive = latest_run_dir(&journal_base);
 
     let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
-    let resumed_counters = AuthorityCounters::default();
+    let (resumed_chat, resumed_embed) = (summarizing(), embedding());
     let _bootstrap = install_bootstrap_config(bootstrap_for_resume(recorded_archive).await);
     run_resumable_until(
-        resumable_flow(
-            journal_base.clone(),
-            2,
-            1,
-            resumed_outputs.clone(),
-            successful_authority(resumed_counters.clone()),
-        ),
+        resumable_flow(journal_base.clone(), 2, 1, resumed_outputs.clone()),
+        models_context(&resumed_chat, &resumed_embed),
         &resumed_outputs,
         2,
     )
@@ -589,20 +354,15 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert_eq!(resumed_counters.chat_resolutions.load(Ordering::SeqCst), 1);
-    assert_eq!(resumed_counters.chat_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        resumed_counters
-            .embedding_resolutions
-            .load(Ordering::SeqCst),
-        1
-    );
-    assert_eq!(resumed_counters.embedding_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resumed_chat.connect_count(), 1);
+    assert_eq!(resumed_chat.call_count(), 1);
+    assert_eq!(resumed_embed.connect_count(), 1);
+    assert_eq!(resumed_embed.call_count(), 1);
 
     let resumed_archive = latest_run_dir(&journal_base);
     for (stage, effect_type) in [
-        ("chat", "obzenflow.ai.chat_completion"),
-        ("embedding", "obzenflow.ai.embedding_generation"),
+        ("chat", CHAT_EFFECT_TYPE),
+        ("embedding", EMBEDDING_EFFECT_TYPE),
     ] {
         assert_eq!(
             stage_events(&resumed_archive, stage)
@@ -635,38 +395,26 @@ async fn wait_for_writers_released(archive: &Path) {
 async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
-    let (chat_target, embedding_target) = fixture_targets();
-    let initial_chat_calls = Arc::new(AtomicUsize::new(0));
-    let initial_embedding_calls = Arc::new(AtomicUsize::new(0));
+    let config = ai_config(temp.path(), None);
     let physical_success = Arc::new(Notify::new());
-    let ports = eager_authority(
-        Arc::new(FixtureChatClient {
-            target: chat_target,
-            calls: initial_chat_calls.clone(),
-        }),
-        Arc::new(AmbiguousEmbeddingClient {
-            target: embedding_target,
-            calls: initial_embedding_calls.clone(),
-            physical_success: physical_success.clone(),
-        }),
-    );
+    let initial_chat = summarizing();
+    let initial_embed = FakeEmbeddingModels::hanging(physical_success.clone());
 
     let live_task = tokio::spawn({
         let journal_base = journal_base.clone();
+        let config = config.clone();
+        let providers = fake_ai::providers(&initial_chat, &initial_embed);
         async move {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
-                .run_async(finite_flow(
+                .with_config_file(config)
+                .with_ai_models(providers)
+                .run_async(chat_and_embedding_flow(
                     journal_base,
-                    vec![TicketRaised {
-                        id: 1,
-                        description: "ambiguous embedding".to_string(),
-                    }],
+                    ticket(1, "ambiguous embedding"),
                     Arc::new(Mutex::new(Vec::new())),
-                    ports,
-                    MapperFailure::None,
-                    MapperCounters::default(),
-                    EmbeddingDimensions::try_from(3).unwrap(),
+                    SummarizeTicket::baseline(),
+                    EmbedSummary::of_width(3),
                 ))
                 .await
         }
@@ -675,8 +423,8 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
         .await
         .expect("the embedding operation reaches physical success after Start(1)");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(initial_chat_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(initial_embedding_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(initial_chat.call_count(), 1);
+    assert_eq!(initial_embed.call_count(), 1);
     assert!(
         !live_task.is_finished(),
         "the port performs no hidden retry"
@@ -696,7 +444,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     );
     assert!(in_doubt_events.iter().all(|event| successful_effect_record(
         event,
-        "obzenflow.ai.embedding_generation"
+        EMBEDDING_EFFECT_TYPE
     )
     .is_none()));
     assert!(
@@ -707,38 +455,27 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     );
 
     let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
-    let resumed_counters = AuthorityCounters::default();
+    let (resumed_chat, resumed_embed) = (summarizing(), embedding());
+    let mut resume = replay_args(&in_doubt_archive, "--resume-from");
+    resume.push(OsString::from("--allow-incomplete-archive"));
     FlowApplication::builder()
-        .with_cli_args(vec![
-            OsString::from("obzenflow"),
-            OsString::from("--resume-from"),
-            in_doubt_archive.as_os_str().to_os_string(),
-            OsString::from("--allow-incomplete-archive"),
-        ])
-        .run_async(finite_flow(
+        .with_cli_args(resume)
+        .with_config_file(config)
+        .with_ai_models(fake_ai::providers(&resumed_chat, &resumed_embed))
+        .run_async(chat_and_embedding_flow(
             journal_base.clone(),
-            vec![TicketRaised {
-                id: 1,
-                description: "ambiguous embedding".to_string(),
-            }],
+            ticket(1, "ambiguous embedding"),
             resumed_outputs.clone(),
-            successful_authority(resumed_counters.clone()),
-            MapperFailure::None,
-            MapperCounters::default(),
-            EmbeddingDimensions::try_from(3).unwrap(),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
         ))
         .await
-        .expect("the resilience boundary authorises one recovery attempt");
+        .expect("the stage's breaker authorizes one recovery attempt");
 
-    assert_eq!(resumed_counters.chat_resolutions.load(Ordering::SeqCst), 0);
-    assert_eq!(resumed_counters.chat_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        resumed_counters
-            .embedding_resolutions
-            .load(Ordering::SeqCst),
-        1
-    );
-    assert_eq!(resumed_counters.embedding_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resumed_chat.connect_count(), 0);
+    assert_eq!(resumed_chat.call_count(), 0);
+    assert_eq!(resumed_embed.connect_count(), 1);
+    assert_eq!(resumed_embed.call_count(), 1);
     assert_eq!(resumed_outputs.lock().unwrap().len(), 1);
 
     let recovered = stage_events(&latest_run_dir(&journal_base), "embedding").await;
@@ -753,10 +490,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     assert_eq!(
         recovered
             .iter()
-            .filter(
-                |event| successful_effect_record(event, "obzenflow.ai.embedding_generation")
-                    .is_some()
-            )
+            .filter(|event| successful_effect_record(event, EMBEDDING_EFFECT_TYPE).is_some())
             .count(),
         1
     );
@@ -766,75 +500,61 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
 async fn recorded_provider_failure_replays_with_the_same_public_classification() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
-    let (chat_target, embedding_target) = fixture_targets();
-    let live_calls = Arc::new(AtomicUsize::new(0));
-    let live_ports = eager_authority(
-        Arc::new(FailingChatClient {
-            target: chat_target,
-            calls: live_calls.clone(),
-        }),
-        Arc::new(FixtureEmbeddingClient {
-            target: embedding_target,
-            calls: Arc::new(AtomicUsize::new(0)),
-        }),
-    );
+    let config = ai_config(temp.path(), None);
+    let live_chat = failing_chat();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(finite_flow(
+        .with_config_file(config.clone())
+        .with_ai_models(fake_ai::providers(&live_chat, &embedding()))
+        .run_async(chat_and_embedding_flow(
             journal_base.clone(),
-            vec![TicketRaised {
-                id: 1,
-                description: "provider failure".to_string(),
-            }],
+            ticket(1, "provider failure"),
             Arc::new(Mutex::new(Vec::new())),
-            live_ports,
-            MapperFailure::None,
-            MapperCounters::default(),
-            EmbeddingDimensions::try_from(3).unwrap(),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
         ))
         .await
-        .expect("an ordinary remote handler failure is journalled and routed");
-    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+        .expect("an unavailable model reaches the role, which routes it as a remote error");
+    assert_eq!(live_chat.call_count(), 1);
 
     let live_archive = latest_run_dir(&journal_base);
     let live_data = stage_events(&live_archive, "chat").await;
     let live_failures = live_data
         .iter()
-        .filter_map(|event| failed_effect_record(event, "obzenflow.ai.chat_completion"))
+        .filter_map(|event| failed_effect_record(event, CHAT_EFFECT_TYPE))
         .collect::<Vec<_>>();
     assert_eq!(live_failures.len(), 1);
     let live_errors = error_projection(&stage_error_events(&live_archive, "chat").await);
     assert_eq!(live_errors.len(), 1);
     assert_eq!(live_errors[0].0, Some(ErrorKind::Remote));
-    assert!(live_errors[0].1.contains("fixture provider unavailable"));
+    assert!(
+        live_errors[0].1.contains("fixture provider unavailable"),
+        "{live_errors:?}"
+    );
 
     FlowApplication::builder()
-        .with_cli_args(vec![
-            OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
-            live_archive.as_os_str().to_os_string(),
-        ])
-        .run_async(finite_flow(
+        .with_cli_args(replay_args(&live_archive, "--replay-from"))
+        .with_config_file(config)
+        .with_ai_models(fake_ai::providers(
+            &FakeChatModels::forbidden(),
+            &FakeEmbeddingModels::forbidden(),
+        ))
+        .run_async(chat_and_embedding_flow(
             journal_base.clone(),
-            vec![TicketRaised {
-                id: 1,
-                description: "provider failure".to_string(),
-            }],
+            ticket(1, "provider failure"),
             Arc::new(Mutex::new(Vec::new())),
-            empty_authority(),
-            MapperFailure::None,
-            MapperCounters::default(),
-            EmbeddingDimensions::try_from(3).unwrap(),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
         ))
         .await
-        .expect("strict replay rehydrates the recorded provider failure without a port");
+        .expect("strict replay rehydrates the recorded provider failure without a client");
 
     let replay_archive = latest_run_dir(&journal_base);
     let replay_data = stage_events(&replay_archive, "chat").await;
     let replay_failures = replay_data
         .iter()
-        .filter_map(|event| failed_effect_record(event, "obzenflow.ai.chat_completion"))
+        .filter_map(|event| failed_effect_record(event, CHAT_EFFECT_TYPE))
         .collect::<Vec<_>>();
     assert_eq!(replay_failures.len(), 1);
     assert_eq!(replay_failures[0].outcome, live_failures[0].outcome);
@@ -845,35 +565,30 @@ async fn recorded_provider_failure_replays_with_the_same_public_classification()
 }
 
 #[tokio::test]
-async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes() {
+async fn deterministic_role_failures_round_trip_on_their_distinct_error_routes() {
     for (failure, expected_kind, expected_chat_calls, expected_records) in [
         (MapperFailure::BeforeEffect, ErrorKind::Validation, 0, 0),
         (MapperFailure::AfterEffect, ErrorKind::Domain, 1, 1),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let journal_base = temp.path().join("journals");
-        let live_counters = AuthorityCounters::default();
+        let config = ai_config(temp.path(), None);
+        let (chat, embed) = (summarizing(), embedding());
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
-            .run_async(finite_flow(
+            .with_config_file(config.clone())
+            .with_ai_models(fake_ai::providers(&chat, &embed))
+            .run_async(chat_and_embedding_flow(
                 journal_base.clone(),
-                vec![TicketRaised {
-                    id: 1,
-                    description: "deterministic mapper failure".to_string(),
-                }],
+                ticket(1, "deterministic role failure"),
                 Arc::new(Mutex::new(Vec::new())),
-                successful_authority(live_counters.clone()),
-                failure,
-                MapperCounters::default(),
-                EmbeddingDimensions::try_from(3).unwrap(),
+                summarize_with(failure, MapperCounters::default()),
+                EmbedSummary::of_width(3),
             ))
             .await
-            .expect("deterministic mapper failures are journalled and routed");
-        assert_eq!(
-            live_counters.chat_calls.load(Ordering::SeqCst),
-            expected_chat_calls
-        );
-        assert_eq!(live_counters.embedding_calls.load(Ordering::SeqCst), 0);
+            .expect("deterministic role failures are journalled and routed");
+        assert_eq!(chat.call_count(), expected_chat_calls);
+        assert_eq!(embed.call_count(), 0);
         let live_archive = latest_run_dir(&journal_base);
         let live_errors = stage_processing_errors(&live_archive, "chat").await;
         assert_eq!(live_errors.len(), 1);
@@ -882,34 +597,27 @@ async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes
             stage_events(&live_archive, "chat")
                 .await
                 .iter()
-                .filter(
-                    |event| successful_effect_record(event, "obzenflow.ai.chat_completion")
-                        .is_some()
-                )
+                .filter(|event| successful_effect_record(event, CHAT_EFFECT_TYPE).is_some())
                 .count(),
             expected_records
         );
 
         FlowApplication::builder()
-            .with_cli_args(vec![
-                OsString::from("obzenflow"),
-                OsString::from("--replay-from"),
-                live_archive.as_os_str().to_os_string(),
-            ])
-            .run_async(finite_flow(
+            .with_cli_args(replay_args(&live_archive, "--replay-from"))
+            .with_config_file(config)
+            .with_ai_models(fake_ai::providers(
+                &FakeChatModels::forbidden(),
+                &FakeEmbeddingModels::forbidden(),
+            ))
+            .run_async(chat_and_embedding_flow(
                 journal_base.clone(),
-                vec![TicketRaised {
-                    id: 1,
-                    description: "deterministic mapper failure".to_string(),
-                }],
+                ticket(1, "deterministic role failure"),
                 Arc::new(Mutex::new(Vec::new())),
-                empty_authority(),
-                failure,
-                MapperCounters::default(),
-                EmbeddingDimensions::try_from(3).unwrap(),
+                summarize_with(failure, MapperCounters::default()),
+                EmbedSummary::of_width(3),
             ))
             .await
-            .expect("strict replay reproduces the deterministic mapper failure");
+            .expect("strict replay reproduces the deterministic role failure");
         assert_eq!(
             stage_processing_errors(&latest_run_dir(&journal_base), "chat").await,
             live_errors
@@ -918,32 +626,29 @@ async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes
 }
 
 #[tokio::test]
-async fn empty_embedding_inputs_fail_validation_before_resolver_attempt_or_effect_record() {
+async fn empty_embedding_inputs_fail_validation_before_connect_attempt_or_effect_record() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
-    let counters = AuthorityCounters::default();
+    let (chat, embed) = (summarizing(), embedding());
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(finite_flow(
+        .with_config_file(ai_config(temp.path(), None))
+        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .run_async(chat_and_embedding_flow(
             journal_base.clone(),
-            vec![TicketRaised {
-                id: 1,
-                description: "empty embedding request".to_string(),
-            }],
+            ticket(1, "empty embedding request"),
             Arc::new(Mutex::new(Vec::new())),
-            successful_authority(counters.clone()),
-            MapperFailure::EmptyEmbeddingInputs,
-            MapperCounters::default(),
-            EmbeddingDimensions::try_from(3).unwrap(),
+            SummarizeTicket::baseline(),
+            embed_with(MapperFailure::EmptyEmbeddingInputs, 3),
         ))
         .await
-        .expect("operation construction failures follow the deterministic handler-error route");
+        .expect("request construction failures follow the deterministic handler-error route");
 
-    assert_eq!(counters.chat_resolutions.load(Ordering::SeqCst), 1);
-    assert_eq!(counters.chat_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(counters.embedding_resolutions.load(Ordering::SeqCst), 0);
-    assert_eq!(counters.embedding_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(chat.connect_count(), 1);
+    assert_eq!(chat.call_count(), 1);
+    assert_eq!(embed.connect_count(), 0);
+    assert_eq!(embed.call_count(), 0);
 
     let archive = latest_run_dir(&journal_base);
     let embedding_events = stage_events(&archive, "embedding").await;
@@ -964,45 +669,36 @@ async fn empty_embedding_inputs_fail_validation_before_resolver_attempt_or_effec
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
+async fn held_provider_serializes_data_and_keeps_eof_out_of_roles() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
-    let (chat_target, embedding_target) = fixture_targets();
-    let chat_calls = Arc::new(AtomicUsize::new(0));
-    let embedding_calls = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(Semaphore::new(0));
+    let chat = FakeChatModels::gated(release.clone(), "concise summary");
+    let embed = embedding();
     let mapper_counters = MapperCounters::default();
     let outputs = Arc::new(Mutex::new(Vec::new()));
-    let ports = eager_authority(
-        Arc::new(GatedChatClient {
-            target: chat_target,
-            calls: chat_calls.clone(),
-            release: release.clone(),
-        }),
-        Arc::new(FixtureEmbeddingClient {
-            target: embedding_target,
-            calls: embedding_calls.clone(),
-        }),
-    );
 
     let run = tokio::spawn({
         let journal_base = journal_base.clone();
         let outputs = outputs.clone();
         let mapper_counters = mapper_counters.clone();
+        let config = ai_config(temp.path(), None);
+        let providers = fake_ai::providers(&chat, &embed);
         async move {
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
+                .with_config_file(config)
+                .with_ai_models(providers)
                 .run_async(control_interleaving_flow(
                     journal_base,
                     outputs,
-                    ports,
                     mapper_counters,
                 ))
                 .await
         }
     });
 
-    wait_for_atomic(&chat_calls, 1, "the first held chat call").await;
+    wait_for_atomic(&chat.calls, 1, "the first held chat call").await;
     let active_archive = latest_run_dir(&journal_base);
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -1023,15 +719,15 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
     .expect("both typed data rows and the runtime-owned EOF arrive while the provider is held");
 
     assert!(!run.is_finished());
-    assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(embedding_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(chat.call_count(), 1);
+    assert_eq!(embed.call_count(), 0);
     assert_eq!(mapper_counters.request.load(Ordering::SeqCst), 1);
     assert_eq!(mapper_counters.response.load(Ordering::SeqCst), 0);
     assert!(outputs.lock().unwrap().is_empty());
 
     release.add_permits(1);
-    wait_for_atomic(&chat_calls, 2, "serial admission of the second chat call").await;
-    wait_for_atomic(&embedding_calls, 1, "the first embedding call").await;
+    wait_for_atomic(&chat.calls, 2, "serial admission of the second chat call").await;
+    wait_for_atomic(&embed.calls, 1, "the first embedding call").await;
     assert!(!run.is_finished());
     assert_eq!(mapper_counters.request.load(Ordering::SeqCst), 2);
     assert_eq!(mapper_counters.response.load(Ordering::SeqCst), 1);
@@ -1042,8 +738,8 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
         .expect("the released flow drains")
         .expect("the flow task joins")
         .expect("the flow completes");
-    assert_eq!(chat_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(embedding_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(chat.call_count(), 2);
+    assert_eq!(embed.call_count(), 2);
     assert_eq!(mapper_counters.request.load(Ordering::SeqCst), 2);
     assert_eq!(mapper_counters.response.load(Ordering::SeqCst), 2);
     assert_eq!(
@@ -1092,42 +788,27 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
 async fn maximum_release_fixture_measures_one_normalised_reply_and_one_domain_vector_copy() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
-    let (chat_target, embedding_target) = fixture_targets();
-    let wide_calls = Arc::new(AtomicUsize::new(0));
-    let ports = eager_authority(
-        Arc::new(FixtureChatClient {
-            target: chat_target,
-            calls: Arc::new(AtomicUsize::new(0)),
-        }),
-        Arc::new(WideEmbeddingClient {
-            target: embedding_target,
-            calls: wide_calls.clone(),
-        }),
-    );
-    let dimensions = EmbeddingDimensions::try_from(MAX_MEASURED_EMBEDDING_DIMENSIONS).unwrap();
+    let wide = wide_embedding();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(finite_flow(
+        .with_config_file(ai_config(temp.path(), None))
+        .with_ai_models(fake_ai::providers(&summarizing(), &wide))
+        .run_async(chat_and_embedding_flow(
             journal_base.clone(),
-            vec![TicketRaised {
-                id: 1,
-                description: "maximum measured embedding".to_string(),
-            }],
+            ticket(1, "maximum measured embedding"),
             Arc::new(Mutex::new(Vec::new())),
-            ports,
-            MapperFailure::None,
-            MapperCounters::default(),
-            dimensions,
+            SummarizeTicket::baseline(),
+            embed_with(MapperFailure::None, MAX_MEASURED_EMBEDDING_DIMENSIONS),
         ))
         .await
         .expect("the maximum release measurement fixture completes");
-    assert_eq!(wide_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wide.call_count(), 1);
 
     let events = stage_events(&latest_run_dir(&journal_base), "embedding").await;
     let records = events
         .iter()
-        .filter_map(|event| successful_effect_record(event, "obzenflow.ai.embedding_generation"))
+        .filter_map(|event| successful_effect_record(event, EMBEDDING_EFFECT_TYPE))
         .collect::<Vec<_>>();
     assert_eq!(records.len(), 1);
     let EffectOutcomePayload::Succeeded { output } = &records[0].outcome else {
@@ -1153,9 +834,6 @@ async fn maximum_release_fixture_measures_one_normalised_reply_and_one_domain_ve
     );
     let reply_bytes = serde_json::to_vec(&records[0]).unwrap().len();
     let output_bytes = serde_json::to_vec(output_events[0]).unwrap().len();
-    eprintln!(
-        "FLOWIP-128b maximum measured embedding row ({MAX_MEASURED_EMBEDDING_DIMENSIONS} dimensions): effect_reply={reply_bytes} bytes, typed_output={output_bytes} bytes"
-    );
     assert!(reply_bytes > MAX_MEASURED_EMBEDDING_DIMENSIONS as usize);
     assert!(output_bytes > MAX_MEASURED_EMBEDDING_DIMENSIONS as usize);
 }

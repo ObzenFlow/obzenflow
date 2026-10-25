@@ -796,6 +796,7 @@ pub(super) async fn produce_final_output<
     H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut StatefulResources<H>,
+    drain_requested_by_handle: bool,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat.state.mark_draining();
@@ -829,22 +830,21 @@ pub(super) async fn produce_final_output<
         }
     }
 
-    // FLOWIP-095k finalizer gate: end-of-input finalization follows the
-    // completion kind. Truncated terminates without the final emission so a
-    // killed original is not given a completion it never had; Poison keeps
-    // today's finalize-and-complete behaviour (FLOWIP-075b owns the live
-    // question). Exhaustive: a new kind must decide its finalization here.
-    match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
-        EofKind::Natural | EofKind::Poison => {}
-        EofKind::Truncated => {
-            tracing::info!(
-                stage_name = %ctx.stage_name,
-                "terminal EOF is truncated; skipping end-of-input finalization"
-            );
-            return Ok(EventLoopDirective::Transition(
-                StatefulEvent::FinalOutputsPrepared,
-            ));
-        }
+    let kind = terminal_kind(ctx, drain_requested_by_handle);
+    let finalizes = ctx
+        .handler
+        .as_ref()
+        .expect("handler available before cleanup")
+        .finalizes_on(kind);
+    if !finalizes {
+        tracing::info!(
+            stage_name = %ctx.stage_name,
+            termination = ?kind,
+            "termination does not finalize; skipping end-of-input finalization"
+        );
+        return Ok(EventLoopDirective::Transition(
+            StatefulEvent::FinalOutputsPrepared,
+        ));
     }
 
     // Call handler.drain() to emit final accumulated state.

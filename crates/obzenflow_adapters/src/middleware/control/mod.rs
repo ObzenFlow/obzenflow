@@ -13,11 +13,9 @@ mod resilience;
 pub use circuit_breaker::{
     circuit_breaker, retry, CircuitBreaker, CircuitBreakerConfigError, FailureHealth, Retry,
 };
-#[cfg(feature = "test-support")]
-pub use composition::ai_recovery_rejecting_resilience_for_test;
 pub use composition::{
-    ai_resilience, compose_effect_controls, AiResilience, BuiltinControlContribution,
-    BuiltinControlFamily, ControlCompositionError,
+    compose_effect_controls, BuiltinControlContribution, BuiltinControlFamily,
+    ControlCompositionError,
 };
 pub use provider::ControlMiddlewareAggregator;
 pub use rate_limiter::{rate_limit, RateLimiter, RateLimiterMiddleware};

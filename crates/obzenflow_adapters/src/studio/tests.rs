@@ -224,6 +224,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
         stage,
         7,
         ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
+            unit: "worker".into(),
             mode_from: RateLimiterMode::Normal,
             mode_to: RateLimiterMode::Limiting,
             limit_rate: 10.0,
@@ -246,7 +247,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
         serde_json::from_str::<Value>(&snapshot.data).unwrap(),
         json!({
             "timestamp_ms": 456, "flow_id": "flow", "flow_name": "demo", "vector_clock": envelope.envelope.provenance.journal.vector_clock,
-            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "rate_limiter": {"mode": "limiting", "revision": 7, "state_updated_at_ms": envelope.envelope.provenance.event.processing.event_time}}]
+            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "unit": "worker", "rate_limiter": {"mode": "limiting", "revision": 7, "state_updated_at_ms": envelope.envelope.provenance.event.processing.event_time}}]
         })
     );
     let running = fact(SystemPayload::PipelineLifecycle(
@@ -308,6 +309,137 @@ fn stage_bootstrap_retains_terminal_accounting_after_an_empty_duplicate() {
 
 fn payload(frame: &SseFrame) -> Value {
     serde_json::from_str(&frame.data).unwrap()
+}
+
+#[test]
+fn composite_breaker_facts_from_two_members_are_one_row() {
+    use obzenflow_core::event::observability::*;
+    let (map, reduce) = (StageId::new(), StageId::new());
+    let member_record = |stage: StageId, name: &str, event_time: u64, payload: ExecutionPayload| {
+        let mut event = ChainEventFactory::execution_event(stage.into(), payload)
+            .with_flow_context(FlowContext {
+                flow_name: "demo".into(),
+                flow_id: "flow".into(),
+                ..FlowContext::new(name, stage)
+            });
+        event.processing.event_time = event_time;
+        stored_record(JournalWriterId::from(JournalId::new()), event)
+    };
+    let running = |stage: StageId, name: &str| {
+        member_record(
+            stage,
+            name,
+            1,
+            ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: stage }),
+        )
+    };
+    let capture_scope = CaptureScope {
+        flow_id: FlowId::new(),
+        resume_generation: Default::default(),
+    };
+    let summary = |stage: StageId, seq: u64, observed_at_ms: u64, successes: u32| {
+        let mut packet = ObservabilityContext::new(CaptureStamp {
+            capture_scope,
+            observer: stage.into(),
+            capture_seq: CaptureSeq(seq),
+            capture_reason: CaptureReason::Periodic,
+            observed_at_ms,
+        });
+        packet
+            .records
+            .push(ObservationRecord::CircuitBreakerSummary {
+                unit: "digest".into(),
+                effect_type: None,
+                window_duration_s: 10,
+                requests_processed: u64::from(successes),
+                requests_rejected: 0,
+                observed_state: CircuitState::Closed,
+                consecutive_failures: 0,
+                rejection_rate: 0.0,
+                successes_total: u64::from(successes),
+                failures_total: 0,
+                opened_total: 0,
+                time_in_closed_seconds: 10.0,
+                time_in_open_seconds: 0.0,
+                time_in_half_open_seconds: 0.0,
+            });
+        packet
+            .records
+            .push(ObservationRecord::RateLimiterUtilisation {
+                unit: "digest".into(),
+                effect_type: None,
+                utilization_percent: f64::from(successes),
+                events_in_window: u64::from(successes),
+                window_size_ms: 1_000,
+            });
+        packet
+    };
+    let opened = member_record(
+        map,
+        "digest__map",
+        10,
+        ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+            unit: "digest".into(),
+            cooldown_ms: 5_000,
+            error_rate: 1.0,
+            failure_count: 1,
+            trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+            observed_calls: 1,
+            slow_call_rate: None,
+            slow_call_count: None,
+            last_error: None,
+        }),
+    );
+    let closed = member_record(
+        reduce,
+        "digest__reduce",
+        20,
+        ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+            unit: "digest".into(),
+            success_count: 1,
+            recovery_duration_ms: 10,
+        }),
+    );
+    let mut live = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
+
+    live.project(&running(map, "digest__map").into(), 1);
+    live.project(&running(reduce, "digest__reduce").into(), 1);
+    live.project_measurements(summary(map, 1, 30, 5));
+    live.project_measurements(summary(reduce, 1, 40, 7));
+    live.project_measurements(summary(map, 2, 35, 6));
+    let snapshot = payload(&live.middleware_snapshot(50).unwrap());
+    let rows = snapshot["middleware"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "summaries from both members are one row");
+    assert_eq!(rows[0]["unit"], "digest");
+    assert_eq!(
+        rows[0]["circuit_breaker"]["successes_total"], 7,
+        "the latest summary wins, whichever member wrote it"
+    );
+    assert_eq!(rows[0]["rate_limiter"]["utilization_pct"], 7.0);
+
+    let frames = live.project(&opened.into(), 100);
+    let opening = payload(&frames[0]);
+    assert_eq!(opening["unit"], "digest");
+    assert_eq!(opening["stage_id"], map.to_string());
+    assert_eq!(opening["state_to"], "open");
+
+    let frames = live.project(&closed.into(), 200);
+    let closing = payload(&frames[0]);
+    assert_eq!(closing["unit"], "digest");
+    assert_eq!(closing["stage_id"], reduce.to_string());
+    assert_eq!(
+        closing["state_from"], "open",
+        "the reduce member continues the state the map member left"
+    );
+
+    let snapshot = payload(&live.middleware_snapshot(300).unwrap());
+    let rows = snapshot["middleware"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "one row per policy, whichever member wrote");
+    assert_eq!(rows[0]["unit"], "digest");
+    assert_eq!(rows[0]["stage_id"], reduce.to_string());
+    assert_eq!(rows[0]["stage_name"], "digest__reduce");
+    assert_eq!(rows[0]["circuit_breaker"]["state"], "closed");
+    assert_eq!(rows[0]["circuit_breaker"]["successes_total"], 7);
 }
 
 #[test]
@@ -646,6 +778,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     let factual =
         |revision, middleware| Input::Fact(Box::new(middleware_fact(stage, revision, middleware)));
     let summary = |successes| ObservationRecord::CircuitBreakerSummary {
+        unit: "worker".into(),
         effect_type: None,
         window_duration_s: 5,
         requests_processed: 20,
@@ -665,6 +798,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             7,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+                unit: "worker".into(),
                 cooldown_ms: 5_000,
                 error_rate: 0.5,
                 failure_count: 2,
@@ -679,12 +813,14 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             8,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+                unit: "worker".into(),
                 test_request_count: 1,
             }),
         ),
         factual(
             9,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+                unit: "worker".into(),
                 success_count: 1,
                 recovery_duration_ms: 250,
             }),
@@ -692,6 +828,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         measured(
             1000,
             ObservationRecord::RateLimiterUtilisation {
+                unit: "worker".into(),
                 effect_type: None,
                 utilization_percent: 25.0,
                 events_in_window: 5,
@@ -701,6 +838,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             7,
             ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
+                unit: "worker".into(),
                 mode_from: RateLimiterMode::Normal,
                 mode_to: RateLimiterMode::Limiting,
                 limit_rate: 10.0,
@@ -709,6 +847,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         measured(
             1001,
             ObservationRecord::RateLimiterActivity {
+                unit: "worker".into(),
                 effect_type: None,
                 window_ms: 1000,
                 delayed_events: 3,
@@ -720,6 +859,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             8,
             ExecutionPayload::RateLimiter(RateLimiterFact::ConfigChanged {
+                unit: "worker".into(),
                 old_rate: 10.0,
                 new_rate: 20.0,
             }),
@@ -801,6 +941,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     let Input::Fact(carrier) = factual(
         10,
         ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+            unit: "worker".into(),
             test_request_count: 1,
         }),
     ) else {

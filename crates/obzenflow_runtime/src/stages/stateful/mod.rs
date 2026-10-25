@@ -52,7 +52,6 @@ pub mod handle;
 pub mod supervisor;
 
 // FLOWIP-080c: Composable primitives
-pub mod ai_map_reduce;
 pub mod strategies;
 
 // Public API - only expose builder, handle, and essential types
@@ -148,10 +147,6 @@ where
 {
     TopNBy::new(n, key_fn, score_fn, output_fn)
 }
-
-// FLOWIP-128g: sealed seeded AI map-reduce collector
-#[doc(hidden)]
-pub use ai_map_reduce::SeededCollectByInput;
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{

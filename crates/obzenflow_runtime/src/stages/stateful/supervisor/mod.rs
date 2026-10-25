@@ -378,8 +378,9 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::ForwardingTerminal {
-                on StatefulEvent::TerminalForwarded => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
-                    Box::pin(async move { Ok(Transition { next_state: StatefulState::ProducingFinalOutput, actions: vec![StatefulAction::ProduceFinalOutput] }) })
+                on StatefulEvent::TerminalForwarded => |_: &StatefulState<H>, _: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    let drain_requested = ctx.drain_requested_by_handle;
+                    Box::pin(async move { Ok(Transition { next_state: StatefulState::ProducingFinalOutput, actions: vec![StatefulAction::ProduceFinalOutput { drain_requested }] }) })
                 };
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
                     let StatefulEvent::Error(cause) = event else { unreachable!() };
@@ -562,8 +563,8 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> HandlerS
                     draining::validate_terminal(&mut resources, drain_requested).await
                 }
                 StatefulAction::ForwardTerminal => draining::forward_terminal(&mut resources).await,
-                StatefulAction::ProduceFinalOutput => {
-                    draining::produce_final_output(&mut resources).await
+                StatefulAction::ProduceFinalOutput { drain_requested } => {
+                    draining::produce_final_output(&mut resources, drain_requested).await
                 }
                 StatefulAction::DrainFinalOutput => draining::drain_final_output(&mut resources)
                     .await

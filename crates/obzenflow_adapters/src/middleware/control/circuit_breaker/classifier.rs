@@ -46,6 +46,17 @@ fn recorded_error_kind(error_type: &str) -> ErrorKind {
     }
 }
 
+fn dependency_error_kind(code: &str) -> ErrorKind {
+    match code {
+        "timeout" => ErrorKind::Timeout,
+        "remote" => ErrorKind::Remote,
+        "rate_limited" => ErrorKind::RateLimited,
+        "invalid_request" | "unsupported" => ErrorKind::Validation,
+        "authentication" => ErrorKind::PermanentFailure,
+        _ => ErrorKind::Unknown,
+    }
+}
+
 fn effect_error_kind(error: &EffectError) -> ErrorKind {
     match error {
         EffectError::Timeout(_) => ErrorKind::Timeout,
@@ -54,6 +65,7 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         EffectError::Validation(_) => ErrorKind::Validation,
         EffectError::Domain(_) => ErrorKind::Domain,
         EffectError::RecordedFailure { error_type, .. } => recorded_error_kind(error_type.as_str()),
+        EffectError::DependencyFailed { code, .. } => dependency_error_kind(code.as_str()),
         EffectError::BindingAuthority { .. }
         | EffectError::Serialization(_)
         | EffectError::Journal(_)
@@ -70,7 +82,6 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         | EffectError::UndeclaredOutput { .. }
         | EffectError::EmitUnsupported { .. }
         | EffectError::EffectTargetInvariantViolation { .. }
-        | EffectError::DependencyFailed { .. }
         | EffectError::RecoveryAbandoned { .. }
         | EffectError::TransactionalCommitMissing { .. }
         | EffectError::Execution(_)
@@ -127,6 +138,26 @@ mod tests {
             effect_error_kind(&EffectError::Execution("opaque".to_string())),
             ErrorKind::PermanentFailure
         );
+        for (code, kind) in [
+            ("timeout", ErrorKind::Timeout),
+            ("remote", ErrorKind::Remote),
+            ("rate_limited", ErrorKind::RateLimited),
+            ("authentication", ErrorKind::PermanentFailure),
+            ("invalid_request", ErrorKind::Validation),
+            ("unsupported", ErrorKind::Validation),
+            ("other", ErrorKind::Unknown),
+        ] {
+            assert_eq!(
+                effect_error_kind(&EffectError::DependencyFailed {
+                    failure_source: obzenflow_core::event::EffectFailureSource::new("chat_client"),
+                    code: obzenflow_core::event::EffectFailureCode::new(code),
+                    message: "provider".to_string(),
+                    retry: obzenflow_core::event::RetryDisposition::NotRetryable,
+                }),
+                kind,
+                "{code}"
+            );
+        }
         assert_eq!(
             effect_error_kind(&EffectError::RecordedFailure {
                 error_type: "domain".into(),

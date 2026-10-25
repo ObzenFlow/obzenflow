@@ -395,6 +395,35 @@ pub struct ChatRequestSpec {
 }
 
 impl ChatRequestSpec {
+    /// A request with one system message and one user message.
+    pub fn new(system: impl Into<String>, user: impl Into<String>) -> Self {
+        Self {
+            messages: vec![ChatMessage::system(system), ChatMessage::user(user)],
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            response_format: None,
+        }
+    }
+
+    pub fn temperature(mut self, temperature: f32) -> Self {
+        self.params.temperature = Some(temperature);
+        self
+    }
+
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.params.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// The content of the last user message.
+    pub fn user_prompt(&self) -> Option<&str> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ChatRole::user())
+            .map(|message| message.content.as_str())
+    }
+
     pub fn bind_target(&self, target: &ChatTarget) -> ChatRequest {
         ChatRequest {
             provider: target.provider.clone(),
@@ -437,14 +466,40 @@ pub struct ChatResponse {
     pub raw: Option<Value>,
 }
 
-/// Durable framework-owned reply of the replay-safe chat-completion effect.
+/// Durable framework-owned outcome of the replay-safe chat-completion effect.
 ///
 /// This is deliberately not a `TypedPayload`: persistence makes the value
 /// replay evidence, not a public stage fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ChatCompletionReply {
+pub struct ChatCompletionOutcome {
     pub response: ChatResponse,
     pub observability: super::LlmObservability,
+}
+
+/// One chat call's reply, with the request the role prepared for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatCompletionReply {
+    pub request: ChatRequestSpec,
+    pub response: ChatResponse,
+    pub observability: super::LlmObservability,
+}
+
+impl ChatCompletionReply {
+    pub fn new(request: ChatRequestSpec, outcome: ChatCompletionOutcome) -> Self {
+        Self {
+            request,
+            response: outcome.response,
+            observability: outcome.observability,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.response.text
+    }
+
+    pub fn request(&self) -> &ChatRequestSpec {
+        &self.request
+    }
 }
 
 /// Requested or observed embedding vector width.
@@ -598,13 +653,39 @@ pub struct EmbeddingResponse {
     pub usage: Option<Usage>,
 }
 
-/// Durable framework-owned reply of the replay-safe embedding effect.
+/// Durable framework-owned outcome of the replay-safe embedding effect.
 ///
 /// This is replay evidence, not a public stage fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EmbeddingGenerationReply {
+pub struct EmbeddingGenerationOutcome {
     pub response: EmbeddingResponse,
     pub observability: super::LlmObservability,
+}
+
+/// One embedding call's reply, with the request the role prepared for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddingGenerationReply {
+    pub request: EmbeddingRequestSpec,
+    pub response: EmbeddingResponse,
+    pub observability: super::LlmObservability,
+}
+
+impl EmbeddingGenerationReply {
+    pub fn new(request: EmbeddingRequestSpec, outcome: EmbeddingGenerationOutcome) -> Self {
+        Self {
+            request,
+            response: outcome.response,
+            observability: outcome.observability,
+        }
+    }
+
+    pub fn vectors(&self) -> &[Vec<f32>] {
+        &self.response.vectors
+    }
+
+    pub fn request(&self) -> &EmbeddingRequestSpec {
+        &self.request
+    }
 }
 
 #[cfg(test)]

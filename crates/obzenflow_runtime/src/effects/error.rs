@@ -37,11 +37,12 @@ pub enum EffectError {
     #[error("duplicate recorded effect for cursor {cursor:?}")]
     DuplicateRecordedEffect { cursor: EffectCursor },
 
-    #[error("effect descriptor mismatch for cursor {cursor:?}: expected {expected}, recorded {recorded}")]
+    #[error("{}", descriptor_mismatch_message(cursor, expected, recorded, drift.as_deref()))]
     DescriptorMismatch {
         cursor: EffectCursor,
         expected: EffectDescriptorHash,
         recorded: EffectDescriptorHash,
+        drift: Option<Box<DescriptorDrift>>,
     },
 
     #[error("recorded effect failure: {error_type}: {error_message}")]
@@ -158,6 +159,135 @@ pub enum EffectError {
 
     #[error("effect replay archive failed: {0}")]
     ReplayArchive(String),
+}
+
+/// A part of an effect's descriptor that a replayed or resumed call compares
+/// with its recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescriptorComponent {
+    /// The effect type, label or schema version.
+    Contract,
+    /// The canonical request.
+    Request,
+    /// The binding, which for an AI effect is its model.
+    Binding,
+    StageLogicVersion,
+}
+
+/// The kind of binding a drifted effect has, which words its diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriftBinding {
+    /// A model chosen by configuration, as an AI effect has.
+    Model,
+    /// A named binding the stage's handler holds.
+    Named,
+}
+
+impl DriftBinding {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Named => "binding",
+        }
+    }
+
+    fn request_changed(self) -> &'static str {
+        match self {
+            Self::Model => "the request differs from the recording (prompt or parameters changed)",
+            Self::Named => "the request differs from the recording",
+        }
+    }
+}
+
+/// Which recorded descriptor components an offered call changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescriptorDrift {
+    pub differs: Vec<DescriptorComponent>,
+    pub binding: DriftBinding,
+}
+
+impl DescriptorDrift {
+    pub(crate) fn between(
+        offered: &EffectDescriptor,
+        recorded: &EffectDescriptor,
+        binding: DriftBinding,
+    ) -> Self {
+        let mut differs = Vec::new();
+        if offered.effect_type != recorded.effect_type
+            || offered.label != recorded.label
+            || offered.schema_version != recorded.schema_version
+        {
+            differs.push(DescriptorComponent::Contract);
+        }
+        if offered.binding != recorded.binding {
+            differs.push(DescriptorComponent::Binding);
+        } else if offered.canonical_input_hash != recorded.canonical_input_hash {
+            differs.push(DescriptorComponent::Request);
+        }
+        if offered.stage_logic_version != recorded.stage_logic_version {
+            differs.push(DescriptorComponent::StageLogicVersion);
+        }
+        Self { differs, binding }
+    }
+}
+
+impl std::fmt::Display for DescriptorDrift {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let changed = self
+            .differs
+            .iter()
+            .map(|component| match component {
+                DescriptorComponent::Contract => {
+                    "the effect's type, label or schema version differs from the recording"
+                        .to_string()
+                }
+                DescriptorComponent::Request => self.binding.request_changed().to_string(),
+                DescriptorComponent::Binding => {
+                    format!("the {} differs from the recording", self.binding.noun())
+                }
+                DescriptorComponent::StageLogicVersion => {
+                    "the stage logic version differs from the recording".to_string()
+                }
+            })
+            .collect::<Vec<_>>();
+        let matching = [
+            (DescriptorComponent::Binding, self.binding.noun()),
+            (
+                DescriptorComponent::StageLogicVersion,
+                "stage logic version",
+            ),
+        ]
+        .into_iter()
+        .filter(|(component, _)| !self.differs.contains(component))
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>();
+        f.write_str(&changed.join("; "))?;
+        match matching.as_slice() {
+            [] => Ok(()),
+            [one] => write!(f, "; {one} matches"),
+            [first, second] => write!(f, "; {first} and {second} match"),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn descriptor_mismatch_message(
+    cursor: &EffectCursor,
+    expected: &EffectDescriptorHash,
+    recorded: &EffectDescriptorHash,
+    drift: Option<&DescriptorDrift>,
+) -> String {
+    match drift {
+        Some(drift) if !drift.differs.is_empty() => format!(
+            "effect {}#{}/{}: {drift}",
+            cursor.stage_key.as_str(),
+            cursor.input_seq,
+            cursor.effect_ordinal
+        ),
+        _ => format!(
+            "effect descriptor mismatch for cursor {cursor:?}: expected {expected}, recorded {recorded}"
+        ),
+    }
 }
 
 impl EffectError {

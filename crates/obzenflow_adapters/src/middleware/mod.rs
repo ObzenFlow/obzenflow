@@ -152,9 +152,9 @@ pub use carrier::{
     MiddlewareAttachmentSite, MiddlewareAttachmentValidationError, MiddlewareAuthorityError,
     MiddlewareCapability, MiddlewareDeclaration, MiddlewareMaterializationContext,
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
-    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
-    SourceStageIngressOwner,
+    ProtectedUnitId, ProtectedUnitOwner, SinkConfiguredTargetKey, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface,
+    SourcePollUnitId, SourceStageIngressOwner,
 };
 pub(crate) use carrier::{MaterializationClaim, MiddlewareSurfaceAttachmentKind};
 pub use context::MiddlewareContext;

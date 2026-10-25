@@ -27,6 +27,7 @@ pub(super) use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::time::Duration;
 
+pub(super) use crate::middleware::ProtectedUnitOwner;
 use crate::middleware::{
     materialize_factory_checked, EffectSurface, EffectTypeKey, EffectUnitId,
     MiddlewareAttachmentRequest, MiddlewareAttachmentSite, MiddlewareFactory, MiddlewareSurface,
@@ -132,6 +133,16 @@ pub(super) fn materialize_effect_attachment(
     _authored_site: usize,
     safety: EffectSafety,
 ) -> Result<EffectPolicyAttachment, String> {
+    materialize_owned_effect_attachment(factory, config, control, safety, ProtectedUnitOwner::Stage)
+}
+
+pub(super) fn materialize_owned_effect_attachment(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    control: &Arc<ControlMiddlewareAggregator>,
+    safety: EffectSafety,
+    owner: ProtectedUnitOwner,
+) -> Result<EffectPolicyAttachment, String> {
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,
         effect_type: EffectTypeKey::from("effect.retry"),
@@ -139,6 +150,7 @@ pub(super) fn materialize_effect_attachment(
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner,
         unit: ProtectedUnit::Effect(EffectUnitId {
             effect_type: EffectTypeKey::from("effect.retry"),
         }),

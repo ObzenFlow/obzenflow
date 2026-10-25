@@ -12,13 +12,22 @@
 //! can select a handler without adding selection syntax to the flow.
 //! Startup diagnostics keep the `config error at <path>: ...` currency.
 
-use super::config::{ConfigError, FlowConfig, RawFileStartupConfig};
+use super::config::{
+    ConfigError, FlowConfig, RawAiFamilySection, RawAiModelFields, RawFileStartupConfig,
+};
 use crate::env::{env_bool, env_var};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
 use obzenflow_runtime::runtime_config::{
-    knob_registry, CandidateSet, ConfigResolveError, ConfigValue, KnobType, ResolvedRuntimeConfig,
-    ScopedCandidate, JOURNAL_ROOT_KEY, SINK_HANDLER_KEY,
+    knob_registry, AiEndpointTable, AiEndpointTables, CandidateSet, ConfigResolveError,
+    ConfigValue, KnobType, ResolvedRuntimeConfig, ScopedCandidate, AI_EMBEDDINGS_SECTION,
+    AI_MODELS_SECTION, JOURNAL_ROOT_KEY, MAX_OPEN_KEYS_KEY, SINK_HANDLER_KEY,
 };
+
+const REMOVED_AI_ENV: &[&str] = &[
+    "OBZENFLOW_AI_MODELS_PROVIDER",
+    "OBZENFLOW_AI_MODELS_BASE_URL",
+    "OBZENFLOW_AI_MODELS_API_KEY_ENV",
+];
 
 const STAGE_SINK_HANDLER_ENV_PREFIX: &str = "OBZENFLOW_SINKS_STAGES_";
 const STAGE_SINK_HANDLER_ENV_SUFFIX: &str = "_HANDLER";
@@ -103,7 +112,110 @@ pub(crate) fn build_runtime_config_snapshot(
     admit_file_candidates(&mut set, file)?;
     admit_env_candidates(&mut set)?;
     admit_resume_view_cli(&mut set, cli)?;
-    Ok(ResolvedRuntimeConfig::new(set))
+    Ok(ResolvedRuntimeConfig::new(set).with_ai_endpoints(ai_endpoint_tables(file)?))
+}
+
+fn ai_endpoint_tables(file: &RawFileStartupConfig) -> Result<AiEndpointTables, ConfigError> {
+    let mut tables = AiEndpointTables::default();
+    for (name, table) in &file.ai.endpoints {
+        tables
+            .admit(
+                name,
+                AiEndpointTable {
+                    provider: table.provider.clone(),
+                    base_url: table.base_url.clone(),
+                    api_key_env: table.api_key_env.clone(),
+                },
+            )
+            .map_err(|error| ConfigError::global(error.to_string()))?;
+    }
+    Ok(tables)
+}
+
+fn refuse_endpoint_fields(table: &str, fields: &RawAiModelFields) -> Result<(), ConfigError> {
+    for (field, value) in [
+        ("provider", &fields.provider),
+        ("base_url", &fields.base_url),
+        ("api_key_env", &fields.api_key_env),
+    ] {
+        if value.is_some() {
+            return Err(ConfigError::global(format!(
+                "[{table}] sets {field}; provider, base_url and api_key_env belong to an endpoint, so define [ai.endpoints.<name>] and set endpoint = \"<name>\""
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn admit_ai_fields(
+    set: &mut CandidateSet,
+    section: &str,
+    table: &str,
+    address: ConfigAddress,
+    fields: &RawAiModelFields,
+) -> Result<(), ConfigError> {
+    refuse_endpoint_fields(table, fields)?;
+    for (knob, value) in [("endpoint", &fields.endpoint), ("model", &fields.model)] {
+        if let Some(value) = value {
+            admit(
+                set,
+                &format!("{section}.{knob}"),
+                address.clone(),
+                ConfigSource::File,
+                ConfigValue::Text(value.clone()),
+                &format!("{table}.{knob}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn admit_ai_family(
+    set: &mut CandidateSet,
+    section: &str,
+    family: &RawAiFamilySection,
+) -> Result<(), ConfigError> {
+    let global = RawAiModelFields {
+        endpoint: family.endpoint.clone(),
+        model: family.model.clone(),
+        provider: family.provider.clone(),
+        base_url: family.base_url.clone(),
+        api_key_env: family.api_key_env.clone(),
+    };
+    admit_ai_fields(set, section, section, ConfigScope::Global.into(), &global)?;
+    admit_ai_fields(
+        set,
+        section,
+        &format!("{section}.flow"),
+        ConfigScope::Flow.into(),
+        &family.flow,
+    )?;
+    for (stage, entry) in &family.stages {
+        let stage_fields = RawAiModelFields {
+            endpoint: entry.endpoint.clone(),
+            model: entry.model.clone(),
+            provider: entry.provider.clone(),
+            base_url: entry.base_url.clone(),
+            api_key_env: entry.api_key_env.clone(),
+        };
+        admit_ai_fields(
+            set,
+            section,
+            &format!("{section}.stages.{stage}"),
+            ConfigScope::stage(stage.as_str()).into(),
+            &stage_fields,
+        )?;
+        for (effect_type, exact) in &entry.by_type {
+            admit_ai_fields(
+                set,
+                section,
+                &format!("{section}.stages.{stage}.by_type.\"{effect_type}\""),
+                ConfigAddress::effect(stage.as_str(), effect_type.as_str()),
+                exact,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn admit(
@@ -473,24 +585,21 @@ fn admit_file_candidates(
         }
     }
 
-    // [ai.models].
-    let models = &file.ai.models;
-    for (key, field) in [
-        ("ai.models.provider", &models.provider),
-        ("ai.models.model", &models.model),
-        ("ai.models.base_url", &models.base_url),
-        ("ai.models.api_key_env", &models.api_key_env),
+    for (section, family) in [
+        (AI_MODELS_SECTION, &file.ai.models),
+        (AI_EMBEDDINGS_SECTION, &file.ai.embeddings),
     ] {
-        if let Some(value) = field {
-            admit(
-                set,
-                key,
-                ConfigScope::Global,
-                ConfigSource::File,
-                ConfigValue::Text(value.clone()),
-                key,
-            )?;
-        }
+        admit_ai_family(set, section, family)?;
+    }
+
+    for (stage, entry) in &runtime.ai.stages {
+        file_u64!(
+            set,
+            MAX_OPEN_KEYS_KEY,
+            ConfigScope::stage(stage.as_str()),
+            entry.max_open_keys,
+            &format!("runtime.ai.stages.{stage}.max_open_keys")
+        );
     }
 
     // The runtime.resume.* view over the existing [replay] table
@@ -703,6 +812,14 @@ fn admit_middleware_fields(
 /// Env acquisition: the canonical spellings (§2 environment-tier lock) plus
 /// the named 010h spellings kept by the runtime.resume view. Global-only.
 fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
+    for &name in REMOVED_AI_ENV {
+        if std::env::var_os(name).is_some() {
+            return Err(ConfigError::at(
+                name,
+                "provider, base_url and api_key_env belong to an endpoint, so define [ai.endpoints.<name>] and set OBZENFLOW_AI_MODELS_ENDPOINT to its name",
+            ));
+        }
+    }
     for (name, _) in std::env::vars_os() {
         if let Some(name) = name.to_str() {
             if name.starts_with("OBZENFLOW_RUNTIME_OBSERVABILITY_")
@@ -732,11 +849,9 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             KnobType::F64 { .. } | KnobType::F64Range { .. } => env_var::<f64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::F64),
-            KnobType::Text | KnobType::Token { .. } | KnobType::Path | KnobType::EnvName => {
-                env_var::<String>(&name)
-                    .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
-                    .map(ConfigValue::Text)
-            }
+            KnobType::Text | KnobType::Token { .. } | KnobType::Path => env_var::<String>(&name)
+                .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
+                .map(ConfigValue::Text),
         };
         if let Some(value) = value {
             admit(
@@ -850,6 +965,124 @@ mod tests {
 
     fn snapshot(toml: &str, args: &[&str]) -> ResolvedRuntimeConfig {
         build_runtime_config_snapshot(&cli(args), &parse_file(toml)).expect("snapshot builds")
+    }
+
+    #[test]
+    fn ai_family_tables_resolve_each_stage_through_the_ladder() {
+        let lock = env_lock();
+        let snapshot = snapshot(
+            r#"
+            [ai.endpoints.groq]
+            provider = "openai_compatible"
+            base_url = "https://api.groq.com/openai/v1"
+            api_key_env = "GROQ_API_KEY"
+
+            [ai.models]
+            model = "llama3.1:8b"
+
+            [ai.models.flow]
+            model = "llama3.1:70b"
+
+            [ai.models.stages.digest]
+            endpoint = "groq"
+            model = "llama-3.3-70b-versatile"
+
+            [ai.models.stages.summarize.by_type."obzenflow.ai.chat_completion"]
+            model = "llama3.2:3b"
+
+            [ai.embeddings]
+            model = "nomic-embed-text"
+
+            [runtime.ai.stages.thread]
+            max_open_keys = 5000
+            "#,
+            &[],
+        );
+        let chat = "obzenflow.ai.chat_completion";
+        let digest = snapshot
+            .resolve_ai_model(AI_MODELS_SECTION, "digest", chat)
+            .unwrap();
+        assert_eq!(digest.endpoint.name, "groq");
+        assert_eq!(digest.endpoint.provider.as_str(), "openai_compatible");
+        assert_eq!(
+            digest
+                .endpoint
+                .api_key_env
+                .as_ref()
+                .map(|env| env.env_name()),
+            Some("GROQ_API_KEY")
+        );
+        assert_eq!(digest.model, "llama-3.3-70b-versatile");
+
+        let summarize = snapshot
+            .resolve_ai_model(AI_MODELS_SECTION, "summarize", chat)
+            .unwrap();
+        assert_eq!(summarize.endpoint.name, "ollama");
+        assert_eq!(summarize.model, "llama3.2:3b");
+
+        let other = snapshot
+            .resolve_ai_model(AI_MODELS_SECTION, "other", chat)
+            .unwrap();
+        assert_eq!(other.model, "llama3.1:70b");
+
+        let embed = snapshot
+            .resolve_ai_model(
+                AI_EMBEDDINGS_SECTION,
+                "embed",
+                "obzenflow.ai.embedding_generation",
+            )
+            .unwrap();
+        assert_eq!(embed.endpoint.name, "ollama");
+        assert_eq!(embed.model, "nomic-embed-text");
+
+        assert_eq!(snapshot.resolve_max_open_keys("thread").unwrap(), 5000);
+        assert_eq!(snapshot.resolve_max_open_keys("other").unwrap(), 1000);
+        drop(lock);
+    }
+
+    #[test]
+    fn endpoint_fields_outside_an_endpoint_table_name_the_table() {
+        for (toml, message) in [
+            (
+                "[ai.models.stages.digest]\napi_key_env = \"GROQ_API_KEY\"",
+                "config error: [ai.models.stages.digest] sets api_key_env; provider, base_url and api_key_env belong to an endpoint, so define [ai.endpoints.<name>] and set endpoint = \"<name>\"",
+            ),
+            (
+                "[ai.models]\nprovider = \"openai\"",
+                "config error: [ai.models] sets provider; provider, base_url and api_key_env belong to an endpoint, so define [ai.endpoints.<name>] and set endpoint = \"<name>\"",
+            ),
+            (
+                "[ai.embeddings.flow]\nbase_url = \"http://localhost:11434\"",
+                "config error: [ai.embeddings.flow] sets base_url; provider, base_url and api_key_env belong to an endpoint, so define [ai.endpoints.<name>] and set endpoint = \"<name>\"",
+            ),
+            (
+                "[ai.endpoints.groq]\nbase_url = \"https://api.groq.com/openai/v1\"",
+                "config error: [ai.endpoints.groq] has no provider; an endpoint states its provider with its URL and credential",
+            ),
+            (
+                "[ai.endpoints.ollama]\nprovider = \"ollama\"",
+                "config error: [ai.endpoints.ollama] reuses a built-in endpoint name; choose another name",
+            ),
+        ] {
+            let error = build_runtime_config_snapshot(&cli(&[]), &parse_file(toml)).unwrap_err();
+            assert_eq!(error.to_string(), message, "{toml}");
+        }
+    }
+
+    #[test]
+    fn max_open_keys_is_set_only_per_stage() {
+        assert!(toml::from_str::<RawFileStartupConfig>("[runtime.ai]\nmax_open_keys = 5").is_err());
+        let error = build_runtime_config_snapshot(
+            &cli(&[]),
+            &parse_file("[runtime.ai.stages.thread]\nmax_open_keys = 0"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("config error at runtime.ai.stages.thread.max_open_keys"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -996,8 +1229,8 @@ mod tests {
             events_per_second = 10.5
 
             [ai.models]
-            provider = "openai"
-            api_key_env = "MY_KEY"
+            endpoint = "openai"
+            model = "gpt-4.1-mini"
             "#,
             &[],
         );
@@ -1009,7 +1242,7 @@ mod tests {
             doc("contracts.source_contract_strict_mode").value,
             serde_json::json!("warn")
         );
-        assert_eq!(doc("ai.models.provider").value, serde_json::json!("openai"));
+        assert_eq!(doc("ai.models.endpoint").value, serde_json::json!("openai"));
         // Scoped entries live in the candidate table for Phase B, not the
         // global view.
         assert!(snapshot
@@ -1535,7 +1768,7 @@ mod tests {
         expect_default("runtime.metrics_drain_timeout_ms");
         expect_default("contracts.source_contract_strict_mode");
         expect_default("runtime.cycle_max_iterations");
-        expect_default("ai.models.provider");
+        expect_default("ai.models.endpoint");
     }
 
     /// Source-tree assertion for the legacy kill: the retired spellings may

@@ -39,6 +39,9 @@ mod private {
 /// Closed strategy selected by an [`Effect`] for binding authority.
 pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
+    const DRIFT_BINDING: super::DriftBinding;
+
+    #[doc(hidden)]
     fn invocation_binding(effect: &E) -> EffectInvocationBinding;
 }
 
@@ -48,6 +51,11 @@ pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static 
 pub struct Named<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
 
 impl<B: EffectBindingEvidence> private::Sealed for Named<B> {}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Configured<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
+
+impl<B: EffectBindingEvidence> private::Sealed for Configured<B> {}
 
 /// Observable name of a binding, such as the system a stage names, chosen by
 /// the trusted composition root.
@@ -367,10 +375,10 @@ pub(super) struct BoundEffectPortSlot {
     pub(super) coordinate: BindingCoordinate,
 }
 
-/// A named binding for one effect, which a stage's handler holds in a
-/// `#[system]` field.
+/// The binding for one effect, either a named binding a stage's handler holds
+/// in a `#[system]` field or a configured binding an `ai!` stage resolves.
 #[derive(Clone)]
-pub struct EffectBinding<E: NamedEffect> {
+pub struct EffectBinding<E: BoundEffect> {
     logical_name: LogicalEffectBindingName,
     projection: EffectBindingUse<E>,
     registration: BindingCoordinate,
@@ -379,7 +387,7 @@ pub struct EffectBinding<E: NamedEffect> {
     _effect: PhantomData<fn() -> E>,
 }
 
-impl<E: NamedEffect> EffectBinding<E> {
+impl<E: BoundEffect> EffectBinding<E> {
     pub(super) fn from_parts(
         logical_name: LogicalEffectBindingName,
         evidence: E::BindingEvidence,
@@ -444,7 +452,7 @@ impl<E: NamedEffect> EffectBinding<E> {
     }
 }
 
-impl<E: NamedEffect> std::fmt::Debug for EffectBinding<E> {
+impl<E: BoundEffect> std::fmt::Debug for EffectBinding<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("EffectBinding")
@@ -464,15 +472,14 @@ impl<E: NamedEffect> std::fmt::Debug for EffectBinding<E> {
     }
 }
 
-/// Invocation-only projection retained by a named effect value.
 #[derive(Clone)]
-pub struct EffectBindingUse<E: NamedEffect> {
+pub struct EffectBindingUse<E: BoundEffect> {
     family: BindingFamily,
     evidence: E::BindingEvidence,
     _effect: PhantomData<fn() -> E>,
 }
 
-impl<E: NamedEffect> EffectBindingUse<E> {
+impl<E: BoundEffect> EffectBindingUse<E> {
     pub fn evidence(&self) -> &E::BindingEvidence {
         &self.evidence
     }
@@ -485,7 +492,7 @@ impl<E: NamedEffect> EffectBindingUse<E> {
     }
 }
 
-impl<E: NamedEffect> std::fmt::Debug for EffectBindingUse<E> {
+impl<E: BoundEffect> std::fmt::Debug for EffectBindingUse<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("EffectBindingUse")
@@ -496,13 +503,32 @@ impl<E: NamedEffect> std::fmt::Debug for EffectBindingUse<E> {
     }
 }
 
-/// Effect contract implemented only by named effects.
-pub trait NamedEffect: Effect<BindingMode = Named<Self::BindingEvidence>> {
+pub trait BoundEffect: Effect {
     type BindingEvidence: EffectBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self>;
 
     fn required_slots() -> EffectPortSlotSet;
+}
+
+pub trait NamedEffect:
+    BoundEffect + Effect<BindingMode = Named<<Self as BoundEffect>::BindingEvidence>>
+{
+}
+
+impl<E> NamedEffect for E where
+    E: BoundEffect + Effect<BindingMode = Named<<E as BoundEffect>::BindingEvidence>>
+{
+}
+
+pub trait ConfiguredEffect:
+    BoundEffect + Effect<BindingMode = Configured<<Self as BoundEffect>::BindingEvidence>>
+{
+}
+
+impl<E> ConfiguredEffect for E where
+    E: BoundEffect + Effect<BindingMode = Configured<<E as BoundEffect>::BindingEvidence>>
+{
 }
 
 #[doc(hidden)]
@@ -564,7 +590,7 @@ impl EffectDeclarationBinding {
         projection
     }
 
-    pub(super) fn typed_projection<E: NamedEffect>(&self) -> Option<EffectBindingUse<E>> {
+    pub(super) fn typed_projection<E: BoundEffect>(&self) -> Option<EffectBindingUse<E>> {
         self.projection
             .downcast_ref::<EffectBindingUse<E>>()
             .cloned()
@@ -610,14 +636,28 @@ impl EffectDeclarationBinding {
 impl<E, B> EffectBindingMode<E> for Named<B>
 where
     B: EffectBindingEvidence,
-    E: NamedEffect<BindingEvidence = B>,
+    E: BoundEffect<BindingEvidence = B>,
 {
+    const DRIFT_BINDING: super::DriftBinding = super::DriftBinding::Named;
+
     fn invocation_binding(effect: &E) -> EffectInvocationBinding {
         effect.binding_use().erased()
     }
 }
 
-pub(crate) fn binding_identity<E: NamedEffect>(
+impl<E, B> EffectBindingMode<E> for Configured<B>
+where
+    B: EffectBindingEvidence,
+    E: BoundEffect<BindingEvidence = B>,
+{
+    const DRIFT_BINDING: super::DriftBinding = super::DriftBinding::Model;
+
+    fn invocation_binding(effect: &E) -> EffectInvocationBinding {
+        effect.binding_use().erased()
+    }
+}
+
+pub(crate) fn binding_identity<E: BoundEffect>(
     evidence: &E::BindingEvidence,
 ) -> EffectBindingIdentity {
     let mut framed = Vec::new();

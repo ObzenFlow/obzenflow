@@ -744,6 +744,21 @@ impl ReplayArchive for DiskReplayArchive {
         &self.manifest.bounded_direct_fact_admission
     }
 
+    fn recorded_ai_models(&self, stage_key: &str) -> Vec<obzenflow_core::ai::AiModelSpec> {
+        self.manifest
+            .stages
+            .get(stage_key)
+            .map(|stage| stage.ai_models.clone())
+            .unwrap_or_default()
+    }
+
+    fn recorded_max_open_keys(&self, stage_key: &str) -> Option<u64> {
+        self.manifest
+            .stages
+            .get(stage_key)
+            .and_then(|stage| stage.max_open_keys)
+    }
+
     /// The highest generation with a recorded catch-up boundary in any source
     /// or effect-stage journal, scanned at open.
     fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {

@@ -24,6 +24,8 @@ pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_
 pub const EFFECT_BINDING_DESCRIPTOR_CAPABILITY: &str = "effect_binding_descriptor";
 /// Family-stamped optional attachments, independent of protected accounting.
 pub const OBSERVABILITY_CAPTURE_CAPABILITY: &str = "observability_capture";
+/// Every AI stage records the credential-free model spec of each AI effect.
+pub const AI_MODEL_SPECS_CAPABILITY: &str = "ai_model_specs";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
@@ -127,6 +129,13 @@ pub struct RunManifestStage {
     pub inbound: Vec<String>,
     /// How this stage's input order is fixed, written once at flow build.
     pub delivery_order: DeliveryOrder,
+    /// The model each AI effect of an `ai!` stage used, which reconstruction
+    /// reads instead of current configuration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_models: Vec<crate::ai::AiModelSpec>,
+    /// The open-key limit a keyed `ai!` stage applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_open_keys: Option<u64>,
 }
 
 /// How a stage's input delivery order is fixed.

@@ -9,8 +9,8 @@ use obzenflow::middleware::{SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     materialize_factory_checked, MiddlewareAttachmentRequest, MiddlewareAttachmentSite,
-    MiddlewareSurface, ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId,
+    MiddlewareSurface, ProtectedUnit, ProtectedUnitId, ProtectedUnitOwner, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::StageId;
@@ -34,6 +34,7 @@ fn materialise(factory: &SingleSummaryDelivery) -> Arc<dyn SinkPolicy> {
     });
     let protected_unit = ProtectedUnitId {
         stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
             target: SinkDeliveryTarget::Stage,
         }),

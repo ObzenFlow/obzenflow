@@ -215,6 +215,8 @@ mod tests {
                 error_journal_file: String::new(),
                 inbound: Vec::new(),
                 delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
+                ai_models: Vec::new(),
+                max_open_keys: None,
             },
         )
     }

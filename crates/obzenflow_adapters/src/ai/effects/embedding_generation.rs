@@ -2,20 +2,24 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::error_mapping::ai_client_error_to_effect_error;
+use crate::ai::error_mapping::{ai_client_error_to_effect_error, provider_error_to_resolution};
+use crate::ai::unreachable::UnreachableEmbeddingClient;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    params_hash_for_embedding, prompt_hash_for_embedding_inputs, CanonicalizationComponent,
-    EmbeddingClient, EmbeddingDimensions, EmbeddingGenerationReply, EmbeddingRequest,
-    EmbeddingResponse, EmbeddingTarget, LlmHashes, LlmObservability, EMBEDDING_CLIENT_PORT,
+    params_hash_for_embedding, prompt_hash_for_embedding_inputs, AiEndpoint, AiModelSpec,
+    CanonicalizationComponent, EmbeddingClient, EmbeddingDimensions, EmbeddingGenerationOutcome,
+    EmbeddingGenerationReply, EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingRequest,
+    EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, LlmHashes, LlmObservability,
+    EMBEDDING_CLIENT_PORT,
 };
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_core::BoundedBindingEvidence;
+use obzenflow_runtime::ai::{AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError};
 use obzenflow_runtime::effects::{
-    Effect, EffectBinding, EffectBindingBuildError, EffectBindingEvidence, EffectBindingUse,
-    EffectContext, EffectError, EffectPortMetadataContext, EffectPortResolver,
-    EffectPortResolverWithMetadata, EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder,
-    EffectSafety, LogicalEffectBindingName, Named, NamedEffect, RecordedReply, ResolvedEffectPort,
+    BoundEffect, Configured, Effect, EffectBindingEvidence, EffectBindingUse, EffectContext,
+    EffectError, EffectPortMetadataContext, EffectPortResolverWithMetadata, EffectPortSlot,
+    EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, LogicalEffectBindingName,
+    RecordedReply, ResolvedEffectPort,
 };
 use std::sync::Arc;
 
@@ -49,7 +53,7 @@ pub struct EmbeddingBindingEvidence {
 }
 
 impl EmbeddingBindingEvidence {
-    pub fn new(target: EmbeddingTarget) -> Result<Self, EmbeddingBindingEvidenceBuildError> {
+    pub(crate) fn new(target: EmbeddingTarget) -> Result<Self, EmbeddingBindingEvidenceBuildError> {
         let canonical = serde_json::to_vec(&target)
             .map_err(|_| EmbeddingBindingEvidenceBuildError::CanonicalizationFailed)?;
         let canonical = BoundedBindingEvidence::try_new(canonical)
@@ -59,29 +63,6 @@ impl EmbeddingBindingEvidence {
 
     pub fn target(&self) -> &EmbeddingTarget {
         &self.target
-    }
-
-    /// The embedding binding this evidence identifies, whose client
-    /// `resolver` builds when a live call first needs it. The resolved
-    /// client's own target, not the requested one, becomes the binding's
-    /// metadata.
-    pub fn into_binding(
-        self,
-        resolver: EffectPortResolver<dyn EmbeddingClient>,
-    ) -> Result<EffectBinding<EmbeddingGeneration>, EffectBindingBuildError> {
-        let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
-            Arc::new(move || {
-                let client = resolver()?;
-                let metadata = Arc::new(client.target().clone());
-                Ok(ResolvedEffectPort::new(client, metadata))
-            });
-        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
-            LogicalEffectBindingName::new("embedding")
-                .expect("framework embedding binding name is a valid public identifier"),
-            self,
-        )
-        .bind_deferred_with_metadata(EMBEDDING_CLIENT, resolver)?
-        .finish()
     }
 }
 
@@ -113,7 +94,7 @@ impl EffectBindingEvidence for EmbeddingBindingEvidence {
 pub const EMBEDDING_CLIENT: EffectPortSlot<dyn EmbeddingClient, EmbeddingTarget> =
     EffectPortSlot::new(EMBEDDING_CLIENT_PORT);
 
-/// Replay-safe embedding generation through the sealed embedding port.
+/// Replay-safe embedding generation, performed only by an `ai!` stage.
 #[derive(Clone)]
 pub struct EmbeddingGeneration {
     label: String,
@@ -134,7 +115,7 @@ impl std::fmt::Debug for EmbeddingGeneration {
 }
 
 impl EmbeddingGeneration {
-    pub fn new(
+    pub(crate) fn new(
         label: impl Into<String>,
         request: EmbeddingRequest,
         binding: EffectBindingUse<Self>,
@@ -175,9 +156,9 @@ impl Effect for EmbeddingGeneration {
     const EFFECT_TYPE: &'static str = "obzenflow.ai.embedding_generation";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
-    type BindingMode = Named<EmbeddingBindingEvidence>;
+    type BindingMode = Configured<EmbeddingBindingEvidence>;
 
-    type Outcome = EmbeddingGenerationReply;
+    type Outcome = EmbeddingGenerationOutcome;
     type OutcomeSemantics = RecordedReply;
 
     fn label(&self) -> &str {
@@ -202,7 +183,7 @@ impl Effect for EmbeddingGeneration {
     async fn execute(
         &self,
         ctx: &mut EffectContext,
-    ) -> Result<EmbeddingGenerationReply, EffectError> {
+    ) -> Result<EmbeddingGenerationOutcome, EffectError> {
         let client = ctx.port(EMBEDDING_CLIENT)?;
         let response = client.embed(self.request.clone()).await.map_err(|error| {
             ai_client_error_to_effect_error(error, EMBEDDING_CLIENT, "embedding_client")
@@ -216,14 +197,14 @@ impl Effect for EmbeddingGeneration {
         );
         observability.usage = response.usage.clone();
 
-        Ok(EmbeddingGenerationReply {
+        Ok(EmbeddingGenerationOutcome {
             response,
             observability,
         })
     }
 }
 
-impl NamedEffect for EmbeddingGeneration {
+impl BoundEffect for EmbeddingGeneration {
     type BindingEvidence = EmbeddingBindingEvidence;
 
     fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -233,6 +214,127 @@ impl NamedEffect for EmbeddingGeneration {
     fn required_slots() -> EffectPortSlotSet {
         EffectPortSlotSet::single(EMBEDDING_CLIENT)
     }
+}
+
+impl AiEffect for EmbeddingGeneration {
+    type Request = EmbeddingRequestSpec;
+    type Reply = EmbeddingGenerationReply;
+    type Provider = dyn EmbeddingModelProvider;
+
+    const SECTION: &'static str = "ai.embeddings";
+    const FAMILY: &'static str = "embedding";
+
+    fn effect(
+        label: &'static str,
+        request: &EmbeddingRequestSpec,
+        binding: EffectBindingUse<Self>,
+    ) -> Result<Self, AiRequestError> {
+        let bound = request.bind_target(binding.evidence().target());
+        Self::new(label, bound, binding).map_err(|error| AiRequestError(error.to_string()))
+    }
+
+    fn reply(
+        request: EmbeddingRequestSpec,
+        outcome: EmbeddingGenerationOutcome,
+    ) -> EmbeddingGenerationReply {
+        EmbeddingGenerationReply::new(request, outcome)
+    }
+
+    fn bind(
+        source: AiModelSource<dyn EmbeddingModelProvider>,
+    ) -> Result<AiBinding<Self>, AiBindingError> {
+        let (stage, endpoint_name, description, resolver): (
+            String,
+            String,
+            _,
+            EffectPortResolverWithMetadata<_, _>,
+        ) = match source {
+            AiModelSource::Configured {
+                stage,
+                endpoint,
+                model,
+                provider,
+            } => {
+                let description = provider.describe(&endpoint, &model)?;
+                let name = endpoint.name.clone();
+                let resolver = connecting(provider, endpoint, description.clone());
+                (stage, name, description, resolver)
+            }
+            AiModelSource::Recorded {
+                stage,
+                spec,
+                provider,
+            } => {
+                let description = provider.describe_recorded(&spec)?;
+                let resolver = unreachable(description.target.clone(), spec.endpoint.clone());
+                (stage, spec.endpoint, description, resolver)
+            }
+            AiModelSource::Kept {
+                stage,
+                spec,
+                endpoint,
+                provider,
+            } => {
+                let description = provider.describe_recorded(&spec)?;
+                let serving = endpoint.filter(|endpoint| {
+                    provider
+                        .describe(endpoint, &spec.model)
+                        .is_ok_and(|current| {
+                            current.target.binding_fingerprint
+                                == description.target.binding_fingerprint
+                        })
+                });
+                let resolver = match serving {
+                    Some(endpoint) => connecting(provider, endpoint, description.clone()),
+                    None => unreachable(description.target.clone(), spec.endpoint.clone()),
+                };
+                (stage, spec.endpoint, description, resolver)
+            }
+        };
+        let spec = AiModelSpec {
+            effect_type: Self::EFFECT_TYPE.to_string(),
+            endpoint: endpoint_name,
+            provider: description.target.provider.clone(),
+            model: description.target.model.clone(),
+            binding_fingerprint: description.target.binding_fingerprint.as_str().to_string(),
+            estimator: None,
+        };
+        let evidence = EmbeddingBindingEvidence::new(description.target)
+            .map_err(|error| AiBindingError::Evidence(error.to_string()))?;
+        let logical_name = LogicalEffectBindingName::new(stage)
+            .map_err(|error| AiBindingError::Evidence(error.to_string()))?;
+        let binding = EffectRegistrationBuilder::<Self>::new(logical_name, evidence)
+            .bind_deferred_with_metadata(EMBEDDING_CLIENT, resolver)?
+            .finish()?;
+        Ok(AiBinding { binding, spec })
+    }
+}
+
+fn connecting(
+    provider: Arc<dyn EmbeddingModelProvider>,
+    endpoint: AiEndpoint,
+    description: EmbeddingModelDescription,
+) -> EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> {
+    Arc::new(move || {
+        let client = provider
+            .connect(&endpoint, &description)
+            .map_err(provider_error_to_resolution)?;
+        let metadata = Arc::new(client.target().clone());
+        Ok(ResolvedEffectPort::new(client, metadata))
+    })
+}
+
+fn unreachable(
+    target: EmbeddingTarget,
+    endpoint: String,
+) -> EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> {
+    Arc::new(move || {
+        let client: Arc<dyn EmbeddingClient> = Arc::new(UnreachableEmbeddingClient::new(
+            target.clone(),
+            endpoint.clone(),
+        ));
+        Ok(ResolvedEffectPort::new(client, Arc::new(target.clone())))
+    })
 }
 
 fn validate_response(
@@ -392,8 +494,7 @@ mod tests {
     #[test]
     fn durable_effect_contract_matches_the_locked_release_surface() {
         let binding = binding();
-        let declaration =
-            obzenflow_runtime::effects::EffectDeclaration::named_at_least_once(&binding);
+        let declaration = obzenflow_runtime::effects::EffectDeclaration::configured(&binding);
 
         assert_eq!(
             EmbeddingGeneration::EFFECT_TYPE,

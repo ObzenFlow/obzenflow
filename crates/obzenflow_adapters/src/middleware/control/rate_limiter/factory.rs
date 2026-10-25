@@ -653,7 +653,7 @@ mod tests {
         use crate::middleware::{
             HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
             MiddlewareAttachmentRequest, MiddlewareAttachmentSite, ProtectedUnit, ProtectedUnitId,
-            SourceStageIngressOwner,
+            ProtectedUnitOwner, SourceStageIngressOwner,
         };
         use obzenflow_core::ingress::{
             IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq, IngressKey,
@@ -677,6 +677,7 @@ mod tests {
         });
         let unit = ProtectedUnitId {
             stage_id: config.stage_id,
+            owner: ProtectedUnitOwner::Stage,
             unit: ProtectedUnit::Ingress(IngressUnitId {
                 source_stage_key: stage_key,
                 target,

@@ -262,8 +262,8 @@ impl PreparedConsole {
                         tokio::spawn(async move {
                             let outcome = work.await;
                             let error = match outcome {
-                                Ok(Ok(())) => format!("Tokio Console {name} stopped unexpectedly"),
-                                Ok(Err(error)) => format!("Tokio Console {name} failed: {error}"),
+                                Ok(Ok(())) => return,
+                                Ok(Err(error)) => format!("Tokio Console {name} {error}"),
                                 Err(_) => format!("Tokio Console {name} panicked"),
                             };
                             // The work's scoped dispatcher has exited. Diagnostic
@@ -299,7 +299,8 @@ impl PreparedConsole {
                         std::future::pending::<()>(),
                     )
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| format!("failed: {error}"))?;
+                Err("stopped unexpectedly".to_string())
             }
             .boxed(),
         ));

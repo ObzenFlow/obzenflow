@@ -54,6 +54,8 @@ pub struct CircuitBreaker {
     pub(in crate::middleware::control) probes: u32,
     pub(in crate::middleware::control) rate_limited_counts_as_failure: bool,
     pub(in crate::middleware::control) classifier: Option<FailureClassificationClassifier>,
+    #[cfg(feature = "test-support")]
+    pub(in crate::middleware::control) reject_affine_recovery_for_test: bool,
 }
 
 /// Declare an inert breaker value. Choose an explicit failure mode before attachment.
@@ -69,10 +71,19 @@ pub fn circuit_breaker() -> CircuitBreaker {
         probes: 1,
         rate_limited_counts_as_failure: false,
         classifier: None,
+        #[cfg(feature = "test-support")]
+        reject_affine_recovery_for_test: false,
     }
 }
 
 impl CircuitBreaker {
+    /// Refuse to resume an in-doubt affine attempt.
+    #[cfg(feature = "test-support")]
+    pub fn rejecting_recovery_for_test(mut self) -> Self {
+        self.reject_affine_recovery_for_test = true;
+        self
+    }
+
     pub fn consecutive_failures(mut self, failures: u32) -> Self {
         self.consecutive_failures = Some(failures);
         self
@@ -259,6 +270,7 @@ impl CircuitBreakerFactory {
             threshold,
             self.config.open_for,
             config.stage_id,
+            context.unit_name(),
         );
         middleware.failure_mode = self.config.failure_mode.clone();
         middleware.rate_window = rate_window;
@@ -320,6 +332,7 @@ impl CircuitBreakerFactory {
             })
         });
 
+        let middleware = Arc::new(middleware);
         context
             .stage_control_registration(
                 claimant,
@@ -328,6 +341,7 @@ impl CircuitBreakerFactory {
                     effect_type,
                     metrics_fn: snapshotter,
                     state_view: state_view.clone(),
+                    shared: middleware.clone(),
                 },
             )
             .map_err(|error| {
@@ -337,7 +351,7 @@ impl CircuitBreakerFactory {
                     error,
                 )
             })?;
-        Ok((middleware, state_view))
+        Ok((middleware.handle_for(config.stage_id), state_view))
     }
 }
 

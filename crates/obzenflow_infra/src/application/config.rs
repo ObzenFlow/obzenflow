@@ -347,7 +347,7 @@ impl ConfigError {
         }
     }
 
-    fn global(message: impl Into<String>) -> Self {
+    pub(crate) fn global(message: impl Into<String>) -> Self {
         Self {
             path: None,
             message: message.into(),
@@ -602,6 +602,19 @@ pub(crate) struct RawFileRuntimeConfig {
     pub(crate) stages: BTreeMap<String, RawRuntimeStageScope>,
     pub(crate) backpressure: RawBackpressureConfig,
     pub(crate) observability: RawObservabilityConfig,
+    pub(crate) ai: RawRuntimeAiConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawRuntimeAiConfig {
+    pub(crate) stages: BTreeMap<String, RawRuntimeAiStage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawRuntimeAiStage {
+    pub(crate) max_open_keys: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -765,21 +778,53 @@ pub(crate) struct RawRateLimiterFields {
     pub(crate) cost_per_attempt: Option<f64>,
 }
 
-/// `[ai]` with the `[ai.models]` namespace (absorbs `ModelConfig`'s env
-/// surface; `api_key_env` is the visible secret reference, §13).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawFileAiConfig {
-    pub(crate) models: RawFileAiModelsConfig,
+    pub(crate) endpoints: BTreeMap<String, RawAiEndpointTable>,
+    pub(crate) models: RawAiFamilySection,
+    pub(crate) embeddings: RawAiFamilySection,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawFileAiModelsConfig {
+pub(crate) struct RawAiEndpointTable {
     pub(crate) provider: Option<String>,
-    pub(crate) model: Option<String>,
     pub(crate) base_url: Option<String>,
     pub(crate) api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawAiFamilySection {
+    pub(crate) endpoint: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) provider: Option<toml::Value>,
+    pub(crate) base_url: Option<toml::Value>,
+    pub(crate) api_key_env: Option<toml::Value>,
+    pub(crate) flow: RawAiModelFields,
+    pub(crate) stages: BTreeMap<String, RawAiStageScope>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawAiModelFields {
+    pub(crate) endpoint: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) provider: Option<toml::Value>,
+    pub(crate) base_url: Option<toml::Value>,
+    pub(crate) api_key_env: Option<toml::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawAiStageScope {
+    pub(crate) endpoint: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) provider: Option<toml::Value>,
+    pub(crate) base_url: Option<toml::Value>,
+    pub(crate) api_key_env: Option<toml::Value>,
+    pub(crate) by_type: BTreeMap<String, RawAiModelFields>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2792,7 +2837,10 @@ port = "abc"
             ),
             (format!("[app]\npartner = {{ key = {SENTINEL} }}\n"), "2:19"),
             (format!("[app]\nkeys = [\"ok\", {SENTINEL}]\n"), "2:15"),
-            (format!("[ai.models]\napi_key_env = {SENTINEL}\n"), "2:15"),
+            (
+                format!("[ai.endpoints.partner]\napi_key_env = {SENTINEL}\n"),
+                "2:15",
+            ),
         ] {
             let (_dir, path) = write_config(&contents);
             let error = resolve_file(&path).unwrap_err();
@@ -2819,14 +2867,29 @@ port = "abc"
 
     #[test]
     fn secret_references_admit_only_environment_variable_names() {
-        let _lock = env_lock();
-        let refused = "config error at ai.models.api_key_env: expected an environment variable \
-                       name: uppercase letters, digits and underscores, not starting with a digit";
+        let lock = env_lock();
+        let endpoint = "[ai.endpoints.partner]\nprovider = \"openai_compatible\"\n\
+                        base_url = \"http://127.0.0.1:1/v1\"\n";
 
-        let (_dir, path) = write_config(&format!("[ai.models]\napi_key_env = \"{SENTINEL}\"\n"));
-        let error = resolve_file(&path).unwrap_err();
-        assert_eq!(error.to_string(), refused);
+        let refused = write_config(&format!("{endpoint}api_key_env = \"{SENTINEL}\"\n"));
+        let error = resolve_file(&refused.1).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: [ai.endpoints.partner] api_key_env must name an environment variable"
+        );
         assert!(!format!("{error:?}").contains(SENTINEL));
+
+        let admitted = write_config(&format!("{endpoint}api_key_env = \"PARTNER_API_KEY\"\n"));
+        let resolved = resolve_file(&admitted.1).unwrap();
+        let partner = resolved
+            .runtime_config
+            .ai_endpoints()
+            .resolve("digest", "partner")
+            .unwrap();
+        assert_eq!(
+            partner.api_key_env.as_ref().map(|env| env.env_name()),
+            Some("PARTNER_API_KEY")
+        );
 
         let guard = EnvGuard::new(&["OBZENFLOW_AI_MODELS_API_KEY_ENV"]);
         guard.set("OBZENFLOW_AI_MODELS_API_KEY_ENV", SENTINEL);
@@ -2834,28 +2897,21 @@ port = "abc"
             .unwrap()
             .resolve(None, false)
             .unwrap_err();
-        assert_eq!(error.to_string(), refused);
-        assert!(!format!("{error:?}").contains(SENTINEL));
-        guard.set("OBZENFLOW_AI_MODELS_API_KEY_ENV", "PARTNER_API_KEY");
-        let resolved = FlowConfig::try_parse_from(["obzenflow"])
-            .unwrap()
-            .resolve(None, false)
-            .unwrap();
         assert_eq!(
-            resolved
-                .runtime_config
-                .ai_models()
-                .api_key_env
-                .value
-                .env_name(),
-            "PARTNER_API_KEY"
+            error.to_string(),
+            "config error at OBZENFLOW_AI_MODELS_API_KEY_ENV: provider, base_url and api_key_env \
+             belong to an endpoint, so define [ai.endpoints.<name>] and set \
+             OBZENFLOW_AI_MODELS_ENDPOINT to its name"
         );
+        assert!(!format!("{error:?}").contains(SENTINEL));
 
         let error = toml::from_str::<BTreeMap<String, obzenflow_core::config::SecretRef>>(
             &format!("partner_api_key_env = \"{SENTINEL}\""),
         )
         .unwrap_err();
         assert!(!error.message().contains(SENTINEL), "{}", error.message());
+        drop(guard);
+        drop(lock);
     }
 
     #[test]

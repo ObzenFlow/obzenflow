@@ -74,9 +74,9 @@ pub(crate) use actions::{
 pub use binding::{BindingIdentifierError, EffectBinding};
 #[doc(hidden)]
 pub use binding::{
-    EffectBindingEvidence, EffectBindingMode, EffectBindingUse, EffectInvocationBinding,
-    EffectPortSlot, EffectPortSlotLabel, EffectPortSlotSet, LogicalEffectBindingName, Named,
-    NamedEffect, NoPortMetadata,
+    BoundEffect, Configured, ConfiguredEffect, EffectBindingEvidence, EffectBindingMode,
+    EffectBindingUse, EffectInvocationBinding, EffectPortSlot, EffectPortSlotLabel,
+    EffectPortSlotSet, LogicalEffectBindingName, Named, NamedEffect, NoPortMetadata,
 };
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
@@ -100,20 +100,19 @@ pub use obzenflow_core::SystemBindingEvidence;
 pub use obzenflow_core_derive::{port, EffectHandler};
 #[doc(hidden)]
 pub use system::{
-    assert_port_answer, effectful_stateful_effects, effectful_transform_effects,
-    AcknowledgedSafety, AnswersEffect, DeclareEffects, EffectAcknowledgement, EverySystemAnswers,
-    FindSystem, MarkSystemUsed, PortAnswer, PortImpl, ServesPort, StageEffectsError, SystemAfter,
-    SystemAnswersAnEffect, SystemFound, SystemList, SystemMark, Unused, Used,
+    assert_handler_performs_no_ai_effect, assert_port_answer,
+    assert_stateful_handler_performs_no_ai_effect, effectful_stateful_effects,
+    effectful_transform_effects, AcknowledgedSafety, AnswersEffect, DeclareEffects,
+    EffectAcknowledgement, EverySystemAnswers, FindSystem, HandlerPerformableEffects,
+    MarkSystemUsed, PortAnswer, PortImpl, RowAcknowledgedEffect, ServesPort, StageEffectsError,
+    SystemAfter, SystemAnswersAnEffect, SystemFound, SystemList, SystemMark, Unused, Used,
 };
 pub use system::{EffectHandler, StageSystem, System, SystemError};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
 #[doc(hidden)]
-pub use declaration::{
-    declare_named_at_least_once_effect, DomainFacts, Effect, EffectBindingFor,
-    EffectOutcomeSemantics, RecordedReply,
-};
+pub use declaration::{DomainFacts, Effect, EffectOutcomeSemantics, RecordedReply};
 pub use declaration::{
     EffectDeclaration, EffectOutcomeKind, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
     PreparedEffectSuccess, SinkRedeliverySafety,
@@ -123,7 +122,7 @@ pub use declaration::{
 pub use effect_set::{
     assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectSet, EffectTypeDisjoint,
 };
-pub use error::EffectError;
+pub use error::{DescriptorComponent, DescriptorDrift, DriftBinding, EffectError};
 pub use fault::{BindingAuthorityFault, BindingMismatchKind};
 #[cfg(test)]
 pub(crate) use history::current_cursor_history;
@@ -156,7 +155,8 @@ use commit::{
     build_effect_recovery_abandoned_event, EffectCommitHandleParams, PreparedEffectOutcome,
 };
 use identity::{
-    descriptor_for_effect, descriptor_hash, deterministic_effect_evidence_event_id, hash_json_value,
+    descriptor_for_effect, descriptor_hash, deterministic_effect_evidence_event_id,
+    hash_json_value, stamp_output_event,
 };
 use replay::{
     decode_effect_outcome, decode_effect_outcome_group, effect_fact_set_error,

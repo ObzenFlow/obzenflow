@@ -269,7 +269,7 @@ impl TypeHint {
         }
     }
 
-    fn exact_fact_type(fact: TypedFactType) -> Self {
+    pub(crate) fn exact_fact_type(fact: TypedFactType) -> Self {
         Self::Exact {
             type_id: fact.type_id,
             display_name: fact.display_name,
@@ -981,6 +981,7 @@ where
         handler: TypedStatefulHandlerAdapter::new(handler),
         emit_interval,
         observers,
+        max_open_keys: None,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -1015,6 +1016,7 @@ where
         ),
         emit_interval,
         observers,
+        max_open_keys: None,
     });
     wrap_typed_descriptor(descriptor, metadata)
 }
@@ -1791,6 +1793,18 @@ impl StageDescriptor for TypedStageDescriptor {
 
     fn stage_logic_version(&self) -> String {
         self.inner.stage_logic_version()
+    }
+
+    fn ai_model_specs(&self) -> Vec<obzenflow_core::ai::AiModelSpec> {
+        self.inner.ai_model_specs()
+    }
+
+    fn ai_config_sections(&self) -> Vec<(&'static str, &'static str)> {
+        self.inner.ai_config_sections()
+    }
+
+    fn max_open_keys(&self) -> Option<u64> {
+        self.inner.max_open_keys()
     }
 
     fn sink_description(&self) -> Option<&SinkDescription> {
@@ -3022,6 +3036,18 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn stage_logic_version(&self) -> String {
         self.inner.stage_logic_version()
+    }
+
+    fn ai_model_specs(&self) -> Vec<obzenflow_core::ai::AiModelSpec> {
+        self.inner.ai_model_specs()
+    }
+
+    fn ai_config_sections(&self) -> Vec<(&'static str, &'static str)> {
+        self.inner.ai_config_sections()
+    }
+
+    fn max_open_keys(&self) -> Option<u64> {
+        self.inner.max_open_keys()
     }
 
     fn sink_description(&self) -> Option<&SinkDescription> {

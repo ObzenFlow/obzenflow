@@ -217,7 +217,7 @@
 //! - [`middleware`] provides live-I/O policies and passive observers.
 //! - [`application`] configures and runs the application, including ingress.
 //! - [`journal`] constructs, inspects, and exports recorded runs.
-//! - [`ai`] provides inference, model bindings, and budget planning.
+//! - [`ai`] provides AI roles, `ai!` handler shapes, model providers, and budget planning.
 //! - [`mod@env`] reads typed application environment values.
 
 pub mod ai;

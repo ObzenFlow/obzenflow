@@ -736,6 +736,23 @@ impl EffectHistory {
         self.abandonments.get(cursor)
     }
 
+    pub(crate) fn recorded_descriptor_hash(
+        &self,
+        cursor: &EffectCursor,
+    ) -> Option<&EffectDescriptorHash> {
+        self.find(cursor)
+            .map(|record| &record.descriptor_hash)
+            .or_else(|| {
+                self.attempts(cursor)
+                    .first()
+                    .map(|started| &started.descriptor_hash)
+            })
+            .or_else(|| {
+                self.abandonment(cursor)
+                    .map(|abandoned| &abandoned.descriptor_hash)
+            })
+    }
+
     pub(crate) fn cursor_history(&self, cursor: &EffectCursor) -> EffectCursorHistory {
         let attempts = self.attempts(cursor).to_vec();
         let attempt_events = attempts

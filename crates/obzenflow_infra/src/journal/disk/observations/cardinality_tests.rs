@@ -19,6 +19,7 @@ fn subject_event(template: &ChainEvent, subject: String, seq: u64) -> ChainEvent
     packet.capture.capture_seq = CaptureSeq(seq);
     packet.runtime = None;
     packet.records = vec![ObservationRecord::RateLimiterActivity {
+        unit: "stage".into(),
         effect_type: Some(subject),
         window_ms: 1000,
         delayed_events: seq,

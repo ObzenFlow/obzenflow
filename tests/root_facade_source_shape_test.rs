@@ -113,13 +113,21 @@ fn root_facades_export_the_owned_authoring_surfaces() {
     let ai_facade =
         fs::read_to_string(root.join("src/ai.rs")).expect("AI facade module should be readable");
     assert!(
-        ai_facade.contains("pub use obzenflow_runtime::stages::InferenceHandler;"),
-        "obzenflow::ai must remain the root facade for the InferenceHandler trait"
+        ai_facade.contains("pub use obzenflow_runtime::ai::{AiEffect, AiModelProviders, AiReply, AiRequest, AiRole};"),
+        "obzenflow::ai must remain the root facade for AI roles and model providers"
     );
-    assert!(
-        !ai_facade.contains("inference_handler"),
-        "the retired free inference factory must not return"
-    );
+    for retired in [
+        "inference_handler",
+        "InferenceHandler",
+        "ChatEffectBinding",
+        "ChatTransform",
+        "ChatEffects",
+    ] {
+        assert!(
+            !ai_facade.contains(retired),
+            "the retired AI surface `{retired}` must not return"
+        );
+    }
 
     let source_facade = fs::read_to_string(root.join("src/stages/sources.rs"))
         .expect("source facade module should be readable");

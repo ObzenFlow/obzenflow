@@ -294,7 +294,8 @@ mod sealed {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a system",
     label = "a `#[system]` field holds a system the handler calls",
-    note = "hold a `System` value, or a typed binding such as `EffectBinding<ChatCompletion>`"
+    note = "hold a `System` value, or the typed binding of a hand-written named effect; \
+            AI effects are performed by `ai!`, whose model comes from [ai.*] configuration"
 )]
 pub trait StageSystem: sealed::StageSystem {}
 
@@ -377,8 +378,49 @@ pub struct EffectAcknowledgement {
     safety: AcknowledgedSafety,
 }
 
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is an AI effect; an `ai!` row is itself the acknowledgement for its AI effect",
+    label = "only `ai!` performs and acknowledges this effect",
+    note = "AI effects are performed by `ai!`; the model comes from [ai.*] configuration"
+)]
+pub trait RowAcknowledgedEffect: Effect {}
+
+impl<E: NamedEffect> RowAcknowledgedEffect for E {}
+
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "an effectful handler cannot perform an AI effect",
+    label = "this handler's `AllowedEffects` names an AI effect",
+    note = "AI effects are performed by `ai!`; the model comes from [ai.*] configuration"
+)]
+pub trait HandlerPerformableEffects {}
+
+impl HandlerPerformableEffects for EmptySet {}
+
+impl<E: NamedEffect, Rest: HandlerPerformableEffects> HandlerPerformableEffects
+    for WithMember<E, Rest>
+{
+}
+
+#[doc(hidden)]
+pub fn assert_handler_performs_no_ai_effect<H>(_: &H)
+where
+    H: EffectfulTransformHandler,
+    <H::AllowedEffects as EffectSet>::Members: HandlerPerformableEffects,
+{
+}
+
+#[doc(hidden)]
+pub fn assert_stateful_handler_performs_no_ai_effect<H>(_: &H)
+where
+    H: EffectfulStatefulHandler,
+    <H::AllowedEffects as EffectSet>::Members: HandlerPerformableEffects,
+{
+}
+
 impl EffectAcknowledgement {
-    pub fn at_least_once<E: Effect>(written: &'static str) -> Self {
+    pub fn at_least_once<E: RowAcknowledgedEffect>(written: &'static str) -> Self {
         Self {
             effect_type: E::EFFECT_TYPE,
             written,
@@ -386,7 +428,7 @@ impl EffectAcknowledgement {
         }
     }
 
-    pub fn transactional<E: Effect>(written: &'static str) -> Self {
+    pub fn transactional<E: RowAcknowledgedEffect>(written: &'static str) -> Self {
         Self {
             effect_type: E::EFFECT_TYPE,
             written,

@@ -3,19 +3,13 @@
 // https://obzenflow.dev
 
 const STAGE_MACROS: &str = include_str!("../crates/obzenflow_dsl/src/dsl/stage_macros.rs");
-const INFERENCE: &str = include_str!("../crates/obzenflow_dsl/src/dsl/inference.rs");
-const AI_MAP_REDUCE: &str =
-    include_str!("../crates/obzenflow_dsl/src/dsl/composites/ai_map_reduce.rs");
+const AI_STAGE: &str = include_str!("../crates/obzenflow_dsl/src/dsl/ai_stage.rs");
 
 #[test]
-fn generated_ai_uses_clauses_use_the_canonical_effect_entry_lowerer() {
-    assert!(STAGE_MACROS.contains("@generated_chat surface"));
-    assert!(STAGE_MACROS.contains("@entry __chat_declarations"));
-    assert!(!STAGE_MACROS.contains("macro_rules! __obzenflow_ai_chat_effect_row"));
-    assert!(!STAGE_MACROS.contains("macro_rules! __obzenflow_ai_effect_row_syntax_then"));
-
-    for generated_module in [INFERENCE, AI_MAP_REDUCE] {
-        assert!(!generated_module.contains("EffectPolicyAttachment {"));
-        assert!(!generated_module.contains("EffectDeclaration::named_at_least_once"));
-    }
+fn ai_stages_declare_their_effect_only_through_the_configured_binding() {
+    assert!(AI_STAGE.contains("EffectDeclaration::configured_with_recorded("));
+    assert!(!AI_STAGE.contains("EffectPolicyAttachment {"));
+    assert!(!AI_STAGE.contains("EffectDeclaration::named_at_least_once"));
+    assert!(!STAGE_MACROS.contains("macro_rules! __obzenflow_effect_entries"));
+    assert!(!STAGE_MACROS.contains("@generated_chat surface"));
 }

@@ -559,6 +559,7 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
         packet
             .records
             .push(ObservationRecord::CircuitBreakerSummary {
+                unit: "worker".into(),
                 effect_type: None,
                 window_duration_s: 1,
                 requests_processed: seq,
@@ -578,6 +579,7 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
     let mut opened = ChainEventFactory::execution_event(
         stage.into(),
         ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+            unit: "worker".into(),
             cooldown_ms: 5_000,
             error_rate: 1.0,
             failure_count: 3,
@@ -1073,6 +1075,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                 journals.stage(breaker),
                 breaker,
                 ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+                    unit: breaker.to_string().into(),
                     cooldown_ms: 5_000,
                     error_rate: 1.0,
                     failure_count: 3,
@@ -1088,6 +1091,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                 journals.stage(limiter),
                 limiter,
                 ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
+                    unit: limiter.to_string().into(),
                     mode_from: RateLimiterMode::Normal,
                     mode_to: RateLimiterMode::Limiting,
                     limit_rate: 10.0,
@@ -1128,6 +1132,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                 journals.stage(breaker),
                 breaker,
                 ExecutionPayload::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                    unit: breaker.to_string().into(),
                     from_state: CircuitState::Open,
                     to_state: CircuitState::Closed,
                     timestamp: 421,

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! One-shot AI inference with a replay-safe, target-free handler.
+//! One-shot AI inference with a replay-safe AI role.
 //!
 //! Run:
 //! `cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
@@ -13,13 +13,14 @@
 //! without resolving credentials or contacting the provider.
 
 use anyhow::Result;
-use obzenflow::ai::{ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec};
-use obzenflow::ai::{ChatEffectBinding, InferenceHandler};
+use obzenflow::ai::{
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
+};
 use obzenflow::application::FlowApplication;
 use obzenflow::error::HandlerError;
-use obzenflow::flow::{flow, inference, sink, source, FlowDefinition};
+use obzenflow::flow::{ai, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
-use obzenflow::middleware::ai_resilience;
+use obzenflow::middleware::circuit_breaker;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks;
 use obzenflow::stages::sources;
@@ -49,50 +50,41 @@ impl TypedPayload for DecisionBrief {
 #[derive(Clone, Debug)]
 struct GenerateBrief;
 
-impl InferenceHandler for GenerateBrief {
-    type Input = ReducedEvidence;
-    type Output = DecisionBrief;
+impl AiRole<ReducedEvidence> for GenerateBrief {
+    type Effect = ChatCompletion;
+    type Out = DecisionBrief;
 
     fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
-        Ok(ChatRequestSpec {
-            messages: vec![
-                ChatMessage::system(
-                    "Produce one concise recommendation using only the supplied evidence.",
-                ),
-                ChatMessage::user(format!(
-                    "Question: {}\nEvidence:\n- {}",
-                    input.question,
-                    input.evidence.join("\n- ")
-                )),
-            ],
-            params: ChatParams {
-                temperature: Some(0.1),
-                max_tokens: Some(240),
-                ..ChatParams::default()
-            },
-            tools: Vec::new(),
-            response_format: None,
-        })
+        Ok(ChatRequestSpec::new(
+            "Produce one concise recommendation using only the supplied evidence.",
+            format!(
+                "Question: {}\nEvidence:\n- {}",
+                input.question,
+                input.evidence.join("\n- ")
+            ),
+        )
+        .temperature(0.1)
+        .max_tokens(240))
     }
 
     fn interpret(
         &self,
         input: ReducedEvidence,
-        _request: ChatRequestSpec,
-        reply: ChatCompletionReply,
+        outcome: AiOutcome<ChatCompletionReply>,
     ) -> Result<DecisionBrief, HandlerError> {
+        let reply = outcome.replied()?;
         Ok(DecisionBrief {
             question: input.question,
-            recommendation: reply.response.text,
+            recommendation: reply.text().to_string(),
         })
     }
 }
 
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
-    FlowDefinition::materialize(move |runtime_config| {
-        let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
+    FlowDefinition::materialize(move |_| {
         let evidence = sources::ValuesSource::new([input]);
-        let generate_brief = GenerateBrief;
+        let generate_brief = ai::infer(GenerateBrief);
+        let ai_breaker = circuit_breaker().consecutive_failures(5);
         let display = sinks::ConsoleSink::new(|brief: &DecisionBrief| {
             format!("{}\n\n{}", brief.question, brief.recommendation.trim())
         });
@@ -102,13 +94,7 @@ fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowD
             journals: disk_journals(journal_path),
             stages: {
                 evidence = source!(ReducedEvidence => evidence);
-                brief = inference!(
-                    ReducedEvidence -> DecisionBrief
-                    uses at_least_once(ChatCompletion)
-                        via chat
-                        with ai_resilience()
-                    => generate_brief
-                );
+                brief = ai!(ReducedEvidence -> DecisionBrief with ai_breaker => generate_brief);
                 display = sink!(DecisionBrief => display);
             },
 

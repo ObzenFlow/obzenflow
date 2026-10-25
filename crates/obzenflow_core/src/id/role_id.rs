@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 //! Composite role identifier - the semantic function of a member inside a
-//! composite (`chunk`, `map`, `collect`, `finalize`, `compensate`, ...).
+//! composite (`chunk`, `map`, `collect`, `reduce`, `compensate`, ...).
 //!
 //! A stable string id with the locked grammar `[a-z][a-z0-9_]*`, unique per
 //! composite (FLOWIP-128a D2). It names the member attributed by a failed

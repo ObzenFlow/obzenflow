@@ -11,7 +11,7 @@
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
-use obzenflow_core::WriterId;
+use obzenflow_core::{StageKey, WriterId};
 
 use super::admission_core::RateLimitDelayEvent;
 
@@ -23,10 +23,15 @@ pub(super) fn rate_limiter_event(writer_id: WriterId, event: RateLimiterFact) ->
 
 /// Build the one-shot `Delayed` lifecycle fact emitted on the first wait of an
 /// acquire (FLOWIP-114o).
-pub(super) fn delayed_event(writer_id: WriterId, info: RateLimitDelayEvent) -> ChainEvent {
+pub(super) fn delayed_event(
+    writer_id: WriterId,
+    unit: &StageKey,
+    info: RateLimitDelayEvent,
+) -> ChainEvent {
     rate_limiter_event(
         writer_id,
         RateLimiterFact::Delayed {
+            unit: unit.clone(),
             delay_ms: info.delay_ms,
             current_rate: info.current_rate,
             limit_rate: info.limit_rate,

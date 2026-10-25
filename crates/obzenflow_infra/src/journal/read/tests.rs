@@ -71,6 +71,8 @@ impl Run {
                     error_journal_file: "error.log".into(),
                     inbound: vec![],
                     delivery_order: obzenflow_core::journal::archive::DeliveryOrder::SingleInput,
+                    ai_models: Vec::new(),
+                    max_open_keys: None,
                 },
             )]
             .into(),

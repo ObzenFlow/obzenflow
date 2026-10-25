@@ -630,6 +630,23 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         "1".to_string()
     }
 
+    /// The model each AI effect of this stage uses, as the run manifest
+    /// records it.
+    fn ai_model_specs(&self) -> Vec<obzenflow_core::ai::AiModelSpec> {
+        Vec::new()
+    }
+
+    /// The configuration section and effect type of each AI effect this
+    /// stage performs, such as `("ai.models", "obzenflow.ai.chat_completion")`.
+    fn ai_config_sections(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
+
+    /// The open-key limit this stage enforces, as the run manifest records it.
+    fn max_open_keys(&self) -> Option<u64> {
+        None
+    }
+
     /// The sink's one pre-erasure connector-description snapshot. Every
     /// descriptor and wrapper must state whether it carries one so metadata
     /// cannot silently attenuate while crossing a wrapper (FLOWIP-134h).
@@ -1679,6 +1696,7 @@ fn materialize_effect_boundary(
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect_declarations: &[EffectDeclaration],
     effect_policies: &[EffectPolicyAttachment],
+    owner: &obzenflow_adapters::middleware::ProtectedUnitOwner,
 ) -> Result<Arc<dyn EffectBoundary>, String> {
     let inline_policy_declarations: Vec<MiddlewareDeclaration> = effect_policies
         .iter()
@@ -1731,6 +1749,7 @@ fn materialize_effect_boundary(
             control_middleware,
             effect_declaration,
             attachment.authored_site,
+            owner,
         )?;
         effect_chains
             .entry(attachment.effect_type)
@@ -1758,6 +1777,9 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     pass_through_descriptor: Option<obzenflow_core::EventDescriptor>,
     generated_surface: Option<&'static str>,
     generated_owner_kind: &'static str,
+    ai_models: Vec<obzenflow_core::ai::AiModelSpec>,
+    ai_sections: Vec<(&'static str, &'static str)>,
+    policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner,
 }
 
 impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
@@ -1806,7 +1828,16 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             pass_through_descriptor: None,
             generated_surface: None,
             generated_owner_kind: "role",
+            ai_models: Vec::new(),
+            ai_sections: Vec::new(),
+            policy_owner: obzenflow_adapters::middleware::ProtectedUnitOwner::Stage,
         }
+    }
+
+    pub(crate) fn with_policy_owner(mut self, composite: &str) -> Self {
+        self.policy_owner =
+            obzenflow_adapters::middleware::ProtectedUnitOwner::Composite(composite.into());
+        self
     }
 
     pub(crate) fn with_implementation_middleware(
@@ -1814,6 +1845,15 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
         middleware: Vec<Box<dyn MiddlewareFactory>>,
     ) -> Self {
         self.observers = middleware;
+        self
+    }
+
+    pub(crate) fn with_ai_models<E: obzenflow_runtime::ai::AiEffect>(
+        mut self,
+        specs: Vec<obzenflow_core::ai::AiModelSpec>,
+    ) -> Self {
+        self.ai_sections.push((E::SECTION, E::EFFECT_TYPE));
+        self.ai_models.extend(specs);
         self
     }
 
@@ -1833,7 +1873,7 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             obzenflow_runtime::stages::resources_builder::DirectFactPlan::generated::<Input>(
                 direct_bound,
             );
-        descriptor.generated_surface = Some("ai_map_reduce!");
+        descriptor.generated_surface = Some("ai!");
         descriptor
     }
 
@@ -1917,6 +1957,14 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         self.handler.stage_logic_version().to_string()
     }
 
+    fn ai_model_specs(&self) -> Vec<obzenflow_core::ai::AiModelSpec> {
+        self.ai_models.clone()
+    }
+
+    fn ai_config_sections(&self) -> Vec<(&'static str, &'static str)> {
+        self.ai_sections.clone()
+    }
+
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         self.effects.clone()
     }
@@ -1927,22 +1975,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             &self.name,
             &self.effects,
             &self.effect_policies,
-        )?;
-        if let Some(surface) = self.generated_surface {
-            crate::dsl::ai_effect::require_generated_chat_resilience(
-                surface,
-                self.generated_owner_kind,
-                &self.name,
-                self.effect_policies
-                    .iter()
-                    .filter(|attachment| {
-                        attachment.factory.declaration().is_control() && attachment.effect_type
-                            == <obzenflow_adapters::ai::ChatCompletion as obzenflow_runtime::effects::Effect>::EFFECT_TYPE
-                    })
-                    .map(|attachment| attachment.factory.as_ref()),
-            )?;
-        }
-        Ok(())
+        )
     }
 
     fn direct_fact_plan(
@@ -1972,20 +2005,6 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         mut resources: StageResources,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
-        if let Some(surface) = self.generated_surface {
-            crate::dsl::ai_effect::require_generated_chat_resilience(
-                surface,
-                self.generated_owner_kind,
-                &self.name,
-                self.effect_policies
-                    .iter()
-                    .filter(|attachment| {
-                        attachment.factory.declaration().is_control() && attachment.effect_type
-                            == <obzenflow_adapters::ai::ChatCompletion as obzenflow_runtime::effects::Effect>::EFFECT_TYPE
-                    })
-                    .map(|attachment| attachment.factory.as_ref()),
-            )?;
-        }
         if let Some(bound) = self.direct_fact_plan.maximum_bound() {
             let surface = self.generated_surface.unwrap_or("generated stage");
             resources
@@ -2083,6 +2102,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             &control_middleware,
             &effect_declarations,
             &self.effect_policies,
+            &self.policy_owner,
         )?;
 
         let observers = effect_observers;
@@ -2514,6 +2534,7 @@ pub(crate) struct StatefulDescriptor<H: UnifiedStatefulHandler + 'static> {
     pub(crate) handler: H,
     pub(crate) emit_interval: Option<Duration>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) max_open_keys: Option<u64>,
 }
 
 #[async_trait]
@@ -2534,6 +2555,10 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
 
     fn set_name(&mut self, name: String) {
         self.name = name;
+    }
+
+    fn max_open_keys(&self) -> Option<u64> {
+        self.max_open_keys
     }
 
     fn stage_type(&self) -> StageType {
@@ -2831,6 +2856,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             &control_middleware,
             &effect_declarations,
             &self.effect_policies,
+            &obzenflow_adapters::middleware::ProtectedUnitOwner::Stage,
         )?;
 
         let observers = effect_observers;
@@ -3293,8 +3319,8 @@ mod tests {
     };
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
-        Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
-        EffectPortSlotSet, EffectRegistrationBuilder, LogicalEffectBindingName, Named, NamedEffect,
+        BoundEffect, Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext,
+        EffectError, EffectPortSlotSet, EffectRegistrationBuilder, LogicalEffectBindingName, Named,
     };
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
@@ -3357,7 +3383,7 @@ mod tests {
 
     macro_rules! zero_slot_fixture {
         ($effect:ty) => {
-            impl NamedEffect for $effect {
+            impl BoundEffect for $effect {
                 type BindingEvidence = SafetyBindingEvidence;
 
                 fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -3373,7 +3399,7 @@ mod tests {
 
     fn zero_slot_binding<E>(name: &str) -> EffectBinding<E>
     where
-        E: NamedEffect<BindingEvidence = SafetyBindingEvidence>,
+        E: BoundEffect<BindingEvidence = SafetyBindingEvidence>,
     {
         EffectRegistrationBuilder::<E>::new(
             LogicalEffectBindingName::new(name).unwrap(),
@@ -3493,7 +3519,7 @@ mod tests {
         }
     }
 
-    impl<const CLASS: u8> NamedEffect for NamedSafetyEffect<CLASS> {
+    impl<const CLASS: u8> BoundEffect for NamedSafetyEffect<CLASS> {
         type BindingEvidence = SafetyBindingEvidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
@@ -3723,7 +3749,7 @@ mod tests {
         binding: EffectBindingUse<Self>,
     }
 
-    impl<const SECOND: bool> NamedEffect for ObserverFixtureEffect<SECOND> {
+    impl<const SECOND: bool> BoundEffect for ObserverFixtureEffect<SECOND> {
         type BindingEvidence = SafetyBindingEvidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {

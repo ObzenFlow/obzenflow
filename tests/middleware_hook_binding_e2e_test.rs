@@ -22,9 +22,10 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
     MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
     MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
-    SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx,
-    SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
+    ProtectedUnitOwner, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
+    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
+    SourcePollUnitId,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
 use obzenflow_core::event::{
@@ -859,6 +860,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     });
     let mismatched_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::Effect(EffectUnitId {
             effect_type: EffectTypeKey::from("actual"),
         }),
@@ -878,6 +880,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     });
     let sink_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
             target: SinkDeliveryTarget::Stage,
         }),
@@ -896,6 +899,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     });
     let source_unit = ProtectedUnitId {
         stage_id: config.stage_id,
+        owner: ProtectedUnitOwner::Stage,
         unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
     };
     let source_request = MiddlewareAttachmentRequest {

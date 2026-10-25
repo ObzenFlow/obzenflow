@@ -76,6 +76,7 @@ impl ChainEventFactory {
         cause: EventId,
     ) -> ChainEvent {
         let CircuitBreakerAttemptSettledEventParams {
+            unit,
             cursor,
             attempt,
             health_classification,
@@ -86,6 +87,7 @@ impl ChainEventFactory {
         Self::circuit_breaker_retry_event(
             writer_id,
             CircuitBreakerFact::AttemptSettled {
+                unit,
                 cursor,
                 attempt,
                 health_classification,
@@ -177,6 +179,7 @@ impl ChainEventFactory {
         params: CircuitBreakerOpenedEventParams,
     ) -> ChainEvent {
         let CircuitBreakerOpenedEventParams {
+            unit,
             cooldown_ms,
             trigger,
             observed_calls,
@@ -189,6 +192,7 @@ impl ChainEventFactory {
         Self::execution_event(
             writer_id,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+                unit,
                 cooldown_ms,
                 error_rate,
                 failure_count,

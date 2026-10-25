@@ -1,14 +1,14 @@
-# The generated map and finalize roles each reserve their complete three-row
+# The generated map and reduce members each reserve their complete three-row
 # direct-fact bound before starting a live chat continuation.
 [runtime.backpressure.flow]
 mode = "enforce"
 window = 3
 stall_timeout_ms = 30000
 
-# One immutable target supplies the descriptor, estimator, role requests, and
-# deferred chat client. Secrets are read only when a live effect first executes.
+# Every chat stage's endpoint and model. The built-in `ollama` endpoint needs
+# no table. Secrets are read only when a live call first needs them.
 [ai.models]
-provider = "ollama"
+endpoint = "ollama"
 model = "llama3.1:8b"
 
 # The logical `digest_summary` stage declares `console_sink` and
@@ -27,7 +27,5 @@ poll_timeout_secs = 120
 # interests = "rust, ai, security"
 
 [app.digest]
-# Per-chunk input budget; absent, 2500 tokens for Ollama and 6000 otherwise.
-# group_budget_tokens = 2500
-# Stories per chunk; 0 for unlimited.
+# Stories per group, 1 or more.
 group_max_stories = 10

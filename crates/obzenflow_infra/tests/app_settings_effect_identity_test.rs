@@ -574,10 +574,9 @@ async fn a_changed_app_value_in_an_effect_identity_refuses_replay_and_resume() -
     }
     let replay = replay_testkit::latest_run_dir(&journal_base);
     let refusal = assert_refused(&replay, StageFatalReason::DescriptorMismatch).await?;
-    assert!(
-        refusal.detail.starts_with("effect descriptor mismatch"),
-        "{}",
-        refusal.detail
+    assert_eq!(
+        refusal.detail,
+        "effect score#1/0: the request differs from the recording; binding and stage logic version match"
     );
     assert_eq!(
         refusal.departure, None,

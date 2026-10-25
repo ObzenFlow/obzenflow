@@ -4,7 +4,7 @@
 
 //! Sealed built-in contributions and the bounded effect composition catalog.
 
-use super::circuit_breaker::{circuit_breaker, CircuitBreaker, Retry};
+use super::circuit_breaker::{CircuitBreaker, Retry};
 use super::rate_limiter::RateLimiter;
 use super::resilience::EffectPlanFactory;
 use crate::middleware::{MiddlewareAttachmentSite, MiddlewareFactory};
@@ -49,7 +49,14 @@ impl BuiltinControlContribution {
         Self::one(Contribution::Limiter(value))
     }
     pub(in crate::middleware::control) fn breaker(value: CircuitBreaker) -> Self {
-        Self::one(Contribution::Breaker(value))
+        #[cfg(feature = "test-support")]
+        let reject_affine_recovery_for_test = value.reject_affine_recovery_for_test;
+        Self {
+            values: vec![Contribution::Breaker(value)],
+            sites: Vec::new(),
+            #[cfg(feature = "test-support")]
+            reject_affine_recovery_for_test,
+        }
     }
     pub(in crate::middleware::control) fn retry(value: Retry) -> Self {
         Self::one(Contribution::Retry(value))
@@ -181,30 +188,6 @@ pub fn compose_effect_controls(
     Ok(Box::new(plan))
 }
 
-/// The fixed no-retry preset for generated AI effect boundaries.
-#[derive(Clone)]
-pub struct AiResilience {
-    plan: EffectPlanFactory,
-}
-
-pub fn ai_resilience() -> AiResilience {
-    let mut plan = EffectPlanFactory::empty();
-    plan.breaker = Some(
-        circuit_breaker()
-            .consecutive_failures(5)
-            .open_for(std::time::Duration::from_secs(60))
-            .probes(1),
-    );
-    AiResilience { plan }
-}
-
-#[cfg(feature = "test-support")]
-pub fn ai_recovery_rejecting_resilience_for_test() -> AiResilience {
-    let mut preset = ai_resilience();
-    preset.plan.reject_affine_recovery_for_test = true;
-    preset
-}
-
 macro_rules! delegate_effect_value {
     ($ty:ty, $plan:expr, $contribution:expr, $label:literal) => {
         impl MiddlewareFactory for $ty {
@@ -240,12 +223,6 @@ delegate_effect_value!(
     },
     |value: &Retry| BuiltinControlContribution::retry(value.clone()),
     "retry"
-);
-delegate_effect_value!(
-    AiResilience,
-    |value: &AiResilience| value.plan.clone(),
-    |value: &AiResilience| BuiltinControlContribution::from_plan(&value.plan),
-    "ai_resilience"
 );
 
 #[cfg(test)]
