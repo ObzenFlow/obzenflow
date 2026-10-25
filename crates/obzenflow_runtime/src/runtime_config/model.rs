@@ -341,7 +341,11 @@ mod tests {
         assert_eq!(model.meta.source, ConfigSource::File);
         assert_eq!(model.meta.scope, ConfigScope::stage("digest"));
         let endpoint = snapshot
-            .resolve_effect_value("ai.models.endpoint", "digest", "obzenflow.ai.chat_completion")
+            .resolve_effect_value(
+                "ai.models.endpoint",
+                "digest",
+                "obzenflow.ai.chat_completion",
+            )
             .unwrap()
             .unwrap();
         assert_eq!(endpoint.value, ConfigValue::Text("ollama".to_string()));

@@ -16,11 +16,11 @@
 //! surface/capability compatibility and passes only typed runtime/infra ports
 //! across the architectural boundary.
 
+use super::control::circuit_breaker::CircuitBreakerMiddleware;
 use super::control::policy::{
     EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy, SinkPolicy, SourcePolicy,
 };
 use super::control::provider::PendingControlRegistration;
-use super::control::circuit_breaker::CircuitBreakerMiddleware;
 use super::control::{ControlMiddlewareAggregator, RateLimiterMiddleware};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};

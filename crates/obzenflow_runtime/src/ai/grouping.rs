@@ -19,19 +19,23 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-/// The function that keys an `ai::map` stage's items.
 pub type AiKeyFn<T, K> = Arc<dyn Fn(&T) -> K + Send + Sync + 'static>;
 
-/// How an `ai::map` stage's grouping member keys its items.
 pub enum AiKeying<T, K> {
-    /// One key for the whole input.
     Unkeyed,
-    /// Groups and windows form within each key, and at most `max_open_keys`
-    /// keys are open at once.
     Keyed {
         key: AiKeyFn<T, K>,
         max_open_keys: NonZeroU64,
     },
+}
+
+impl<T, K> AiKeying<T, K> {
+    pub fn max_open_keys(&self) -> Option<u64> {
+        match self {
+            Self::Unkeyed => None,
+            Self::Keyed { max_open_keys, .. } => Some(max_open_keys.get()),
+        }
+    }
 }
 
 impl<T, K> Clone for AiKeying<T, K> {
@@ -46,9 +50,6 @@ impl<T, K> Clone for AiKeying<T, K> {
     }
 }
 
-/// The pure grouping member of an `ai::map` stage. It keys, closes and
-/// numbers groups, enforces the open-key limit and, at a natural end of input
-/// only, flushes open groups and closes each key's final window.
 #[doc(hidden)]
 pub struct AiGrouping<T, K> {
     stage: String,
@@ -145,7 +146,7 @@ fn grouped_count(value: u64) -> String {
     let digits = value.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(digit);
@@ -172,7 +173,9 @@ where
         match self.trigger {
             None => false,
             Some(ReduceTrigger::OnEof) => groups.groups > 0,
-            Some(ReduceTrigger::EveryNChunks { chunks }) => groups.groups % chunks.get() != 0,
+            Some(ReduceTrigger::EveryNChunks { chunks }) => {
+                !groups.groups.is_multiple_of(chunks.get())
+            }
         }
     }
 
@@ -368,7 +371,7 @@ where
         }
     }
 
-    fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, _: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(Vec::new())
     }
 
@@ -398,6 +401,73 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::StageId;
+    use serde::Deserialize;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Item {
+        value: u64,
+    }
+
+    impl TypedPayload for Item {
+        const EVENT_TYPE: &'static str = "test.ai_grouping.item";
+    }
+
+    fn item(value: u64) -> ChainEvent {
+        TypedFact::from_payload(Item { value })
+            .expect("the item encodes")
+            .into_event(WriterId::from(StageId::new()))
+    }
+
+    #[tokio::test]
+    async fn only_a_natural_end_of_input_flushes_the_open_group_and_ends_grouping() {
+        let mut grouping = AiGrouping::<Item, ()>::new(
+            "digest",
+            NonZeroU64::new(2).expect("a nonzero chunk size"),
+            Some(ReduceTrigger::OnEof),
+            AiKeying::Unkeyed,
+        );
+        grouping.install_writer_id(WriterId::from(StageId::new()));
+        for kind in [
+            StatefulTerminationKind::NaturalEof,
+            StatefulTerminationKind::Drain,
+            StatefulTerminationKind::BeginDrain,
+            StatefulTerminationKind::TruncatedEof,
+            StatefulTerminationKind::PoisonedEof,
+            StatefulTerminationKind::PipelineAbort,
+            StatefulTerminationKind::ForceShutdown,
+        ] {
+            assert_eq!(
+                grouping.finalizes_on(kind),
+                kind == StatefulTerminationKind::NaturalEof,
+                "{kind:?}"
+            );
+        }
+
+        let mut state = grouping.initial_state();
+        for value in 1..=3 {
+            grouping
+                .try_accumulate(&mut state, item(value))
+                .expect("the grouping admits the item");
+        }
+        assert_eq!(grouping.emit(&mut state).expect("one full group").len(), 1);
+
+        let drained = grouping
+            .drain(&state)
+            .await
+            .expect("a natural end of input finishes the grouping");
+        let [remainder, ended] = drained.as_slice() else {
+            panic!("the remainder group and the end of input: {drained:?}");
+        };
+        let remainder =
+            AiMapReduceMapInput::<Item>::try_from_event(remainder).expect("the remainder group");
+        assert_eq!(remainder.group.get(), 1);
+        assert_eq!(remainder.closed_by, GroupClosedBy::EndOfInput);
+        assert_eq!(remainder.items, [Item { value: 3 }]);
+        let ended =
+            AiMapReduceGroupingEnded::try_from_event(ended).expect("the grouping-ended fact");
+        assert_eq!(ended.group_count, 2);
+    }
 
     #[test]
     fn limit_counts_read_as_operators_write_them() {

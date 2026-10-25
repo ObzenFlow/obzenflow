@@ -6,7 +6,9 @@
 
 #![cfg(feature = "ai")]
 
-use obzenflow::ai::{self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec};
+use obzenflow::ai::{
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
+};
 use obzenflow::stages::sinks;
 use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
@@ -80,7 +82,7 @@ impl AiRole<ProbeEvent> for Echo {
     type Effect = ChatCompletion;
     type Out = ProbeEvent;
 
-    fn prepare(&self, _input: &ProbeEvent) -> Result<ChatRequestSpec, HandlerError> {
+    fn prepare(&self, _: &ProbeEvent) -> Result<ChatRequestSpec, HandlerError> {
         Ok(ChatRequestSpec::new("Echo.", "probe"))
     }
 
@@ -100,7 +102,7 @@ fn materialised_failure_probe(
     journal_base: PathBuf,
     factory_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
+    FlowDefinition::materialize(move |_| {
         factory_calls.fetch_add(1, Ordering::SeqCst);
 
         // The host bootstrap must already be installed when materialisation starts.
@@ -112,9 +114,6 @@ fn materialised_failure_probe(
         let output = sinks::ConsoleSink::<ProbeEvent, _>::new(sinks::DebugFormatter);
 
         if matches!(kind, FailureKind::FailureAfterBinding) {
-            // The AI stage binds before topology validation runs, so reaching
-            // this topology error proves that binding neither resolved the
-            // unset secret nor constructed a client.
             return Ok(flow! {
                 name: "flowip_133b_build_order_probe",
                 journals: disk_journals(journal_base),

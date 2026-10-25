@@ -4,15 +4,19 @@
 
 use serde_json::{Map, Value};
 
-pub const AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V2: &str = "obzenflow.ai_map_reduce.collector_fact.v2";
+pub const AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V2: &str =
+    "obzenflow.ai_map_reduce.collector_fact.v2";
 
 /// Canonical byte representation used for AI map-reduce collector equality.
 ///
 /// Object keys are ordered by their UTF-8 byte representation, arrays retain
 /// their original order, strings are not normalised, and the result is compact
 /// JSON. Composite activations, runtime envelope, writer, replay and causality
-/// metadata are deliberately absent.
-pub fn canonical_json_bytes_v2(event_type: &str, payload: Value) -> Result<Vec<u8>, serde_json::Error> {
+/// metadata are absent.
+pub fn canonical_json_bytes_v2(
+    event_type: &str,
+    payload: Value,
+) -> Result<Vec<u8>, serde_json::Error> {
     let value = Value::Object(Map::from_iter([
         (
             "format".to_string(),
@@ -50,11 +54,9 @@ mod tests {
 
     #[test]
     fn sorts_nested_object_keys_and_preserves_array_order() {
-        let bytes = canonical_json_bytes_v2(
-            "example",
-            json!({"z": {"b": 2, "a": 1}, "a": [3, 2, 1]}),
-        )
-        .expect("canonical JSON");
+        let bytes =
+            canonical_json_bytes_v2("example", json!({"z": {"b": 2, "a": 1}, "a": [3, 2, 1]}))
+                .expect("canonical JSON");
         let encoded = String::from_utf8(bytes).expect("UTF-8 JSON");
 
         assert_eq!(

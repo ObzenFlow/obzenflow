@@ -167,6 +167,14 @@ async fn metrics_tail_overwrites_and_preserves_sparse_families() {
 }
 
 #[tokio::test]
+async fn metrics_breaker_state_is_one_series_per_protected_unit() {
+    metrics_backends(
+        obzenflow_runtime::testing::metrics::metrics_breaker_state_is_one_series_per_protected_unit,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn metrics_refresh_failures_retain_values_and_exports_do_no_reads() {
     metrics_backends(obzenflow_runtime::testing::metrics::metrics_refresh_failures_retain_values_and_exports_do_no_reads).await;
 }

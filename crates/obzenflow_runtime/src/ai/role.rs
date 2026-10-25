@@ -12,13 +12,12 @@ pub type AiRequest<R, In> = <<R as AiRole<In>>::Effect as AiEffect>::Request;
 /// The reply an AI role interprets for its effect.
 pub type AiReply<R, In> = <<R as AiRole<In>>::Effect as AiEffect>::Reply;
 
-/// One AI role: domain logic around one model call per input.
+/// An AI role, the domain logic around one model call per input.
 ///
-/// `prepare` builds the request and `interpret` turns the input and the
-/// call's outcome into the role's output. Both are synchronous and
-/// deterministic and perform no I/O, because replay recomputes each request,
-/// and `prepare` may run more than once for one input. One type may
-/// implement several roles, one per input type.
+/// `prepare` builds the request and `interpret` turns the input and the call's
+/// outcome into the role's output. Both are synchronous, deterministic and free
+/// of I/O. Replay recomputes each request, and `prepare` may run more than once
+/// for one input. One type may implement several roles, one per input type.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an AI role for `{In}`",
     label = "this role cannot take `{In}`",

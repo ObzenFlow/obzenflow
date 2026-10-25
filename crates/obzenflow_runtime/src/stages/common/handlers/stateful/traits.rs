@@ -145,8 +145,6 @@ pub trait StatefulHandler: Send + Sync {
         TerminalValidation::Clean
     }
 
-    /// Whether a termination of this kind finalizes the handler's state
-    /// through `drain`. A truncated end of input never does.
     fn finalizes_on(&self, kind: StatefulTerminationKind) -> bool {
         !matches!(kind, StatefulTerminationKind::TruncatedEof)
     }

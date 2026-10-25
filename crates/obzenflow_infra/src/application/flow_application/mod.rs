@@ -401,8 +401,7 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Serve `ai!` stages with these model providers instead of the built-in
-    /// ones, for a custom client or a test fake.
+    /// Serve `ai!` stages with these model providers instead of the built-in ones.
     pub fn with_ai_models(mut self, providers: obzenflow_runtime::ai::AiModelProviders) -> Self {
         self.ai_models = Some(providers);
         self

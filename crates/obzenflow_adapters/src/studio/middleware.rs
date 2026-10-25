@@ -35,8 +35,6 @@ pub(super) fn policy_unit(payload: &ExecutionPayload) -> Option<&StageKey> {
     }
 }
 
-/// The unit a breaker or limiter fact names, keyed as the stage itself when the
-/// writing stage owns it.
 pub(super) fn fact_unit(stage_id: StageId, stage_name: &str, unit: &str) -> ControlUnit {
     if unit == stage_name {
         ControlUnit::Stage(stage_id)
@@ -181,15 +179,13 @@ impl MiddlewareView {
                     },
                     CircuitBreakerFact::HalfOpen {
                         test_request_count, ..
-                    } => {
-                        CircuitBreakerUpdate::StateChange {
-                            state_from,
-                            state_to: "half_open",
-                            context: CircuitTransition::HalfOpen {
-                                test_request_count: *test_request_count,
-                            },
-                        }
-                    }
+                    } => CircuitBreakerUpdate::StateChange {
+                        state_from,
+                        state_to: "half_open",
+                        context: CircuitTransition::HalfOpen {
+                            test_request_count: *test_request_count,
+                        },
+                    },
                     CircuitBreakerFact::StateChanged {
                         from_state,
                         to_state,

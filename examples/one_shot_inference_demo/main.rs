@@ -13,7 +13,9 @@
 //! without resolving credentials or contacting the provider.
 
 use anyhow::Result;
-use obzenflow::ai::{self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec};
+use obzenflow::ai::{
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
+};
 use obzenflow::application::FlowApplication;
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{ai, flow, sink, source, FlowDefinition};
@@ -79,7 +81,7 @@ impl AiRole<ReducedEvidence> for GenerateBrief {
 }
 
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
+    FlowDefinition::materialize(move |_| {
         let evidence = sources::ValuesSource::new([input]);
         let generate_brief = ai::infer(GenerateBrief);
         let ai_breaker = circuit_breaker().consecutive_failures(5);

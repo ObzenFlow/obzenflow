@@ -537,10 +537,14 @@ impl EffectPortRegistry {
         > = HashMap::new();
         let mut same_system = Vec::new();
 
-        for declaration in declarations {
-            let logical_name = declaration.binding().logical_name();
-            let registration = declaration.binding().registration;
-            let package = declaration.binding().pending_package().ok_or_else(|| {
+        for (declaration, binding) in declarations.into_iter().flat_map(|declaration| {
+            declaration
+                .bindings()
+                .map(move |binding| (declaration, binding))
+        }) {
+            let logical_name = binding.logical_name();
+            let registration = binding.registration;
+            let package = binding.pending_package().ok_or_else(|| {
                 EffectRegistrationCollectionError::MissingPackage {
                     binding: logical_name.clone(),
                     effect_type: declaration.effect_type(),
@@ -662,25 +666,26 @@ impl EffectPortRegistry {
         &self,
         declaration: &EffectDeclaration,
     ) -> Result<(), BindingAuthorityFault> {
-        let logical_name = declaration.binding().logical_name();
-        let registration = declaration.binding().registration;
-        let slots = declaration.binding().slots();
+        for binding in declaration.bindings() {
+            let logical_name = binding.logical_name();
 
-        if !self.installed_coordinates.contains(&registration) {
-            return Err(BindingAuthorityFault::registration_missing(
-                declaration.effect_type(),
-                logical_name.clone(),
-            ));
-        }
+            if !self.installed_coordinates.contains(&binding.registration) {
+                return Err(BindingAuthorityFault::registration_missing(
+                    declaration.effect_type(),
+                    logical_name.clone(),
+                ));
+            }
 
-        if slots
-            .iter()
-            .any(|slot| !self.recipes.contains_key(&slot.coordinate))
-        {
-            return Err(BindingAuthorityFault::registration_missing(
-                declaration.effect_type(),
-                logical_name.clone(),
-            ));
+            if binding
+                .slots()
+                .iter()
+                .any(|slot| !self.recipes.contains_key(&slot.coordinate))
+            {
+                return Err(BindingAuthorityFault::registration_missing(
+                    declaration.effect_type(),
+                    logical_name.clone(),
+                ));
+            }
         }
 
         Ok(())

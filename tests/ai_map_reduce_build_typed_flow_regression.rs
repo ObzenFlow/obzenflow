@@ -2,29 +2,26 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Map-reduce `ai!` stages through the ordinary flow builder: composite
-//! subgraph membership reaches edge validation, the generated members run
-//! with a fake chat provider, and joins resolve references through the
-//! stage's boundary.
-
 #[path = "support/fake_ai.rs"]
 pub mod fake_ai;
 
 use async_trait::async_trait;
-use fake_ai::{build_context, build_context_with, chat_model, enforced_backpressure, FakeChatModels};
+use fake_ai::{
+    build_context, build_context_with, chat_model, enforced_backpressure, FakeChatModels,
+};
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk, Keyed,
     Partials, TriggeredMapReduce, Unkeyed,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{ai, flow, join, sink, source, FlowDefinition};
+use obzenflow_dsl::{ai, flow, infinite_source, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
-    TypedJoinHandler,
+    TypedInfiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
@@ -203,9 +200,7 @@ where
 
 #[tokio::test]
 async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
-    // If edge validation ran without composite subgraph membership, the
-    // members' mixed internal feeds would surface as a SingleEdge mismatch.
-    let result = FlowDefinition::materialize(|_runtime_config| {
+    let result = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
         let (out, _) = Collect::<BuildOnlyOut>::new();
         let digest = digest();
@@ -248,7 +243,7 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     .with_metrics_exporter(metrics_model.clone());
     let (out, rows) = Collect::<BuildOnlyOut>::new();
 
-    let handle = FlowDefinition::materialize(move |_runtime_config| {
+    let handle = FlowDefinition::materialize(move |_| {
         let items = ItemSource::one_to(5);
         let digest = digest();
 
@@ -309,7 +304,7 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
 async fn a_map_only_stage_emits_one_output_per_group() {
     let fake = models();
     let (out, rows) = Collect::<BuildOnlyPartial>::new();
-    let handle = FlowDefinition::materialize(move |_runtime_config| {
+    let handle = FlowDefinition::materialize(move |_| {
         let items = ItemSource::one_to(5);
         let tag = ai::map(SumMap).chunks(2);
 
@@ -349,9 +344,12 @@ async fn a_map_only_stage_emits_one_output_per_group() {
 async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of_input() {
     let fake = models();
     let (out, rows) = Collect::<BuildOnlyOut>::new();
-    let handle = FlowDefinition::materialize(move |_runtime_config| {
+    let handle = FlowDefinition::materialize(move |_| {
         let items = ItemSource::one_to(5);
-        let digest = ai::map(SumMap).chunks(1).reduce(SumReduce).every_n_chunks(2);
+        let digest = ai::map(SumMap)
+            .chunks(1)
+            .reduce(SumReduce)
+            .every_n_chunks(2);
 
         Ok(flow! {
             name: "amr_every_n_chunks",
@@ -371,7 +369,10 @@ async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of
     .build(build_context(&fake, "deterministic"))
     .await
     .expect("a rolling map-reduce ai! flow should build");
-    handle.run().await.expect("a rolling map-reduce ai! flow should run");
+    handle
+        .run()
+        .await
+        .expect("a rolling map-reduce ai! flow should run");
 
     assert_eq!(
         *rows.lock().unwrap(),
@@ -384,12 +385,8 @@ async fn a_rolling_trigger_reduces_once_per_k_chunks_and_the_remainder_at_end_of
     assert_eq!(fake.call_count(), 8, "five groups and three reduces");
 }
 
-type ByParity = TriggeredMapReduce<
-    SumMap,
-    SumReduce,
-    BuildOnlyItem,
-    Keyed<u64, fn(&BuildOnlyItem) -> u64>,
->;
+type ByParity =
+    TriggeredMapReduce<SumMap, SumReduce, BuildOnlyItem, Keyed<u64, fn(&BuildOnlyItem) -> u64>>;
 
 fn parity(item: &BuildOnlyItem) -> u64 {
     item.value % 2
@@ -399,7 +396,7 @@ fn parity(item: &BuildOnlyItem) -> u64 {
 async fn a_keyed_stage_never_mixes_keys_in_a_group_or_window() {
     let fake = models();
     let (out, rows) = Collect::<BuildOnlyOut>::new();
-    let handle = FlowDefinition::materialize(move |_runtime_config| {
+    let handle = FlowDefinition::materialize(move |_| {
         let items = ItemSource::one_to(5);
         let by_parity: ByParity = ai::map(SumMap)
             .key_by(parity as fn(&BuildOnlyItem) -> u64)
@@ -425,7 +422,10 @@ async fn a_keyed_stage_never_mixes_keys_in_a_group_or_window() {
     .build(build_context(&fake, "deterministic"))
     .await
     .expect("a keyed map-reduce ai! flow should build");
-    handle.run().await.expect("a keyed map-reduce ai! flow should run");
+    handle
+        .run()
+        .await
+        .expect("a keyed map-reduce ai! flow should run");
 
     let mut totals: Vec<u64> = rows.lock().unwrap().iter().map(|row| row.total).collect();
     totals.sort_unstable();
@@ -439,7 +439,7 @@ async fn a_keyed_stage_never_mixes_keys_in_a_group_or_window() {
 
 #[tokio::test]
 async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
-    let result = FlowDefinition::materialize(|_runtime_config| {
+    let result = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
         let (wrong, _) = Collect::<BuildOnlyItem>::new();
         let digest = digest();
@@ -450,8 +450,6 @@ async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
             stages: {
                 items = source!(BuildOnlyItem => items);
                 digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
-                // No output port carries BuildOnlyItem, so the edge binds the
-                // default `out` port and must fail edge typing there.
                 wrong = sink!(BuildOnlyItem => wrong);
             },
 
@@ -534,11 +532,9 @@ impl TypedFiniteSourceHandler for NoStreamSource {
     }
 }
 
-/// A join reference naming the `ai!` stage resolves through its boundary by
-/// the join's declared reference type.
 #[tokio::test]
 async fn join_reference_resolves_through_composite_boundary_port() {
-    let result = FlowDefinition::materialize(|_runtime_config| {
+    let result = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
         let stream_handler = NoStreamSource;
         let join_handler = LocalNoopJoin;
@@ -606,7 +602,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
 
 #[tokio::test]
 async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
-    let handle = FlowDefinition::materialize(|_runtime_config| {
+    let handle = FlowDefinition::materialize(|_| {
         let items = NoEventSource;
         let (out, _) = Collect::<BuildOnlyOut>::new();
         let digest = digest();
@@ -663,4 +659,473 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
         !serialized.contains(".v1.v1"),
         "boundary payload event types must already be canonical: {serialized}"
     );
+}
+
+#[derive(Clone, Copy)]
+struct TagOne;
+
+impl AiRole<BuildOnlyItem> for TagOne {
+    type Effect = ChatCompletion;
+    type Out = BuildOnlyPartial;
+
+    fn prepare(&self, item: &BuildOnlyItem) -> Result<ChatRequestSpec, HandlerError> {
+        Ok(ChatRequestSpec::new(
+            "Tag the item.",
+            item.value.to_string(),
+        ))
+    }
+
+    fn interpret(
+        &self,
+        item: BuildOnlyItem,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<BuildOnlyPartial, HandlerError> {
+        outcome.replied()?;
+        Ok(BuildOnlyPartial { value: item.value })
+    }
+}
+
+#[tokio::test]
+async fn infer_map_and_map_reduce_lower_to_one_two_and_four_members() {
+    let handle = FlowDefinition::materialize(|_| {
+        let items = NoEventSource;
+        let brief = ai::infer(TagOne);
+        let tag = ai::map(SumMap).chunks(2);
+        let digest = digest();
+        let (briefs, _) = Collect::<BuildOnlyPartial>::new();
+        let (tags, _) = Collect::<BuildOnlyPartial>::new();
+        let (digests, _) = Collect::<BuildOnlyOut>::new();
+
+        Ok(flow! {
+            name: "amr_shapes",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                brief = ai!(BuildOnlyItem -> BuildOnlyPartial => brief);
+                tag = ai!(BuildOnlyItem -> BuildOnlyPartial => tag);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                briefs = sink!(BuildOnlyPartial => briefs);
+                tags = sink!(BuildOnlyPartial => tags);
+                digests = sink!(BuildOnlyOut => digests);
+            },
+
+            topology: {
+                items |> brief;
+                items |> tag;
+                items |> digest;
+                brief |> briefs;
+                tag |> tags;
+                digest |> digests;
+            }
+        })
+    })
+    .build(build_context(&models(), "deterministic"))
+    .await
+    .expect("every ai! shape builds");
+
+    let topology = handle
+        .topology()
+        .expect("a built flow carries its topology");
+    let names = topology
+        .stages()
+        .map(|stage| (stage.id, stage.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert!(names.values().any(|name| name == "brief"));
+    let members = |binding: &str| {
+        let subgraph = topology
+            .subgraphs()
+            .iter()
+            .find(|subgraph| subgraph.binding == binding)
+            .unwrap_or_else(|| panic!("`{binding}` lowers to a composite"));
+        let mut members = subgraph
+            .member_stage_ids
+            .iter()
+            .map(|id| names[id].clone())
+            .collect::<Vec<_>>();
+        members.sort();
+        members
+    };
+    assert!(
+        topology
+            .subgraphs()
+            .iter()
+            .all(|subgraph| subgraph.binding != "brief"),
+        "an infer stage is its one generated member"
+    );
+    assert_eq!(members("tag"), ["tag__chunk", "tag__map"]);
+    assert_eq!(
+        members("digest"),
+        [
+            "digest__chunk",
+            "digest__collect",
+            "digest__map",
+            "digest__reduce"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_zero_reduce_trigger_fails_the_build_naming_the_stage() {
+    let result = FlowDefinition::materialize(|_| {
+        let items = NoEventSource;
+        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let digest = ai::map(SumMap)
+            .chunks(1)
+            .reduce(SumReduce)
+            .every_n_chunks(0);
+
+        Ok(flow! {
+            name: "amr_zero_trigger",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        })
+    })
+    .build(build_context(&models(), "deterministic"))
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("a window that never reduces cannot build"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("stage `digest`: `.every_n_chunks(0)` can never reduce; use 1 or more"),
+        "{error}"
+    );
+}
+
+#[derive(Clone, Copy)]
+struct SumMapExceptThree;
+
+impl AiRole<Chunk<BuildOnlyItem>> for SumMapExceptThree {
+    type Effect = ChatCompletion;
+    type Out = BuildOnlyPartial;
+
+    fn prepare(&self, chunk: &Chunk<BuildOnlyItem>) -> Result<ChatRequestSpec, HandlerError> {
+        if chunk.iter().any(|item| item.value == 3) {
+            return Err(HandlerError::Validation(
+                "item 3 cannot be summed".to_string(),
+            ));
+        }
+        SumMap.prepare(chunk)
+    }
+
+    fn interpret(
+        &self,
+        chunk: Chunk<BuildOnlyItem>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<BuildOnlyPartial, HandlerError> {
+        SumMap.interpret(chunk, outcome)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_group_fails_only_its_rolling_window() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let handle = FlowDefinition::materialize(move |_| {
+        let items = ItemSource::one_to(5);
+        let digest = ai::map(SumMapExceptThree)
+            .chunks(1)
+            .reduce(SumReduce)
+            .every_n_chunks(2);
+
+        Ok(flow! {
+            name: "amr_failed_window",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a rolling map-reduce ai! flow should build");
+    handle
+        .run()
+        .await
+        .expect("a failed group fails its window, not the stage");
+
+    assert_eq!(
+        *rows.lock().unwrap(),
+        vec![BuildOnlyOut { total: 3 }, BuildOnlyOut { total: 5 }],
+        "the window holding item 3 fails, and the windows before and after it reduce"
+    );
+    assert_eq!(
+        fake.call_count(),
+        6,
+        "four groups call the model, and two windows reduce"
+    );
+}
+
+#[tokio::test]
+async fn a_build_without_a_chat_provider_fails_naming_the_stage() {
+    let result = FlowDefinition::materialize(|_| {
+        let items = NoEventSource;
+        let (out, _) = Collect::<BuildOnlyOut>::new();
+        let digest = digest();
+
+        Ok(flow! {
+            name: "amr_no_provider",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::new(
+        fake_ai::runtime_config([chat_model("deterministic")], Default::default()),
+    ))
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("an ai! stage needs a chat model provider"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains(
+            "stage `digest`: this build has no chat model provider; enable the `ai` feature or install one with FlowBuildContext::with_ai_models"
+        ),
+        "{error}"
+    );
+}
+
+#[derive(Clone, Debug)]
+struct EndlessItems {
+    next: u64,
+    emit: u64,
+}
+
+impl TypedInfiniteSourceHandler for EndlessItems {
+    type Output = BuildOnlyItem;
+
+    fn next(&mut self) -> Result<Vec<BuildOnlyItem>, SourceError> {
+        if self.next >= self.emit {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            return Ok(Vec::new());
+        }
+        self.next += 1;
+        Ok(vec![BuildOnlyItem { value: self.next }])
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_infinite_source_reduces_once_per_k_chunks_without_an_end_of_input() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let handle = FlowDefinition::materialize(move |_| {
+        let items = EndlessItems { next: 0, emit: 8 };
+        let digest = ai::map(SumMap)
+            .chunks(1)
+            .reduce(SumReduce)
+            .every_n_chunks(2);
+
+        Ok(flow! {
+            name: "amr_infinite_rolling",
+            journals: memory_journals(),
+            stages: {
+                items = infinite_source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a rolling map-reduce over an infinite source should build");
+    handle.start().await.expect("the flow starts");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while rows.lock().unwrap().len() < 4 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("four windows reduce while the source stays open");
+    handle.stop().await.expect("the flow stops");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle.wait_for_completion(),
+    )
+    .await
+    .expect("the stopped flow terminates")
+    .expect("a stopped flow ends cleanly");
+
+    assert_eq!(
+        *rows.lock().unwrap(),
+        vec![
+            BuildOnlyOut { total: 3 },
+            BuildOnlyOut { total: 7 },
+            BuildOnlyOut { total: 11 },
+            BuildOnlyOut { total: 15 },
+        ]
+    );
+    assert_eq!(fake.call_count(), 12, "eight groups and four reduces");
+}
+
+fn reduce_prompts(fake: &FakeChatModels) -> Vec<String> {
+    fake.recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| fake_ai::last_user_message(&call.request))
+        .filter(|prompt| prompt.ends_with("partials"))
+        .collect()
+}
+
+#[tokio::test]
+async fn twelve_items_in_groups_of_three_reduce_in_two_windows_of_two_groups() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let handle = FlowDefinition::materialize(move |_| {
+        let items = ItemSource::one_to(12);
+        let digest = ai::map(SumMap)
+            .chunks(3)
+            .reduce(SumReduce)
+            .every_n_chunks(2);
+
+        Ok(flow! {
+            name: "amr_two_windows",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                digest = ai!(BuildOnlyItem -> BuildOnlyOut => digest);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> digest;
+                digest |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a rolling map-reduce ai! flow should build");
+    handle
+        .run()
+        .await
+        .expect("a rolling map-reduce ai! flow should run");
+
+    assert_eq!(
+        *rows.lock().unwrap(),
+        vec![BuildOnlyOut { total: 21 }, BuildOnlyOut { total: 57 }]
+    );
+    assert_eq!(reduce_prompts(&fake), ["2 partials", "2 partials"]);
+}
+
+#[tokio::test]
+async fn a_rolling_trigger_fires_per_key() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let handle = FlowDefinition::materialize(move |_| {
+        let items = ItemSource::one_to(8);
+        let by_parity = ai::map(SumMap)
+            .key_by(parity as fn(&BuildOnlyItem) -> u64)
+            .chunks(1)
+            .reduce(SumReduce)
+            .every_n_chunks(2);
+
+        Ok(flow! {
+            name: "amr_keyed_rolling",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                by_parity = ai!(BuildOnlyItem -> BuildOnlyOut => by_parity);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> by_parity;
+                by_parity |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a keyed rolling map-reduce ai! flow should build");
+    handle
+        .run()
+        .await
+        .expect("a keyed rolling map-reduce ai! flow should run");
+
+    let mut totals: Vec<u64> = rows.lock().unwrap().iter().map(|row| row.total).collect();
+    totals.sort_unstable();
+    assert_eq!(
+        totals,
+        vec![4, 6, 12, 14],
+        "odd keys reduce 1+3 and 5+7, even keys 2+4 and 6+8"
+    );
+    assert_eq!(fake.call_count(), 12, "eight groups and four reduces");
+}
+
+#[tokio::test]
+async fn a_failed_group_fails_only_its_keys_window() {
+    let fake = models();
+    let (out, rows) = Collect::<BuildOnlyOut>::new();
+    let handle = FlowDefinition::materialize(move |_| {
+        let items = ItemSource::one_to(8);
+        let by_parity = ai::map(SumMapExceptThree)
+            .key_by(parity as fn(&BuildOnlyItem) -> u64)
+            .chunks(1)
+            .reduce(SumReduce)
+            .every_n_chunks(2);
+
+        Ok(flow! {
+            name: "amr_keyed_failed_window",
+            journals: memory_journals(),
+            stages: {
+                items = source!(BuildOnlyItem => items);
+                by_parity = ai!(BuildOnlyItem -> BuildOnlyOut => by_parity);
+                out = sink!(BuildOnlyOut => out);
+            },
+
+            topology: {
+                items |> by_parity;
+                by_parity |> out;
+            }
+        })
+    })
+    .build(build_context(&fake, "deterministic"))
+    .await
+    .expect("a keyed rolling map-reduce ai! flow should build");
+    handle
+        .run()
+        .await
+        .expect("a failed group fails its window, not the stage");
+
+    let mut totals: Vec<u64> = rows.lock().unwrap().iter().map(|row| row.total).collect();
+    totals.sort_unstable();
+    assert_eq!(
+        totals,
+        vec![6, 12, 14],
+        "the odd key's window holding item 3 fails, and every other window reduces"
+    );
+    assert_eq!(fake.call_count(), 10, "seven groups and three reduces");
 }

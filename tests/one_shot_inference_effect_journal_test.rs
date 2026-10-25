@@ -2,15 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Checked journal witness for a one-shot `ai!` stage built with `ai::infer`.
-
 mod replay_testkit;
 
 #[path = "support/fake_ai.rs"]
 pub mod fake_ai;
 
 use fake_ai::FakeChatModels;
-use obzenflow::ai::{self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec};
+use obzenflow::ai::{
+    self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
+};
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit, MiddlewareFactory};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -51,7 +51,7 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
         .expect("one-shot witness source is readable");
 
     for required in [
-        "FlowDefinition::materialize(move |_runtime_config| {",
+        "FlowDefinition::materialize(move |_| {",
         "use obzenflow::stages::sources;",
         "let evidence = sources::ValuesSource::new([input]);",
         "impl AiRole<ReducedEvidence> for GenerateBrief {",
@@ -615,7 +615,10 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
         .with_cli_args(["obzenflow"])
         .with_config_file(backpressure_config(&journal_base, "off", None))
         .with_ai_models(live.providers())
-        .run_async(build_two_stage_flow(journal_base.clone(), live_outputs.clone()))
+        .run_async(build_two_stage_flow(
+            journal_base.clone(),
+            live_outputs.clone(),
+        ))
         .await
         .expect("two ai! stages run live");
 
@@ -624,7 +627,11 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
         answer: format!("{ANSWER} / {ANSWER}"),
     }];
     assert_eq!(*live_outputs.lock().expect("live output lock"), expected);
-    assert_eq!(live.connect_count(), 2, "each stage connects its own binding");
+    assert_eq!(
+        live.connect_count(),
+        2,
+        "each stage connects its own binding"
+    );
     assert_eq!(live.call_count(), 2);
 
     let archive = latest_run_dir(&journal_base);
@@ -643,9 +650,169 @@ async fn two_ai_stages_run_live_and_strict_replay_without_connecting() {
         .await
         .expect("strict replay serves both recorded replies");
 
-    assert_eq!(*replay_outputs.lock().expect("replay output lock"), expected);
+    assert_eq!(
+        *replay_outputs.lock().expect("replay output lock"),
+        expected
+    );
     assert_eq!(replay.connect_count(), 0);
     assert_eq!(replay.call_count(), 0);
+}
+
+fn ai_config(journal_base: &Path, body: &str) -> PathBuf {
+    let path = journal_base.with_extension("toml");
+    std::fs::write(&path, body).expect("write the run configuration");
+    path
+}
+
+#[tokio::test]
+async fn two_ai_stages_take_their_models_from_their_own_stage_tables() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let live = answering();
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(ai_config(
+            &journal_base,
+            "[ai.models.stages.brief]\nmodel = \"brief-model\"\n\n\
+             [ai.models.stages.reviewed]\nmodel = \"review-model\"\n",
+        ))
+        .with_ai_models(live.providers())
+        .run_async(build_two_stage_flow(
+            journal_base.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+        ))
+        .await
+        .expect("each stage resolves its own model");
+
+    let models = live
+        .recorded
+        .lock()
+        .expect("recorded calls")
+        .iter()
+        .map(|call| (call.request.messages[0].content.clone(), call.model.clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        models,
+        BTreeMap::from([
+            ("Decide.".to_string(), "brief-model".to_string()),
+            ("Review.".to_string(), "review-model".to_string()),
+        ])
+    );
+    let manifest = archive_manifest(&latest_run_dir(&journal_base));
+    assert_eq!(
+        manifest["stages"]["brief"]["ai_models"][0]["model"],
+        "brief-model"
+    );
+    assert_eq!(
+        manifest["stages"]["reviewed"]["ai_models"][0]["model"],
+        "review-model"
+    );
+}
+
+#[tokio::test]
+async fn two_endpoints_each_receive_only_their_own_credential_and_replay_reads_neither() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    let live = answering();
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(ai_config(
+            &journal_base,
+            "[ai.endpoints.east]\nprovider = \"openai_compatible\"\n\
+             base_url = \"https://east.example/v1\"\napi_key_env = \"EAST_KEY\"\n\n\
+             [ai.endpoints.west]\nprovider = \"openai_compatible\"\n\
+             base_url = \"https://west.example/v1\"\napi_key_env = \"WEST_KEY\"\n\n\
+             [ai.models.stages.brief]\nendpoint = \"east\"\nmodel = \"brief-model\"\n\n\
+             [ai.models.stages.reviewed]\nendpoint = \"west\"\nmodel = \"review-model\"\n",
+        ))
+        .with_ai_models(live.providers())
+        .run_async(build_two_stage_flow(
+            journal_base.clone(),
+            live_outputs.clone(),
+        ))
+        .await
+        .expect("each stage calls its own endpoint");
+
+    let reached = live
+        .recorded
+        .lock()
+        .expect("recorded calls")
+        .iter()
+        .map(|call| {
+            (
+                call.request.messages[0].content.clone(),
+                (call.url.clone(), call.credential.clone()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let endpoint = |url: &str, key: &str| (Some(url.to_string()), Some(key.to_string()));
+    assert_eq!(
+        reached,
+        BTreeMap::from([
+            (
+                "Decide.".to_string(),
+                endpoint("https://east.example/v1", "EAST_KEY")
+            ),
+            (
+                "Review.".to_string(),
+                endpoint("https://west.example/v1", "WEST_KEY")
+            ),
+        ])
+    );
+
+    let archive = latest_run_dir(&journal_base);
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let replay = FakeChatModels::forbidden();
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive.as_os_str().to_os_string(),
+            OsString::from("--verify"),
+        ])
+        .with_config_file(ai_config(&journal_base, ""))
+        .with_ai_models(replay.providers())
+        .run_async(build_two_stage_flow(journal_base, replay_outputs.clone()))
+        .await
+        .expect("strict replay needs no endpoint table");
+
+    assert_eq!(
+        *replay_outputs.lock().expect("replay outputs"),
+        *live_outputs.lock().expect("live outputs")
+    );
+    assert_eq!(replay.connect_count() + replay.call_count(), 0);
+}
+
+#[tokio::test]
+async fn an_embeddings_table_for_a_chat_stage_fails_the_build() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let live = answering();
+
+    let error = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(ai_config(
+            &journal_base,
+            "[ai.models]\nmodel = \"deterministic\"\n\n\
+             [ai.embeddings.stages.brief]\nmodel = \"embedding-model\"\n",
+        ))
+        .with_ai_models(live.providers())
+        .run_async(build_two_stage_flow(
+            journal_base,
+            Arc::new(Mutex::new(Vec::new())),
+        ))
+        .await
+        .expect_err("`brief` generates no embeddings");
+    assert!(
+        error
+            .to_string()
+            .contains("config: [ai.embeddings.stages.brief] names no AI stage in this flow"),
+        "{error}"
+    );
+    assert_eq!(live.connect_count() + live.call_count(), 0);
 }
 
 #[tokio::test]
@@ -1386,7 +1553,9 @@ async fn changed_inference_request_is_replay_divergence_before_port_resolution()
     let error = result.expect_err("changed canonical request must fail strict replay");
     let detail = replay_failure_reason(&latest_run_dir(&journal_base)).await;
     assert!(
-        detail.contains("descriptor mismatch"),
+        detail.contains(
+            "effect brief#1/0: the request differs from the recording (prompt or parameters changed); model and stage logic version match"
+        ),
         "typed replay failure should expose descriptor drift: {detail}; application error: {error}"
     );
     assert_eq!(replay.connect_count(), 0);
@@ -1440,7 +1609,9 @@ async fn changed_inference_logic_version_is_replay_divergence_with_identical_req
         .expect_err("a logic-version-only change must invalidate the archived effect descriptor");
     let detail = replay_failure_reason(&latest_run_dir(&journal_base)).await;
     assert!(
-        detail.contains("descriptor mismatch"),
+        detail.contains(
+            "effect brief#1/0: the stage logic version differs from the recording; model matches"
+        ),
         "logic version drift should surface as descriptor divergence: {detail}; application error: {error}"
     );
     assert_eq!(

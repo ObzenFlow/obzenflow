@@ -375,10 +375,6 @@ fn renamed_facade_macros_and_constructors_compile() {
             topology: { input |> output; }
         })
     });
-
-    // Checking the function value compiles every AI macro path without opening
-    // a provider or requiring credentials.
-    let _ = ai_stages;
 }
 
 use self::of::ai::{
@@ -411,7 +407,7 @@ impl AiRole<Chunk<Fact>> for Pure {
     type Effect = ChatCompletion;
     type Out = Fact;
 
-    fn prepare(&self, _chunk: &Chunk<Fact>) -> Result<ChatRequestSpec, HandlerError> {
+    fn prepare(&self, _: &Chunk<Fact>) -> Result<ChatRequestSpec, HandlerError> {
         Ok(request())
     }
 
@@ -429,7 +425,7 @@ impl AiRole<Partials<Fact, Fact>> for Pure {
     type Effect = ChatCompletion;
     type Out = Fact;
 
-    fn prepare(&self, _input: &Partials<Fact, Fact>) -> Result<ChatRequestSpec, HandlerError> {
+    fn prepare(&self, _: &Partials<Fact, Fact>) -> Result<ChatRequestSpec, HandlerError> {
         Ok(request())
     }
 
@@ -443,12 +439,13 @@ impl AiRole<Partials<Fact, Fact>> for Pure {
     }
 }
 
-fn ai_stages() {
+#[test]
+fn renamed_facade_ai_rows_compile() {
     let breaker = of::middleware::circuit_breaker().consecutive_failures(5);
     let infer = of::ai::infer(Pure);
-    let _ = ai!(Fact -> Fact with breaker => infer);
+    ai!(Fact -> Fact with breaker => infer);
     let tag = of::ai::map(Pure).chunks(1);
-    let _ = ai!(Fact -> Fact => tag);
+    ai!(Fact -> Fact => tag);
     let digest = of::ai::map(Pure).chunks(1).reduce(Pure).on_eof();
-    let _ = ai!(Fact -> Fact => digest);
+    ai!(Fact -> Fact => digest);
 }

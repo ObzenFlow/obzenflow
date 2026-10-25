@@ -653,8 +653,7 @@ mod tests {
         use crate::middleware::{
             HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
             MiddlewareAttachmentRequest, MiddlewareAttachmentSite, ProtectedUnit, ProtectedUnitId,
-            ProtectedUnitOwner,
-            SourceStageIngressOwner,
+            ProtectedUnitOwner, SourceStageIngressOwner,
         };
         use obzenflow_core::ingress::{
             IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq, IngressKey,

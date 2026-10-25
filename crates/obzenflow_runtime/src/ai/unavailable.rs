@@ -7,7 +7,11 @@ use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_core::ai::{AiProviderFailureKind, AiUnavailable, AiUnavailableCause};
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 
-fn fatal(code: StageFatalCode, reason: StageFatalReason, detail: impl Into<String>) -> HandlerError {
+fn fatal(
+    code: StageFatalCode,
+    reason: StageFatalReason,
+    detail: impl Into<String>,
+) -> HandlerError {
     HandlerError::Fatal(StageFatal::new(code, reason, detail))
 }
 

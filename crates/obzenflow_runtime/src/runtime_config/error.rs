@@ -78,6 +78,12 @@ pub enum ConfigResolveError {
     UnkeyedAiStage { stage: String },
     /// An entry names a member the build generated for an authored stage.
     GeneratedMember { table: String, owner: String },
+    /// A middleware entry for an AI stage that lists no middleware reading it.
+    UnlistedAiControl {
+        table: String,
+        key_path: String,
+        stage: String,
+    },
 }
 
 impl fmt::Display for ConfigResolveError {
@@ -174,6 +180,14 @@ impl fmt::Display for ConfigResolveError {
             Self::GeneratedMember { table, owner } => write!(
                 f,
                 "config: [{table}] names a generated member of `{owner}`; configure `{owner}`"
+            ),
+            Self::UnlistedAiControl {
+                table,
+                key_path,
+                stage,
+            } => write!(
+                f,
+                "config: [{table}] sets {key_path}, but `{stage}` lists no middleware in `with` that reads it"
             ),
         }
     }

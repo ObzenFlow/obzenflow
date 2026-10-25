@@ -7,14 +7,13 @@
 pub mod effects;
 mod error_mapping;
 mod shapes;
+mod unreachable;
 
 pub use effects::{
     ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, ChatCompletionBuildError,
     EmbeddingBindingEvidence, EmbeddingBindingEvidenceBuildError, EmbeddingGeneration,
     EmbeddingGenerationBuildError, CHAT_CLIENT, EMBEDDING_CLIENT,
 };
-pub use shapes::{
-    infer, map, Chunked, Infer, Keyed, Map, MapReduce, TriggeredMapReduce, Unkeyed,
-};
+pub use shapes::{infer, map, Chunked, Infer, Keyed, Map, MapReduce, TriggeredMapReduce, Unkeyed};
 #[doc(hidden)]
 pub use shapes::{AiKeySpec, AiTrigger, InferHasNoKey, KeyByBeforeChunks};

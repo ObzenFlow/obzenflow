@@ -378,7 +378,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::ForwardingTerminal {
-                on StatefulEvent::TerminalForwarded => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                on StatefulEvent::TerminalForwarded => |_: &StatefulState<H>, _: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
                     let drain_requested = ctx.drain_requested_by_handle;
                     Box::pin(async move { Ok(Transition { next_state: StatefulState::ProducingFinalOutput, actions: vec![StatefulAction::ProduceFinalOutput { drain_requested }] }) })
                 };

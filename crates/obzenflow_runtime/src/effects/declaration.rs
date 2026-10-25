@@ -154,6 +154,7 @@ pub struct EffectDeclaration {
     idempotency_key_policy: IdempotencyKeyPolicy,
     syntax: EffectDeclarationSyntax,
     pub(crate) binding: EffectDeclarationBinding,
+    recorded: Vec<EffectDeclarationBinding>,
     /// Event-sourcing meaning selected by the effect type.
     outcome_kind: EffectOutcomeKind,
     /// Public facts this effect may author. Recorded replies project an empty
@@ -177,6 +178,11 @@ impl EffectDeclaration {
     pub fn runtime_projection(&self) -> Self {
         let mut declaration = self.clone();
         declaration.binding = declaration.binding.runtime_projection();
+        declaration.recorded = declaration
+            .recorded
+            .iter()
+            .map(EffectDeclarationBinding::runtime_projection)
+            .collect();
         declaration
     }
 
@@ -217,6 +223,7 @@ impl EffectDeclaration {
             idempotency_key_policy,
             syntax,
             binding,
+            recorded: Vec::new(),
             outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
             public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
                 E::Outcome,
@@ -305,8 +312,6 @@ impl EffectDeclaration {
         )
     }
 
-    /// Declare a configured effect for the `ai!` stage that resolved its
-    /// binding. The `ai!` row acknowledges the effect's at-least-once safety.
     #[doc(hidden)]
     pub fn configured<E>(binding: &EffectBinding<E>) -> Self
     where
@@ -329,12 +334,42 @@ impl EffectDeclaration {
         )
     }
 
+    #[doc(hidden)]
+    pub fn configured_with_recorded<'a, E>(
+        binding: &EffectBinding<E>,
+        recorded: impl IntoIterator<Item = &'a EffectBinding<E>>,
+    ) -> Self
+    where
+        E: ConfiguredEffect,
+    {
+        let mut declaration = Self::configured(binding);
+        declaration.recorded = recorded
+            .into_iter()
+            .map(EffectBinding::declaration_binding)
+            .collect();
+        declaration
+    }
+
     pub(crate) fn binding_identity(&self) -> obzenflow_core::EffectBindingIdentity {
         self.binding.identity()
     }
 
     pub(crate) fn binding(&self) -> &EffectDeclarationBinding {
         &self.binding
+    }
+
+    pub(crate) fn bindings(&self) -> impl Iterator<Item = &EffectDeclarationBinding> {
+        std::iter::once(&self.binding).chain(&self.recorded)
+    }
+
+    pub(crate) fn has_recorded_bindings(&self) -> bool {
+        !self.recorded.is_empty()
+    }
+
+    pub(crate) fn for_binding_use(&self, binding: &EffectDeclarationBinding) -> Self {
+        let mut declaration = self.clone();
+        declaration.binding = binding.clone();
+        declaration
     }
 }
 

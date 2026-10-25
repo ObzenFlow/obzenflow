@@ -1681,6 +1681,224 @@ async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
     assert_eq!(metrics.rejections_total, 1);
 }
 
+fn breaker_transitions(
+    report: &obzenflow_runtime::effects::EffectBoundaryReport,
+) -> Vec<(WriterId, &'static str, String)> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) => {
+                let transition = match fact {
+                    CircuitBreakerFact::Opened { .. } => "opened",
+                    CircuitBreakerFact::HalfOpen { .. } => "half_open",
+                    CircuitBreakerFact::Closed { .. } => "closed",
+                    CircuitBreakerFact::StateChanged { .. } => "state_changed",
+                    CircuitBreakerFact::Rejected { .. }
+                    | CircuitBreakerFact::AttemptSettled { .. } => return None,
+                };
+                Some((event.writer_id, transition, fact.unit().as_str().to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn composite_members(
+    factory: &dyn crate::middleware::MiddlewareFactory,
+) -> (
+    Arc<ControlMiddlewareAggregator>,
+    StageId,
+    Arc<PerEffectPolicyBoundary>,
+    StageId,
+    Arc<PerEffectPolicyBoundary>,
+) {
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let owner = ProtectedUnitOwner::Composite(StageKey::from("digest"));
+    let member = || {
+        let config = test_stage_config(factory);
+        let attachment = materialize_owned_effect_attachment(
+            factory,
+            &config,
+            &control,
+            EffectSafety::Idempotent,
+            owner.clone(),
+        )
+        .expect("a composite member materializes its share of the unit");
+        (
+            config.stage_id,
+            Arc::new(boundary_with_chain(vec![attachment])),
+        )
+    };
+    let (map, map_boundary) = member();
+    let (reduce, reduce_boundary) = member();
+    (control, map, map_boundary, reduce, reduce_boundary)
+}
+
+#[tokio::test(start_paused = true)]
+async fn composite_members_share_one_breaker_and_write_their_own_evidence() {
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker()
+            .consecutive_failures(1)
+            .open_for(Duration::from_millis(2))
+            .probes(1),
+    )
+    .build()
+    .expect("composite breaker aggregate");
+    let (control, map, map_boundary, reduce, reduce_boundary) = composite_members(factory.as_ref());
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let outage = map_boundary
+        .around_repeatable_effect(
+            &identity_at(1),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| {
+                Err(EffectError::Timeout("map outage".to_string()))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        outage.outcome,
+        EffectBoundaryOutcome::Executed(Err(_))
+    ));
+    assert_eq!(
+        breaker_transitions(&outage),
+        [(WriterId::from(map), "opened", "digest".to_string())]
+    );
+
+    let rejected = reduce_boundary
+        .around_repeatable_effect(
+            &identity_at(2),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        rejected.outcome,
+        EffectBoundaryOutcome::Aborted(ref reason)
+            if reason.cause.code.as_str() == "circuit_open"
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the map outage fails the reduce call before it reaches the dependency"
+    );
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let probe = reduce_boundary
+        .around_repeatable_effect(
+            &identity_at(3),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        probe.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(
+        breaker_transitions(&probe),
+        [
+            (WriterId::from(reduce), "half_open", "digest".to_string()),
+            (WriterId::from(reduce), "closed", "digest".to_string()),
+        ],
+        "the member whose call caused a transition writes it"
+    );
+
+    assert!(
+        control
+            .effect_circuit_breaker_snapshotters(&reduce)
+            .is_empty(),
+        "the shared unit registers its measurements once"
+    );
+    let shared = control.effect_circuit_breaker_snapshotters(&map);
+    let metrics = shared[0].1().expect("measurement captured");
+    assert_eq!(metrics.requests_total, 2);
+    assert_eq!(metrics.failures_total, 1);
+    assert_eq!(metrics.successes_total, 1);
+    assert_eq!(metrics.rejections_total, 1);
+    assert_eq!(metrics.opened_total, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn half_open_admits_one_probe_across_composite_members() {
+    let factory = EffectPlanFactory::with_breaker(
+        crate::middleware::control::circuit_breaker()
+            .consecutive_failures(1)
+            .open_for(Duration::from_secs(30))
+            .probes(1),
+    )
+    .rate_limit_each_attempt(crate::middleware::control::rate_limit(1_000.0).burst_capacity(3.0))
+    .build()
+    .expect("composite resilience aggregate");
+    let (control, map, map_boundary, reduce, reduce_boundary) = composite_members(factory.as_ref());
+
+    map_boundary
+        .around_repeatable_effect(
+            &identity_at(1),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async {
+                Err(EffectError::Timeout("open the shared unit".to_string()))
+            }),
+        )
+        .await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+
+    let probe_started = Arc::new(tokio::sync::Notify::new());
+    let release_probe = Arc::new(tokio::sync::Notify::new());
+    let probe = {
+        let reduce_boundary = reduce_boundary.clone();
+        let probe_started = probe_started.clone();
+        let release_probe = release_probe.clone();
+        tokio::spawn(async move {
+            reduce_boundary
+                .around_repeatable_effect(
+                    &identity_at(2),
+                    &data_event(),
+                    RepeatableEffectOperation::new(move || {
+                        let probe_started = probe_started.clone();
+                        let release_probe = release_probe.clone();
+                        async move {
+                            probe_started.notify_one();
+                            release_probe.notified().await;
+                            Ok(Vec::new())
+                        }
+                    }),
+                )
+                .await
+        })
+    };
+    probe_started.notified().await;
+
+    let map_calls = Arc::new(AtomicUsize::new(0));
+    let rejected = map_boundary
+        .around_repeatable_effect(
+            &identity_at(3),
+            &data_event(),
+            scripted_operation(map_calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        rejected.outcome,
+        EffectBoundaryOutcome::Aborted(ref reason)
+            if reason.cause.code.as_str() == "probe_in_progress"
+    ));
+    assert_eq!(map_calls.load(Ordering::SeqCst), 0);
+
+    release_probe.notify_one();
+    let probe = probe.await.expect("the reduce probe completes");
+    assert!(matches!(
+        probe.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(
+        effect_limiter_events(control.as_ref(), map),
+        2,
+        "one bucket paces both members"
+    );
+    assert!(control.effect_rate_limiter_snapshotters(&reduce).is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn limiter_wait_is_not_a_slow_dependency_sample() {
     let factory = EffectPlanFactory::with_breaker(

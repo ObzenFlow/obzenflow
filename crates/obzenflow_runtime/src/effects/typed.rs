@@ -122,15 +122,15 @@ where
         self.core.project_named_effect::<E>()
     }
 
-    /// The configured binding this stage declared for `E`.
     #[doc(hidden)]
-    pub fn project_configured_effect<E, At>(
+    pub fn configured_effect_for_next_cursor<E, At, R>(
         &mut self,
-    ) -> Result<EffectBindingUse<E>, EffectError>
+        build: impl FnMut(EffectBindingUse<E>) -> Result<E, R>,
+    ) -> Result<Result<E, R>, EffectError>
     where
         E: ConfiguredEffect + AllowedEffectsAllowEffect<AllowedEffects, At>,
     {
-        self.core.project_configured_effect::<E>()
+        self.core.configured_effect_for_next_cursor::<E, R>(build)
     }
 
     /// Author one flat output fact declared by `Output`.

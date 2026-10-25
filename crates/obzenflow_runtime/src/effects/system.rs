@@ -378,8 +378,6 @@ pub struct EffectAcknowledgement {
     safety: AcknowledgedSafety,
 }
 
-/// An effect a stage row may acknowledge. AI effects are acknowledged by the
-/// `ai!` row that performs them.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is an AI effect; an `ai!` row is itself the acknowledgement for its AI effect",
@@ -390,7 +388,6 @@ pub trait RowAcknowledgedEffect: Effect {}
 
 impl<E: NamedEffect> RowAcknowledgedEffect for E {}
 
-/// Proof that an effectful handler's effect set holds no AI effect.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "an effectful handler cannot perform an AI effect",
@@ -407,7 +404,7 @@ impl<E: NamedEffect, Rest: HandlerPerformableEffects> HandlerPerformableEffects
 }
 
 #[doc(hidden)]
-pub fn assert_handler_performs_no_ai_effect<H>(_handler: &H)
+pub fn assert_handler_performs_no_ai_effect<H>(_: &H)
 where
     H: EffectfulTransformHandler,
     <H::AllowedEffects as EffectSet>::Members: HandlerPerformableEffects,
@@ -415,7 +412,7 @@ where
 }
 
 #[doc(hidden)]
-pub fn assert_stateful_handler_performs_no_ai_effect<H>(_handler: &H)
+pub fn assert_stateful_handler_performs_no_ai_effect<H>(_: &H)
 where
     H: EffectfulStatefulHandler,
     <H::AllowedEffects as EffectSet>::Members: HandlerPerformableEffects,

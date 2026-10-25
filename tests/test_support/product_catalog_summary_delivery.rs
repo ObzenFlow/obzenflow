@@ -10,8 +10,7 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     materialize_factory_checked, MiddlewareAttachmentRequest, MiddlewareAttachmentSite,
     MiddlewareSurface, ProtectedUnit, ProtectedUnitId, ProtectedUnitOwner, SinkDeliverySurface,
-    SinkDeliveryTarget,
-    SinkDeliveryUnitId,
+    SinkDeliveryTarget, SinkDeliveryUnitId,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::StageId;

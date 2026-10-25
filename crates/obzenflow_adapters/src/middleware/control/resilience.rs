@@ -1862,7 +1862,8 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         | EffectError::Permanent(_)
         | EffectError::Validation(_)
         | EffectError::Domain(_)
-        | EffectError::Execution(_) => true,
+        | EffectError::Execution(_)
+        | EffectError::DependencyFailed { .. } => true,
         EffectError::RecordedFailure { error_type, .. } => matches!(
             error_type.as_str(),
             "timeout"
@@ -1891,7 +1892,6 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         | EffectError::CompletedWithoutOutput { .. }
         | EffectError::CompletedEmptyWithOutput { .. }
         | EffectError::EffectTargetInvariantViolation { .. }
-        | EffectError::DependencyFailed { .. }
         | EffectError::RecoveryAbandoned { .. }
         | EffectError::TransactionalCommitMissing { .. }
         | EffectError::ReplayArchive(_) => false,

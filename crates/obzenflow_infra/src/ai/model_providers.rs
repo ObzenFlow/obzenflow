@@ -2,8 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The chat and embedding model providers a host installs for `ai!` stages.
-
 use super::endpoint_identity::{
     bound_chat_target, bound_embedding_target, default_ollama_base_url, default_openai_base_url,
     endpoint_has_credentials,
@@ -12,8 +10,8 @@ use super::resolve_estimator_for_model;
 use crate::ai::rig::RigChatClient;
 use crate::ai::NativeEmbeddingClient;
 use obzenflow_core::ai::{
-    AiEndpoint, AiModelProviderError, AiModelSpec, AiProvider, ChatBindingFingerprint,
-    ChatClient, ChatModelDescription, ChatModelProvider, ChatTarget, EmbeddingBindingFingerprint,
+    AiEndpoint, AiModelProviderError, AiModelSpec, AiProvider, ChatBindingFingerprint, ChatClient,
+    ChatModelDescription, ChatModelProvider, ChatTarget, EmbeddingBindingFingerprint,
     EmbeddingClient, EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingTarget,
     ResolvedTokenEstimator,
 };
@@ -222,7 +220,12 @@ mod tests {
     use super::*;
     use obzenflow_core::config::SecretRef;
 
-    fn endpoint(name: &str, provider: &str, base_url: Option<&str>, key: Option<&str>) -> AiEndpoint {
+    fn endpoint(
+        name: &str,
+        provider: &str,
+        base_url: Option<&str>,
+        key: Option<&str>,
+    ) -> AiEndpoint {
         AiEndpoint {
             name: name.to_string(),
             provider: AiProvider::from(provider),
@@ -267,8 +270,13 @@ mod tests {
     #[test]
     fn a_compatible_endpoint_without_a_credential_reads_no_environment() {
         assert_eq!(
-            credential(&endpoint("local", OPENAI_COMPATIBLE, Some("http://127.0.0.1:1/v1"), None))
-                .unwrap(),
+            credential(&endpoint(
+                "local",
+                OPENAI_COMPATIBLE,
+                Some("http://127.0.0.1:1/v1"),
+                None
+            ))
+            .unwrap(),
             ""
         );
     }

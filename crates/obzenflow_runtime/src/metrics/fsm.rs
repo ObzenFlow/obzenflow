@@ -199,7 +199,6 @@ impl std::ops::DerefMut for MetricsAggregatorContext {
     }
 }
 
-/// The newest breaker state a protected unit's facts reported.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct ObservedCircuitState {
@@ -1501,12 +1500,12 @@ impl MetricsAggregatorAction {
                                     _ => None,
                                 };
                                 if let Some(value) = state {
-                                    let unit = if fact.unit().as_str() == event.flow_context.stage_name
-                                    {
-                                        ControlUnit::Stage(stage_id)
-                                    } else {
-                                        ControlUnit::Composite(fact.unit().clone())
-                                    };
+                                    let unit =
+                                        if fact.unit().as_str() == event.flow_context.stage_name {
+                                            ControlUnit::Stage(stage_id)
+                                        } else {
+                                            ControlUnit::Composite(fact.unit().clone())
+                                        };
                                     let observed = ObservedCircuitState {
                                         value,
                                         event_time: event.processing.event_time,

@@ -2,9 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Resume, recovery, failure-routing and measurement proofs for chat and
-//! embedding `ai!` stages.
-
 use super::*;
 use fake_ai::{chat_model, embedding_model, runtime_config};
 use obzenflow::ai::{AiClientError, EmbeddingResponse};
@@ -277,7 +274,10 @@ async fn wait_for_running(handle: &FlowHandle) {
 
 fn models_context(chat: &FakeChatModels, embed: &FakeEmbeddingModels) -> FlowBuildContext {
     FlowBuildContext::new(runtime_config(
-        [chat_model("fixture-chat"), embedding_model("fixture-embedding")],
+        [
+            chat_model("fixture-chat"),
+            embedding_model("fixture-embedding"),
+        ],
         AiEndpointTables::default(),
     ))
     .with_ai_models(fake_ai::providers(chat, embed))
@@ -289,10 +289,7 @@ async fn run_resumable_until(
     outputs: &Mutex<Vec<TicketEmbedded>>,
     expected: usize,
 ) {
-    let handle = flow
-        .build(context)
-        .await
-        .expect("resumable AI flow builds");
+    let handle = flow.build(context).await.expect("resumable AI flow builds");
     wait_for_running(&handle).await;
     wait_for_outputs(outputs, expected).await;
     handle.stop().await.expect("test flow accepts stop");
@@ -363,7 +360,10 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
     assert_eq!(resumed_embed.call_count(), 1);
 
     let resumed_archive = latest_run_dir(&journal_base);
-    for (stage, effect_type) in [("chat", CHAT_EFFECT_TYPE), ("embedding", EMBEDDING_EFFECT_TYPE)] {
+    for (stage, effect_type) in [
+        ("chat", CHAT_EFFECT_TYPE),
+        ("embedding", EMBEDDING_EFFECT_TYPE),
+    ] {
         assert_eq!(
             stage_events(&resumed_archive, stage)
                 .await
@@ -442,9 +442,11 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
             .count(),
         1
     );
-    assert!(in_doubt_events
-        .iter()
-        .all(|event| successful_effect_record(event, EMBEDDING_EFFECT_TYPE).is_none()));
+    assert!(in_doubt_events.iter().all(|event| successful_effect_record(
+        event,
+        EMBEDDING_EFFECT_TYPE
+    )
+    .is_none()));
     assert!(
         in_doubt_events
             .iter()
@@ -468,7 +470,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
             EmbedSummary::of_width(3),
         ))
         .await
-        .expect("the stage's breaker authorises one recovery attempt");
+        .expect("the stage's breaker authorizes one recovery attempt");
 
     assert_eq!(resumed_chat.connect_count(), 0);
     assert_eq!(resumed_chat.call_count(), 0);
@@ -667,7 +669,7 @@ async fn empty_embedding_inputs_fail_validation_before_connect_attempt_or_effect
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn held_provider_serialises_data_and_keeps_eof_out_of_roles() {
+async fn held_provider_serializes_data_and_keeps_eof_out_of_roles() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
     let release = Arc::new(Semaphore::new(0));

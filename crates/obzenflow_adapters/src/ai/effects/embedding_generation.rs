@@ -3,23 +3,23 @@
 // https://obzenflow.dev
 
 use crate::ai::error_mapping::{ai_client_error_to_effect_error, provider_error_to_resolution};
+use crate::ai::unreachable::UnreachableEmbeddingClient;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    params_hash_for_embedding, prompt_hash_for_embedding_inputs, AiModelSpec,
+    params_hash_for_embedding, prompt_hash_for_embedding_inputs, AiEndpoint, AiModelSpec,
     CanonicalizationComponent, EmbeddingClient, EmbeddingDimensions, EmbeddingGenerationOutcome,
-    EmbeddingGenerationReply, EmbeddingModelProvider, EmbeddingRequest, EmbeddingRequestSpec,
-    EmbeddingResponse, EmbeddingTarget, LlmHashes, LlmObservability, EMBEDDING_CLIENT_PORT,
+    EmbeddingGenerationReply, EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingRequest,
+    EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, LlmHashes, LlmObservability,
+    EMBEDDING_CLIENT_PORT,
 };
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_core::BoundedBindingEvidence;
-use obzenflow_runtime::ai::{
-    AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError,
-};
+use obzenflow_runtime::ai::{AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError};
 use obzenflow_runtime::effects::{
     BoundEffect, Configured, Effect, EffectBindingEvidence, EffectBindingUse, EffectContext,
-    EffectError, EffectPortMetadataContext, EffectPortResolutionError,
-    EffectPortResolverWithMetadata, EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder,
-    EffectSafety, LogicalEffectBindingName, RecordedReply, ResolvedEffectPort,
+    EffectError, EffectPortMetadataContext, EffectPortResolverWithMetadata, EffectPortSlot,
+    EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, LogicalEffectBindingName,
+    RecordedReply, ResolvedEffectPort,
 };
 use std::sync::Arc;
 
@@ -256,16 +256,8 @@ impl AiEffect for EmbeddingGeneration {
                 provider,
             } => {
                 let description = provider.describe(&endpoint, &model)?;
-                let connect_with = description.clone();
                 let name = endpoint.name.clone();
-                let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
-                    Arc::new(move || {
-                        let client = provider
-                            .connect(&endpoint, &connect_with)
-                            .map_err(provider_error_to_resolution)?;
-                        let metadata = Arc::new(client.target().clone());
-                        Ok(ResolvedEffectPort::new(client, metadata))
-                    });
+                let resolver = connecting(provider, endpoint, description.clone());
                 (stage, name, description, resolver)
             }
             AiModelSource::Recorded {
@@ -274,8 +266,28 @@ impl AiEffect for EmbeddingGeneration {
                 provider,
             } => {
                 let description = provider.describe_recorded(&spec)?;
-                let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
-                    Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed));
+                let resolver = unreachable(description.target.clone(), spec.endpoint.clone());
+                (stage, spec.endpoint, description, resolver)
+            }
+            AiModelSource::Kept {
+                stage,
+                spec,
+                endpoint,
+                provider,
+            } => {
+                let description = provider.describe_recorded(&spec)?;
+                let serving = endpoint.filter(|endpoint| {
+                    provider
+                        .describe(endpoint, &spec.model)
+                        .is_ok_and(|current| {
+                            current.target.binding_fingerprint
+                                == description.target.binding_fingerprint
+                        })
+                });
+                let resolver = match serving {
+                    Some(endpoint) => connecting(provider, endpoint, description.clone()),
+                    None => unreachable(description.target.clone(), spec.endpoint.clone()),
+                };
                 (stage, spec.endpoint, description, resolver)
             }
         };
@@ -296,6 +308,33 @@ impl AiEffect for EmbeddingGeneration {
             .finish()?;
         Ok(AiBinding { binding, spec })
     }
+}
+
+fn connecting(
+    provider: Arc<dyn EmbeddingModelProvider>,
+    endpoint: AiEndpoint,
+    description: EmbeddingModelDescription,
+) -> EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> {
+    Arc::new(move || {
+        let client = provider
+            .connect(&endpoint, &description)
+            .map_err(provider_error_to_resolution)?;
+        let metadata = Arc::new(client.target().clone());
+        Ok(ResolvedEffectPort::new(client, metadata))
+    })
+}
+
+fn unreachable(
+    target: EmbeddingTarget,
+    endpoint: String,
+) -> EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> {
+    Arc::new(move || {
+        let client: Arc<dyn EmbeddingClient> = Arc::new(UnreachableEmbeddingClient::new(
+            target.clone(),
+            endpoint.clone(),
+        ));
+        Ok(ResolvedEffectPort::new(client, Arc::new(target.clone())))
+    })
 }
 
 fn validate_response(

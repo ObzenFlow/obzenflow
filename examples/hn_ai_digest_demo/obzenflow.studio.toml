@@ -3,9 +3,7 @@
 # The runtime registers with the phonebook and the browser attaches directly
 # to this process's port; the phonebook never proxies the data path.
 #
-# This is the composite showcase: the `digest` map-reduce `ai!` stage renders
-# as one collapsed node in Studio (FLOWIP-128a), not four `digest__*` member
-# stages.
+# Studio renders the `digest` map-reduce `ai!` stage as one collapsed node.
 #
 # The HN feed is mocked by default (set source = "live" under [app] for the
 # real API). The stage's endpoint and model resolve from [ai.models] below.

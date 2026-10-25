@@ -6,9 +6,8 @@
 //! closed protocol shape; application values nested inside it remain untouched.
 
 use crate::ai::{
-    AiMapReduceChunkFailed, AiMapReduceGroupingEnded, AiMapReduceMapInput,
-    AiMapReduceReduceFailed, AiMapReduceReduceInput, AiMapReduceTaggedPartial,
-    AiMapReduceWindowFailed,
+    AiMapReduceChunkFailed, AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceReduceFailed,
+    AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapReduceWindowFailed,
 };
 use serde::{Serialize, Serializer};
 use serde_json::Value;

@@ -38,7 +38,6 @@ struct RateLimiterRegistration {
 /// bounded by the stage's declared `effects:` set.
 type ControlKey = (StageId, Option<EffectTypeKey>);
 
-/// A policy shared by the members of one authored composite, per effect.
 type SharedKey = (StageKey, Option<EffectTypeKey>);
 
 pub(crate) enum PendingControlRegistration {

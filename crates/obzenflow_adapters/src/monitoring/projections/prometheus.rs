@@ -870,7 +870,10 @@ impl PrometheusProjection {
                         .map(|metadata| format_composite_unit_labels(composite, metadata)),
                 };
                 if let Some(labels) = labels {
-                    writeln!(output, "obzenflow_circuit_breaker_state{{{labels}}} {value}")?;
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_state{{{labels}}} {value}"
+                    )?;
                 }
             }
             writeln!(output)?;
@@ -2962,6 +2965,56 @@ mod tests {
             escape_label(&stage_id.to_string())
         );
         assert!(output.contains(&expected));
+    }
+
+    #[test]
+    fn a_composite_breaker_is_one_series_labelled_by_the_authored_stage() {
+        let exporter = PrometheusProjection::new();
+        let (map, reduce, other) = (StageId::new(), StageId::new(), StageId::new());
+        let mut snapshot = AppMetricsSnapshot::default();
+        for (stage_id, name) in [
+            (map, "digest__map"),
+            (reduce, "digest__reduce"),
+            (other, "other"),
+        ] {
+            snapshot.stage_metadata.insert(
+                stage_id,
+                StageMetadata {
+                    name: name.to_string(),
+                    flow_name: "hn_ai_digest".to_string(),
+                    stage_type: obzenflow_core::event::context::StageType::Transform,
+                    reference_mode: None,
+                    flow_id: None,
+                },
+            );
+        }
+        snapshot
+            .circuit_breaker_state
+            .insert(ControlUnit::Composite("digest".into()), 1.0);
+        snapshot
+            .circuit_breaker_state
+            .insert(ControlUnit::Stage(other), 0.0);
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+
+        let output = exporter.render(&view).unwrap();
+        let series = output
+            .lines()
+            .filter(|line| line.starts_with("obzenflow_circuit_breaker_state{"))
+            .collect::<Vec<_>>();
+        assert_eq!(series.len(), 2);
+        assert!(series.contains(
+            &"obzenflow_circuit_breaker_state{flow=\"hn_ai_digest\",stage=\"digest\"} 1"
+        ));
+        assert!(series.contains(
+            &format!(
+                "obzenflow_circuit_breaker_state{{flow=\"hn_ai_digest\",stage=\"other\",stage_id=\"{}\"}} 0",
+                escape_label(&other.to_string())
+            )
+            .as_str()
+        ));
     }
 
     #[test]

@@ -32,9 +32,8 @@ impl AiProviderPort for dyn EmbeddingModelProvider {
     }
 }
 
-/// An effect only an `ai!` stage performs: one model call whose binding comes
-/// from configuration at the stage's point, or from the run's archive when a
-/// run is reconstructed.
+/// An effect only an `ai!` stage performs, one model call bound from configuration
+/// at the stage's point or from the run's archive on reconstruction.
 pub trait AiEffect:
     ConfiguredEffect<
     OutcomeSemantics = RecordedReply,
@@ -76,10 +75,20 @@ pub enum AiModelSource<P: ?Sized> {
         model: String,
         provider: Arc<P>,
     },
-    /// The spec a reconstructed run's archive recorded. Never connects.
+    /// The spec a reconstructed run's archive recorded. Strict replay never
+    /// calls it, and a call through it answers that the endpoint is unreachable.
     Recorded {
         stage: String,
         spec: AiModelSpec,
+        provider: Arc<P>,
+    },
+    /// A spec an earlier run recorded, kept on resume for cursors with history.
+    /// It connects through `endpoint` while that endpoint still serves the
+    /// recorded target, and is otherwise unreachable.
+    Kept {
+        stage: String,
+        spec: AiModelSpec,
+        endpoint: Option<AiEndpoint>,
         provider: Arc<P>,
     },
 }

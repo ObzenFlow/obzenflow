@@ -262,15 +262,6 @@ where
             descriptors.insert(name, descriptor);
         }
 
-        // FLOWIP-114c: build the subgraph membership map from lowering
-        // artifacts BEFORE topology stages are assembled, so the StageInfo
-        // entries passed to `validate_edge_typing` carry `subgraph_id`.
-        // Without this, the validator's composite-internal-edge skip rule
-        // cannot fire (it reads `topology.stage_info(...).subgraph`), and
-        // any flow using a map-reduce `ai!` stage would surface its mixed internal
-        // selected feeds as a SingleEdge mismatch at the validator boundary.
-        // The same map is reused downstream when assembling the
-        // annotated topology returned to the caller.
         let mut subgraph_membership_map: HashMap<StageId, obzenflow_topology::StageSubgraphMembership> =
             HashMap::new();
         for (stage_name, membership) in lowering_artifacts.stage_subgraphs {

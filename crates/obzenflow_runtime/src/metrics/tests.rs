@@ -384,6 +384,117 @@ pub async fn metrics_tail_overwrites_and_preserves_sparse_families(
     );
 }
 
+fn breaker_transition(
+    stage: StageId,
+    stage_name: &str,
+    fact: obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact,
+    event_time: u64,
+) -> ChainEvent {
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    let mut event =
+        ChainEventFactory::execution_event(stage.into(), ExecutionPayload::CircuitBreaker(fact));
+    event.flow_context.stage_id = stage;
+    event.flow_context.stage_name = stage_name.into();
+    event.processing.event_time = event_time;
+    event
+}
+
+pub async fn metrics_breaker_state_is_one_series_per_protected_unit(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    use obzenflow_core::event::payloads::execution_payload::{
+        CircuitBreakerFact, CircuitBreakerOpenTrigger,
+    };
+    use obzenflow_core::metrics::ControlUnit;
+    let opened = |unit: &str| CircuitBreakerFact::Opened {
+        unit: unit.into(),
+        cooldown_ms: 1,
+        error_rate: 1.0,
+        failure_count: 1,
+        trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+        observed_calls: 1,
+        slow_call_rate: None,
+        slow_call_count: None,
+        last_error: None,
+    };
+    let closed = |unit: &str| CircuitBreakerFact::Closed {
+        unit: unit.into(),
+        success_count: 1,
+        recovery_duration_ms: 1,
+    };
+    let (map, reduce, other) = (StageId::new(), StageId::new(), StageId::new());
+    let map_journal = stage_journal(&mut *factory, map, "digest__map");
+    let reduce_journal = stage_journal(&mut *factory, reduce, "digest__reduce");
+    let other_journal = stage_journal(&mut *factory, other, "other");
+    map_journal
+        .append(
+            breaker_transition(map, "digest__map", opened("digest"), 10),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reduce_journal
+        .append(
+            breaker_transition(reduce, "digest__reduce", closed("digest"), 20),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    other_journal
+        .append(
+            breaker_transition(other, "other", opened("other"), 5),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let (mut ctx, _, _) = context(
+        &mut *factory,
+        vec![
+            (map, map_journal.clone()),
+            (reduce, reduce_journal),
+            (other, other_journal),
+        ],
+        vec![],
+    )
+    .await;
+    let series = |ctx: &Context| {
+        let mut series = ctx
+            .metrics_store
+            .circuit_breaker_state
+            .iter()
+            .map(|(unit, observed)| (unit.clone(), observed.value))
+            .collect::<Vec<_>>();
+        series.sort_by(|left, right| left.0.cmp(&right.0));
+        series
+    };
+
+    refresh(&mut ctx).await;
+    assert_eq!(
+        series(&ctx),
+        [
+            (ControlUnit::Stage(other), 1.0),
+            (ControlUnit::Composite("digest".into()), 0.0),
+        ],
+        "both members report one unit, and the newer reduce transition wins"
+    );
+
+    map_journal
+        .append(
+            breaker_transition(map, "digest__map", opened("digest"), 30),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    refresh(&mut ctx).await;
+    assert_eq!(
+        series(&ctx),
+        [
+            (ControlUnit::Stage(other), 1.0),
+            (ControlUnit::Composite("digest".into()), 1.0),
+        ]
+    );
+}
+
 pub async fn metrics_refresh_failures_retain_values_and_exports_do_no_reads(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {

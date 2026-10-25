@@ -2,8 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! A deterministic chat model provider and configuration for `ai!` flow tests.
-
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     chat_binding_fingerprint, embedding_binding_fingerprint, AiClientError, AiEndpoint,
@@ -26,12 +24,12 @@ pub type Reply = Arc<dyn Fn(&ChatRequest) -> Result<ChatResponse, AiClientError>
 
 pub type HangFilter = Arc<dyn Fn(&ChatRequest) -> bool + Send + Sync>;
 
-/// What the fake recorded for one call: the endpoint it was connected to,
-/// the credential name that endpoint named, and the request.
 #[derive(Debug, Clone)]
 pub struct RecordedCall {
     pub endpoint: String,
+    pub url: Option<String>,
     pub credential: Option<String>,
+    pub model: String,
     pub request: ChatRequest,
 }
 
@@ -45,6 +43,14 @@ pub struct FakeChatModels {
     hang: Option<(HangFilter, Arc<tokio::sync::Notify>)>,
     gate: Option<Arc<tokio::sync::Semaphore>>,
     client_target: Option<ChatTarget>,
+    ledger: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LedgerCall {
+    pub endpoint: String,
+    pub model: String,
+    pub prompt: String,
 }
 
 impl FakeChatModels {
@@ -64,11 +70,15 @@ impl FakeChatModels {
             hang: None,
             gate: None,
             client_target: None,
+            ledger: None,
         }
     }
 
-    /// A provider whose calls matching `filter` signal `entered` and never
-    /// return; other calls reply with `text`.
+    pub fn with_ledger(mut self, path: std::path::PathBuf) -> Self {
+        self.ledger = Some(path);
+        self
+    }
+
     pub fn hanging_when(
         entered: Arc<tokio::sync::Notify>,
         filter: impl Fn(&ChatRequest) -> bool + Send + Sync + 'static,
@@ -80,8 +90,6 @@ impl FakeChatModels {
         }
     }
 
-    /// A provider that connects clients serving `target` instead of the
-    /// described one.
     pub fn with_client_target(target: ChatTarget) -> Self {
         Self {
             client_target: Some(target),
@@ -89,7 +97,6 @@ impl FakeChatModels {
         }
     }
 
-    /// A provider whose calls each wait for one permit from `release`.
     pub fn gated(release: Arc<tokio::sync::Semaphore>, text: &'static str) -> Self {
         Self {
             gate: Some(release),
@@ -97,7 +104,6 @@ impl FakeChatModels {
         }
     }
 
-    /// A provider whose clients refuse every call, for strict replay.
     pub fn forbidden() -> Self {
         Self {
             forbidden: true,
@@ -105,7 +111,6 @@ impl FakeChatModels {
         }
     }
 
-    /// A provider whose calls signal `entered` and never return.
     pub fn hanging(entered: Arc<tokio::sync::Notify>) -> Self {
         Self::hanging_when(entered, |_| true, "")
     }
@@ -151,14 +156,14 @@ fn heuristic(model: &str) -> TokenEstimatorResolutionInfo {
 }
 
 fn endpoint_identity(endpoint: &AiEndpoint) -> String {
-    endpoint
-        .base_url
-        .as_ref()
-        .map_or_else(|| format!("builtin:{}", endpoint.name), |url| url.to_string())
+    endpoint.base_url.as_ref().map_or_else(
+        || format!("builtin:{}", endpoint.name),
+        |url| url.to_string(),
+    )
 }
 
 impl ChatModelProvider for FakeChatModels {
-    fn serves(&self, _provider: &obzenflow_core::ai::AiProvider) -> bool {
+    fn serves(&self, _: &obzenflow_core::ai::AiProvider) -> bool {
         true
     }
 
@@ -192,7 +197,9 @@ impl ChatModelProvider for FakeChatModels {
             ),
             estimator: ResolvedTokenEstimator::new(
                 Arc::new(HeuristicTokenEstimator::default()),
-                spec.estimator.clone().unwrap_or_else(|| heuristic(&spec.model)),
+                spec.estimator
+                    .clone()
+                    .unwrap_or_else(|| heuristic(&spec.model)),
             ),
         })
     }
@@ -209,6 +216,7 @@ impl ChatModelProvider for FakeChatModels {
                 .clone()
                 .unwrap_or_else(|| description.target.clone()),
             endpoint: endpoint.name.clone(),
+            url: endpoint.base_url.as_ref().map(|url| url.to_string()),
             credential: endpoint
                 .api_key_env
                 .as_ref()
@@ -221,6 +229,7 @@ impl ChatModelProvider for FakeChatModels {
 struct FakeChatClient {
     target: ChatTarget,
     endpoint: String,
+    url: Option<String>,
     credential: Option<String>,
     models: FakeChatModels,
 }
@@ -243,9 +252,29 @@ impl ChatClient for FakeChatClient {
             .expect("recorded calls")
             .push(RecordedCall {
                 endpoint: self.endpoint.clone(),
+                url: self.url.clone(),
                 credential: self.credential.clone(),
+                model: self.target.model.clone(),
                 request: request.clone(),
             });
+        if let Some(path) = &self.models.ledger {
+            let mut line = serde_json::to_vec(&LedgerCall {
+                endpoint: self.endpoint.clone(),
+                model: self.target.model.clone(),
+                prompt: last_user_message(&request),
+            })
+            .expect("a ledger line encodes");
+            line.push(b'\n');
+            std::io::Write::write_all(
+                &mut std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .expect("the ledger opens"),
+                &line,
+            )
+            .expect("the ledger records the call");
+        }
         if let Some((filter, entered)) = &self.models.hang {
             if filter(&request) {
                 entered.notify_one();
@@ -273,10 +302,10 @@ pub struct FakeEmbeddingModels {
     reply: EmbeddingReply,
     forbidden: bool,
     hang: Option<Arc<tokio::sync::Notify>>,
+    serves_only: Option<obzenflow_core::ai::AiProvider>,
 }
 
 impl FakeEmbeddingModels {
-    /// A provider that returns `vector` for every input.
     pub fn constant(vector: Vec<f32>) -> Self {
         Self::with_reply(move |request| {
             Ok(EmbeddingResponse {
@@ -300,6 +329,7 @@ impl FakeEmbeddingModels {
             reply: Arc::new(reply),
             forbidden: false,
             hang: None,
+            serves_only: None,
         }
     }
 
@@ -310,11 +340,16 @@ impl FakeEmbeddingModels {
         }
     }
 
-    /// A provider whose calls signal `entered` once the operation would have
-    /// succeeded remotely, and never return.
     pub fn hanging(entered: Arc<tokio::sync::Notify>) -> Self {
         Self {
             hang: Some(entered),
+            ..Self::constant(vec![0.0])
+        }
+    }
+
+    pub fn serving_only(provider: &str) -> Self {
+        Self {
+            serves_only: Some(obzenflow_core::ai::AiProvider::new(provider)),
             ..Self::constant(vec![0.0])
         }
     }
@@ -329,8 +364,10 @@ impl FakeEmbeddingModels {
 }
 
 impl EmbeddingModelProvider for FakeEmbeddingModels {
-    fn serves(&self, _provider: &obzenflow_core::ai::AiProvider) -> bool {
-        true
+    fn serves(&self, provider: &obzenflow_core::ai::AiProvider) -> bool {
+        self.serves_only
+            .as_ref()
+            .is_none_or(|served| served == provider)
     }
 
     fn describe(
@@ -366,7 +403,7 @@ impl EmbeddingModelProvider for FakeEmbeddingModels {
 
     fn connect(
         &self,
-        _endpoint: &AiEndpoint,
+        _: &AiEndpoint,
         description: &EmbeddingModelDescription,
     ) -> Result<Arc<dyn EmbeddingClient>, AiModelProviderError> {
         self.connects.fetch_add(1, Ordering::SeqCst);
@@ -408,7 +445,6 @@ pub fn providers(chat: &FakeChatModels, embedding: &FakeEmbeddingModels) -> AiMo
         .embedding(embedding.clone())
 }
 
-/// One configuration candidate a test admits.
 pub type Candidate = (&'static str, ConfigScope, ConfigValue);
 
 pub fn chat_model(model: &str) -> Candidate {
@@ -464,8 +500,6 @@ pub fn runtime_config(
     Arc::new(ResolvedRuntimeConfig::new(set).with_ai_endpoints(endpoints))
 }
 
-/// A build context whose AI stages use `models` with every chat stage on
-/// `model` at the built-in `ollama` endpoint.
 pub fn build_context(models: &FakeChatModels, model: &str) -> FlowBuildContext {
     build_context_with(models, [chat_model(model)])
 }

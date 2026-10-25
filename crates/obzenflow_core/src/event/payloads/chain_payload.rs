@@ -71,8 +71,7 @@ impl ChainPayload {
         if kind != EventKind::Fact {
             let expected = match (kind, event_type) {
                 (EventKind::CompositeData, event_type) => {
-                    CompositeDataPayload::schema_version_of(event_type)
-                        .map_or(1, NonZeroU32::get)
+                    CompositeDataPayload::schema_version_of(event_type).map_or(1, NonZeroU32::get)
                 }
                 (
                     EventKind::Execution,

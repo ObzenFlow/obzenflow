@@ -42,8 +42,8 @@ pub use obzenflow_core::config::{
 pub use obzenflow_runtime::runtime_config::model::OverlayEntry;
 pub use obzenflow_runtime::runtime_config::{
     AiConfigError, AiEndpointTables, BackpressureMode, CandidateSet, ConfigResolveError,
-    ConfigValue, ExactConfigView, FlowEffectiveConfig, ResolutionPoint, Resolved,
-    ResolvedAiModel, ResolvedRuntimeConfig, RuntimeConfigOverlay, ScopedCandidate,
+    ConfigValue, ExactConfigView, FlowEffectiveConfig, ResolutionPoint, Resolved, ResolvedAiModel,
+    ResolvedRuntimeConfig, RuntimeConfigOverlay, ScopedCandidate,
 };
 
 /// Replay output verification (FLOWIP-095j): compare two recorded runs of the

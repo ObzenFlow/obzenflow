@@ -1848,12 +1848,12 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
         self
     }
 
-    pub(crate) fn with_ai_model<E: obzenflow_runtime::ai::AiEffect>(
+    pub(crate) fn with_ai_models<E: obzenflow_runtime::ai::AiEffect>(
         mut self,
-        spec: obzenflow_core::ai::AiModelSpec,
+        specs: Vec<obzenflow_core::ai::AiModelSpec>,
     ) -> Self {
         self.ai_sections.push((E::SECTION, E::EFFECT_TYPE));
-        self.ai_models.push(spec);
+        self.ai_models.extend(specs);
         self
     }
 

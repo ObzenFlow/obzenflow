@@ -394,8 +394,6 @@ impl DslCandidates {
             .consume_effect(key_path, stage, effect_type);
     }
 
-    /// Declare that a generated member's configuration point is the authored
-    /// stage that owns it, so configuration names only the owner.
     #[doc(hidden)]
     pub fn declare_stage_owner(
         &mut self,

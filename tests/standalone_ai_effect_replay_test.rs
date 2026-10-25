@@ -2,9 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Live and replay witness for chat and embedding `ai!` stages, each family
-//! configured in its own section.
-
 mod replay_testkit;
 
 #[path = "support/fake_ai.rs"]
@@ -13,11 +10,12 @@ pub mod fake_ai;
 use fake_ai::{FakeChatModels, FakeEmbeddingModels};
 use obzenflow::ai::{
     self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec,
-    ChatResponseFormat, EmbeddingDimensions, EmbeddingGeneration, EmbeddingGenerationReply,
-    EmbeddingParams, EmbeddingRequestSpec,
+    ChatResponseFormat, Chunk, EmbeddingDimensions, EmbeddingGeneration, EmbeddingGenerationReply,
+    EmbeddingParams, EmbeddingRequestSpec, Partials,
 };
 use obzenflow::stages::sources;
-use obzenflow_adapters::middleware::circuit_breaker;
+use obzenflow_adapters::middleware::{circuit_breaker, MiddlewareFactory};
+use obzenflow_core::ai::AiClientError;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{
@@ -123,7 +121,7 @@ impl AiRole<TicketRaised> for SummarizeTicket {
             ));
         }
         let mut request = ChatRequestSpec::new(
-            "Summarise support tickets concisely.",
+            "Summarize support tickets concisely.",
             format!("{}{}", ticket.description, self.prompt_suffix),
         )
         .temperature(0.2);
@@ -249,8 +247,6 @@ fn embedding() -> FakeEmbeddingModels {
     FakeEmbeddingModels::constant(vec![0.1, 0.2, 0.3])
 }
 
-/// Each family's section picks its own model; the chat family may name
-/// another endpoint.
 fn ai_config(dir: &Path, chat_endpoint: Option<&str>) -> PathBuf {
     let path = dir.join("standalone_ai.toml");
     let endpoint = match chat_endpoint {
@@ -275,7 +271,7 @@ fn chat_and_embedding_flow(
     summarize: SummarizeTicket,
     embed: EmbedSummary,
 ) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
+    FlowDefinition::materialize(move |_| {
         let summarize = ai::infer(summarize);
         let embed = ai::infer(embed);
         let chat_breaker = circuit_breaker().consecutive_failures(5);
@@ -378,6 +374,248 @@ fn replay_args(archive: &Path, verb: &str) -> Vec<OsString> {
     ]
 }
 
+#[derive(Clone, Copy)]
+struct SummarizeTickets;
+
+impl AiRole<Chunk<TicketRaised>> for SummarizeTickets {
+    type Effect = ChatCompletion;
+    type Out = TicketSummarised;
+
+    fn prepare(&self, chunk: &Chunk<TicketRaised>) -> Result<ChatRequestSpec, HandlerError> {
+        let descriptions = chunk
+            .iter()
+            .map(|ticket| ticket.description.as_str())
+            .collect::<Vec<_>>();
+        Ok(ChatRequestSpec::new(
+            "Summarize support tickets concisely.",
+            descriptions.join("\n"),
+        ))
+    }
+
+    fn interpret(
+        &self,
+        chunk: Chunk<TicketRaised>,
+        outcome: AiOutcome<ChatCompletionReply>,
+    ) -> Result<TicketSummarised, HandlerError> {
+        let id = chunk.iter().map(|ticket| ticket.id).sum();
+        if outcome.unavailable().is_some() {
+            return Ok(TicketSummarised {
+                id,
+                summary: "summary unavailable".to_string(),
+            });
+        }
+        Ok(TicketSummarised {
+            id,
+            summary: outcome.replied()?.text().to_string(),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EmbedSummaries;
+
+impl AiRole<Partials<TicketRaised, TicketSummarised>> for EmbedSummaries {
+    type Effect = EmbeddingGeneration;
+    type Out = TicketEmbedded;
+
+    fn prepare(
+        &self,
+        input: &Partials<TicketRaised, TicketSummarised>,
+    ) -> Result<EmbeddingRequestSpec, HandlerError> {
+        Ok(EmbeddingRequestSpec {
+            inputs: input
+                .partials()
+                .iter()
+                .map(|partial| partial.summary.clone())
+                .collect(),
+            params: EmbeddingParams {
+                dimensions: Some(EmbeddingDimensions::try_from(3).unwrap()),
+            },
+        })
+    }
+
+    fn interpret(
+        &self,
+        input: Partials<TicketRaised, TicketSummarised>,
+        outcome: AiOutcome<EmbeddingGenerationReply>,
+    ) -> Result<TicketEmbedded, HandlerError> {
+        Ok(TicketEmbedded {
+            id: input.partials().iter().map(|partial| partial.id).sum(),
+            vectors: outcome.replied()?.response.vectors,
+        })
+    }
+}
+
+fn two_tickets() -> Vec<TicketRaised> {
+    vec![
+        TicketRaised {
+            id: 1,
+            description: "Customer cannot sign in".to_string(),
+        },
+        TicketRaised {
+            id: 2,
+            description: "Invoice shows the wrong total".to_string(),
+        },
+    ]
+}
+
+#[tokio::test]
+async fn a_stage_whose_roles_perform_two_effects_refuses_an_unscoped_breaker() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("journals");
+    let (chat, embed) = (summarizing(), embedding());
+
+    let error = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(ai_config(temp.path(), None))
+        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .run_async(FlowDefinition::materialize(move |_| {
+            let tickets = sources::ValuesSource::new(two_tickets());
+            let digest = ai::map(SummarizeTickets)
+                .chunks(1)
+                .reduce(EmbedSummaries)
+                .on_eof();
+            let ai_breaker = circuit_breaker().consecutive_failures(5);
+            let collected = CollectEmbedded {
+                outputs: Arc::new(Mutex::new(Vec::new())),
+            };
+
+            Ok(flow! {
+                name: "two_effect_unscoped",
+                journals: disk_journals(journal_base),
+                stages: {
+                    tickets = source!(TicketRaised => tickets);
+                    digest = ai!(TicketRaised -> TicketEmbedded with ai_breaker => digest);
+                    collected = sink!(TicketEmbedded => collected);
+                },
+
+                topology: {
+                    tickets |> digest;
+                    digest |> collected;
+                }
+            })
+        }))
+        .await
+        .expect_err("one breaker cannot guard two effects");
+    assert!(
+        error.to_string().contains(
+            "stage `digest`: control 'circuit_breaker' requires exactly one declared effect; build it with `.for_effect::<E>()` for one of [obzenflow.ai.chat_completion, obzenflow.ai.embedding_generation]"
+        ),
+        "{error}"
+    );
+    assert_eq!(chat.connect_count() + embed.connect_count(), 0);
+}
+
+#[tokio::test]
+async fn a_stage_whose_roles_perform_two_effects_builds_one_breaker_per_effect() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("journals");
+    let chat = FakeChatModels::with_reply(|_| {
+        Err(AiClientError::Timeout {
+            message: "endpoint down".to_string(),
+        })
+    });
+    let embed = embedding();
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(ai_config(temp.path(), None))
+        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .run_async(FlowDefinition::materialize({
+            let outputs = outputs.clone();
+            move |_| {
+                let tickets = sources::ValuesSource::new(two_tickets());
+                let digest = ai::map(SummarizeTickets)
+                    .chunks(1)
+                    .reduce(EmbedSummaries)
+                    .on_eof();
+                let chat_breaker = circuit_breaker()
+                    .consecutive_failures(1)
+                    .open_for(std::time::Duration::from_secs(60))
+                    .for_effect::<ChatCompletion>();
+                let embedding_breaker = circuit_breaker()
+                    .consecutive_failures(1)
+                    .open_for(std::time::Duration::from_secs(60))
+                    .for_effect::<EmbeddingGeneration>();
+                let collected = CollectEmbedded { outputs };
+
+                Ok(flow! {
+                    name: "two_effect_scoped",
+                    journals: disk_journals(journal_base),
+                    stages: {
+                        tickets = source!(TicketRaised => tickets);
+                        digest = ai!(TicketRaised -> TicketEmbedded with { chat_breaker, embedding_breaker } => digest);
+                        collected = sink!(TicketEmbedded => collected);
+                    },
+
+                    topology: {
+                        tickets |> digest;
+                        digest |> collected;
+                    }
+                })
+            }
+        }))
+        .await
+        .expect("each effect has its own breaker");
+
+    assert_eq!(
+        chat.call_count(),
+        1,
+        "the first map failure opens the chat breaker, which rejects the second map call"
+    );
+    assert_eq!(
+        embed.call_count(),
+        1,
+        "the embedding breaker stays closed, so the reduce call runs"
+    );
+    assert_eq!(
+        *outputs.lock().unwrap(),
+        vec![TicketEmbedded {
+            id: 3,
+            vectors: vec![vec![0.1, 0.2, 0.3], vec![0.1, 0.2, 0.3]],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn an_embedding_endpoint_whose_provider_serves_only_chat_fails_the_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("chat_only.toml");
+    std::fs::write(
+        &config,
+        "[ai.endpoints.chatbox]\nprovider = \"chat_only\"\nbase_url = \"https://chat.example/v1\"\n\n\
+         [ai.models]\nmodel = \"fixture-chat\"\n\n\
+         [ai.embeddings]\nendpoint = \"chatbox\"\nmodel = \"fixture-embedding\"\n",
+    )
+    .unwrap();
+    let (chat, embed) = (summarizing(), FakeEmbeddingModels::serving_only("ollama"));
+
+    let error = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .with_config_file(config)
+        .with_ai_models(fake_ai::providers(&chat, &embed))
+        .run_async(chat_and_embedding_flow(
+            temp.path().join("journals"),
+            one_ticket(),
+            Arc::new(Mutex::new(Vec::new())),
+            SummarizeTicket::baseline(),
+            EmbedSummary::of_width(3),
+        ))
+        .await
+        .expect_err("no installed embedding provider serves `chat_only`");
+    assert!(
+        error.to_string().contains(
+            "config: stage `embedding` names endpoint `chatbox`, whose provider `chat_only` cannot serve obzenflow.ai.embedding_generation"
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        chat.call_count() + embed.connect_count() + embed.call_count(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() {
     let temp = tempfile::tempdir().unwrap();
@@ -420,8 +658,7 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
         "fixture-chat"
     );
     assert_eq!(
-        manifest["stages"]["embedding"]["ai_models"][0]["model"],
-        "fixture-embedding",
+        manifest["stages"]["embedding"]["ai_models"][0]["model"], "fixture-embedding",
         "embeddings resolve from their own section"
     );
     for (stage, effect_type, schema, output_type) in [
@@ -485,7 +722,10 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
     }
 
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    let (replay_chat, replay_embed) = (FakeChatModels::forbidden(), FakeEmbeddingModels::forbidden());
+    let (replay_chat, replay_embed) = (
+        FakeChatModels::forbidden(),
+        FakeEmbeddingModels::forbidden(),
+    );
     FlowApplication::builder()
         .with_cli_args(replay_args(&live_archive, "--replay-from"))
         .with_config_file(config.clone())
@@ -500,7 +740,10 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
         .await
         .expect("strict replay succeeds without connecting either family");
     assert_eq!(*replay_outputs.lock().unwrap(), expected);
-    assert_eq!(replay_chat.connect_count() + replay_embed.connect_count(), 0);
+    assert_eq!(
+        replay_chat.connect_count() + replay_embed.connect_count(),
+        0
+    );
 
     mark_archive_incomplete(&live_archive);
     let (resume_chat, resume_embed) = (summarizing(), embedding());
@@ -536,9 +779,18 @@ async fn request_drift_fails_strict_replay_before_any_client_is_connected() {
         ..SummarizeTicket::baseline()
     };
     for (summarize, embed) in [
-        (drifted(" changed", "ticket-summary-v1", false), EmbedSummary::of_width(3)),
-        (drifted("", "ticket-summary-v2", false), EmbedSummary::of_width(3)),
-        (drifted("", "ticket-summary-v1", true), EmbedSummary::of_width(3)),
+        (
+            drifted(" changed", "ticket-summary-v1", false),
+            EmbedSummary::of_width(3),
+        ),
+        (
+            drifted("", "ticket-summary-v2", false),
+            EmbedSummary::of_width(3),
+        ),
+        (
+            drifted("", "ticket-summary-v1", true),
+            EmbedSummary::of_width(3),
+        ),
         (SummarizeTicket::baseline(), EmbedSummary::of_width(2)),
     ] {
         let temp = tempfile::tempdir().unwrap();
@@ -600,7 +852,10 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_moves() {
     let archive = latest_run_dir(&journal_base);
 
     let outputs = Arc::new(Mutex::new(Vec::new()));
-    let (chat, embed) = (FakeChatModels::forbidden(), FakeEmbeddingModels::forbidden());
+    let (chat, embed) = (
+        FakeChatModels::forbidden(),
+        FakeEmbeddingModels::forbidden(),
+    );
     FlowApplication::builder()
         .with_cli_args(replay_args(&archive, "--replay-from"))
         .with_config_file(ai_config(temp.path(), Some("http://127.0.0.1:11435")))
@@ -618,13 +873,11 @@ async fn strict_replay_keeps_the_recorded_endpoint_when_configuration_moves() {
     assert_eq!(chat.connect_count() + embed.connect_count(), 0);
 
     let replay_manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(latest_run_dir(&journal_base).join("run_manifest.json"))
-            .unwrap(),
+        &std::fs::read_to_string(latest_run_dir(&journal_base).join("run_manifest.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(
-        replay_manifest["stages"]["chat"]["ai_models"][0]["endpoint"],
-        "ollama",
+        replay_manifest["stages"]["chat"]["ai_models"][0]["endpoint"], "ollama",
         "the replay records the model it replayed"
     );
 }

@@ -326,7 +326,6 @@ impl CircuitBreakerMiddleware {
         Self::construct(threshold, cooldown, Some(stage_id), unit, None)
     }
 
-    /// The same breaker state, with evidence written by another member stage.
     pub(in crate::middleware::control) fn handle_for(&self, stage_id: StageId) -> Self {
         Self {
             state: self.state.clone(),

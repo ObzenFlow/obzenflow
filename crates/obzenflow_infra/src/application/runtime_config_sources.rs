@@ -849,11 +849,9 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             KnobType::F64 { .. } | KnobType::F64Range { .. } => env_var::<f64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::F64),
-            KnobType::Text | KnobType::Token { .. } | KnobType::Path => {
-                env_var::<String>(&name)
-                    .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
-                    .map(ConfigValue::Text)
-            }
+            KnobType::Text | KnobType::Token { .. } | KnobType::Path => env_var::<String>(&name)
+                .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
+                .map(ConfigValue::Text),
         };
         if let Some(value) = value {
             admit(
@@ -971,7 +969,7 @@ mod tests {
 
     #[test]
     fn ai_family_tables_resolve_each_stage_through_the_ladder() {
-        let _lock = env_lock();
+        let lock = env_lock();
         let snapshot = snapshot(
             r#"
             [ai.endpoints.groq]
@@ -1007,7 +1005,11 @@ mod tests {
         assert_eq!(digest.endpoint.name, "groq");
         assert_eq!(digest.endpoint.provider.as_str(), "openai_compatible");
         assert_eq!(
-            digest.endpoint.api_key_env.as_ref().map(|env| env.env_name()),
+            digest
+                .endpoint
+                .api_key_env
+                .as_ref()
+                .map(|env| env.env_name()),
             Some("GROQ_API_KEY")
         );
         assert_eq!(digest.model, "llama-3.3-70b-versatile");
@@ -1035,6 +1037,7 @@ mod tests {
 
         assert_eq!(snapshot.resolve_max_open_keys("thread").unwrap(), 5000);
         assert_eq!(snapshot.resolve_max_open_keys("other").unwrap(), 1000);
+        drop(lock);
     }
 
     #[test]

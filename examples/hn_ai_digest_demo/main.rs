@@ -4,13 +4,6 @@
 
 //! HN AI Digest Demo — showcases Rig-backed LLM transforms.
 //!
-//! Pipeline (map-reduce):
-//! `HttpPullSource` → format stories → `ai!` digest → configured sink
-//!
-//! The `digest` stage is one map-reduce `ai!` stage: each group of at most
-//! `group_max_stories` stories gets one LLM call from the map role, and at the end of input
-//! the reduce role folds the group summaries into the final digest with one more call.
-//!
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):

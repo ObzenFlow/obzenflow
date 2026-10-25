@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! AI model configuration: named endpoints and each AI stage's model.
+//! AI model configuration for named endpoints and each AI stage's model.
 
 use super::error::ConfigResolveError;
 use super::model::{Resolved, ResolvedRuntimeConfig};
@@ -29,7 +29,7 @@ pub const BUILTIN_AI_ENDPOINTS: &[&str] = &["ollama", "openai"];
 
 const OPENAI_DEFAULT_CREDENTIAL: &str = "OPENAI_API_KEY";
 
-/// One `[ai.endpoints.<name>]` table: a provider, its URL and the name of
+/// One `[ai.endpoints.<name>]` table with a provider, its URL and the name of
 /// its credential, always read together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiEndpointTable {
@@ -51,7 +51,9 @@ pub enum AiConfigError {
     EndpointWithoutProvider { name: String },
     #[error("[ai.endpoints.{name}] reuses a built-in endpoint name; choose another name")]
     ReservedEndpointName { name: String },
-    #[error("[ai.endpoints.{name}] is not a valid endpoint name; use letters, digits, '_', '.' or '-'")]
+    #[error(
+        "[ai.endpoints.{name}] is not a valid endpoint name; use letters, digits, '_', '.' or '-'"
+    )]
     InvalidEndpointName { name: String },
     #[error("[ai.endpoints.{name}] base_url is not a URL: {detail}")]
     InvalidBaseUrl { name: String, detail: String },
@@ -70,7 +72,13 @@ pub enum AiConfigError {
         section: String,
     },
     #[error(transparent)]
-    Resolve(#[from] ConfigResolveError),
+    Resolve(Box<ConfigResolveError>),
+}
+
+impl From<ConfigResolveError> for AiConfigError {
+    fn from(error: ConfigResolveError) -> Self {
+        Self::Resolve(Box::new(error))
+    }
 }
 
 fn builtin(name: &str) -> Option<AiEndpoint> {
@@ -137,11 +145,13 @@ impl AiEndpointTables {
             }
         }
         let api_key_env = match table.api_key_env {
-            Some(env) => Some(SecretRef::new(env).map_err(|_| {
-                AiConfigError::InvalidCredentialName {
-                    name: name_owned.clone(),
-                }
-            })?),
+            Some(env) => {
+                Some(
+                    SecretRef::new(env).map_err(|_| AiConfigError::InvalidCredentialName {
+                        name: name_owned.clone(),
+                    })?,
+                )
+            }
             None if provider.as_str() == "openai" => SecretRef::new(OPENAI_DEFAULT_CREDENTIAL).ok(),
             None => None,
         };
@@ -216,7 +226,7 @@ impl ResolvedRuntimeConfig {
                 section: section.to_string(),
             })?;
         let endpoint_choice = resolve(format!("{section}.endpoint"))?.ok_or_else(|| {
-            AiConfigError::Resolve(ConfigResolveError::UnknownKnob {
+            AiConfigError::from(ConfigResolveError::UnknownKnob {
                 key_path: format!("{section}.endpoint"),
             })
         })?;
@@ -302,6 +312,33 @@ mod tests {
         };
         assert_eq!(model("digest"), "exact");
         assert_eq!(model("other"), "flow");
+    }
+
+    #[test]
+    fn a_command_line_value_overrides_the_file() {
+        let chat = "obzenflow.ai.chat_completion";
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "ai.models.model",
+            ConfigAddress::unqualified(ConfigScope::Global),
+            "file",
+        );
+        set.admit(ScopedCandidate {
+            key_path: "ai.models.model".to_string(),
+            address: ConfigAddress::unqualified(ConfigScope::Global),
+            source: ConfigSource::Cli,
+            value: ConfigValue::Text("operator".to_string()),
+        })
+        .unwrap();
+        let config = config(set, AiEndpointTables::default());
+        assert_eq!(
+            config
+                .resolve_ai_model(AI_MODELS_SECTION, "digest", chat)
+                .unwrap()
+                .model,
+            "operator"
+        );
     }
 
     #[test]

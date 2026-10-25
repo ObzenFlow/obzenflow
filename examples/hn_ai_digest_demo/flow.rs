@@ -127,7 +127,7 @@ impl AiRole<Chunk<FormattedStory>> for HnDigest {
 
     fn interpret(
         &self,
-        _chunk: Chunk<FormattedStory>,
+        _: Chunk<FormattedStory>,
         outcome: AiOutcome<ChatCompletionReply>,
     ) -> Result<HnDigestGroupSummary, HandlerError> {
         let reply = outcome.replied()?;
@@ -230,10 +230,7 @@ Notable stories:\n\
     p.finish()
 }
 
-fn digest_reduce_prompt(
-    interests: Option<&str>,
-    summaries: &[HnDigestGroupSummary],
-) -> UserPrompt {
+fn digest_reduce_prompt(interests: Option<&str>, summaries: &[HnDigestGroupSummary]) -> UserPrompt {
     let rules: Vec<String> = vec![
         "Do not invent facts that are not implied by the titles.".to_string(),
         "Start the response immediately with \"## What's topical today\" (no intro).".to_string(),
@@ -279,7 +276,7 @@ pub(crate) fn settings_flow_definition() -> FlowDefinition {
 }
 
 pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
+    FlowDefinition::materialize(move |_| {
         let HnRunInputs {
             max_stories,
             poll_timeout_secs,

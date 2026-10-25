@@ -122,7 +122,7 @@ pub use declaration::{
 pub use effect_set::{
     assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectSet, EffectTypeDisjoint,
 };
-pub use error::EffectError;
+pub use error::{DescriptorComponent, DescriptorDrift, EffectError};
 pub use fault::{BindingAuthorityFault, BindingMismatchKind};
 #[cfg(test)]
 pub(crate) use history::current_cursor_history;
@@ -155,8 +155,8 @@ use commit::{
     build_effect_recovery_abandoned_event, EffectCommitHandleParams, PreparedEffectOutcome,
 };
 use identity::{
-    descriptor_for_effect, descriptor_hash, deterministic_effect_evidence_event_id, hash_json_value,
-    stamp_output_event,
+    descriptor_for_effect, descriptor_hash, deterministic_effect_evidence_event_id,
+    hash_json_value, stamp_output_event,
 };
 use replay::{
     decode_effect_outcome, decode_effect_outcome_group, effect_fact_set_error,

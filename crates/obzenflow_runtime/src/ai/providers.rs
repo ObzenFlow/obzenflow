@@ -11,8 +11,7 @@ use std::sync::Arc;
 /// The model providers a build can bind AI stages with, one per AI family.
 ///
 /// A host installs its providers with
-/// [`FlowBuildContext::with_ai_models`](crate::run_context::FlowBuildContext::with_ai_models),
-/// and tests install fakes the same way.
+/// [`FlowBuildContext::with_ai_models`](crate::run_context::FlowBuildContext::with_ai_models).
 #[derive(Clone, Default)]
 pub struct AiModelProviders {
     providers: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,

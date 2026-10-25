@@ -159,8 +159,7 @@ impl<T> Chunk<T> {
     }
 
     /// Each item with its citation number. Numbers start at 1 in each reduce
-    /// window and continue across the window's chunks, so the reduce role's
-    /// [`Partials::numbered`] gives every item the same number.
+    /// window and continue across its chunks, matching [`Partials::numbered`].
     pub fn numbered(&self) -> impl Iterator<Item = (u64, &T)> + '_ {
         self.items
             .iter()
@@ -178,8 +177,8 @@ impl<'a, T> IntoIterator for &'a Chunk<T> {
     }
 }
 
-/// One reduce window: its items in input order and each group's partial in
-/// group order.
+/// One reduce window, with its items in input order and each group's partial
+/// in group order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Partials<T, P> {
     window: WindowOrdinal,

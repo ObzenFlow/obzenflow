@@ -121,7 +121,6 @@ impl RateLimiterMiddleware {
         Self::new_keyed(stage_id, config, context, claimant, None)
     }
 
-    /// The same bucket, with evidence written by another member stage.
     pub(in crate::middleware::control) fn handle_for(&self, stage_id: StageId) -> Self {
         Self {
             core: self.core.clone(),

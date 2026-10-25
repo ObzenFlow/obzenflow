@@ -3,22 +3,21 @@
 // https://obzenflow.dev
 
 use crate::ai::error_mapping::{ai_client_error_to_effect_error, provider_error_to_resolution};
+use crate::ai::unreachable::UnreachableChatClient;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format, AiModelSpec,
-    CanonicalizationComponent, ChatClient, ChatCompletionOutcome, ChatCompletionReply,
-    ChatModelProvider, ChatRequest, ChatRequestSpec, ChatTarget, LlmHashes, LlmObservability,
-    ResolvedTokenEstimator, CHAT_CLIENT_PORT,
+    params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format, AiEndpoint,
+    AiModelSpec, CanonicalizationComponent, ChatClient, ChatCompletionOutcome, ChatCompletionReply,
+    ChatModelDescription, ChatModelProvider, ChatRequest, ChatRequestSpec, ChatTarget, LlmHashes,
+    LlmObservability, ResolvedTokenEstimator, CHAT_CLIENT_PORT,
 };
 use obzenflow_core::BoundedBindingEvidence;
-use obzenflow_runtime::ai::{
-    AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError,
-};
+use obzenflow_runtime::ai::{AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError};
 use obzenflow_runtime::effects::{
     BoundEffect, Configured, Effect, EffectBindingEvidence, EffectBindingUse, EffectContext,
-    EffectError, EffectPortMetadataContext, EffectPortResolutionError,
-    EffectPortResolverWithMetadata, EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder,
-    EffectSafety, LogicalEffectBindingName, RecordedReply, ResolvedEffectPort,
+    EffectError, EffectPortMetadataContext, EffectPortResolverWithMetadata, EffectPortSlot,
+    EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, LogicalEffectBindingName,
+    RecordedReply, ResolvedEffectPort,
 };
 use std::sync::Arc;
 
@@ -280,16 +279,8 @@ impl AiEffect for ChatCompletion {
                 provider,
             } => {
                 let description = provider.describe(&endpoint, &model)?;
-                let connect_with = description.clone();
                 let name = endpoint.name.clone();
-                let resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> =
-                    Arc::new(move || {
-                        let client = provider
-                            .connect(&endpoint, &connect_with)
-                            .map_err(provider_error_to_resolution)?;
-                        let metadata = Arc::new(client.target().clone());
-                        Ok(ResolvedEffectPort::new(client, metadata))
-                    });
+                let resolver = connecting(provider, endpoint, description.clone());
                 (stage, name, description, resolver)
             }
             AiModelSource::Recorded {
@@ -298,8 +289,28 @@ impl AiEffect for ChatCompletion {
                 provider,
             } => {
                 let description = provider.describe_recorded(&spec)?;
-                let resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> =
-                    Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed));
+                let resolver = unreachable(description.target.clone(), spec.endpoint.clone());
+                (stage, spec.endpoint, description, resolver)
+            }
+            AiModelSource::Kept {
+                stage,
+                spec,
+                endpoint,
+                provider,
+            } => {
+                let description = provider.describe_recorded(&spec)?;
+                let serving = endpoint.filter(|endpoint| {
+                    provider
+                        .describe(endpoint, &spec.model)
+                        .is_ok_and(|current| {
+                            current.target.binding_fingerprint
+                                == description.target.binding_fingerprint
+                        })
+                });
+                let resolver = match serving {
+                    Some(endpoint) => connecting(provider, endpoint, description.clone()),
+                    None => unreachable(description.target.clone(), spec.endpoint.clone()),
+                };
                 (stage, spec.endpoint, description, resolver)
             }
         };
@@ -325,6 +336,31 @@ impl AiEffect for ChatCompletion {
             .finish()?;
         Ok(AiBinding { binding, spec })
     }
+}
+
+fn connecting(
+    provider: Arc<dyn ChatModelProvider>,
+    endpoint: AiEndpoint,
+    description: ChatModelDescription,
+) -> EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> {
+    Arc::new(move || {
+        let client = provider
+            .connect(&endpoint, &description)
+            .map_err(provider_error_to_resolution)?;
+        let metadata = Arc::new(client.target().clone());
+        Ok(ResolvedEffectPort::new(client, metadata))
+    })
+}
+
+fn unreachable(
+    target: ChatTarget,
+    endpoint: String,
+) -> EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> {
+    Arc::new(move || {
+        let client: Arc<dyn ChatClient> =
+            Arc::new(UnreachableChatClient::new(target.clone(), endpoint.clone()));
+        Ok(ResolvedEffectPort::new(client, Arc::new(target.clone())))
+    })
 }
 
 fn canonicalization_error(

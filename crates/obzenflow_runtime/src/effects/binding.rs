@@ -39,6 +39,9 @@ mod private {
 /// Closed strategy selected by an [`Effect`] for binding authority.
 pub trait EffectBindingMode<E: Effect>: private::Sealed + Send + Sync + 'static {
     #[doc(hidden)]
+    const BINDING_NOUN: &'static str;
+
+    #[doc(hidden)]
     fn invocation_binding(effect: &E) -> EffectInvocationBinding;
 }
 
@@ -49,8 +52,6 @@ pub struct Named<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
 
 impl<B: EffectBindingEvidence> private::Sealed for Named<B> {}
 
-/// An effect whose binding comes from configuration at its stage's point.
-/// Only an `ai!` stage performs such an effect.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Configured<B: EffectBindingEvidence>(PhantomData<fn() -> B>);
 
@@ -374,8 +375,8 @@ pub(super) struct BoundEffectPortSlot {
     pub(super) coordinate: BindingCoordinate,
 }
 
-/// The binding for one effect: a named binding a stage's handler holds in a
-/// `#[system]` field, or a configured binding an `ai!` stage resolves.
+/// The binding for one effect, either a named binding a stage's handler holds
+/// in a `#[system]` field or a configured binding an `ai!` stage resolves.
 #[derive(Clone)]
 pub struct EffectBinding<E: BoundEffect> {
     logical_name: LogicalEffectBindingName,
@@ -471,7 +472,6 @@ impl<E: BoundEffect> std::fmt::Debug for EffectBinding<E> {
     }
 }
 
-/// Invocation-only projection retained by a bound effect value.
 #[derive(Clone)]
 pub struct EffectBindingUse<E: BoundEffect> {
     family: BindingFamily,
@@ -503,8 +503,6 @@ impl<E: BoundEffect> std::fmt::Debug for EffectBindingUse<E> {
     }
 }
 
-/// Effect contract implemented by every effect whose value carries the
-/// binding it was declared with.
 pub trait BoundEffect: Effect {
     type BindingEvidence: EffectBindingEvidence;
 
@@ -513,7 +511,6 @@ pub trait BoundEffect: Effect {
     fn required_slots() -> EffectPortSlotSet;
 }
 
-/// A bound effect answered by a named binding.
 pub trait NamedEffect:
     BoundEffect + Effect<BindingMode = Named<<Self as BoundEffect>::BindingEvidence>>
 {
@@ -524,7 +521,6 @@ impl<E> NamedEffect for E where
 {
 }
 
-/// A bound effect whose binding comes from configuration.
 pub trait ConfiguredEffect:
     BoundEffect + Effect<BindingMode = Configured<<Self as BoundEffect>::BindingEvidence>>
 {
@@ -642,6 +638,8 @@ where
     B: EffectBindingEvidence,
     E: BoundEffect<BindingEvidence = B>,
 {
+    const BINDING_NOUN: &'static str = "binding";
+
     fn invocation_binding(effect: &E) -> EffectInvocationBinding {
         effect.binding_use().erased()
     }
@@ -652,6 +650,8 @@ where
     B: EffectBindingEvidence,
     E: BoundEffect<BindingEvidence = B>,
 {
+    const BINDING_NOUN: &'static str = "model";
+
     fn invocation_binding(effect: &E) -> EffectInvocationBinding {
         effect.binding_use().erased()
     }

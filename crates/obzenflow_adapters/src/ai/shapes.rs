@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::ai::{AiKey, Chunk, Partials, ReduceTrigger};
-use obzenflow_runtime::ai::AiRole;
+use obzenflow_runtime::ai::{AiKeyFn, AiRole};
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -94,8 +94,6 @@ pub struct TriggeredMapReduce<R, S, T, Key> {
     _items: PhantomData<fn(T)>,
 }
 
-/// The reduce trigger a map-reduce handler chose, before lowering checks its
-/// count.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiTrigger {
@@ -104,12 +102,12 @@ pub enum AiTrigger {
 }
 
 impl AiTrigger {
-    /// The durable trigger, or `None` when the chosen count is zero.
     pub fn resolve(self) -> Option<ReduceTrigger> {
         match self {
             Self::OnEof => Some(ReduceTrigger::OnEof),
-            Self::EveryNChunks(chunks) => NonZeroU64::new(chunks as u64)
-                .map(|chunks| ReduceTrigger::EveryNChunks { chunks }),
+            Self::EveryNChunks(chunks) => {
+                NonZeroU64::new(chunks as u64).map(|chunks| ReduceTrigger::EveryNChunks { chunks })
+            }
         }
     }
 }
@@ -150,7 +148,6 @@ where
     }
 }
 
-/// Marker that refuses `.key_by(..)` after `.chunks(n)`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`.key_by(..)` comes before `.chunks(n)`",
@@ -159,7 +156,6 @@ where
 )]
 pub trait KeyByBeforeChunks {}
 
-/// Marker that refuses `.key_by(..)` on `ai::infer`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`ai::infer` has no key",
@@ -170,7 +166,7 @@ pub trait InferHasNoKey {}
 
 impl<R, In> Infer<R, In> {
     #[doc(hidden)]
-    pub fn key_by<F>(self, _key: F) -> Self
+    pub fn key_by<F>(self, _: F) -> Self
     where
         Self: InferHasNoKey,
     {
@@ -188,7 +184,7 @@ where
     R: AiRole<Chunk<T>>,
 {
     #[doc(hidden)]
-    pub fn key_by<F>(self, _key: F) -> Self
+    pub fn key_by<F>(self, _: F) -> Self
     where
         Self: KeyByBeforeChunks,
     {
@@ -217,7 +213,7 @@ where
 
 impl<R, S, T, Key> MapReduce<R, S, T, Key> {
     #[doc(hidden)]
-    pub fn key_by<F>(self, _key: F) -> Self
+    pub fn key_by<F>(self, _: F) -> Self
     where
         Self: KeyByBeforeChunks,
     {
@@ -249,7 +245,7 @@ impl<R, S, T, Key> MapReduce<R, S, T, Key> {
 
 impl<R, S, T, Key> TriggeredMapReduce<R, S, T, Key> {
     #[doc(hidden)]
-    pub fn key_by<F>(self, _key: F) -> Self
+    pub fn key_by<F>(self, _: F) -> Self
     where
         Self: KeyByBeforeChunks,
     {
@@ -268,18 +264,17 @@ impl<R, S, T, Key> TriggeredMapReduce<R, S, T, Key> {
     }
 }
 
-/// How a handler keys its items, as the grouping member needs it.
 #[doc(hidden)]
 pub trait AiKeySpec<T>: Send + Sync + 'static {
     type Key: Ord + Clone + serde::Serialize + Send + Sync + 'static;
 
-    fn key_fn(self) -> Option<Arc<dyn Fn(&T) -> Self::Key + Send + Sync + 'static>>;
+    fn key_fn(self) -> Option<AiKeyFn<T, Self::Key>>;
 }
 
 impl<T> AiKeySpec<T> for Unkeyed {
     type Key = ();
 
-    fn key_fn(self) -> Option<Arc<dyn Fn(&T) -> Self::Key + Send + Sync + 'static>> {
+    fn key_fn(self) -> Option<AiKeyFn<T, Self::Key>> {
         None
     }
 }
@@ -291,7 +286,7 @@ where
 {
     type Key = K;
 
-    fn key_fn(self) -> Option<Arc<dyn Fn(&T) -> Self::Key + Send + Sync + 'static>> {
+    fn key_fn(self) -> Option<AiKeyFn<T, Self::Key>> {
         Some(Arc::new(self.key))
     }
 }

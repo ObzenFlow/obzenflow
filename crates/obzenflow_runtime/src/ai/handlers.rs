@@ -44,10 +44,9 @@ where
     Output: StageFactSet,
     Allowed: EffectSet,
 {
-    let binding = fx
-        .project_configured_effect::<E, At>()
-        .map_err(|error| CallFailure::Integrity(integrity_failure(error)))?;
-    let effect = E::effect(label, request, binding)
+    let effect = fx
+        .configured_effect_for_next_cursor::<E, At, _>(|binding| E::effect(label, request, binding))
+        .map_err(|error| CallFailure::Integrity(integrity_failure(error)))?
         .map_err(|error| CallFailure::Request(error.to_string()))?;
     match fx.perform::<E, At, SubsetProofEnd>(effect).await {
         Ok(outcome) => Ok(AiOutcome::Replied(E::reply(request.clone(), outcome))),
@@ -79,7 +78,6 @@ fn interpret_failure(
     }
 }
 
-/// The generated member of an `ai::infer` stage: one call per input.
 #[doc(hidden)]
 #[derive(crate::effects::EffectHandler)]
 #[effect_handler(effects = crate::effects)]
@@ -105,7 +103,9 @@ impl<R, In> Clone for AiInferHandler<R, In> {
 
 impl<R, In> fmt::Debug for AiInferHandler<R, In> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("AiInferHandler").finish_non_exhaustive()
+        formatter
+            .debug_struct("AiInferHandler")
+            .finish_non_exhaustive()
     }
 }
 
@@ -145,8 +145,6 @@ fn chunk_of<T>(group: AiMapReduceMapInput<T>) -> Chunk<T> {
     Chunk::new(group.group, group.first_number, group.items)
 }
 
-/// The generated map member of a map-only `ai::map` stage: one call per group,
-/// whose output leaves the stage.
 #[doc(hidden)]
 #[derive(crate::effects::EffectHandler)]
 #[effect_handler(effects = crate::effects)]
@@ -172,7 +170,9 @@ impl<R, T> Clone for AiMapHandler<R, T> {
 
 impl<R, T> fmt::Debug for AiMapHandler<R, T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("AiMapHandler").finish_non_exhaustive()
+        formatter
+            .debug_struct("AiMapHandler")
+            .finish_non_exhaustive()
     }
 }
 
@@ -209,13 +209,10 @@ where
     }
 }
 
-/// The facts the map member of an `ai::map` stage with a reduce authors.
 #[doc(hidden)]
 pub type AiMapPartialFacts<T, P> =
     obzenflow_core::stage_fact_set![AiMapReduceTaggedPartial<T, P>, AiMapReduceChunkFailed];
 
-/// The generated map member of an `ai::map` stage with a reduce: one call per
-/// group, whose partial or failure the collector receives.
 #[doc(hidden)]
 #[derive(crate::effects::EffectHandler)]
 #[effect_handler(effects = crate::effects)]
@@ -318,8 +315,6 @@ where
     }
 }
 
-/// The facts the reduce member of an `ai::map` stage authors: the reduce
-/// role's output facts and its failure.
 #[doc(hidden)]
 pub struct AiReduceFacts<O>(PhantomData<fn() -> O>);
 
@@ -336,8 +331,6 @@ where
     }
 }
 
-/// The generated reduce member of an `ai::map` stage: one call per closed
-/// window.
 #[doc(hidden)]
 #[derive(crate::effects::EffectHandler)]
 #[effect_handler(effects = crate::effects)]

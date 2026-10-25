@@ -312,6 +312,74 @@ fn payload(frame: &SseFrame) -> Value {
 }
 
 #[test]
+fn composite_breaker_facts_from_two_members_are_one_row() {
+    let (map, reduce) = (StageId::new(), StageId::new());
+    let member_fact = |stage: StageId, name: &str, event_time: u64, fact: CircuitBreakerFact| {
+        let mut event = ChainEventFactory::execution_event(
+            stage.into(),
+            ExecutionPayload::CircuitBreaker(fact),
+        )
+        .with_flow_context(FlowContext {
+            flow_name: "demo".into(),
+            flow_id: "flow".into(),
+            ..FlowContext::new(name, stage)
+        });
+        event.processing.event_time = event_time;
+        stored_record(JournalWriterId::from(JournalId::new()), event)
+    };
+    let opened = member_fact(
+        map,
+        "digest__map",
+        10,
+        CircuitBreakerFact::Opened {
+            unit: "digest".into(),
+            cooldown_ms: 5_000,
+            error_rate: 1.0,
+            failure_count: 1,
+            trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+            observed_calls: 1,
+            slow_call_rate: None,
+            slow_call_count: None,
+            last_error: None,
+        },
+    );
+    let closed = member_fact(
+        reduce,
+        "digest__reduce",
+        20,
+        CircuitBreakerFact::Closed {
+            unit: "digest".into(),
+            success_count: 1,
+            recovery_duration_ms: 10,
+        },
+    );
+    let mut live = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
+
+    let frames = live.project(&opened.into(), 100);
+    let opening = payload(&frames[0]);
+    assert_eq!(opening["unit"], "digest");
+    assert_eq!(opening["stage_id"], map.to_string());
+    assert_eq!(opening["state_to"], "open");
+
+    let frames = live.project(&closed.into(), 200);
+    let closing = payload(&frames[0]);
+    assert_eq!(closing["unit"], "digest");
+    assert_eq!(closing["stage_id"], reduce.to_string());
+    assert_eq!(
+        closing["state_from"], "open",
+        "the reduce member continues the state the map member left"
+    );
+
+    let snapshot = payload(&live.middleware_snapshot(300).unwrap());
+    let rows = snapshot["middleware"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "one row per policy, whichever member wrote");
+    assert_eq!(rows[0]["unit"], "digest");
+    assert_eq!(rows[0]["stage_id"], reduce.to_string());
+    assert_eq!(rows[0]["stage_name"], "digest__reduce");
+    assert_eq!(rows[0]["circuit_breaker"]["state"], "closed");
+}
+
+#[test]
 fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
     let stage = StageId::new();
     let cases = [

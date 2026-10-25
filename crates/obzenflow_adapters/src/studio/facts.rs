@@ -94,11 +94,7 @@ fn stage_frame(
             let context = &envelope.envelope.provenance.event.flow_context;
             let unit = super::middleware::policy_unit(payload)?;
             let update = middleware.message(
-                &super::middleware::fact_unit(
-                    context.stage_id,
-                    &context.stage_name,
-                    unit.as_str(),
-                ),
+                &super::middleware::fact_unit(context.stage_id, &context.stage_name, unit.as_str()),
                 payload,
             )?;
             StudioMessage::MiddlewareLifecycle {

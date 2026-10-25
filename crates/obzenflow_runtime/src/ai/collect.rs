@@ -26,9 +26,6 @@ const MAX_SLOTS_PER_WINDOW: u64 = 4096;
 
 type KeyId = String;
 
-/// The pure collecting member of an `ai::map` stage with a reduce. It holds
-/// each key's partials and items by window and hands a closed window to the
-/// reduce member, or records why it never reduces.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct AiCollector {
@@ -359,10 +356,9 @@ impl AiCollector {
             return self.record_end(state, ended);
         }
         if AiMapReduceTaggedPartial::<Value, Value>::matches_event_type(&event_type) {
-            let tagged = AiMapReduceTaggedPartial::<Value, Value>::try_from_event(&event)
-                .map_err(|error| {
-                    protocol_fatal(format!("ai tagged partial decode failed: {error}"))
-                })?;
+            let tagged = AiMapReduceTaggedPartial::<Value, Value>::try_from_event(&event).map_err(
+                |error| protocol_fatal(format!("ai tagged partial decode failed: {error}")),
+            )?;
             return self.record_disposition(
                 state,
                 &event,
@@ -476,7 +472,7 @@ impl StatefulHandler for AiCollector {
         AiCollectorState::default()
     }
 
-    fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, _: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(Vec::new())
     }
 
@@ -549,5 +545,188 @@ impl StatefulHandler for AiCollector {
             return Err(failure.clone());
         }
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::StageId;
+    use serde_json::json;
+
+    fn collector(trigger: ReduceTrigger) -> AiCollector {
+        let mut collector = AiCollector::new(
+            "digest",
+            trigger,
+            NonZeroU64::new(8).expect("a nonzero window limit"),
+        );
+        collector.install_writer_id(WriterId::from(StageId::new()));
+        collector
+    }
+
+    fn every(chunks: u64) -> ReduceTrigger {
+        ReduceTrigger::EveryNChunks {
+            chunks: NonZeroU64::new(chunks).expect("a nonzero trigger"),
+        }
+    }
+
+    fn fact<P: TypedPayload>(payload: P) -> ChainEvent {
+        TypedFact::from_payload(payload)
+            .expect("the protocol fact encodes")
+            .into_event(WriterId::from(StageId::new()))
+    }
+
+    fn partial(group: u64, value: u64) -> ChainEvent {
+        fact(AiMapReduceTaggedPartial::<Value, Value> {
+            key: None,
+            group: GroupOrdinal::new(group),
+            items: vec![json!(value)],
+            partial: json!(value * 10),
+        })
+    }
+
+    fn ended(group_count: u64) -> ChainEvent {
+        fact(AiMapReduceGroupingEnded {
+            key: None,
+            group_count,
+        })
+    }
+
+    fn admit(collector: &mut AiCollector, state: &mut AiCollectorState, events: Vec<ChainEvent>) {
+        for event in events {
+            collector
+                .try_accumulate(state, event)
+                .expect("the collector admits the fact");
+        }
+    }
+
+    fn handed(
+        collector: &AiCollector,
+        state: &mut AiCollectorState,
+    ) -> Vec<(u64, Vec<Value>, Vec<Value>)> {
+        if !collector.should_emit(state) {
+            return Vec::new();
+        }
+        let events = collector.emit(state).expect("the ready windows hand off");
+        collector.outputs_committed(state);
+        events
+            .iter()
+            .map(|event| {
+                let input = AiMapReduceReduceInput::<Value, Value>::try_from_event(event)
+                    .expect("a reduce input");
+                (input.window.get(), input.items, input.partials)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_window_closes_when_its_slots_fill_and_hands_partials_in_group_order() {
+        let mut collector = collector(every(2));
+        let mut state = collector.initial_state();
+        admit(&mut collector, &mut state, vec![partial(1, 2)]);
+        assert!(handed(&collector, &mut state).is_empty());
+
+        admit(&mut collector, &mut state, vec![partial(0, 1)]);
+        assert_eq!(
+            handed(&collector, &mut state),
+            [(0, vec![json!(1), json!(2)], vec![json!(10), json!(20)])]
+        );
+    }
+
+    #[test]
+    fn the_end_of_input_fact_closes_an_on_eof_window() {
+        let mut collector = collector(ReduceTrigger::OnEof);
+        let mut state = collector.initial_state();
+        admit(
+            &mut collector,
+            &mut state,
+            vec![partial(0, 1), partial(2, 3), partial(1, 2)],
+        );
+        assert!(handed(&collector, &mut state).is_empty());
+
+        admit(&mut collector, &mut state, vec![ended(3)]);
+        assert_eq!(
+            handed(&collector, &mut state),
+            [(
+                0,
+                vec![json!(1), json!(2), json!(3)],
+                vec![json!(10), json!(20), json!(30)]
+            )]
+        );
+    }
+
+    #[test]
+    fn the_end_of_input_fact_closes_the_remainder_window() {
+        let mut collector = collector(every(2));
+        let mut state = collector.initial_state();
+        admit(
+            &mut collector,
+            &mut state,
+            vec![partial(0, 1), partial(1, 2), partial(2, 3)],
+        );
+        assert_eq!(handed(&collector, &mut state).len(), 1);
+
+        admit(&mut collector, &mut state, vec![ended(3)]);
+        assert_eq!(
+            handed(&collector, &mut state),
+            [(1, vec![json!(3)], vec![json!(30)])]
+        );
+    }
+
+    #[test]
+    fn a_repeated_disposition_is_ignored() {
+        let mut collector = collector(every(2));
+        let mut state = collector.initial_state();
+        admit(
+            &mut collector,
+            &mut state,
+            vec![partial(0, 1), partial(0, 1), partial(1, 2)],
+        );
+        assert_eq!(
+            handed(&collector, &mut state),
+            [(0, vec![json!(1), json!(2)], vec![json!(10), json!(20)])]
+        );
+    }
+
+    #[test]
+    fn conflicting_dispositions_for_one_group_fail_the_stage() {
+        let mut collector = collector(every(2));
+        let mut state = collector.initial_state();
+        admit(&mut collector, &mut state, vec![partial(0, 1)]);
+        let Err(HandlerError::Fatal(fatal)) = collector.try_accumulate(&mut state, partial(0, 5))
+        else {
+            panic!("a second disposition for group 0 is a protocol failure");
+        };
+        assert_eq!(fatal.code, StageFatalCode::Protocol);
+        assert_eq!(
+            fatal.detail,
+            "stage `digest`: conflicting dispositions for group 0"
+        );
+    }
+
+    #[test]
+    fn only_a_natural_end_of_input_requires_every_window_closed() {
+        let mut collector = collector(ReduceTrigger::OnEof);
+        let mut state = collector.initial_state();
+        admit(&mut collector, &mut state, vec![partial(0, 1)]);
+
+        for kind in [
+            StatefulTerminationKind::TruncatedEof,
+            StatefulTerminationKind::PoisonedEof,
+        ] {
+            assert_eq!(
+                collector.validate_terminal(&state, kind),
+                TerminalValidation::Clean
+            );
+        }
+        let TerminalValidation::Primary(fatal) =
+            collector.validate_terminal(&state, StatefulTerminationKind::NaturalEof)
+        else {
+            panic!("an open window at a natural end of input fails the stage");
+        };
+        assert_eq!(
+            fatal.detail,
+            "stage `digest` reached a natural end of input with 1 open window(s): window 0"
+        );
     }
 }

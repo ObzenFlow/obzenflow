@@ -27,6 +27,9 @@ pub mod gateway_demo;
 #[path = "../examples/flash_sale_allocation/support.rs"]
 pub mod flash_sale_demo;
 
+#[path = "support/fake_ai.rs"]
+pub mod fake_ai;
+
 use async_trait::async_trait;
 use gateway_demo::domain::{
     CustomerOrderPlaced, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
@@ -273,6 +276,8 @@ enum Hold {
     Receipt(String),
     ReceiptAndGateway { receipt: String, gateway: String },
     BetweenEffects(String),
+    AiSourceAfter(u64),
+    AiCall(String),
 }
 
 async fn hold_until(release: &Path) {
@@ -512,7 +517,9 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
         Some(Hold::Gateway(order)) => (Some(order), None),
         Some(Hold::Receipt(order)) => (None, Some(order)),
         Some(Hold::ReceiptAndGateway { receipt, gateway }) => (Some(gateway), Some(receipt)),
-        Some(Hold::BetweenEffects(_)) | None => (None, None),
+        Some(Hold::BetweenEffects(_) | Hold::AiSourceAfter(_) | Hold::AiCall(_)) | None => {
+            (None, None)
+        }
     };
     let gateway = Gateway {
         calls: CallLog::open(scenario.ledger()).expect("the gateway's call log opens"),
@@ -639,6 +646,10 @@ fn durable_execution_contract_child() {
         Graph::UnorderedFanIn => app
             .with_presentation(lagging::presentation())
             .run_blocking(lagging::fan_in_flow(scenario)),
+        Graph::AiDigest => app
+            .with_config_file(ai_digest::config(scenario))
+            .with_ai_models(ai_digest::models(scenario, plan.hold.as_ref()).providers())
+            .run_blocking(ai_digest::build_flow(scenario, plan.hold)),
     };
     if let Err(error) = result {
         eprintln!("{error}");
@@ -675,6 +686,7 @@ enum Graph {
     FlashSale,
     RateLimitedSink,
     UnorderedFanIn,
+    AiDigest,
 }
 
 fn payment_config(scenario: &Scenario) -> PathBuf {
@@ -4957,5 +4969,503 @@ mod lagging {
             ITEMS as usize,
             "{name}: every item prints"
         );
+    }
+}
+
+mod ai_digest {
+    use super::*;
+    use crate::fake_ai::{last_user_message, FakeChatModels, LedgerCall};
+    use obzenflow::ai::{
+        self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk,
+        Partials,
+    };
+    use obzenflow::flow::ai;
+    use obzenflow::stages::sources::{
+        FiniteSourceConnector, PositionedFiniteReader, Seek, SeekableSource, SourceError,
+        SourceInputIdentity, SourcePosition, SourceReaderInitContext, SourceRecord,
+    };
+    use obzenflow_core::ai::{
+        AiMapReduceGroupingEnded, AiMapReduceMapInput, AiMapReduceTaggedPartial,
+    };
+
+    const ITEMS: u64 = 12;
+    const OPEN_AFTER: u64 = 10;
+    const HELD: &str = "sum [5, 7]";
+    const MODEL_A: &str = "[ai.models]\nmodel = \"model-a\"\n";
+    const MODEL_B: &str = "[ai.models]\nmodel = \"model-b\"\n";
+    const EAST: &str = "[ai.endpoints.east]\nprovider = \"openai_compatible\"\n\
+                        base_url = \"https://east.example/v1\"\n\n\
+                        [ai.models]\nendpoint = \"east\"\nmodel = \"model-a\"\n";
+    const WEST: &str = "[ai.endpoints.west]\nprovider = \"openai_compatible\"\n\
+                        base_url = \"https://west.example/v1\"\n\n\
+                        [ai.models]\nendpoint = \"west\"\nmodel = \"model-b\"\n";
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Item {
+        value: u64,
+    }
+    impl TypedPayload for Item {
+        const EVENT_TYPE: &'static str = "durable_contract.ai.item";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Sum {
+        total: u64,
+    }
+    impl TypedPayload for Sum {
+        const EVENT_TYPE: &'static str = "durable_contract.ai.sum";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    struct KeyTotal {
+        key: u64,
+        total: u64,
+    }
+    impl TypedPayload for KeyTotal {
+        const EVENT_TYPE: &'static str = "durable_contract.ai.key_total";
+    }
+
+    fn parity(item: &Item) -> u64 {
+        item.value % 2
+    }
+
+    #[derive(Clone, Copy)]
+    struct SumMap;
+
+    impl AiRole<Chunk<Item>> for SumMap {
+        type Effect = ChatCompletion;
+        type Out = Sum;
+
+        fn prepare(&self, chunk: &Chunk<Item>) -> Result<ChatRequestSpec, HandlerError> {
+            let values = chunk.iter().map(|item| item.value).collect::<Vec<_>>();
+            Ok(ChatRequestSpec::new("Sum.", format!("sum {values:?}")))
+        }
+
+        fn interpret(
+            &self,
+            chunk: Chunk<Item>,
+            outcome: AiOutcome<ChatCompletionReply>,
+        ) -> Result<Sum, HandlerError> {
+            if outcome.unavailable().is_some() {
+                return Ok(Sum { total: 0 });
+            }
+            outcome.replied()?;
+            Ok(Sum {
+                total: chunk.iter().map(|item| item.value).sum(),
+            })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct SumReduce;
+
+    impl AiRole<Partials<Item, Sum>> for SumReduce {
+        type Effect = ChatCompletion;
+        type Out = KeyTotal;
+
+        fn prepare(&self, input: &Partials<Item, Sum>) -> Result<ChatRequestSpec, HandlerError> {
+            Ok(ChatRequestSpec::new(
+                "Reduce.",
+                format!("reduce key {}", parity(&input.items()[0])),
+            ))
+        }
+
+        fn interpret(
+            &self,
+            input: Partials<Item, Sum>,
+            outcome: AiOutcome<ChatCompletionReply>,
+        ) -> Result<KeyTotal, HandlerError> {
+            outcome.replied()?;
+            Ok(KeyTotal {
+                key: parity(&input.items()[0]),
+                total: input.partials().iter().map(|partial| partial.total).sum(),
+            })
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct Offset(u64);
+
+    impl SourcePosition for Offset {}
+
+    #[derive(Clone, Debug)]
+    struct Items {
+        holds_after: Option<u64>,
+        release: PathBuf,
+    }
+
+    struct ItemsReader {
+        next: u64,
+        items: Items,
+        identity: SourceInputIdentity,
+    }
+
+    impl SeekableSource for ItemsReader {
+        type Position = Offset;
+
+        fn input_identity(&self) -> &SourceInputIdentity {
+            &self.identity
+        }
+
+        fn beginning(&self) -> Offset {
+            Offset(0)
+        }
+
+        fn seek(&mut self, position: Offset) -> Result<(), SourceError> {
+            self.next = position.0;
+            Ok(())
+        }
+    }
+
+    impl PositionedFiniteReader for ItemsReader {
+        type Output = Item;
+
+        fn next(&mut self) -> Result<Option<Vec<SourceRecord<Item, Offset>>>, SourceError> {
+            if self
+                .items
+                .holds_after
+                .is_some_and(|after| self.next >= after)
+                && !self.items.release.exists()
+            {
+                return Ok(Some(Vec::new()));
+            }
+            if self.next >= ITEMS {
+                return Ok(None);
+            }
+            self.next += 1;
+            Ok(Some(vec![SourceRecord {
+                value: Item { value: self.next },
+                after: Offset(self.next),
+            }]))
+        }
+    }
+
+    impl FiniteSourceConnector for Items {
+        type Output = Item;
+        type Reader = ItemsReader;
+        type Continuation = Seek<Offset>;
+
+        fn open(&self, _: SourceReaderInitContext) -> Result<ItemsReader, SourceError> {
+            Ok(ItemsReader {
+                next: 0,
+                items: self.clone(),
+                identity: SourceInputIdentity::new("ai_digest_items", &json!({ "items": ITEMS }))
+                    .expect("the identity encodes"),
+            })
+        }
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario, hold: Option<Hold>) -> FlowDefinition {
+        let items = Items {
+            holds_after: match hold {
+                Some(Hold::AiSourceAfter(after)) => Some(after),
+                _ => None,
+            },
+            release: scenario.release(),
+        };
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_| {
+            let digest = ai::map(SumMap)
+                .key_by(parity)
+                .chunks(2)
+                .reduce(SumReduce)
+                .on_eof();
+            let totals = DiscardSink::<KeyTotal>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_ai_digest",
+                journals: disk_journals(journals),
+
+                stages: {
+                    items = source!(Item => items);
+                    digest = ai!(Item -> KeyTotal => digest);
+                    totals = sink!(KeyTotal => totals);
+                },
+
+                topology: {
+                    items |> digest;
+                    digest |> totals;
+                }
+            })
+        })
+    }
+
+    pub(super) fn models(scenario: &Scenario, hold: Option<&Hold>) -> FakeChatModels {
+        let models = match hold {
+            Some(Hold::AiCall(held)) => {
+                let held = held.clone();
+                FakeChatModels::hanging_when(
+                    std::sync::Arc::new(tokio::sync::Notify::new()),
+                    move |request| last_user_message(request) == held,
+                    "ok",
+                )
+            }
+            _ => FakeChatModels::replying(|_| "ok".to_string()),
+        };
+        models.with_ledger(ledger(scenario))
+    }
+
+    pub(super) fn config(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("obzenflow.toml")
+    }
+
+    fn configure(scenario: &Scenario, ai: &str) {
+        std::fs::write(config(scenario), ai).expect("write the configuration");
+    }
+
+    fn ledger(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("ai-ledger.jsonl")
+    }
+
+    fn calls(scenario: &Scenario) -> Vec<LedgerCall> {
+        read_lines(&ledger(scenario))
+    }
+
+    fn map_calls(scenario: &Scenario) -> Vec<(String, String, String)> {
+        calls(scenario)
+            .into_iter()
+            .filter(|call| call.prompt.starts_with("sum "))
+            .map(|call| (call.endpoint, call.model, call.prompt))
+            .collect()
+    }
+
+    fn reduce_calls(scenario: &Scenario) -> BTreeSet<(String, String, String)> {
+        calls(scenario)
+            .into_iter()
+            .filter(|call| call.prompt.starts_with("reduce "))
+            .map(|call| (call.endpoint, call.model, call.prompt))
+            .collect()
+    }
+
+    fn decoded<'a, T: TypedPayload + 'a>(
+        archive: &'a Archive,
+        stage: &'a str,
+    ) -> impl Iterator<Item = T> + 'a {
+        archive
+            .rows(stage, RunJournalKind::Data)
+            .filter_map(|row| T::from_event(&row.authored()))
+    }
+
+    fn groups(archive: &Archive) -> Vec<(String, u64, Vec<u64>)> {
+        let mut groups = decoded::<AiMapReduceMapInput<Item>>(archive, "digest__chunk")
+            .map(|input| {
+                (
+                    input.key.map(|key| key.to_string()).unwrap_or_default(),
+                    input.group.get(),
+                    input.items.iter().map(|item| item.value).collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        groups.sort();
+        groups
+    }
+
+    fn totals(archive: &Archive) -> Vec<KeyTotal> {
+        let mut totals = decoded::<KeyTotal>(archive, "digest__reduce").collect::<Vec<_>>();
+        totals.sort();
+        totals
+    }
+
+    fn partials(archive: &Archive) -> usize {
+        decoded::<AiMapReduceTaggedPartial<Item, Sum>>(archive, "digest__map").count()
+    }
+
+    fn row(endpoint: &str, model: &str, prompt: &str) -> (String, String, String) {
+        (endpoint.into(), model.into(), prompt.into())
+    }
+
+    async fn strict_replay(scenario: &Scenario, archive: &Path, name: &str) {
+        configure(scenario, "");
+        let before = calls(scenario);
+        let replayed = Child::spawn(scenario, replay(archive), None)
+            .completed()
+            .await;
+        assert_eq!(
+            calls(scenario),
+            before,
+            "{name}: a strict replay calls no model"
+        );
+        let (code, report) = verify_exit(archive, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+    }
+
+    async fn open_groups_survive(name: &str, signal: Signal) {
+        let control = Scenario::for_graph(&format!("{name}_control"), Graph::AiDigest);
+        configure(&control, MODEL_A);
+        let uninterrupted =
+            Archive::read(&Child::spawn(&control, Vec::new(), None).completed().await).await;
+
+        let scenario = Scenario::for_graph(name, Graph::AiDigest);
+        configure(&scenario, MODEL_A);
+        let child = Child::spawn(&scenario, Vec::new(), Some(Hold::AiSourceAfter(OPEN_AFTER)));
+        let interrupted = child.run().await;
+        until(&interrupted, name, |archive| partials(archive) == 4).await;
+        let stops_cleanly = matches!(signal, Signal::Term);
+        child.signal(signal);
+        assert_eq!(
+            child.exit().await.success(),
+            stops_cleanly,
+            "{name}: the signal lands"
+        );
+        let stopped = Archive::read(&interrupted).await;
+        assert_eq!(
+            groups(&stopped).len(),
+            4,
+            "{name}: no open group closes early"
+        );
+        assert_eq!(
+            decoded::<AiMapReduceGroupingEnded>(&stopped, "digest__chunk").count(),
+            0,
+            "{name}: a signal is not the end of input"
+        );
+        assert!(
+            totals(&stopped).is_empty(),
+            "{name}: no window reduces early"
+        );
+
+        let resumed = Child::spawn(&scenario, resume(&interrupted), None)
+            .completed()
+            .await;
+        let archive = Archive::read(&resumed).await;
+        assert_eq!(
+            groups(&archive),
+            groups(&uninterrupted),
+            "{name}: resume numbers each key's groups as the uninterrupted run does"
+        );
+        assert_eq!(totals(&archive), totals(&uninterrupted));
+        assert_lineage_at_crossing(&archive, "digest__map", name);
+        let prompts = calls(&scenario)
+            .into_iter()
+            .map(|call| call.prompt)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prompts.len(),
+            prompts.iter().collect::<BTreeSet<_>>().len(),
+            "{name}: no committed call repeats: {prompts:?}"
+        );
+        assert_eq!(
+            prompts.len(),
+            8,
+            "{name}: six map calls and two reduce calls"
+        );
+
+        strict_replay(&scenario, &resumed, name).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kill_with_open_groups_for_two_keys_resumes_and_replays() {
+        open_groups_survive("ai_open_groups_kill", Signal::Kill).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_with_open_groups_for_two_keys_resumes_and_replays() {
+        open_groups_survive("ai_open_groups_term", Signal::Term).await;
+    }
+
+    async fn kill_during_held_call(scenario: &Scenario, name: &str) -> PathBuf {
+        let child = Child::spawn(scenario, Vec::new(), Some(Hold::AiCall(HELD.into())));
+        let killed = child.run().await;
+        until(&killed, name, |_| {
+            calls(scenario).iter().any(|call| call.prompt == HELD)
+        })
+        .await;
+        child.signal(Signal::Kill);
+        assert!(!child.exit().await.success(), "{name}: the kill lands");
+        killed
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_in_doubt_call_resumes_under_its_recorded_model_and_new_calls_take_the_configured_one(
+    ) {
+        let name = "ai_in_doubt_model_change";
+        let scenario = Scenario::for_graph(name, Graph::AiDigest);
+        configure(&scenario, MODEL_A);
+        let killed = kill_during_held_call(&scenario, name).await;
+
+        configure(&scenario, MODEL_B);
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        assert_eq!(
+            map_calls(&scenario),
+            [
+                row("ollama", "model-a", "sum [1, 3]"),
+                row("ollama", "model-a", "sum [2, 4]"),
+                row("ollama", "model-a", HELD),
+                row("ollama", "model-a", HELD),
+                row("ollama", "model-b", "sum [6, 8]"),
+                row("ollama", "model-b", "sum [9, 11]"),
+                row("ollama", "model-b", "sum [10, 12]"),
+            ],
+            "{name}: the in-doubt call repeats under the model that started it"
+        );
+        assert_eq!(
+            reduce_calls(&scenario),
+            BTreeSet::from([
+                row("ollama", "model-b", "reduce key 0"),
+                row("ollama", "model-b", "reduce key 1"),
+            ])
+        );
+        let archive = Archive::read(&resumed).await;
+        assert_eq!(
+            totals(&archive),
+            [
+                KeyTotal { key: 0, total: 42 },
+                KeyTotal { key: 1, total: 36 }
+            ]
+        );
+        assert_eq!(
+            archive.manifest()["stages"]["digest__map"]["ai_models"]
+                .as_array()
+                .expect("the map member's models")
+                .iter()
+                .map(|spec| spec["model"].as_str().expect("a model"))
+                .collect::<Vec<_>>(),
+            ["model-b", "model-a"],
+            "{name}: the configured model, then the one the archive recorded"
+        );
+
+        strict_replay(&scenario, &resumed, name).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_in_doubt_call_whose_endpoint_is_gone_reaches_its_role_as_unavailable() {
+        let name = "ai_in_doubt_endpoint_gone";
+        let scenario = Scenario::for_graph(name, Graph::AiDigest);
+        configure(&scenario, EAST);
+        let killed = kill_during_held_call(&scenario, name).await;
+
+        configure(&scenario, WEST);
+        let resumed = Child::spawn(&scenario, resume(&killed), None)
+            .completed()
+            .await;
+        assert_eq!(
+            map_calls(&scenario),
+            [
+                row("east", "model-a", "sum [1, 3]"),
+                row("east", "model-a", "sum [2, 4]"),
+                row("east", "model-a", HELD),
+                row("west", "model-b", "sum [6, 8]"),
+                row("west", "model-b", "sum [9, 11]"),
+                row("west", "model-b", "sum [10, 12]"),
+            ],
+            "{name}: nothing reaches the gone endpoint, and new calls take the configured one"
+        );
+        assert_eq!(
+            reduce_calls(&scenario),
+            BTreeSet::from([
+                row("west", "model-b", "reduce key 0"),
+                row("west", "model-b", "reduce key 1"),
+            ])
+        );
+        assert_eq!(
+            totals(&Archive::read(&resumed).await),
+            [
+                KeyTotal { key: 0, total: 42 },
+                KeyTotal { key: 1, total: 24 }
+            ],
+            "{name}: the role turns the unreachable call into an empty sum"
+        );
+
+        strict_replay(&scenario, &resumed, name).await;
     }
 }

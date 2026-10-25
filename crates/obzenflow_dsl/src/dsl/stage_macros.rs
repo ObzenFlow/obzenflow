@@ -20,16 +20,7 @@
 //! effectful_stateful!(In -> Out => handler.at_least_once::<ChargeCard>())
 //! sink!(In => handler.idempotent())
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
-//! ai!(In -> Out with breaker => handler)
 //! ```
-//!
-//! Every stage macro takes one row
-//! shape: the stage's types, an optional `with` clause holding its middleware,
-//! `=>`, then the handler and its decorations. An effectful handler's effect
-//! set declares the effects it performs, its `#[system]` fields hold the
-//! systems that answer them, and `.at_least_once::<E>()` or
-//! `.transactional::<E>()` acknowledges a paid effect. A sink's `.idempotent()` or `.non_idempotent()`
-//! classifies its redelivery. Backpressure is set only in configuration.
 //!
 //! Ordinary handler and role slots accept only a local name, unit value path,
 //! or qualified value path made from identifier segments, followed by its
@@ -2933,8 +2924,6 @@ macro_rules! __obzenflow_join_attachment_contract {
     };
 }
 
-/// Shared stage-row lowering: the stage's types, an optional `with` clause
-/// holding its middleware, `=>`, then the handler and its decorations.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_stage_row {
@@ -3658,18 +3647,463 @@ macro_rules! effectful_transform {
 /// The row's arrow equals the handler's input and output, and middleware is
 /// optional.
 ///
-/// ```ignore
-/// let digest = ai::map(roles.clone()).chunks(10).reduce(roles).on_eof();
+/// ```
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_adapters::middleware::circuit_breaker;
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec, Chunk, Partials};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Digest;
+/// # impl AiRole<Chunk<Story>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
+/// #     }
+/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// # impl AiRole<Partials<Story, Summary>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, input: &Partials<Story, Summary>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Combine.", format!("{} summaries", input.partials().len())))
+/// #     }
+/// #     fn interpret(&self, _: Partials<Story, Summary>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// # impl AiRole<Story> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let digest = ai::map(Digest).chunks(10).reduce(Digest).on_eof();
 /// let ai_breaker = circuit_breaker().consecutive_failures(5);
+/// let digest_stage = obzenflow_dsl::ai!(Story -> Summary with ai_breaker => digest);
 ///
-/// digest = ai!(FormattedStory -> HnDigestSummary with ai_breaker => digest);
+/// let brief = ai::infer(Digest);
+/// let brief_stage = obzenflow_dsl::ai!(Story -> Summary => brief);
+/// ```
+///
+/// A map-reduce names when its windows reduce.
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec, Chunk, Partials};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Digest;
+/// # impl AiRole<Chunk<Story>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
+/// #     }
+/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// # impl AiRole<Partials<Story, Summary>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, input: &Partials<Story, Summary>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Combine.", format!("{} summaries", input.partials().len())))
+/// #     }
+/// #     fn interpret(&self, _: Partials<Story, Summary>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let digest = ai::map(Digest).chunks(10).reduce(Digest);
+/// let digest_stage = obzenflow_dsl::ai!(Story -> Summary => digest);
+/// ```
+///
+/// `ai::map` bounds its groups with `.chunks(n)`.
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec, Chunk};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Digest;
+/// # impl AiRole<Chunk<Story>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
+/// #     }
+/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let digest = ai::map(Digest);
+/// let digest_stage = obzenflow_dsl::ai!(Story -> Summary => digest);
+/// ```
+///
+/// The arrow states the handler's input and output.
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Brief;
+/// # impl AiRole<Story> for Brief {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let brief = ai::infer(Brief);
+/// let brief_stage = obzenflow_dsl::ai!(Story -> Story => brief);
+/// ```
+///
+/// A key groups items before they are chunked.
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec, Chunk};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Digest;
+/// # impl AiRole<Chunk<Story>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
+/// #     }
+/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let digest = ai::map(Digest).chunks(10).key_by(|story: &Story| story.title.clone());
+/// ```
+///
+/// A key reads the items the stage takes.
+///
+/// ```compile_fail,E0631
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec, Chunk};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Digest;
+/// # impl AiRole<Chunk<Story>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
+/// #     }
+/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let digest = ai::map(Digest).key_by(|summary: &Summary| summary.text.clone()).chunks(10);
+/// ```
+///
+/// `ai::infer` makes one call per input and has no key.
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Brief;
+/// # impl AiRole<Story> for Brief {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let brief = ai::infer(Brief).key_by(|story: &Story| story.title.clone());
+/// ```
+///
+/// A reduce role takes the partials its map role produces.
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec, Chunk, Partials};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Digest;
+/// # impl AiRole<Chunk<Story>> for Digest {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, chunk: &Chunk<Story>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", format!("{} stories", chunk.len())))
+/// #     }
+/// #     fn interpret(&self, _: Chunk<Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// # #[derive(Clone)]
+/// # struct CombineStories;
+/// # impl AiRole<Partials<Story, Story>> for CombineStories {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, input: &Partials<Story, Story>) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Combine.", format!("{} stories", input.partials().len())))
+/// #     }
+/// #     fn interpret(&self, _: Partials<Story, Story>, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let digest = ai::map(Digest).chunks(10).reduce(CombineStories).on_eof();
+/// ```
+///
+/// `with` comes before `=>`.
+///
+/// ```compile_fail
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_adapters::middleware::circuit_breaker;
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Brief;
+/// # impl AiRole<Story> for Brief {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let brief = ai::infer(Brief);
+/// let ai_breaker = circuit_breaker().consecutive_failures(5);
+/// let brief_stage = obzenflow_dsl::ai!(Story -> Summary => brief with ai_breaker);
+/// ```
+///
+/// A middleware group holds at least one value; omit `with` for none.
+///
+/// ```compile_fail
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Brief;
+/// # impl AiRole<Story> for Brief {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let brief = ai::infer(Brief);
+/// let brief_stage = obzenflow_dsl::ai!(Story -> Summary with {} => brief);
+/// ```
+///
+/// The role's `type Effect` names the effect, so a row has no `uses`.
+///
+/// ```compile_fail
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Brief;
+/// # impl AiRole<Story> for Brief {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let brief = ai::infer(Brief);
+/// let brief_stage = obzenflow_dsl::ai!(Story -> Summary uses ChatCompletion => brief);
+/// ```
+///
+/// Configuration chooses each stage's model, so a row has no `via`.
+///
+/// ```compile_fail
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Brief;
+/// # impl AiRole<Story> for Brief {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let brief = ai::infer(Brief);
+/// let brief_stage = obzenflow_dsl::ai!(Story -> Summary via chat => brief);
+/// ```
+///
+/// The row acknowledges its AI effect.
+///
+/// ```compile_fail
+/// # use obzenflow_adapters::ai::{self, ChatCompletion};
+/// # use obzenflow_core::ai::{AiOutcome, ChatCompletionReply, ChatRequestSpec};
+/// # use obzenflow_core::TypedPayload;
+/// # use obzenflow_runtime::ai::AiRole;
+/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Story { title: String }
+/// # impl TypedPayload for Story { const EVENT_TYPE: &'static str = "ai_doc.story"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Summary { text: String }
+/// # impl TypedPayload for Summary { const EVENT_TYPE: &'static str = "ai_doc.summary"; }
+/// # #[derive(Clone)]
+/// # struct Brief;
+/// # impl AiRole<Story> for Brief {
+/// #     type Effect = ChatCompletion;
+/// #     type Out = Summary;
+/// #     fn prepare(&self, story: &Story) -> Result<ChatRequestSpec, HandlerError> {
+/// #         Ok(ChatRequestSpec::new("Summarize.", story.title.clone()))
+/// #     }
+/// #     fn interpret(&self, _: Story, outcome: AiOutcome<ChatCompletionReply>) -> Result<Summary, HandlerError> {
+/// #         Ok(Summary { text: outcome.replied()?.text().to_string() })
+/// #     }
+/// # }
+/// let brief = ai::infer(Brief);
+/// let brief_stage =
+///     obzenflow_dsl::ai!(Story -> Summary => brief.at_least_once::<ChatCompletion>());
 /// ```
 #[macro_export]
 macro_rules! ai {
     ($($tokens:tt)*) => { $crate::__obzenflow_stage_row!(@sig ai __obzenflow_ai_attachment_contract [] $($tokens)*) };
 }
 
-/// Retired; build the handler with `ai::infer` and declare the stage with `ai!`.
+/// Rejects every row; declare the stage with `ai!` over a handler built with
+/// `ai::infer`.
+///
+/// ```compile_fail
+/// let brief_stage = obzenflow_dsl::inference!(Story -> Summary => brief);
+/// ```
 #[macro_export]
 macro_rules! inference {
     ($($tokens:tt)*) => {
@@ -3677,7 +4111,12 @@ macro_rules! inference {
     };
 }
 
-/// Retired; build the handler with `ai::map` and declare the stage with `ai!`.
+/// Rejects every row; declare the stage with `ai!` over a handler built with
+/// `ai::map`.
+///
+/// ```compile_fail
+/// let digest_stage = obzenflow_dsl::ai_map_reduce!(Story -> Summary => digest);
+/// ```
 #[macro_export]
 macro_rules! ai_map_reduce {
     ($($tokens:tt)*) => {

@@ -39,8 +39,8 @@ pub use model_providers::{NativeEmbeddingModelProvider, RigChatModelProvider};
 #[cfg(feature = "ai-rig")]
 pub use native_embedding_client::NativeEmbeddingClient;
 
-/// The model providers a host installs in each flow's build context: rig
-/// chat and native embeddings with the `ai-rig` feature, none without it.
+/// The model providers a host installs in each flow's build context. With the
+/// `ai-rig` feature these are rig chat and native embeddings; without it, none.
 pub fn builtin_ai_models() -> obzenflow_runtime::ai::AiModelProviders {
     let providers = obzenflow_runtime::ai::AiModelProviders::default();
     #[cfg(feature = "ai-rig")]

@@ -115,8 +115,7 @@ impl fmt::Display for AiUnavailable {
 
 impl std::error::Error for AiUnavailable {}
 
-/// The outcome of one AI call as a role sees it: the reply, or the typed
-/// reason no reply exists.
+/// The reply a role sees for one AI call, or the typed reason no reply exists.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AiOutcome<R> {
     Replied(R),

@@ -2,10 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! AI source authority and contraction guard: the members that run AI roles
-//! reach a model only through their effect, and the retired standalone
-//! surfaces stay absent.
-
 use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
@@ -28,7 +24,10 @@ fn rust_sources_beneath(directory: &Path, sources: &mut Vec<PathBuf>) {
 
 fn guarded_role_sources() -> Vec<PathBuf> {
     let mut sources = Vec::new();
-    rust_sources_beneath(&root().join("crates/obzenflow_runtime/src/ai"), &mut sources);
+    rust_sources_beneath(
+        &root().join("crates/obzenflow_runtime/src/ai"),
+        &mut sources,
+    );
     sources.push(root().join("crates/obzenflow_adapters/src/ai/shapes.rs"));
     sources.push(root().join("crates/obzenflow_dsl/src/dsl/ai_stage.rs"));
     sources.sort();

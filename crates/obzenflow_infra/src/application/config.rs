@@ -605,7 +605,6 @@ pub(crate) struct RawFileRuntimeConfig {
     pub(crate) ai: RawRuntimeAiConfig,
 }
 
-/// `[runtime.ai.stages.<stage>]`: a keyed `ai!` stage's open-key limit.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawRuntimeAiConfig {
@@ -779,8 +778,6 @@ pub(crate) struct RawRateLimiterFields {
     pub(crate) cost_per_attempt: Option<f64>,
 }
 
-/// `[ai]`: named endpoints under `[ai.endpoints.<name>]`, and one section
-/// per AI family whose tables pick an endpoint and a model.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawFileAiConfig {
@@ -797,8 +794,6 @@ pub(crate) struct RawAiEndpointTable {
     pub(crate) api_key_env: Option<String>,
 }
 
-/// One family's tables. `provider`, `base_url` and `api_key_env` parse here
-/// only so admission can point them at an endpoint table.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawAiFamilySection {
@@ -2842,7 +2837,10 @@ port = "abc"
             ),
             (format!("[app]\npartner = {{ key = {SENTINEL} }}\n"), "2:19"),
             (format!("[app]\nkeys = [\"ok\", {SENTINEL}]\n"), "2:15"),
-            (format!("[ai.endpoints.partner]\napi_key_env = {SENTINEL}\n"), "2:15"),
+            (
+                format!("[ai.endpoints.partner]\napi_key_env = {SENTINEL}\n"),
+                "2:15",
+            ),
         ] {
             let (_dir, path) = write_config(&contents);
             let error = resolve_file(&path).unwrap_err();
@@ -2869,21 +2867,20 @@ port = "abc"
 
     #[test]
     fn secret_references_admit_only_environment_variable_names() {
-        let _lock = env_lock();
+        let lock = env_lock();
         let endpoint = "[ai.endpoints.partner]\nprovider = \"openai_compatible\"\n\
                         base_url = \"http://127.0.0.1:1/v1\"\n";
 
-        let (_dir, path) =
-            write_config(&format!("{endpoint}api_key_env = \"{SENTINEL}\"\n"));
-        let error = resolve_file(&path).unwrap_err();
+        let refused = write_config(&format!("{endpoint}api_key_env = \"{SENTINEL}\"\n"));
+        let error = resolve_file(&refused.1).unwrap_err();
         assert_eq!(
             error.to_string(),
             "config error: [ai.endpoints.partner] api_key_env must name an environment variable"
         );
         assert!(!format!("{error:?}").contains(SENTINEL));
 
-        let (_dir, path) = write_config(&format!("{endpoint}api_key_env = \"PARTNER_API_KEY\"\n"));
-        let resolved = resolve_file(&path).unwrap();
+        let admitted = write_config(&format!("{endpoint}api_key_env = \"PARTNER_API_KEY\"\n"));
+        let resolved = resolve_file(&admitted.1).unwrap();
         let partner = resolved
             .runtime_config
             .ai_endpoints()
@@ -2913,6 +2910,8 @@ port = "abc"
         )
         .unwrap_err();
         assert!(!error.message().contains(SENTINEL), "{}", error.message());
+        drop(guard);
+        drop(lock);
     }
 
     #[test]

@@ -37,16 +37,13 @@ macro_rules! composite_data_payload {
     };
 }
 
-/// One closed group, the map member's input.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AiMapReduceMapInput<T> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<Value>,
     pub group: GroupOrdinal,
-    /// Ordinal of the group's first item among its key's items.
     pub first_item: u64,
-    /// Citation number of the group's first item within its reduce window.
     pub first_number: u64,
     pub closed_by: GroupClosedBy,
     pub items: Vec<T>,
@@ -60,7 +57,6 @@ composite_data_payload!(
     MapInput
 );
 
-/// End of input for one key, carrying the key's group count.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiMapReduceGroupingEnded {
@@ -77,7 +73,6 @@ composite_data_payload!(
     GroupingEnded
 );
 
-/// A group's partial, carried with the group's items to the collector.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AiMapReduceTaggedPartial<T, P> {
@@ -96,20 +91,15 @@ composite_data_payload!(
     TaggedPartial
 );
 
-/// Why a role's call produced no output.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "failure_type", rename_all = "snake_case")]
 pub enum AiMapReduceRoleFailure {
-    /// The role failed with its own error.
     Role { kind: ErrorKind, message: String },
-    /// The call was unavailable and the role propagated it.
     Unavailable { unavailable: AiUnavailable },
-    /// The role's request could not become an effect.
     Request { message: String },
 }
 
-/// A group whose map role failed.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiMapReduceChunkFailed {
@@ -127,7 +117,6 @@ composite_data_payload!(
     ChunkFailed
 );
 
-/// One closed reduce window, the reduce member's input.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AiMapReduceReduceInput<T, P> {
@@ -147,7 +136,6 @@ composite_data_payload!(
     ReduceInput
 );
 
-/// One failed group of a window.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiMapReduceGroupFailure {
@@ -155,7 +143,6 @@ pub struct AiMapReduceGroupFailure {
     pub cause: AiMapReduceRoleFailure,
 }
 
-/// A window that closed with a failed group and never reduces.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiMapReduceWindowFailed {
@@ -173,7 +160,6 @@ composite_data_payload!(
     WindowFailed
 );
 
-/// A window whose reduce role failed.
 #[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiMapReduceReduceFailed {

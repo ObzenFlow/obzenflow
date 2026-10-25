@@ -301,19 +301,24 @@ pub fn materialize_flow_config(
         .iter()
         .map(|(key, stages)| (key.as_str(), stages.iter().map(owner_of).collect()))
         .collect();
-    let owner_effect_consumers: BTreeMap<&str, BTreeSet<(StageKey, EffectType)>> =
-        effect_consumers
-            .iter()
-            .map(|(key, points)| {
-                (
-                    key.as_str(),
-                    points
-                        .iter()
-                        .map(|(stage, effect)| (owner_of(stage), effect.clone()))
-                        .collect(),
-                )
-            })
-            .collect();
+    let owner_effect_consumers: BTreeMap<&str, BTreeSet<(StageKey, EffectType)>> = effect_consumers
+        .iter()
+        .map(|(key, points)| {
+            (
+                key.as_str(),
+                points
+                    .iter()
+                    .map(|(stage, effect)| (owner_of(stage), effect.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let ai_stages: BTreeSet<&StageKey> = owner_effect_consumers
+        .iter()
+        .filter(|(key_path, _)| key_path.starts_with("ai."))
+        .flat_map(|(_, points)| points.iter().map(|(owner, _)| owner))
+        .collect();
 
     let mut working = snapshot.candidates().clone();
     for candidate in ctx.dsl.entries() {
@@ -348,6 +353,19 @@ pub fn materialize_flow_config(
                                 .iter()
                                 .map(|s| s.as_str().to_string())
                                 .collect(),
+                        });
+                    }
+                    if matches!(spec.target, KnobTarget::StageOrEffect)
+                        && matches!(address.subject, ConfigSubject::Unqualified)
+                        && ai_stages.contains(stage)
+                        && !owner_effect_consumers
+                            .get(spec.key_path)
+                            .is_some_and(|points| points.iter().any(|(owner, _)| owner == stage))
+                    {
+                        return Err(ConfigResolveError::UnlistedAiControl {
+                            table: super::schema::stage_table(spec, stage.as_str()),
+                            key_path: spec.key_path.to_string(),
+                            stage: stage.as_str().to_string(),
                         });
                     }
                     if matches!(spec.target, KnobTarget::StageConsumer)

@@ -6319,7 +6319,13 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
         fatal.reason,
         obzenflow_core::event::StageFatalReason::DescriptorMismatch
     );
-    assert!(fatal.detail.starts_with("effect descriptor mismatch"));
+    assert!(
+        fatal.detail.ends_with(
+            "the effect's type, label or schema version differs from the recording; binding and stage logic version match"
+        ),
+        "{}",
+        fatal.detail
+    );
     assert!(
         replay.ensure_authoring_open().is_err(),
         "nothing authored after the refusal commits"

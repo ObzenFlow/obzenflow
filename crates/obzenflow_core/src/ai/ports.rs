@@ -32,7 +32,7 @@ pub trait EmbeddingClient: Send + Sync + 'static {
 }
 
 /// Describes and connects the chat models an operator configures. A host
-/// installs one in the build context; tests install a fake.
+/// installs one in the build context.
 pub trait ChatModelProvider: Send + Sync + 'static {
     /// Whether endpoints of `provider` can serve chat through this provider.
     fn serves(&self, provider: &AiProvider) -> bool;

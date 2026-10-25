@@ -17,8 +17,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareAttachmentRequest, MiddlewareAttachmentSite, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareSurface, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
     ProtectedUnitOwner, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy,
-    SourcePolicy,
-    SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;

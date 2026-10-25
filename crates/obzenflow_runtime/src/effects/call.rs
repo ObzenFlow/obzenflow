@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use super::{
-    BoundEffect, DomainFacts, Effect, EffectBindingUse, EffectContext, EffectError,
-    EffectPortSlot, EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
+    BoundEffect, DomainFacts, Effect, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
+    EffectPortSlotSet, EffectSafety, IdempotencyKey, Named,
 };
 use async_trait::async_trait;
 use obzenflow_core::event::schema::EffectOutcomeFacts;

@@ -24,7 +24,6 @@ use std::fmt;
 pub enum FlowMember {
     Stage(Box<dyn StageDescriptor>),
     Composite(Box<dyn CompositeDescriptor>),
-    /// An `ai!` stage, which lowers once the build context can bind its model.
     Ai(Box<crate::dsl::ai_stage::AiStageDescriptor>),
 }
 

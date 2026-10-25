@@ -33,7 +33,9 @@ where
     }
 }
 
-pub(crate) fn provider_error_to_resolution(error: AiModelProviderError) -> EffectPortResolutionError {
+pub(crate) fn provider_error_to_resolution(
+    error: AiModelProviderError,
+) -> EffectPortResolutionError {
     match error {
         AiModelProviderError::CredentialUnavailable { .. } => {
             EffectPortResolutionError::CredentialUnavailable

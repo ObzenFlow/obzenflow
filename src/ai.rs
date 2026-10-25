@@ -6,32 +6,32 @@
 //!
 //! An `ai!` stage runs an AI role, domain logic around one model call. The
 //! role prepares each request and interprets each outcome; the handler value
-//! chooses the stage's shape, and configuration chooses its model:
+//! chooses the stage's shape, and configuration chooses its model.
 //!
 //! ```ignore
 //! use obzenflow::ai::{self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec};
 //!
-//! impl AiRole<TicketRaised> for Summarise {
+//! impl AiRole<TicketRaised> for Summarize {
 //!     type Effect = ChatCompletion;
-//!     type Out = TicketSummarised;
+//!     type Out = TicketSummarized;
 //!
 //!     fn prepare(&self, ticket: &TicketRaised) -> Result<ChatRequestSpec, HandlerError> {
-//!         Ok(ChatRequestSpec::new("Summarise the ticket concisely.", ticket.body.clone()))
+//!         Ok(ChatRequestSpec::new("Summarize the ticket concisely.", ticket.body.clone()))
 //!     }
 //!
 //!     fn interpret(
 //!         &self,
 //!         ticket: TicketRaised,
 //!         outcome: AiOutcome<ChatCompletionReply>,
-//!     ) -> Result<TicketSummarised, HandlerError> {
+//!     ) -> Result<TicketSummarized, HandlerError> {
 //!         let reply = outcome.replied()?;
-//!         Ok(TicketSummarised::new(ticket.id, reply.text()))
+//!         Ok(TicketSummarized::new(ticket.id, reply.text()))
 //!     }
 //! }
 //!
-//! let summarise = ai::infer(Summarise);
+//! let summarize = ai::infer(Summarize);
 //! let breaker = circuit_breaker().consecutive_failures(5);
-//! // inside flow!: summarise = ai!(TicketRaised -> TicketSummarised with breaker => summarise);
+//! // inside flow!: summarize = ai!(TicketRaised -> TicketSummarized with breaker => summarize);
 //! ```
 //!
 //! `ai::map(role).chunks(n)` calls the role once per group of at most `n`
@@ -39,6 +39,8 @@
 //! window of partials. Each stage's endpoint and model resolve from
 //! `[ai.models]` or `[ai.embeddings]`, and strict replay serves recorded
 //! outcomes from the models the run recorded.
+//!
+//! Only `ai!` performs AI effects.
 
 pub use obzenflow_adapters::ai::{
     infer, map, ChatCompletion, ChatCompletionBuildError, Chunked, EmbeddingGeneration,
@@ -60,11 +62,10 @@ pub use obzenflow_core::ai::{
     EmbeddingDimensions, EmbeddingGenerationOutcome, EmbeddingGenerationReply,
     EmbeddingModelDescription, EmbeddingModelProvider, EmbeddingParams, EmbeddingRequest,
     EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, EstimateSource, GroupOrdinal,
-    HeuristicTokenEstimator, OversizeExhaustion, OversizePolicy, Partials,
-    ResolvedTokenEstimator, SplitGroup, SystemPrompt, TokenCount, TokenEstimate,
-    TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
-    TokenEstimatorResolutionInfo, ToolCall, ToolDefinition, Usage, UsageSource, UserPrompt,
-    WindowOrdinal,
+    HeuristicTokenEstimator, OversizeExhaustion, OversizePolicy, Partials, ResolvedTokenEstimator,
+    SplitGroup, SystemPrompt, TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
+    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, ToolCall, ToolDefinition, Usage,
+    UsageSource, UserPrompt, WindowOrdinal,
 };
 
 pub use obzenflow_infra::ai::{

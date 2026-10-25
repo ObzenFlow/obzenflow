@@ -261,12 +261,12 @@ pub trait ReplayArchive: Send + Sync {
     }
 
     /// The model specs a stage recorded, one per AI effect.
-    fn recorded_ai_models(&self, _stage_key: &str) -> Vec<crate::ai::AiModelSpec> {
+    fn recorded_ai_models(&self, _: &str) -> Vec<crate::ai::AiModelSpec> {
         Vec::new()
     }
 
     /// The open-key limit a keyed AI stage recorded.
-    fn recorded_max_open_keys(&self, _stage_key: &str) -> Option<u64> {
+    fn recorded_max_open_keys(&self, _: &str) -> Option<u64> {
         None
     }
 

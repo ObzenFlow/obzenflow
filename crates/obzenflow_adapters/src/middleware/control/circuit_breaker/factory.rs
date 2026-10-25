@@ -77,8 +77,7 @@ pub fn circuit_breaker() -> CircuitBreaker {
 }
 
 impl CircuitBreaker {
-    /// Refuse to resume an in-doubt affine attempt, so a test can observe
-    /// recovery abandonment.
+    /// Refuse to resume an in-doubt affine attempt.
     #[cfg(feature = "test-support")]
     pub fn rejecting_recovery_for_test(mut self) -> Self {
         self.reject_affine_recovery_for_test = true;
