@@ -217,6 +217,35 @@ async fn console_owner_joins_both_tasks_and_closes_idle_clients() {
 
 #[cfg(all(feature = "tokio-console", tokio_unstable))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_owner_reports_no_failure_when_the_aggregator_ends_after_the_server() {
+    let (layer, diagnostics) = start_console();
+    let [aggregator, server]: [tokio::task::AbortHandle; 2] = diagnostics
+        .tasks
+        .iter()
+        .map(|task| task.0.abort_handle())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    server.abort();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !(server.is_finished() && aggregator.is_finished()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the aggregator ends once the cancelled server drops its command sender");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        diagnostics.finish(Ok(())),
+    )
+    .await
+    .expect("diagnostics terminated")
+    .unwrap();
+    drop(layer);
+}
+
+#[cfg(all(feature = "tokio-console", tokio_unstable))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn console_owner_drop_terminates_tasks_and_idle_clients() {
     let (_layer, diagnostics) = start_console();
     let address = diagnostics.address().unwrap();
