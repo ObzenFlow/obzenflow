@@ -399,6 +399,63 @@ fn breaker_transition(
     event
 }
 
+fn control_summary(
+    stage: StageId,
+    unit: &str,
+    capture_seq: u64,
+    observed_at_ms: u64,
+    successes: u32,
+) -> ChainEvent {
+    use obzenflow_core::event::observability::*;
+    use obzenflow_core::event::payloads::execution_payload::CircuitState;
+    let mut event = ChainEventFactory::data_event(
+        stage.into(),
+        "metrics.summary",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({}),
+    );
+    event.flow_context.stage_id = stage;
+    let mut packet = ObservabilityContext::new(CaptureStamp {
+        capture_scope: CaptureScope {
+            flow_id: "00000000000000000000000001".parse().unwrap(),
+            resume_generation: Default::default(),
+        },
+        observer: stage.into(),
+        capture_seq: CaptureSeq(capture_seq),
+        capture_reason: CaptureReason::Record,
+        observed_at_ms,
+    });
+    packet
+        .records
+        .push(ObservationRecord::CircuitBreakerSummary {
+            unit: unit.into(),
+            effect_type: None,
+            window_duration_s: 10,
+            requests_processed: u64::from(successes),
+            requests_rejected: 0,
+            observed_state: CircuitState::Closed,
+            consecutive_failures: 0,
+            rejection_rate: 0.0,
+            successes_total: u64::from(successes),
+            failures_total: 0,
+            opened_total: 0,
+            time_in_closed_seconds: 10.0,
+            time_in_open_seconds: 0.0,
+            time_in_half_open_seconds: 0.0,
+        });
+    packet
+        .records
+        .push(ObservationRecord::RateLimiterUtilisation {
+            unit: unit.into(),
+            effect_type: None,
+            utilization_percent: f64::from(successes),
+            events_in_window: u64::from(successes),
+            window_size_ms: 1_000,
+        });
+    event.envelope.observability = Some(packet);
+    event
+}
+
 pub async fn metrics_breaker_state_is_one_series_per_protected_unit(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
@@ -447,16 +504,42 @@ pub async fn metrics_breaker_state_is_one_series_per_protected_unit(
         )
         .await
         .unwrap();
+    for (journal, summary) in [
+        (&map_journal, control_summary(map, "digest", 1, 50, 9)),
+        (
+            &reduce_journal,
+            control_summary(reduce, "digest", 99, 40, 7),
+        ),
+        (&other_journal, control_summary(other, "other", 1, 5, 3)),
+    ] {
+        journal.append(summary, Default::default()).await.unwrap();
+    }
     let (mut ctx, _, _) = context(
         &mut *factory,
         vec![
             (map, map_journal.clone()),
-            (reduce, reduce_journal),
+            (reduce, reduce_journal.clone()),
             (other, other_journal),
         ],
         vec![],
     )
     .await;
+    for (stage, name) in [
+        (map, "digest__map"),
+        (reduce, "digest__reduce"),
+        (other, "other"),
+    ] {
+        ctx.stage_metadata.insert(
+            stage,
+            obzenflow_core::metrics::StageMetadata {
+                name: name.into(),
+                stage_type: StageType::Transform,
+                reference_mode: None,
+                flow_name: "hn_ai_digest".into(),
+                flow_id: None,
+            },
+        );
+    }
     let series = |ctx: &Context| {
         let mut series = ctx
             .metrics_store
@@ -467,6 +550,23 @@ pub async fn metrics_breaker_state_is_one_series_per_protected_unit(
         series.sort_by(|left, right| left.0.cmp(&right.0));
         series
     };
+    let summaries = |ctx: &Context| {
+        let mut successes = ctx
+            .metrics_store
+            .circuit_breaker_successes_total
+            .iter()
+            .map(|(unit, total)| (unit.clone(), *total))
+            .collect::<Vec<_>>();
+        successes.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut utilization = ctx
+            .metrics_store
+            .rate_limiter_utilization
+            .iter()
+            .map(|(unit, ratio)| (unit.clone(), *ratio))
+            .collect::<Vec<_>>();
+        utilization.sort_by(|left, right| left.0.cmp(&right.0));
+        (successes, utilization)
+    };
 
     refresh(&mut ctx).await;
     assert_eq!(
@@ -476,6 +576,37 @@ pub async fn metrics_breaker_state_is_one_series_per_protected_unit(
             (ControlUnit::Composite("digest".into()), 0.0),
         ],
         "both members report one unit, and the newer reduce transition wins"
+    );
+    assert_eq!(
+        summaries(&ctx),
+        (
+            vec![
+                (ControlUnit::Stage(other), 3),
+                (ControlUnit::Composite("digest".into()), 9),
+            ],
+            vec![
+                (ControlUnit::Stage(other), 0.03),
+                (ControlUnit::Composite("digest".into()), 0.09),
+            ],
+        ),
+        "both members summarize one unit, and the summary observed last wins whatever \
+         the capture order"
+    );
+
+    reduce_journal
+        .append(
+            control_summary(reduce, "digest", 100, 60, 11),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    refresh(&mut ctx).await;
+    assert_eq!(
+        summaries(&ctx).0,
+        [
+            (ControlUnit::Stage(other), 3),
+            (ControlUnit::Composite("digest".into()), 11),
+        ]
     );
 
     map_journal

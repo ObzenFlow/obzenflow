@@ -18,6 +18,9 @@ stall_timeout_ms = 30000
 endpoint = "ollama"
 model = "llama3.1:8b"
 
+[sinks]
+handler = "console_sink"
+
 [server]
 enabled = true
 host = "127.0.0.1"

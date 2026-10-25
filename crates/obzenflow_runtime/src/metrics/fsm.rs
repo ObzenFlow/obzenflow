@@ -27,7 +27,7 @@ use obzenflow_core::metrics::{
 };
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::web::HttpMethod;
-use obzenflow_core::{ChainEvent, EventId, EventType, Journal, JournalRecord};
+use obzenflow_core::{ChainEvent, EventId, EventType, Journal, JournalRecord, StageKey};
 use obzenflow_fsm::{
     fsm, EventVariant, FsmAction, FsmContext, StateMachine, StateVariant, Transition,
 };
@@ -206,6 +206,29 @@ pub struct ObservedCircuitState {
     pub event_time: u64,
 }
 
+fn control_unit(stage_id: StageId, stage_name: Option<&str>, unit: &StageKey) -> ControlUnit {
+    if stage_name.is_none_or(|name| name == unit.as_str()) {
+        ControlUnit::Stage(stage_id)
+    } else {
+        ControlUnit::Composite(unit.clone())
+    }
+}
+
+fn observed_latest(
+    observed: &mut HashMap<ControlUnit, u64>,
+    unit: &ControlUnit,
+    observed_at_ms: u64,
+) -> bool {
+    if observed
+        .get(unit)
+        .is_some_and(|latest| *latest > observed_at_ms)
+    {
+        return false;
+    }
+    observed.insert(unit.clone(), observed_at_ms);
+    true
+}
+
 /// Simple metrics storage
 #[derive(Default)]
 #[doc(hidden)]
@@ -240,20 +263,22 @@ pub struct MetricsStore {
 
     // Middleware observability accumulation (FLOWIP-059a)
     pub circuit_breaker_state: HashMap<ControlUnit, ObservedCircuitState>,
-    pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
-    pub circuit_breaker_consecutive_failures: HashMap<StageId, f64>,
+    pub circuit_breaker_summary_observed_at_ms: HashMap<ControlUnit, u64>,
+    pub circuit_breaker_rejection_rate: HashMap<ControlUnit, f64>,
+    pub circuit_breaker_consecutive_failures: HashMap<ControlUnit, f64>,
     pub circuit_breaker_requests_total: HashMap<StageId, u64>,
     pub circuit_breaker_rejections_total: HashMap<StageId, u64>,
-    pub circuit_breaker_opened_total: HashMap<StageId, u64>,
-    pub circuit_breaker_successes_total: HashMap<StageId, u64>,
-    pub circuit_breaker_failures_total: HashMap<StageId, u64>,
+    pub circuit_breaker_opened_total: HashMap<ControlUnit, u64>,
+    pub circuit_breaker_successes_total: HashMap<ControlUnit, u64>,
+    pub circuit_breaker_failures_total: HashMap<ControlUnit, u64>,
     pub circuit_breaker_slow_total: HashMap<StageId, u64>,
-    pub circuit_breaker_time_in_state_seconds_total: HashMap<(StageId, String), f64>,
+    pub circuit_breaker_time_in_state_seconds_total: HashMap<(ControlUnit, String), f64>,
     pub circuit_breaker_state_transitions_total: HashMap<(StageId, String, String), u64>,
 
     /// Counts rate-limiter admissions, not guaranteed downstream commits (a later middleware
     /// returning `Skip`/`Abort` does not refund — FLOWIP-114m known limitation).
-    pub rate_limiter_utilization: HashMap<StageId, f64>,
+    pub rate_limiter_utilization: HashMap<ControlUnit, f64>,
+    pub rate_limiter_utilization_observed_at_ms: HashMap<ControlUnit, u64>,
     pub rate_limiter_events_total: HashMap<StageId, u64>,
     pub rate_limiter_delayed_total: HashMap<StageId, u64>,
     /// Counts rate-limiter token consumption, not guaranteed downstream commits (a later middleware
@@ -517,7 +542,8 @@ impl FsmContext for MetricsAggregatorContext {}
 
 impl MetricsAggregatorResources {
     fn refresh_measurements(&mut self) {
-        self.metrics_store.refresh_measurements();
+        self.metrics_store
+            .refresh_measurements(&self.stage_metadata);
     }
 
     /// Build an `AppMetricsSnapshot` from the current in-memory `metrics_store`.
@@ -997,17 +1023,18 @@ impl MetricsStore {
     }
 
     fn update_control_measurements(&mut self, stage_id: StageId, runtime: &RuntimeObservability) {
+        let unit = ControlUnit::Stage(stage_id);
         if let Some(cb) = &runtime.circuit_breaker {
             self.circuit_breaker_requests_total
                 .insert(stage_id, cb.requests_total);
             self.circuit_breaker_rejections_total
                 .insert(stage_id, cb.rejections_total);
             self.circuit_breaker_opened_total
-                .insert(stage_id, cb.opened_total);
+                .insert(unit.clone(), cb.opened_total);
             self.circuit_breaker_successes_total
-                .insert(stage_id, cb.successes_total);
+                .insert(unit.clone(), cb.successes_total);
             self.circuit_breaker_failures_total
-                .insert(stage_id, cb.failures_total);
+                .insert(unit.clone(), cb.failures_total);
             self.circuit_breaker_slow_total
                 .insert(stage_id, cb.slow_total);
             for (state, seconds) in [
@@ -1016,7 +1043,7 @@ impl MetricsStore {
                 ("half_open", cb.time_half_open_seconds),
             ] {
                 self.circuit_breaker_time_in_state_seconds_total
-                    .insert((stage_id, state.to_string()), seconds);
+                    .insert((unit.clone(), state.to_string()), seconds);
             }
         }
         if let Some(rl) = &runtime.rate_limiter {
@@ -1034,14 +1061,14 @@ impl MetricsStore {
                 .insert(stage_id, rl.bucket_capacity);
             if rl.bucket_capacity > 0.0 {
                 self.rate_limiter_utilization.insert(
-                    stage_id,
+                    unit,
                     (1.0 - rl.bucket_tokens / rl.bucket_capacity).clamp(0.0, 1.0),
                 );
             }
         }
     }
 
-    fn refresh_measurements(&mut self) {
+    fn refresh_measurements(&mut self, stage_metadata: &HashMap<StageId, StageMetadata>) {
         use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
         for packet in self.observations.snapshot() {
             for record in &packet.records {
@@ -1067,9 +1094,14 @@ impl MetricsStore {
                     .merge_runtime_measurements(runtime);
                 self.update_control_measurements(stage_id, runtime);
             }
+            let stage_name = stage_metadata
+                .get(&stage_id)
+                .map(|metadata| metadata.name.as_str());
+            let observed_at_ms = packet.capture.observed_at_ms;
             for record in packet.records {
                 match record {
                     ObservationRecord::CircuitBreakerSummary {
+                        unit,
                         effect_type: None,
                         consecutive_failures,
                         rejection_rate,
@@ -1081,32 +1113,48 @@ impl MetricsStore {
                         time_in_half_open_seconds,
                         ..
                     } => {
+                        let unit = control_unit(stage_id, stage_name, &unit);
+                        if !observed_latest(
+                            &mut self.circuit_breaker_summary_observed_at_ms,
+                            &unit,
+                            observed_at_ms,
+                        ) {
+                            continue;
+                        }
                         self.circuit_breaker_consecutive_failures
-                            .insert(stage_id, consecutive_failures as f64);
+                            .insert(unit.clone(), consecutive_failures as f64);
                         self.circuit_breaker_rejection_rate
-                            .insert(stage_id, rejection_rate);
+                            .insert(unit.clone(), rejection_rate);
                         self.circuit_breaker_successes_total
-                            .insert(stage_id, successes_total);
+                            .insert(unit.clone(), successes_total);
                         self.circuit_breaker_failures_total
-                            .insert(stage_id, failures_total);
+                            .insert(unit.clone(), failures_total);
                         self.circuit_breaker_opened_total
-                            .insert(stage_id, opened_total);
+                            .insert(unit.clone(), opened_total);
                         for (state, seconds) in [
                             ("closed", time_in_closed_seconds),
                             ("open", time_in_open_seconds),
                             ("half_open", time_in_half_open_seconds),
                         ] {
                             self.circuit_breaker_time_in_state_seconds_total
-                                .insert((stage_id, state.to_string()), seconds);
+                                .insert((unit.clone(), state.to_string()), seconds);
                         }
                     }
                     ObservationRecord::RateLimiterUtilisation {
+                        unit,
                         effect_type: None,
                         utilization_percent,
                         ..
                     } => {
-                        self.rate_limiter_utilization
-                            .insert(stage_id, utilization_percent / 100.0);
+                        let unit = control_unit(stage_id, stage_name, &unit);
+                        if observed_latest(
+                            &mut self.rate_limiter_utilization_observed_at_ms,
+                            &unit,
+                            observed_at_ms,
+                        ) {
+                            self.rate_limiter_utilization
+                                .insert(unit, utilization_percent / 100.0);
+                        }
                     }
                     ObservationRecord::HttpPull(measurements) => {
                         self.http_pull_metrics
@@ -1500,12 +1548,11 @@ impl MetricsAggregatorAction {
                                     _ => None,
                                 };
                                 if let Some(value) = state {
-                                    let unit =
-                                        if fact.unit().as_str() == event.flow_context.stage_name {
-                                            ControlUnit::Stage(stage_id)
-                                        } else {
-                                            ControlUnit::Composite(fact.unit().clone())
-                                        };
+                                    let unit = control_unit(
+                                        stage_id,
+                                        Some(&event.flow_context.stage_name),
+                                        fact.unit(),
+                                    );
                                     let observed = ObservedCircuitState {
                                         value,
                                         event_time: event.processing.event_time,
@@ -1913,7 +1960,7 @@ mod tests {
                     telemetry,
                 )));
             store.observations.offer(packet);
-            store.refresh_measurements();
+            store.refresh_measurements(&HashMap::new());
         };
         fold(&first, 2);
 

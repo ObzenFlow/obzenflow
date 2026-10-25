@@ -99,11 +99,11 @@ pub struct AppMetricsSnapshot {
     /// Circuit breaker state by protected unit (0=closed, 0.5=half_open, 1=open)
     pub circuit_breaker_state: HashMap<ControlUnit, f64>,
 
-    /// Circuit breaker rejection rate by stage (0.0-1.0)
-    pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
+    /// Circuit breaker rejection rate by protected unit (0.0-1.0)
+    pub circuit_breaker_rejection_rate: HashMap<ControlUnit, f64>,
 
-    /// Circuit breaker consecutive failures by stage
-    pub circuit_breaker_consecutive_failures: HashMap<StageId, f64>,
+    /// Circuit breaker consecutive failures by protected unit
+    pub circuit_breaker_consecutive_failures: HashMap<ControlUnit, f64>,
 
     /// Circuit breaker requests processed total by stage (monotonic counter)
     pub circuit_breaker_requests_total: HashMap<StageId, u64>,
@@ -111,33 +111,33 @@ pub struct AppMetricsSnapshot {
     /// Circuit breaker requests rejected total by stage (monotonic counter)
     pub circuit_breaker_rejections_total: HashMap<StageId, u64>,
 
-    /// Circuit breaker times entered Open by stage (monotonic counter).
-    pub circuit_breaker_opened_total: HashMap<StageId, u64>,
+    /// Circuit breaker times entered Open by protected unit (monotonic counter).
+    pub circuit_breaker_opened_total: HashMap<ControlUnit, u64>,
 
-    /// Circuit breaker allowed calls classified as non-failures by stage (monotonic counter).
+    /// Circuit breaker allowed calls classified as non-failures by protected unit (monotonic counter).
     ///
     /// This is "success" from the breaker’s perspective (i.e., it did not count as an
     /// infra failure toward opening), not necessarily domain-level success.
-    pub circuit_breaker_successes_total: HashMap<StageId, u64>,
+    pub circuit_breaker_successes_total: HashMap<ControlUnit, u64>,
 
-    /// Circuit breaker allowed calls classified as failures by stage (monotonic counter).
+    /// Circuit breaker allowed calls classified as failures by protected unit (monotonic counter).
     ///
     /// These are calls that counted toward breaker opening (e.g. Timeout/Remote failures).
-    pub circuit_breaker_failures_total: HashMap<StageId, u64>,
+    pub circuit_breaker_failures_total: HashMap<ControlUnit, u64>,
 
     /// Circuit breaker slow physical calls by stage (monotonic counter).
     pub circuit_breaker_slow_total: HashMap<StageId, u64>,
 
-    /// Circuit breaker time spent in each state by stage (monotonic counter, seconds).
-    /// Maps (StageId, state) -> seconds_total, where state is one of: "closed", "half_open", "open".
-    pub circuit_breaker_time_in_state_seconds_total: HashMap<(StageId, String), f64>,
+    /// Circuit breaker time spent in each state by protected unit (monotonic counter, seconds).
+    /// Maps (unit, state) -> seconds_total, where state is one of: "closed", "half_open", "open".
+    pub circuit_breaker_time_in_state_seconds_total: HashMap<(ControlUnit, String), f64>,
 
     /// Circuit breaker state transitions by stage (monotonic counter).
     /// Maps (StageId, from_state, to_state) -> transitions_total.
     pub circuit_breaker_state_transitions_total: HashMap<(StageId, String, String), u64>,
 
-    /// Rate limiter utilization by stage (0.0-1.0)
-    pub rate_limiter_utilization: HashMap<StageId, f64>,
+    /// Rate limiter utilization by protected unit (0.0-1.0)
+    pub rate_limiter_utilization: HashMap<ControlUnit, f64>,
 
     /// Rate limiter events processed total by stage (monotonic counter)
     pub rate_limiter_events_total: HashMap<StageId, u64>,

@@ -67,6 +67,11 @@ fn limiter_label(mode: RateLimiterMode) -> &'static str {
 impl MiddlewareView {
     pub(super) fn observe(&mut self, record: &ChainJournalRecord) {
         self.last_vector_clock = Some(record.envelope.provenance.journal.vector_clock.clone());
+        let context = &record.envelope.provenance.event.flow_context;
+        let stage_id = context.stage_id;
+        self.stage_names
+            .entry(stage_id)
+            .or_insert_with(|| context.stage_name.clone());
         let ChainPayload::Execution(middleware) = &record.payload else {
             return;
         };
@@ -76,10 +81,6 @@ impl MiddlewareView {
         ) {
             return;
         }
-        let context = &record.envelope.provenance.event.flow_context;
-        let stage_id = context.stage_id;
-        self.stage_names
-            .insert(stage_id, context.stage_name.clone());
         self.flow_id.get_or_insert_with(|| context.flow_id.clone());
         self.flow_name
             .get_or_insert_with(|| context.flow_name.clone());
@@ -215,6 +216,14 @@ impl MiddlewareView {
         })
     }
 
+    fn measured_unit(&self, stage_id: StageId, unit: &StageKey) -> ControlUnit {
+        self.stage_names
+            .get(&stage_id)
+            .map_or(ControlUnit::Stage(stage_id), |name| {
+                fact_unit(stage_id, name, unit.as_str())
+            })
+    }
+
     /// The caller has already selected these families by capture scope, owner,
     /// kind and subject. No measurement reads or changes a factual revision.
     pub(super) fn measurements(&mut self, packet: &ObservabilityContext) -> Vec<SseFrame> {
@@ -261,6 +270,7 @@ impl MiddlewareView {
         for record in &packet.records {
             match record {
                 ObservationRecord::CircuitBreakerSummary {
+                    unit,
                     effect_type: None,
                     window_duration_s,
                     requests_processed,
@@ -287,9 +297,16 @@ impl MiddlewareView {
                         time_in_open_s: Some(*time_in_open_seconds),
                         time_in_half_open_s: Some(*time_in_half_open_seconds),
                     };
-                    let entry = self.circuit_breakers.entry(stage_unit.clone()).or_default();
-                    entry.totals = Some(totals.clone());
-                    entry.totals_observed_at_ms = Some(timestamp_ms);
+                    let unit = self.measured_unit(stage_id, unit);
+                    let entry = self.circuit_breakers.entry(unit.clone()).or_default();
+                    if entry
+                        .totals_observed_at_ms
+                        .is_none_or(|latest| timestamp_ms >= latest)
+                    {
+                        entry.totals = Some(totals.clone());
+                        entry.totals_observed_at_ms = Some(timestamp_ms);
+                        self.writers.entry(unit).or_insert(stage_id);
+                    }
                     updates.push(MiddlewareUpdate::CircuitBreaker(
                         CircuitBreakerUpdate::Summary {
                             summary: CircuitSummary {
@@ -300,6 +317,7 @@ impl MiddlewareView {
                     ));
                 }
                 ObservationRecord::RateLimiterUtilisation {
+                    unit,
                     effect_type: None,
                     utilization_percent,
                     events_in_window,
@@ -311,9 +329,16 @@ impl MiddlewareView {
                         events_in_window: Some(*events_in_window),
                         window_size_ms: Some(*window_size_ms),
                     };
-                    let entry = self.rate_limiters.entry(stage_unit.clone()).or_default();
-                    entry.window = Some(window.clone());
-                    entry.window_observed_at_ms = Some(timestamp_ms);
+                    let unit = self.measured_unit(stage_id, unit);
+                    let entry = self.rate_limiters.entry(unit.clone()).or_default();
+                    if entry
+                        .window_observed_at_ms
+                        .is_none_or(|latest| timestamp_ms >= latest)
+                    {
+                        entry.window = Some(window.clone());
+                        entry.window_observed_at_ms = Some(timestamp_ms);
+                        self.writers.entry(unit).or_insert(stage_id);
+                    }
                     updates.push(MiddlewareUpdate::RateLimiter(
                         RateLimiterUpdate::WindowUtilization { window },
                     ));

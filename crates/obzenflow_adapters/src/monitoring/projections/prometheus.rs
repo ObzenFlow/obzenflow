@@ -858,18 +858,7 @@ impl PrometheusProjection {
             writeln!(output, "# TYPE obzenflow_circuit_breaker_state gauge")?;
 
             for (unit, value) in &snapshot.circuit_breaker_state {
-                let labels = match unit {
-                    ControlUnit::Stage(stage_id) => snapshot
-                        .stage_metadata
-                        .get(stage_id)
-                        .map(|metadata| format_stage_labels(stage_id, metadata)),
-                    ControlUnit::Composite(composite) => snapshot
-                        .stage_metadata
-                        .values()
-                        .next()
-                        .map(|metadata| format_composite_unit_labels(composite, metadata)),
-                };
-                if let Some(labels) = labels {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
                         "obzenflow_circuit_breaker_state{{{labels}}} {value}"
@@ -887,13 +876,11 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_circuit_breaker_rejection_rate gauge"
             )?;
 
-            for (stage_id, value) in &snapshot.circuit_breaker_rejection_rate {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+            for (unit, value) in &snapshot.circuit_breaker_rejection_rate {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_rejection_rate{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        value
+                        "obzenflow_circuit_breaker_rejection_rate{{{labels}}} {value}"
                     )?;
                 }
             }
@@ -908,13 +895,11 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_circuit_breaker_consecutive_failures gauge"
             )?;
 
-            for (stage_id, value) in &snapshot.circuit_breaker_consecutive_failures {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+            for (unit, value) in &snapshot.circuit_breaker_consecutive_failures {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_consecutive_failures{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        value
+                        "obzenflow_circuit_breaker_consecutive_failures{{{labels}}} {value}"
                     )?;
                 }
             }
@@ -980,13 +965,11 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_circuit_breaker_opened_total counter"
             )?;
 
-            for (stage_id, count) in &snapshot.circuit_breaker_opened_total {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+            for (unit, count) in &snapshot.circuit_breaker_opened_total {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_opened_total{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        count
+                        "obzenflow_circuit_breaker_opened_total{{{labels}}} {count}"
                     )?;
                 }
             }
@@ -1004,13 +987,11 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_circuit_breaker_successes_total counter"
             )?;
 
-            for (stage_id, count) in &snapshot.circuit_breaker_successes_total {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+            for (unit, count) in &snapshot.circuit_breaker_successes_total {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_successes_total{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        count
+                        "obzenflow_circuit_breaker_successes_total{{{labels}}} {count}"
                     )?;
                 }
             }
@@ -1028,13 +1009,11 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_circuit_breaker_failures_total counter"
             )?;
 
-            for (stage_id, count) in &snapshot.circuit_breaker_failures_total {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+            for (unit, count) in &snapshot.circuit_breaker_failures_total {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_failures_total{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        count
+                        "obzenflow_circuit_breaker_failures_total{{{labels}}} {count}"
                     )?;
                 }
             }
@@ -1079,14 +1058,14 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_circuit_breaker_time_in_state_seconds_total counter"
             )?;
 
-            for ((stage_id, state), seconds_total) in
+            for ((unit, state), seconds_total) in
                 &snapshot.circuit_breaker_time_in_state_seconds_total
             {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
                         "obzenflow_circuit_breaker_time_in_state_seconds_total{{{},state=\"{}\"}} {}",
-                        format_stage_labels(stage_id, metadata),
+                        labels,
                         escape_label(state),
                         seconds_total
                     )?;
@@ -1131,13 +1110,11 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE obzenflow_rate_limiter_utilization gauge")?;
 
-            for (stage_id, value) in &snapshot.rate_limiter_utilization {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+            for (unit, value) in &snapshot.rate_limiter_utilization {
+                if let Some(labels) = format_unit_labels(unit, snapshot) {
                     writeln!(
                         output,
-                        "obzenflow_rate_limiter_utilization{{{}}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        value
+                        "obzenflow_rate_limiter_utilization{{{labels}}} {value}"
                     )?;
                 }
             }
@@ -2790,10 +2767,20 @@ fn escape_label(value: &str) -> String {
         .replace('\n', "\\n")
 }
 
-/// Centralized stage label formatting (FLOWIP-059a-3 Issue 2)
-///
-/// All stage-scoped metrics MUST use this function to ensure consistent labeling.
-/// Returns the standard label set: flow, flow_id (when available), stage, stage_id
+fn format_unit_labels(unit: &ControlUnit, snapshot: &AppMetricsSnapshot) -> Option<String> {
+    match unit {
+        ControlUnit::Stage(stage_id) => snapshot
+            .stage_metadata
+            .get(stage_id)
+            .map(|metadata| format_stage_labels(stage_id, metadata)),
+        ControlUnit::Composite(composite) => snapshot
+            .stage_metadata
+            .values()
+            .next()
+            .map(|metadata| format_composite_unit_labels(composite, metadata)),
+    }
+}
+
 fn format_composite_unit_labels(composite: &StageKey, metadata: &StageMetadata) -> String {
     match &metadata.flow_id {
         Some(flow_id) => format!(
@@ -2810,6 +2797,10 @@ fn format_composite_unit_labels(composite: &StageKey, metadata: &StageMetadata) 
     }
 }
 
+/// Centralized stage label formatting (FLOWIP-059a-3 Issue 2)
+///
+/// All stage-scoped metrics MUST use this function to ensure consistent labeling.
+/// Returns the standard label set: flow, flow_id (when available), stage, stage_id
 fn format_stage_labels(stage_id: &StageId, metadata: &StageMetadata) -> String {
     let stage_id_str = stage_id.to_string();
     let reference_mode = metadata
@@ -2994,27 +2985,50 @@ mod tests {
         snapshot
             .circuit_breaker_state
             .insert(ControlUnit::Stage(other), 0.0);
+        snapshot
+            .circuit_breaker_successes_total
+            .insert(ControlUnit::Composite("digest".into()), 9);
+        snapshot
+            .circuit_breaker_successes_total
+            .insert(ControlUnit::Stage(other), 3);
+        snapshot
+            .rate_limiter_utilization
+            .insert(ControlUnit::Composite("digest".into()), 0.5);
         let view = MetricsReadView {
             app: Some(std::sync::Arc::new(snapshot)),
             ..Default::default()
         };
 
         let output = exporter.render(&view).unwrap();
-        let series = output
-            .lines()
-            .filter(|line| line.starts_with("obzenflow_circuit_breaker_state{"))
-            .collect::<Vec<_>>();
-        assert_eq!(series.len(), 2);
-        assert!(series.contains(
+        let series = |metric: &str| {
+            output
+                .lines()
+                .filter(|line| line.starts_with(&format!("{metric}{{")))
+                .collect::<Vec<_>>()
+        };
+        let other_labels = format!(
+            "flow=\"hn_ai_digest\",stage=\"other\",stage_id=\"{}\"",
+            escape_label(&other.to_string())
+        );
+        let state = series("obzenflow_circuit_breaker_state");
+        assert_eq!(state.len(), 2);
+        assert!(state.contains(
             &"obzenflow_circuit_breaker_state{flow=\"hn_ai_digest\",stage=\"digest\"} 1"
         ));
-        assert!(series.contains(
-            &format!(
-                "obzenflow_circuit_breaker_state{{flow=\"hn_ai_digest\",stage=\"other\",stage_id=\"{}\"}} 0",
-                escape_label(&other.to_string())
-            )
-            .as_str()
+        assert!(state
+            .contains(&format!("obzenflow_circuit_breaker_state{{{other_labels}}} 0").as_str()));
+        let successes = series("obzenflow_circuit_breaker_successes_total");
+        assert_eq!(successes.len(), 2);
+        assert!(successes.contains(
+            &"obzenflow_circuit_breaker_successes_total{flow=\"hn_ai_digest\",stage=\"digest\"} 9"
         ));
+        assert!(successes.contains(
+            &format!("obzenflow_circuit_breaker_successes_total{{{other_labels}}} 3").as_str()
+        ));
+        assert_eq!(
+            series("obzenflow_rate_limiter_utilization"),
+            ["obzenflow_rate_limiter_utilization{flow=\"hn_ai_digest\",stage=\"digest\"} 0.5"]
+        );
     }
 
     #[test]
