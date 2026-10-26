@@ -1813,6 +1813,44 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
 }
 
 #[test]
+fn a_linked_stateful_output_names_its_input_and_its_previous_output() {
+    let stateful = |event: u64, parents: &[u64]| {
+        let mut record = fact(2, event, parents, json!({"celsius": event}));
+        record.journal.stage.as_mut().unwrap().stage_type = StageType::Stateful;
+        if let RunRecordData::Chain(row) = &mut record.record {
+            row.envelope.provenance.event.flow_context.stage_type = StageType::Stateful;
+        }
+        record
+    };
+    let mut renderer = renderer();
+    let mut output = Vec::new();
+    for record in [
+        fact(1, 100, &[], json!({"celsius":38})),
+        stateful(101, &[100]),
+        fact(1, 102, &[], json!({"celsius":40})),
+        stateful(103, &[102, 101]),
+    ] {
+        renderer.record(&mut output, record).unwrap();
+    }
+    renderer.flush_pending(&mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        text.contains(&format!(
+            "STATEFUL (stage: classify, journal: 2)\nsensor.classified ← classify(sensor.reading)\n{}",
+            displayed_clock(2, 101)
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "STATEFUL (stage: classify, journal: 2)\nsensor.classified ← classify(sensor.reading, sensor.classified)\n{}",
+            displayed_clock(2, 103)
+        )),
+        "{text}"
+    );
+}
+
+#[test]
 fn arbitrary_payload_shapes_keep_types_units_and_escape_terminal_controls() {
     let value = json!({
         "amount_cents":1234, "nested":{"label":"a\u{1b}[2J\nb\u{202e}"},

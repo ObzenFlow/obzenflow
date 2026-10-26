@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::domain::*;
-use super::handlers::Checkbook;
+use super::handlers::AccountLedger;
 use obzenflow::flow::{
     async_infinite_source, flow, join, merge, sink, source, stateful, FlowBuildError,
     FlowDefinition,
@@ -16,7 +16,7 @@ use obzenflow::stages::sources::{
     IngressDecoder, IngressRecord, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
     YamlSource,
 };
-use obzenflow::stages::{joins, merges, sinks};
+use obzenflow::stages::{joins, merges, sinks, stateful};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -121,7 +121,12 @@ pub fn build_flow(
             |entry: &LedgerEntry| entry.account_id.clone(),
             post,
         );
-        let checkbook_handler = Checkbook;
+        let checkbook_handler = stateful::group_by(
+            |entry: &PostedEntry| entry.account_id.clone(),
+            AccountLedger::record,
+            |account_id: &String, ledger: &AccountLedger| ledger.snapshot(account_id),
+        )
+        .emit_on_update();
         let printer_sink = sinks::ConsoleSink::<CheckbookSnapshot, _>::new(
             SnapshotTableFormatter::new(
                 &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],

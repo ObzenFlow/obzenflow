@@ -43,11 +43,11 @@ pub struct FakeChatModels {
     hang: Option<(HangFilter, Arc<tokio::sync::Notify>)>,
     gate: Option<Arc<tokio::sync::Semaphore>>,
     client_target: Option<ChatTarget>,
-    ledger: Option<std::path::PathBuf>,
+    call_log: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LedgerCall {
+pub struct LoggedCall {
     pub endpoint: String,
     pub model: String,
     pub prompt: String,
@@ -70,12 +70,12 @@ impl FakeChatModels {
             hang: None,
             gate: None,
             client_target: None,
-            ledger: None,
+            call_log: None,
         }
     }
 
-    pub fn with_ledger(mut self, path: std::path::PathBuf) -> Self {
-        self.ledger = Some(path);
+    pub fn with_call_log(mut self, path: std::path::PathBuf) -> Self {
+        self.call_log = Some(path);
         self
     }
 
@@ -257,23 +257,23 @@ impl ChatClient for FakeChatClient {
                 model: self.target.model.clone(),
                 request: request.clone(),
             });
-        if let Some(path) = &self.models.ledger {
-            let mut line = serde_json::to_vec(&LedgerCall {
+        if let Some(path) = &self.models.call_log {
+            let mut line = serde_json::to_vec(&LoggedCall {
                 endpoint: self.endpoint.clone(),
                 model: self.target.model.clone(),
                 prompt: last_user_message(&request),
             })
-            .expect("a ledger line encodes");
+            .expect("a call log line encodes");
             line.push(b'\n');
             std::io::Write::write_all(
                 &mut std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
-                    .expect("the ledger opens"),
+                    .expect("the call log opens"),
                 &line,
             )
-            .expect("the ledger records the call");
+            .expect("the call log records the call");
         }
         if let Some((filter, entered)) = &self.models.hang {
             if filter(&request) {

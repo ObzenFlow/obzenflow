@@ -11,7 +11,7 @@ use super::trace::TraceState;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::stateful::{
     StatefulEmission, TypedStatefulContribution, TypedStatefulDrainInvocation,
-    TypedStatefulHandler, TypedStatefulInvocation,
+    TypedStatefulHandler, TypedStatefulInvocation, TypedStatefulOutputIds,
 };
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::{OneFactStageOutput, TypedPayload};
@@ -147,6 +147,18 @@ pub trait Accumulator: Send + Sync + Debug {
             .map(AccumulatorOutput::whole_batch)
             .collect()
     }
+
+    /// Runtime-only hook run once after an accepted emission that keeps the state.
+    ///
+    /// `output_ids` name, in order, the outputs `outputs_with_contribution`
+    /// projected from `state`. A plain `post_emit` passes none.
+    #[doc(hidden)]
+    fn post_emit_with_contribution(
+        &self,
+        _state: &mut Self::State,
+        _output_ids: TypedStatefulOutputIds,
+    ) {
+    }
 }
 
 impl<A, E> StatefulWithEmission<A, E>
@@ -179,6 +191,16 @@ where
             StatefulEmission::RetainEpoch { outputs }
         };
         (emission, traces)
+    }
+
+    fn advance(&self, state: &mut WrapperState<A::State>, output_ids: TypedStatefulOutputIds) {
+        state.advance_period();
+        if self.emission.resets_accumulator_on_emit() {
+            state.inner = self.accumulator.initial_state();
+        } else {
+            self.accumulator
+                .post_emit_with_contribution(&mut state.inner, output_ids);
+        }
     }
 }
 
@@ -229,10 +251,11 @@ where
     }
 
     fn post_emit(&self, state: &mut Self::State) {
-        state.advance_period();
-        if self.emission.resets_accumulator_on_emit() {
-            state.inner = self.accumulator.initial_state();
-        }
+        self.advance(state, TypedStatefulOutputIds::new(Vec::new()));
+    }
+
+    fn post_emit_invocation(&self, state: &mut Self::State, output_ids: TypedStatefulOutputIds) {
+        self.advance(state, output_ids);
     }
 
     fn emit_invocation(
@@ -266,7 +289,9 @@ where
 mod tests {
     use super::*;
     use crate::stages::stateful::strategies::emissions::{EveryN, TimeWindow};
+    use obzenflow_core::EventId;
     use serde::{Deserialize, Serialize};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct Tick;
@@ -322,6 +347,61 @@ mod tests {
         assert_eq!(state.inner, 0);
         assert_eq!(state.events_seen, 0);
         assert_eq!(state.period_started_at, None);
+    }
+
+    #[derive(Debug, Default)]
+    struct LinkedTicks {
+        received: Arc<Mutex<Vec<Vec<EventId>>>>,
+    }
+
+    impl Accumulator for LinkedTicks {
+        type State = u64;
+        type Input = Tick;
+        type Output = Tick;
+
+        fn initial_state(&self) -> u64 {
+            0
+        }
+
+        fn accumulate(&self, count: &mut u64, _: Tick) {
+            *count += 1;
+        }
+
+        fn outputs(&self, _: &u64) -> Vec<Tick> {
+            vec![Tick]
+        }
+
+        fn post_emit_with_contribution(&self, _: &mut u64, output_ids: TypedStatefulOutputIds) {
+            self.received
+                .lock()
+                .expect("recorder lock")
+                .push(output_ids.ids().to_vec());
+        }
+    }
+
+    #[test]
+    fn only_an_emission_that_keeps_the_state_hands_output_ids_to_the_accumulator() {
+        let output_id = EventId::new();
+
+        let retaining = LinkedTicks::default();
+        let received = retaining.received.clone();
+        let retaining = StatefulWithEmission::new(retaining, EveryN::new(1));
+        let mut state = retaining.initial_state();
+        retaining.post_emit_invocation(&mut state, TypedStatefulOutputIds::new(vec![output_id]));
+        retaining.post_emit(&mut state);
+        assert_eq!(
+            *received.lock().expect("recorder lock"),
+            [vec![output_id], Vec::new()]
+        );
+
+        let resetting = LinkedTicks::default();
+        let received = resetting.received.clone();
+        let resetting = StatefulWithEmission::new(resetting, TimeWindow::new(Duration::ZERO));
+        let mut state = resetting.initial_state();
+        resetting.accumulate(&mut state, Tick);
+        resetting.post_emit_invocation(&mut state, TypedStatefulOutputIds::new(vec![output_id]));
+        assert_eq!(state.inner, 0);
+        assert!(received.lock().expect("recorder lock").is_empty());
     }
 
     #[test]

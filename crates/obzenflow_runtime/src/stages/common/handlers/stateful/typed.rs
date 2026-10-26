@@ -54,6 +54,25 @@ impl TypedStatefulContribution {
     }
 }
 
+/// Opaque ids of one accepted emission's outputs, in emission order.
+///
+/// Only framework-owned facades can read them. They reach the handler through
+/// a hidden hook so ordinary authored handlers never see an event id.
+#[doc(hidden)]
+pub struct TypedStatefulOutputIds {
+    ids: Vec<EventId>,
+}
+
+impl TypedStatefulOutputIds {
+    pub(crate) fn new(ids: Vec<EventId>) -> Self {
+        Self { ids }
+    }
+
+    pub(crate) fn ids(&self) -> &[EventId] {
+        &self.ids
+    }
+}
+
 /// One framework invocation before typed outputs are lowered to events.
 #[doc(hidden)]
 pub struct TypedStatefulInvocation<O> {
@@ -209,6 +228,12 @@ pub trait TypedStatefulHandler: Send + Sync {
         state: &Self::State,
     ) -> Result<TypedStatefulInvocation<Self::Output>, HandlerError> {
         self.emit(state).map(TypedStatefulInvocation::facts_only)
+    }
+
+    /// Runtime-only post-emission hook carrying the ids of the accepted outputs.
+    #[doc(hidden)]
+    fn post_emit_invocation(&self, state: &mut Self::State, _output_ids: TypedStatefulOutputIds) {
+        self.post_emit(state);
     }
 
     /// Runtime-only terminal hook for exact facade contribution partitions.
@@ -386,7 +411,9 @@ where
             StatefulEmission::ResetEpoch { outputs } => (outputs, true),
         };
         let events = self.lower_outputs(outputs, traces, &state.trace)?;
-        self.handler.post_emit(&mut state.inner);
+        let output_ids = events.iter().map(|event| event.id).collect();
+        self.handler
+            .post_emit_invocation(&mut state.inner, TypedStatefulOutputIds::new(output_ids));
         if reset_epoch {
             state.trace.reset();
         }
@@ -409,7 +436,7 @@ mod tests {
     use obzenflow_core::{StageId, TypedPayload};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct Input {
@@ -496,6 +523,69 @@ mod tests {
         assert_eq!(outputs[0].event_type(), Output::event_type_name());
         assert_eq!(outputs[0].causality.parent_ids, vec![parent.id]);
         assert_eq!(Output::from_event(&outputs[0]), Some(Output { value: 7 }));
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordsOutputIds {
+        received: Arc<Mutex<Vec<Vec<EventId>>>>,
+    }
+
+    impl TypedStatefulHandler for RecordsOutputIds {
+        type State = u32;
+        type Input = Input;
+        type Output = Output;
+
+        fn initial_state(&self) -> Self::State {
+            0
+        }
+
+        fn accumulate(&self, state: &mut Self::State, input: Self::Input) {
+            *state += input.value;
+        }
+
+        fn emit(
+            &self,
+            state: &Self::State,
+        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
+            Ok(StatefulEmission::RetainEpoch {
+                outputs: vec![Output { value: *state }, Output { value: *state + 1 }],
+            })
+        }
+
+        fn post_emit(&self, _: &mut Self::State) {}
+
+        fn post_emit_invocation(
+            &self,
+            state: &mut Self::State,
+            output_ids: TypedStatefulOutputIds,
+        ) {
+            self.received
+                .lock()
+                .expect("recorder lock")
+                .push(output_ids.ids().to_vec());
+            self.post_emit(state);
+        }
+    }
+
+    #[tokio::test]
+    async fn only_an_accepted_emission_hands_its_output_ids_to_the_handler() {
+        let handler = RecordsOutputIds::default();
+        let received = handler.received.clone();
+        let mut adapter = TypedStatefulHandlerAdapter::new(handler);
+        StatefulHandler::install_writer_id(&mut adapter, WriterId::from(StageId::new()));
+        let mut state = StatefulHandler::initial_state(&adapter);
+        StatefulHandler::try_accumulate(&mut adapter, &mut state, input_event(3))
+            .expect("typed input decodes");
+
+        StatefulHandler::create_events(&adapter, &state).expect("projection lowers");
+        StatefulHandler::drain(&adapter, &state)
+            .await
+            .expect("drain lowers");
+        assert!(received.lock().expect("recorder lock").is_empty());
+
+        let outputs = StatefulHandler::emit(&adapter, &mut state).expect("emission lowers");
+        let output_ids: Vec<_> = outputs.iter().map(|output| output.id).collect();
+        assert_eq!(*received.lock().expect("recorder lock"), [output_ids]);
     }
 
     #[test]

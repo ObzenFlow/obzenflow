@@ -68,7 +68,9 @@ pub use strategies::accumulators::{
     TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry, TopNSnapshot, TopNState, TopNTyped,
     WrapperState,
 };
-pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
+pub use strategies::emissions::{
+    EmissionStrategy, EmitAlways, EveryN, OnEOF, OnUpdate, TimeWindow,
+};
 
 use obzenflow_core::{OneFactStageOutput, TypedPayload};
 use std::fmt::Debug;

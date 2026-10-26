@@ -15,11 +15,13 @@ use std::time::Duration;
 mod emit_always;
 mod every_n;
 mod on_eof;
+mod on_update;
 mod time_window;
 
 pub use emit_always::EmitAlways;
 pub use every_n::EveryN;
 pub use on_eof::OnEOF;
+pub use on_update::OnUpdate;
 pub use time_window::TimeWindow;
 
 /// Strategy for when to emit accumulated results.

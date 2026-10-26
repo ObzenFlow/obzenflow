@@ -3,18 +3,9 @@
 // https://obzenflow.dev
 
 use super::domain::*;
-use obzenflow::error::HandlerError;
-use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
-use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
-pub struct CheckbookState {
-    ledgers: HashMap<String, AccountLedger>,
-    last_snapshot: Option<CheckbookSnapshot>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct AccountLedger {
+pub struct AccountLedger {
     owner: String,
     current_balance_cents: i64,
     total_credits_cents: i64,
@@ -22,82 +13,41 @@ struct AccountLedger {
     transactions: Vec<CheckbookEntry>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Checkbook;
-
-impl TypedStatefulHandler for Checkbook {
-    type State = CheckbookState;
-    type Input = PostedEntry;
-    type Output = CheckbookSnapshot;
-
-    fn accumulate(&self, state: &mut Self::State, entry: PostedEntry) {
-        let ledger = state
-            .ledgers
-            .entry(entry.account_id.clone())
-            .or_insert_with(|| AccountLedger {
-                owner: entry.owner.clone(),
-                current_balance_cents: entry.initial_balance_cents,
-                total_credits_cents: 0,
-                total_debits_cents: 0,
-                transactions: Vec::new(),
-            });
-
-        ledger.owner = entry.owner.clone();
-
+impl AccountLedger {
+    pub fn record(&mut self, entry: &PostedEntry) {
+        if self.transactions.is_empty() {
+            self.current_balance_cents = entry.initial_balance_cents;
+        }
+        self.owner = entry.owner.clone();
+        let amount = entry.amount_cents as i64;
         match entry.kind {
             EntryKind::Credit => {
-                ledger.total_credits_cents = ledger
-                    .total_credits_cents
-                    .saturating_add(entry.amount_cents as i64);
-                ledger.current_balance_cents = ledger
-                    .current_balance_cents
-                    .saturating_add(entry.amount_cents as i64);
+                self.total_credits_cents = self.total_credits_cents.saturating_add(amount);
+                self.current_balance_cents = self.current_balance_cents.saturating_add(amount);
             }
             EntryKind::Debit => {
-                ledger.total_debits_cents = ledger
-                    .total_debits_cents
-                    .saturating_add(entry.amount_cents as i64);
-                ledger.current_balance_cents = ledger
-                    .current_balance_cents
-                    .saturating_sub(entry.amount_cents as i64);
+                self.total_debits_cents = self.total_debits_cents.saturating_add(amount);
+                self.current_balance_cents = self.current_balance_cents.saturating_sub(amount);
             }
         }
-
-        let checkbook_entry = CheckbookEntry {
-            index: ledger.transactions.len() as u64 + 1,
+        self.transactions.push(CheckbookEntry {
+            index: self.transactions.len() as u64 + 1,
             kind: entry.kind,
             amount_cents: entry.amount_cents,
-            balance_cents: ledger.current_balance_cents,
-            note: entry.note,
-        };
-        ledger.transactions.push(checkbook_entry);
-
-        state.last_snapshot = Some(CheckbookSnapshot {
-            account_id: entry.account_id,
-            owner: ledger.owner.clone(),
-            current_balance_cents: ledger.current_balance_cents,
-            available_balance_cents: ledger.current_balance_cents,
-            total_credits_cents: ledger.total_credits_cents,
-            total_debits_cents: ledger.total_debits_cents,
-            transactions: ledger.transactions.clone(),
+            balance_cents: self.current_balance_cents,
+            note: entry.note.clone(),
         });
     }
 
-    fn initial_state(&self) -> Self::State {
-        CheckbookState::default()
-    }
-
-    fn should_emit(&self, state: &Self::State) -> bool {
-        state.last_snapshot.is_some()
-    }
-
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
-            outputs: state.last_snapshot.iter().cloned().collect(),
-        })
-    }
-
-    fn post_emit(&self, state: &mut Self::State) {
-        state.last_snapshot = None;
+    pub fn snapshot(&self, account_id: &str) -> CheckbookSnapshot {
+        CheckbookSnapshot {
+            account_id: account_id.to_string(),
+            owner: self.owner.clone(),
+            current_balance_cents: self.current_balance_cents,
+            available_balance_cents: self.current_balance_cents,
+            total_credits_cents: self.total_credits_cents,
+            total_debits_cents: self.total_debits_cents,
+            transactions: self.transactions.clone(),
+        }
     }
 }
