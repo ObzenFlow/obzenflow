@@ -9,10 +9,10 @@ use super::wrapper::AccumulatorOutput;
 use super::{Accumulator, StatefulWithEmission};
 use crate::stages::common::handlers::stateful::TypedStatefulContribution;
 use crate::stages::stateful::strategies::emissions::{
-    EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
+    EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
 };
 use obzenflow_core::TypedPayload;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -22,7 +22,14 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct Conflate<T, K, FKey> {
     key_fn: FKey,
+    projection: Projection,
     _types: PhantomData<fn() -> (T, K)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Projection {
+    EveryKey,
+    UpdatedKeys,
 }
 
 /// Backwards-compatible spelling for the typed conflate strategy.
@@ -32,6 +39,7 @@ impl<T, K, FKey> Conflate<T, K, FKey> {
     pub fn new(key_fn: FKey) -> Self {
         Self {
             key_fn,
+            projection: Projection::EveryKey,
             _types: PhantomData,
         }
     }
@@ -48,12 +56,35 @@ impl<T, K, FKey> Conflate<T, K, FKey> {
         self.with_emission(EveryN::new(count))
     }
 
-    pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
+    pub fn emit_every(self, interval: Duration) -> StatefulWithEmission<Self, EveryInterval> {
+        self.with_emission(EveryInterval::new(interval))
+    }
+
+    pub fn emit_per_window(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
         self.with_emission(TimeWindow::new(duration))
     }
 
     pub fn emit_always(self) -> StatefulWithEmission<Self, EmitAlways> {
         self.with_emission(EmitAlways)
+    }
+}
+
+impl<T, K, FKey, E> StatefulWithEmission<Conflate<T, K, FKey>, E>
+where
+    E: EmissionStrategy,
+{
+    /// Publishes only the keys that received a value since the previous emission.
+    ///
+    /// Under `emit_always()` that forwards each input. Under `emit_per_window(d)`
+    /// and `emit_on_eof()` every key they publish received a value since then, so
+    /// the output is unchanged.
+    pub fn updated_only(self) -> Self {
+        let (conflate, emission) = self.into_parts();
+        Conflate {
+            projection: Projection::UpdatedKeys,
+            ..conflate
+        }
+        .with_emission(emission)
     }
 }
 
@@ -78,12 +109,13 @@ struct ConflateBucket<T> {
 #[derive(Clone, Debug)]
 pub struct ConflateState<K, T> {
     buckets: HashMap<K, ConflateBucket<T>>,
+    updated: HashSet<K>,
     next_ordinal: u64,
 }
 
 impl<T, K, FKey> Conflate<T, K, FKey>
 where
-    K: Hash + Eq,
+    K: Hash + Eq + Clone,
     FKey: Fn(&T) -> K,
 {
     fn accumulate_value(
@@ -93,6 +125,9 @@ where
         contribution: Option<TypedStatefulContribution>,
     ) {
         let key = (self.key_fn)(&input);
+        if matches!(self.projection, Projection::UpdatedKeys) {
+            state.updated.insert(key.clone());
+        }
         let first_ordinal = state
             .buckets
             .get(&key)
@@ -113,7 +148,14 @@ where
     }
 
     fn ordered_buckets<'a>(&self, state: &'a ConflateState<K, T>) -> Vec<&'a ConflateBucket<T>> {
-        let mut buckets: Vec<_> = state.buckets.values().collect();
+        let mut buckets: Vec<_> = match self.projection {
+            Projection::EveryKey => state.buckets.values().collect(),
+            Projection::UpdatedKeys => state
+                .updated
+                .iter()
+                .filter_map(|key| state.buckets.get(key))
+                .collect(),
+        };
         buckets.sort_by_key(|bucket| {
             (
                 bucket.trace.parent_ids().first().copied(),
@@ -137,6 +179,7 @@ where
     fn initial_state(&self) -> Self::State {
         ConflateState {
             buckets: HashMap::new(),
+            updated: HashSet::new(),
             next_ordinal: 0,
         }
     }
@@ -170,13 +213,19 @@ where
             .map(|bucket| AccumulatorOutput::exact(bucket.value.clone(), bucket.trace.clone()))
             .collect()
     }
+
+    fn post_emit(&self, state: &mut Self::State) {
+        state.updated.clear();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stages::common::handlers::stateful::traits::StatefulHandler;
-    use crate::stages::common::handlers::stateful::TypedStatefulHandlerAdapter;
+    use crate::stages::common::handlers::stateful::{
+        StatefulEmission, TypedStatefulHandler, TypedStatefulHandlerAdapter,
+    };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
     use serde::{Deserialize, Serialize};
@@ -267,5 +316,41 @@ mod tests {
             };
             assert_eq!(output.causality.parent_ids, vec![expected_parent]);
         }
+    }
+
+    fn reading(sensor: &str, value: u32) -> Reading {
+        Reading {
+            sensor: sensor.into(),
+            value,
+        }
+    }
+
+    #[test]
+    fn updated_only_publishes_only_the_keys_that_received_a_value() {
+        let handler = Conflate::new(|reading: &Reading| reading.sensor.clone())
+            .emit_every_n(2)
+            .updated_only();
+        let mut state = handler.initial_state();
+        let mut emissions = Vec::new();
+
+        for (sensor, value) in [("a", 1), ("b", 2), ("a", 3), ("a", 4)] {
+            handler.accumulate(&mut state, reading(sensor, value));
+            if handler.should_emit(&state) {
+                let Ok(StatefulEmission::RetainEpoch { outputs }) = handler.emit(&state) else {
+                    panic!("a conflation emission keeps the state");
+                };
+                handler.post_emit(&mut state);
+                emissions.push(outputs);
+            }
+        }
+
+        assert_eq!(
+            emissions,
+            [
+                vec![reading("a", 1), reading("b", 2)],
+                vec![reading("a", 4)]
+            ]
+        );
+        assert!(handler.drain(&state).expect("drain projects").is_empty());
     }
 }

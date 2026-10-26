@@ -64,6 +64,10 @@ where
             emission,
         }
     }
+
+    pub(super) fn into_parts(self) -> (A, E) {
+        (self.accumulator, self.emission)
+    }
 }
 
 impl<A, E> Clone for StatefulWithEmission<A, E>
@@ -149,15 +153,22 @@ pub trait Accumulator: Send + Sync + Debug {
     }
 
     /// Runtime-only hook run once after an accepted emission that keeps the state.
+    #[doc(hidden)]
+    fn post_emit(&self, _state: &mut Self::State) {}
+
+    /// Runtime-only hook run once after an accepted emission that keeps the state,
+    /// carrying the ids of its outputs.
     ///
     /// `output_ids` name, in order, the outputs `outputs_with_contribution`
-    /// projected from `state`. A plain `post_emit` passes none.
+    /// projected from `state`, and are empty on the value path. The default runs
+    /// `post_emit`.
     #[doc(hidden)]
     fn post_emit_with_contribution(
         &self,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         _output_ids: TypedStatefulOutputIds,
     ) {
+        self.post_emit(state);
     }
 }
 
@@ -191,6 +202,16 @@ where
             StatefulEmission::RetainEpoch { outputs }
         };
         (emission, traces)
+    }
+
+    fn drained_outputs(
+        &self,
+        state: &WrapperState<A::State>,
+    ) -> (Vec<A::Output>, Option<Vec<TraceState>>) {
+        if state.events_seen == 0 && !self.emission.emits_only_at_end_of_input() {
+            return (Vec::new(), None);
+        }
+        self.typed_outputs(state)
     }
 
     fn advance(&self, state: &mut WrapperState<A::State>, output_ids: TypedStatefulOutputIds) {
@@ -270,14 +291,14 @@ where
     }
 
     fn drain(&self, state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(self.typed_outputs(state).0)
+        Ok(self.drained_outputs(state).0)
     }
 
     fn drain_invocation(
         &self,
         state: &Self::State,
     ) -> Result<TypedStatefulDrainInvocation<Self::Output>, HandlerError> {
-        let (outputs, traces) = self.typed_outputs(state);
+        let (outputs, traces) = self.drained_outputs(state);
         Ok(match traces {
             Some(traces) => TypedStatefulDrainInvocation::with_output_traces(outputs, traces),
             None => TypedStatefulDrainInvocation::facts_only(outputs),
@@ -288,7 +309,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::stateful::strategies::emissions::{EveryN, TimeWindow};
+    use crate::stages::stateful::strategies::emissions::{EmitAlways, EveryN, OnEOF, TimeWindow};
     use obzenflow_core::EventId;
     use serde::{Deserialize, Serialize};
     use std::sync::{Arc, Mutex};
@@ -402,6 +423,34 @@ mod tests {
         resetting.post_emit_invocation(&mut state, TypedStatefulOutputIds::new(vec![output_id]));
         assert_eq!(state.inner, 0);
         assert!(received.lock().expect("recorder lock").is_empty());
+    }
+
+    #[test]
+    fn end_of_input_emits_again_only_after_new_inputs_unless_it_is_the_only_emission() {
+        let always = StatefulWithEmission::new(Ticks, EmitAlways);
+        let mut state = always.initial_state();
+        assert!(always.drain(&state).expect("drain projects").is_empty());
+        always.accumulate(&mut state, Tick);
+        always.post_emit(&mut state);
+        assert!(
+            always.drain(&state).expect("drain projects").is_empty(),
+            "the last emission already covered every input"
+        );
+
+        let every_two = StatefulWithEmission::new(Ticks, EveryN::new(2));
+        let mut state = every_two.initial_state();
+        every_two.accumulate(&mut state, Tick);
+        assert_eq!(every_two.drain(&state).expect("drain projects").len(), 1);
+
+        let resetting = StatefulWithEmission::new(Ticks, TimeWindow::new(Duration::ZERO));
+        let mut state = resetting.initial_state();
+        resetting.accumulate(&mut state, Tick);
+        resetting.post_emit(&mut state);
+        assert!(resetting.drain(&state).expect("drain projects").is_empty());
+
+        let at_end = StatefulWithEmission::new(Ticks, OnEOF::new());
+        let state = at_end.initial_state();
+        assert_eq!(at_end.drain(&state).expect("drain projects").len(), 1);
     }
 
     #[test]

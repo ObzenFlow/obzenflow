@@ -13,15 +13,15 @@ use std::time::Duration;
 
 // Re-export concrete strategies
 mod emit_always;
+mod every_interval;
 mod every_n;
 mod on_eof;
-mod on_update;
 mod time_window;
 
 pub use emit_always::EmitAlways;
+pub use every_interval::EveryInterval;
 pub use every_n::EveryN;
 pub use on_eof::OnEOF;
-pub use on_update::OnUpdate;
 pub use time_window::TimeWindow;
 
 /// Strategy for when to emit accumulated results.
@@ -55,6 +55,17 @@ pub trait EmissionStrategy: Send + Sync + Debug {
     ///
     /// Default: false (snapshot-style emissions keep accumulating state).
     fn resets_accumulator_on_emit(&self) -> bool {
+        false
+    }
+
+    /// Whether this strategy emits only at end of input.
+    ///
+    /// End of input emits such a strategy's result even when no input arrived.
+    /// Every other strategy emits at end of input only when inputs arrived since
+    /// its previous emission.
+    ///
+    /// Default: false.
+    fn emits_only_at_end_of_input(&self) -> bool {
         false
     }
 

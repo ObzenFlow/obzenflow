@@ -275,18 +275,12 @@ fn conflate_emit_always_retains_the_latest_value_for_every_key() {
             vec![("a".into(), 4.0), ("b".into(), 8.0)],
         ]
     );
-    assert_eq!(
-        handler.drain(&state).expect("drain the retained view"),
-        vec![
-            Score {
-                key: "a".into(),
-                score: 4.0
-            },
-            Score {
-                key: "b".into(),
-                score: 8.0
-            },
-        ]
+    assert!(
+        handler
+            .drain(&state)
+            .expect("drain the retained view")
+            .is_empty(),
+        "the last emission already published every key"
     );
 }
 

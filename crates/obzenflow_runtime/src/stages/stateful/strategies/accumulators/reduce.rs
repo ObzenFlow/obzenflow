@@ -6,7 +6,7 @@
 
 use super::{Accumulator, StatefulWithEmission};
 use crate::stages::stateful::strategies::emissions::{
-    EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
+    EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
 };
 use obzenflow_core::TypedPayload;
 use std::fmt::{self, Debug};
@@ -45,7 +45,11 @@ impl<T, S, F> Reduce<T, S, F> {
         self.with_emission(EveryN::new(count))
     }
 
-    pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
+    pub fn emit_every(self, interval: Duration) -> StatefulWithEmission<Self, EveryInterval> {
+        self.with_emission(EveryInterval::new(interval))
+    }
+
+    pub fn emit_per_window(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
         self.with_emission(TimeWindow::new(duration))
     }
 

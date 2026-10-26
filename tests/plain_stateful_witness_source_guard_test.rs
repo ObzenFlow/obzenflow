@@ -264,7 +264,8 @@ fn first_class_accumulator_catalog_cannot_be_collapsed_or_shrunk() {
         for combinator in [
             "emit_on_eof",
             "emit_every_n",
-            "emit_within",
+            "emit_every(",
+            "emit_per_window",
             "emit_always",
             "with_emission",
         ] {

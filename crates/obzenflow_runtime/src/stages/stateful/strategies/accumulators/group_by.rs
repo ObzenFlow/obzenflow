@@ -11,7 +11,7 @@ use crate::stages::common::handlers::stateful::{
     TypedStatefulContribution, TypedStatefulOutputIds,
 };
 use crate::stages::stateful::strategies::emissions::{
-    EmissionStrategy, EmitAlways, EveryN, OnEOF, OnUpdate, TimeWindow,
+    EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
 };
 use obzenflow_core::{EventId, OneFactStageOutput, TypedPayload};
 use std::collections::{HashMap, HashSet};
@@ -68,20 +68,30 @@ impl<T, K, S, O, FKey, FUpdate, FOutput> GroupBy<T, K, S, O, FKey, FUpdate, FOut
         self.with_emission(EveryN::new(count))
     }
 
-    pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
+    pub fn emit_every(self, interval: Duration) -> StatefulWithEmission<Self, EveryInterval> {
+        self.with_emission(EveryInterval::new(interval))
+    }
+
+    pub fn emit_per_window(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
         self.with_emission(TimeWindow::new(duration))
     }
 
     pub fn emit_always(self) -> StatefulWithEmission<Self, EmitAlways> {
         self.with_emission(EmitAlways)
     }
+}
 
-    /// Publishes, after each input, the output of every group that input updated.
+impl<T, K, S, O, FKey, FUpdate, FOutput, E>
+    StatefulWithEmission<GroupBy<T, K, S, O, FKey, FUpdate, FOutput>, E>
+where
+    E: EmissionStrategy,
+{
+    /// Publishes only the groups updated since the previous emission.
     ///
-    /// Groups the input did not update publish nothing, and end of input publishes
-    /// nothing further, because every update has already been published.
+    /// Under `emit_per_window(d)` and `emit_on_eof()` every group they publish
+    /// was updated since then, so the output is unchanged.
     ///
-    /// Other accumulators do not offer it:
+    /// Accumulators that publish one result do not offer it:
     ///
     /// ```compile_fail,E0599
     /// # use obzenflow_core::TypedPayload;
@@ -95,14 +105,15 @@ impl<T, K, S, O, FKey, FUpdate, FOutput> GroupBy<T, K, S, O, FKey, FUpdate, FOut
     /// # impl TypedPayload for Count { const EVENT_TYPE: &'static str = "doc.count"; }
     ///
     /// let counts = reduce(Count(0), |count: &mut Count, _: &Entry| count.0 += 1);
-    /// let _ = counts.emit_on_update();
+    /// let _ = counts.emit_always().updated_only();
     /// ```
-    pub fn emit_on_update(self) -> StatefulWithEmission<Self, OnUpdate> {
-        Self {
+    pub fn updated_only(self) -> Self {
+        let (group_by, emission) = self.into_parts();
+        GroupBy {
             projection: Projection::UpdatedGroups,
-            ..self
+            ..group_by
         }
-        .with_emission(OnUpdate::new())
+        .with_emission(emission)
     }
 }
 
@@ -402,8 +413,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_on_update_publishes_only_the_groups_each_input_updated() {
-        let mut adapter = adapter(store_totals().emit_on_update(), DEFAULT_MAX_LINEAGE_DEPTH);
+    async fn updated_only_publishes_only_the_groups_each_input_updated() {
+        let mut adapter = adapter(
+            store_totals().emit_always().updated_only(),
+            DEFAULT_MAX_LINEAGE_DEPTH,
+        );
         let mut state = StatefulHandler::initial_state(&adapter);
         let mut previous_outputs = HashMap::new();
 
@@ -438,9 +452,60 @@ mod tests {
         assert!(drained.is_empty(), "every update was already published");
     }
 
+    #[tokio::test]
+    async fn updated_only_publishes_the_groups_a_coarser_trigger_saw_updated() {
+        let mut adapter = adapter(
+            store_totals().emit_every_n(3).updated_only(),
+            DEFAULT_MAX_LINEAGE_DEPTH,
+        );
+        let mut state = StatefulHandler::initial_state(&adapter);
+        let inputs: Vec<_> = [(1, "a", 2), (2, "b", 3), (3, "a", 5)]
+            .into_iter()
+            .chain([(4, "a", 1), (5, "a", 1), (6, "a", 1), (7, "b", 1)])
+            .map(|(id, store, amount)| sale(id, store, amount))
+            .collect();
+        let mut emissions = Vec::new();
+
+        for input in &inputs {
+            StatefulHandler::try_accumulate(&mut adapter, &mut state, input.clone())
+                .expect("typed input decodes");
+            if StatefulHandler::should_emit(&adapter, &mut state) {
+                emissions
+                    .push(StatefulHandler::emit(&adapter, &mut state).expect("emission lowers"));
+            }
+        }
+        let drained = StatefulHandler::drain(&adapter, &state)
+            .await
+            .expect("drain lowers");
+
+        let [first, second] = emissions.as_slice() else {
+            panic!("two emissions every three inputs: {emissions:?}");
+        };
+        assert_eq!(
+            published(first),
+            vec![
+                (total("a", 7), vec![inputs[0].id, inputs[2].id]),
+                (total("b", 3), vec![inputs[1].id]),
+            ]
+        );
+        assert_eq!(
+            published(second),
+            vec![(
+                total("a", 10),
+                vec![inputs[3].id, inputs[4].id, inputs[5].id, first[0].id]
+            )],
+            "b was not updated, so it publishes nothing"
+        );
+        assert_eq!(
+            published(&drained),
+            vec![(total("b", 4), vec![inputs[6].id, first[1].id])],
+            "end of input publishes the input since the last emission"
+        );
+    }
+
     #[test]
-    fn emit_on_update_publishes_updated_groups_on_the_value_path() {
-        let handler = store_totals().emit_on_update();
+    fn updated_only_publishes_updated_groups_on_the_value_path() {
+        let handler = store_totals().emit_always().updated_only();
         let mut state = handler.initial_state();
         let mut emissions = Vec::new();
 

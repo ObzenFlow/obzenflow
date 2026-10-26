@@ -77,8 +77,8 @@
 
 pub use obzenflow_runtime::stages::stateful::{
     conflate, group_by, reduce, top_n, top_n_by, Accumulator, Conflate, ConflateState,
-    ConflateTyped, EmissionStrategy, EmitAlways, EveryN, GroupBy, GroupByState, GroupByTyped,
-    OnEOF, OnUpdate, Reduce, ReduceState, ReduceTyped, StatefulWithEmission, TimeWindow, TopN,
+    ConflateTyped, EmissionStrategy, EmitAlways, EveryInterval, EveryN, GroupBy, GroupByState,
+    GroupByTyped, OnEOF, Reduce, ReduceState, ReduceTyped, StatefulWithEmission, TimeWindow, TopN,
     TopNBy, TopNByEntry, TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry, TopNSnapshot,
     TopNState, TopNTyped, WrapperState,
 };

@@ -264,7 +264,7 @@ async fn conflate_emits_latest_value_per_key() {
         let transaction_source = TransactionSource::new(8);
         let latest_by_product =
             ConflateTyped::new(|event: &TransactionEvent| event.product_id.clone())
-                .emit_within(Duration::from_millis(1));
+                .emit_per_window(Duration::from_millis(1));
         let collecting_sink = CollectingSink::<TransactionEvent>::new(events_for_flow);
 
         Ok(flow! {

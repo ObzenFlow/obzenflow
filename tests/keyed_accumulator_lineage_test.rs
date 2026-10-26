@@ -103,7 +103,7 @@ impl TypedFiniteSourceHandler for Entries {
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let entries = Entries { next: 0 };
-        let updates = balances().emit_on_update();
+        let updates = balances().emit_always().updated_only();
         let snapshots = balances().emit_always();
         let update_sink = replay_testkit::Discard::<Balance>::default();
         let snapshot_sink = replay_testkit::Discard::<Balance>::default();
@@ -301,20 +301,13 @@ async fn assert_run(run_dir: &Path, cap: usize) {
         .collect();
     assert_eq!(
         published.len(),
-        1 + 2 * ENTRIES as usize,
-        "each later input and the drain at end of input publish both keys"
+        1 + 2 * (ENTRIES as usize - 1),
+        "each later input publishes both keys, and end of input repeats none"
     );
     assert_eq!(published[0], "a");
     assert!(
         published[1..].chunks(2).all(|pair| pair == order),
         "every emission publishes its keys in first-input order {order:?}"
-    );
-    let drained = &snapshots.outputs[snapshots.outputs.len() - 2..];
-    assert!(
-        drained.iter().all(
-            |(_, _, parents)| parents.len() == 1 && !snapshots.inputs.contains_key(&parents[0])
-        ),
-        "a drain moves no evidence, so each drained key cites its link alone"
     );
 
     for lineage in [&updates, &snapshots] {
