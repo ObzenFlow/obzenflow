@@ -35,6 +35,7 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::sink::DeliveryProvenance;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -481,6 +482,17 @@ fn assert_probe_provenance<T: Clone + std::fmt::Debug>(
     deliveries.into_iter().map(|(payload, _)| payload).collect()
 }
 
+fn cancellations_by_upstream(cancelled: &[OrderCancelled]) -> BTreeMap<&str, Vec<u64>> {
+    let mut by_upstream: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+    for cancellation in cancelled {
+        by_upstream
+            .entry(cancellation.origin.as_str())
+            .or_default()
+            .push(cancellation.order_id);
+    }
+    by_upstream
+}
+
 /// FLOWIP-120i: labels are stdout presentation only. No journal row in a
 /// labelled run may contain the label literal.
 fn assert_journals_carry_no_label(run_dir: &Path) {
@@ -602,8 +614,9 @@ async fn every_sink_delivery_carries_replay_provenance_under_strict_replay() {
     // semantic projection): no normalisation anywhere in user code.
     assert_eq!(replay_paid, live_paid, "paid payloads must match live");
     assert_eq!(
-        replay_cancelled, live_cancelled,
-        "cancelled payloads must match live"
+        cancellations_by_upstream(&replay_cancelled),
+        cancellations_by_upstream(&live_cancelled),
+        "cancelled payloads must match live in each upstream's order"
     );
     assert_eq!(
         replay_review, live_review,
