@@ -10,15 +10,12 @@ use super::{Accumulator, StatefulWithEmission};
 use crate::stages::common::handlers::stateful::{
     TypedStatefulContribution, TypedStatefulOutputIds,
 };
-use crate::stages::stateful::strategies::emissions::{
-    EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
-};
+use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::{EventId, OneFactStageOutput, TypedPayload};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::time::Duration;
 
 type GroupByTypeMarker<T, K, S, O> = PhantomData<fn() -> (T, K, S, O)>;
 
@@ -51,33 +48,21 @@ impl<T, K, S, O, FKey, FUpdate, FOutput> GroupBy<T, K, S, O, FKey, FUpdate, FOut
             key_fn,
             update_fn,
             output_fn,
-            projection: Projection::EveryGroup,
+            projection: Projection::UpdatedGroups,
             _types: PhantomData,
         }
     }
 
-    pub fn with_emission<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
-        StatefulWithEmission::new(self, emission)
-    }
-
-    pub fn emit_on_eof(self) -> StatefulWithEmission<Self, OnEOF> {
-        self.with_emission(OnEOF::new())
-    }
-
-    pub fn emit_every_n(self, count: u64) -> StatefulWithEmission<Self, EveryN> {
-        self.with_emission(EveryN::new(count))
-    }
-
-    pub fn emit_every(self, interval: Duration) -> StatefulWithEmission<Self, EveryInterval> {
-        self.with_emission(EveryInterval::new(interval))
-    }
-
-    pub fn emit_per_window(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
-        self.with_emission(TimeWindow::new(duration))
-    }
-
-    pub fn emit_always(self) -> StatefulWithEmission<Self, EmitAlways> {
-        self.with_emission(EmitAlways)
+    /// Emits when `emission` decides, publishing the groups updated since the
+    /// previous emission.
+    pub fn emit<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
+        let projection =
+            if emission.resets_accumulator_on_emit() || emission.emits_only_at_end_of_input() {
+                Projection::EveryGroup
+            } else {
+                self.projection
+            };
+        StatefulWithEmission::new(Self { projection, ..self }, emission)
     }
 }
 
@@ -86,17 +71,14 @@ impl<T, K, S, O, FKey, FUpdate, FOutput, E>
 where
     E: EmissionStrategy,
 {
-    /// Publishes only the groups updated since the previous emission.
-    ///
-    /// Under `emit_per_window(d)` and `emit_on_eof()` every group they publish
-    /// was updated since then, so the output is unchanged.
+    /// Publishes every group at each emission.
     ///
     /// Accumulators that publish one result do not offer it:
     ///
     /// ```compile_fail,E0599
     /// # use obzenflow_core::TypedPayload;
     /// # use serde::{Deserialize, Serialize};
-    /// use obzenflow_runtime::stages::stateful::reduce;
+    /// use obzenflow_runtime::stages::stateful::{emit, reduce};
     /// # #[derive(Clone, Debug, Serialize, Deserialize)]
     /// # struct Entry;
     /// # impl TypedPayload for Entry { const EVENT_TYPE: &'static str = "doc.entry"; }
@@ -105,15 +87,17 @@ where
     /// # impl TypedPayload for Count { const EVENT_TYPE: &'static str = "doc.count"; }
     ///
     /// let counts = reduce(Count(0), |count: &mut Count, _: &Entry| count.0 += 1);
-    /// let _ = counts.emit_always().updated_only();
+    /// let _ = counts.emit(emit::always).all_groups();
     /// ```
-    pub fn updated_only(self) -> Self {
+    pub fn all_groups(self) -> Self {
         let (group_by, emission) = self.into_parts();
-        GroupBy {
-            projection: Projection::UpdatedGroups,
-            ..group_by
-        }
-        .with_emission(emission)
+        StatefulWithEmission::new(
+            GroupBy {
+                projection: Projection::EveryGroup,
+                ..group_by
+            },
+            emission,
+        )
     }
 }
 
@@ -294,6 +278,7 @@ mod tests {
     use crate::stages::common::handlers::stateful::{
         StatefulEmission, TypedStatefulHandler, TypedStatefulHandlerAdapter,
     };
+    use crate::stages::stateful::emit;
     use obzenflow_core::config::{LineagePolicy, DEFAULT_MAX_LINEAGE_DEPTH};
     use obzenflow_core::event::provenance::ReplayContext;
     use obzenflow_core::event::types::CorrelationId;
@@ -413,11 +398,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updated_only_publishes_only_the_groups_each_input_updated() {
-        let mut adapter = adapter(
-            store_totals().emit_always().updated_only(),
-            DEFAULT_MAX_LINEAGE_DEPTH,
-        );
+    async fn an_emission_publishes_only_the_groups_each_input_updated() {
+        let mut adapter = adapter(store_totals().emit(emit::always), DEFAULT_MAX_LINEAGE_DEPTH);
         let mut state = StatefulHandler::initial_state(&adapter);
         let mut previous_outputs = HashMap::new();
 
@@ -453,9 +435,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updated_only_publishes_the_groups_a_coarser_trigger_saw_updated() {
+    async fn a_coarser_trigger_publishes_the_groups_updated_since_its_last_emission() {
         let mut adapter = adapter(
-            store_totals().emit_every_n(3).updated_only(),
+            store_totals().emit(emit::every_n(3)),
             DEFAULT_MAX_LINEAGE_DEPTH,
         );
         let mut state = StatefulHandler::initial_state(&adapter);
@@ -504,8 +486,8 @@ mod tests {
     }
 
     #[test]
-    fn updated_only_publishes_updated_groups_on_the_value_path() {
-        let handler = store_totals().emit_always().updated_only();
+    fn the_value_path_publishes_only_the_updated_groups() {
+        let handler = store_totals().emit(emit::always);
         let mut state = handler.initial_state();
         let mut emissions = Vec::new();
 
@@ -540,7 +522,10 @@ mod tests {
     fn keys_keep_their_first_input_order_after_moves_and_past_the_cap() {
         let inputs = [sale(1, "a", 1), sale(2, "b", 1), sale(3, "a", 1)];
 
-        let mut always = adapter(store_totals().emit_always(), DEFAULT_MAX_LINEAGE_DEPTH);
+        let mut always = adapter(
+            store_totals().emit(emit::always).all_groups(),
+            DEFAULT_MAX_LINEAGE_DEPTH,
+        );
         let mut state = StatefulHandler::initial_state(&always);
         let mut emissions = Vec::new();
         for input in inputs.clone() {
@@ -551,7 +536,7 @@ mod tests {
         }
         assert_eq!(emissions, [vec!["a"], vec!["a", "b"], vec!["a", "b"]]);
 
-        let mut every_third = adapter(store_totals().emit_every_n(3), 1);
+        let mut every_third = adapter(store_totals().emit(emit::every_n(3)).all_groups(), 1);
         let mut state = StatefulHandler::initial_state(&every_third);
         for input in inputs {
             StatefulHandler::try_accumulate(&mut every_third, &mut state, input)
@@ -564,7 +549,7 @@ mod tests {
 
     #[test]
     fn a_key_past_the_cap_cites_its_latest_inputs_then_its_previous_output() {
-        let mut adapter = adapter(store_totals().emit_every_n(4), 2);
+        let mut adapter = adapter(store_totals().emit(emit::every_n(4)), 2);
         let mut state = StatefulHandler::initial_state(&adapter);
         let inputs: Vec<_> = (1..=8).map(|id| sale(id, "a", 1)).collect();
         let mut outputs = Vec::new();
@@ -590,7 +575,10 @@ mod tests {
 
     #[test]
     fn an_output_citing_only_its_previous_output_keeps_its_correlation_and_replay_mark() {
-        let mut adapter = adapter(store_totals().emit_always(), DEFAULT_MAX_LINEAGE_DEPTH);
+        let mut adapter = adapter(
+            store_totals().emit(emit::always).all_groups(),
+            DEFAULT_MAX_LINEAGE_DEPTH,
+        );
         let mut state = StatefulHandler::initial_state(&adapter);
         let mut a = sale(1, "a", 1);
         a.set_single_correlation(CorrelationId::from_ulid(Ulid::from(10_u128)), None);

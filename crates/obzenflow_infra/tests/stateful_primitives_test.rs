@@ -16,6 +16,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler,
 };
+use obzenflow_runtime::stages::stateful::emit;
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     ConflateTyped, GroupByTyped, ReduceTyped,
 };
@@ -158,7 +159,7 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
                 result: result.clone(),
             },
         )
-        .emit_on_eof();
+        .emit(emit::on_eof);
         let collecting_sink = CollectingSink::<ProductStatsUpdate>::new(events_for_flow);
 
         Ok(flow! {
@@ -222,7 +223,7 @@ async fn reduce_with_on_eof_emits_single_total() {
                 stats.total_transactions += 1;
             },
         )
-        .emit_on_eof();
+        .emit(emit::on_eof);
         let collecting_sink = CollectingSink::<TotalStats>::new(events_for_flow);
 
         Ok(flow! {
@@ -264,7 +265,7 @@ async fn conflate_emits_latest_value_per_key() {
         let transaction_source = TransactionSource::new(8);
         let latest_by_product =
             ConflateTyped::new(|event: &TransactionEvent| event.product_id.clone())
-                .emit_per_window(Duration::from_millis(1));
+                .emit(emit::per_window(Duration::from_millis(1)));
         let collecting_sink = CollectingSink::<TransactionEvent>::new(events_for_flow);
 
         Ok(flow! {

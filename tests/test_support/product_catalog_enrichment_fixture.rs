@@ -10,6 +10,7 @@ use crate::product_catalog_enrichment::{
 };
 use anyhow::Result;
 use obzenflow::stages::sinks::ConsoleSink;
+use obzenflow::stages::stateful::emit;
 use obzenflow::stages::{joins, stateful};
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_dsl::{flow, join, sink, source, stateful, FlowDefinition};
@@ -73,7 +74,7 @@ pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> F
             CatalogAnalyticsSummary::default(),
             handlers::summarise_order,
         )
-        .emit_on_eof();
+        .emit(emit::on_eof);
         let summary_printer_handler = ConsoleSink::new(console::format_summary);
 
         // The proof's rejected control changes only the enrichment input below.

@@ -12,6 +12,7 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 // Re-export concrete strategies
+pub mod emit;
 mod emit_always;
 mod every_interval;
 mod every_n;

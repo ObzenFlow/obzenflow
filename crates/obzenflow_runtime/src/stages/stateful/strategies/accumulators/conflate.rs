@@ -8,15 +8,12 @@ use super::trace::TraceState;
 use super::wrapper::AccumulatorOutput;
 use super::{Accumulator, StatefulWithEmission};
 use crate::stages::common::handlers::stateful::TypedStatefulContribution;
-use crate::stages::stateful::strategies::emissions::{
-    EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
-};
+use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::TypedPayload;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::time::Duration;
 
 /// Keeps the latest typed value for each key.
 #[derive(Clone)]
@@ -39,33 +36,21 @@ impl<T, K, FKey> Conflate<T, K, FKey> {
     pub fn new(key_fn: FKey) -> Self {
         Self {
             key_fn,
-            projection: Projection::EveryKey,
+            projection: Projection::UpdatedKeys,
             _types: PhantomData,
         }
     }
 
-    pub fn with_emission<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
-        StatefulWithEmission::new(self, emission)
-    }
-
-    pub fn emit_on_eof(self) -> StatefulWithEmission<Self, OnEOF> {
-        self.with_emission(OnEOF::new())
-    }
-
-    pub fn emit_every_n(self, count: u64) -> StatefulWithEmission<Self, EveryN> {
-        self.with_emission(EveryN::new(count))
-    }
-
-    pub fn emit_every(self, interval: Duration) -> StatefulWithEmission<Self, EveryInterval> {
-        self.with_emission(EveryInterval::new(interval))
-    }
-
-    pub fn emit_per_window(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
-        self.with_emission(TimeWindow::new(duration))
-    }
-
-    pub fn emit_always(self) -> StatefulWithEmission<Self, EmitAlways> {
-        self.with_emission(EmitAlways)
+    /// Emits when `emission` decides, publishing the latest value of each key
+    /// that received one since the previous emission.
+    pub fn emit<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
+        let projection =
+            if emission.resets_accumulator_on_emit() || emission.emits_only_at_end_of_input() {
+                Projection::EveryKey
+            } else {
+                self.projection
+            };
+        StatefulWithEmission::new(Self { projection, ..self }, emission)
     }
 }
 
@@ -73,18 +58,16 @@ impl<T, K, FKey, E> StatefulWithEmission<Conflate<T, K, FKey>, E>
 where
     E: EmissionStrategy,
 {
-    /// Publishes only the keys that received a value since the previous emission.
-    ///
-    /// Under `emit_always()` that forwards each input. Under `emit_per_window(d)`
-    /// and `emit_on_eof()` every key they publish received a value since then, so
-    /// the output is unchanged.
-    pub fn updated_only(self) -> Self {
+    /// Publishes every key's latest value at each emission.
+    pub fn all_keys(self) -> Self {
         let (conflate, emission) = self.into_parts();
-        Conflate {
-            projection: Projection::UpdatedKeys,
-            ..conflate
-        }
-        .with_emission(emission)
+        StatefulWithEmission::new(
+            Conflate {
+                projection: Projection::EveryKey,
+                ..conflate
+            },
+            emission,
+        )
     }
 }
 
@@ -226,6 +209,7 @@ mod tests {
     use crate::stages::common::handlers::stateful::{
         StatefulEmission, TypedStatefulHandler, TypedStatefulHandlerAdapter,
     };
+    use crate::stages::stateful::emit;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
     use serde::{Deserialize, Serialize};
@@ -290,7 +274,7 @@ mod tests {
 
     #[test]
     fn conflate_retains_the_latest_inputs_exact_frontier_per_key() {
-        let conflate = Conflate::new(|reading: &Reading| reading.sensor.clone()).emit_on_eof();
+        let conflate = Conflate::new(|reading: &Reading| reading.sensor.clone()).emit(emit::on_eof);
         let writer_id = WriterId::from(StageId::new());
         let mut adapter = TypedStatefulHandlerAdapter::new(conflate);
         StatefulHandler::install_writer_id(&mut adapter, writer_id);
@@ -326,10 +310,9 @@ mod tests {
     }
 
     #[test]
-    fn updated_only_publishes_only_the_keys_that_received_a_value() {
-        let handler = Conflate::new(|reading: &Reading| reading.sensor.clone())
-            .emit_every_n(2)
-            .updated_only();
+    fn an_emission_publishes_only_the_keys_that_received_a_value() {
+        let handler =
+            Conflate::new(|reading: &Reading| reading.sensor.clone()).emit(emit::every_n(2));
         let mut state = handler.initial_state();
         let mut emissions = Vec::new();
 

@@ -16,6 +16,7 @@ use obzenflow::stages::sources::{
     IngressDecoder, IngressRecord, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
     YamlSource,
 };
+use obzenflow::stages::stateful::emit;
 use obzenflow::stages::{joins, merges, sinks, stateful};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -126,8 +127,7 @@ pub fn build_flow(
             AccountLedger::record,
             |account_id: &String, ledger: &AccountLedger| ledger.snapshot(account_id),
         )
-        .emit_always()
-        .updated_only();
+        .emit(emit::always);
         let printer_sink = sinks::ConsoleSink::<CheckbookSnapshot, _>::new(
             SnapshotTableFormatter::new(
                 &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],

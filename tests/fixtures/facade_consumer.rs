@@ -286,8 +286,8 @@ fn renamed_facade_macros_and_constructors_compile() {
     let _flow = FlowDefinition::materialize(|_config| {
         let input = sources::ValuesSource::new([Fact(1)]);
         let mapped = transforms::map(|fact: Fact| fact);
-        let folded =
-            stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0).emit_on_eof();
+        let folded = stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0)
+            .emit(stateful::emit::on_eof);
         let output = Pure;
         Ok(of::flow::flow! {
             name: "facade",

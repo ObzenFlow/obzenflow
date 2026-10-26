@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::stages::stateful;
+use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalReader;
@@ -299,7 +299,7 @@ async fn cycle_guard_rejects_stateful_emit_per_window_cycle() {
             WindowCount::default(),
             |acc: &mut WindowCount, _ev: &SeedEvent| acc.count += 1,
         )
-        .emit_per_window(Duration::from_millis(10));
+        .emit(emit::per_window(Duration::from_millis(10)));
         let transform = IdentityTransform::<WindowCount>::new();
         let (sink, _count) = EventCounterSink::<WindowCount>::new();
 

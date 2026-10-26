@@ -6,12 +6,14 @@
 //!
 //! ## Choosing when to emit
 //!
-//! Accumulators describe the fold; an [`EmissionStrategy`] decides when its
-//! current result is emitted. Conflation can publish the latest value for each
-//! key after every input. A custom cadence composes through `with_emission`:
+//! Accumulators describe the fold, and `.emit(...)` takes the
+//! [`EmissionStrategy`] that decides when the result is emitted, either a value
+//! from [`emit`] or a strategy of your own. `group_by` and `conflate` publish
+//! the groups or keys updated since the previous emission, and `.all_groups()`
+//! or `.all_keys()` publishes all of them:
 //!
 //! ```
-//! use obzenflow::stages::stateful::{self, EmissionStrategy};
+//! use obzenflow::stages::stateful::{self, emit, EmissionStrategy};
 //! use std::time::Duration;
 //! # use obzenflow::schema::TypedPayload;
 //! # use serde::{Deserialize, Serialize};
@@ -30,15 +32,19 @@
 //! }
 //!
 //! let latest = stateful::conflate(|reading: &Reading| reading.sensor.clone())
-//!     .emit_always();
+//!     .emit(emit::every(Duration::from_secs(1)));
+//! let every_sensor = stateful::conflate(|reading: &Reading| reading.sensor.clone())
+//!     .emit(emit::always)
+//!     .all_keys();
 //! let counts = stateful::reduce(Count::default(), |count: &mut Count, _: &Reading| {
 //!     count.total += 1;
-//! }).with_emission(EveryTwoReadings);
+//! })
+//! .emit(EveryTwoReadings);
 //! ```
 //!
 //! The wrapper tracks events since the previous emission. The custom policy
-//! above retains the accumulated count; [`EveryN`] supplies this cadence as a
-//! built-in strategy.
+//! above retains the accumulated count; [`emit::every_n`] supplies this cadence
+//! as a built-in strategy.
 //!
 //! ## Custom accumulators
 //!
@@ -46,7 +52,7 @@
 //! an emission strategy with [`StatefulWithEmission::new`]:
 //!
 //! ```
-//! use obzenflow::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
+//! use obzenflow::stages::stateful::{emit, Accumulator, StatefulWithEmission};
 //! # use obzenflow::schema::TypedPayload;
 //! # use serde::{Deserialize, Serialize};
 //! # #[derive(Clone, Debug, Serialize, Deserialize)] struct Reading { sensor: String }
@@ -69,14 +75,14 @@
 //!     }
 //! }
 //!
-//! let counts = StatefulWithEmission::new(CountReadings, OnEOF);
+//! let counts = StatefulWithEmission::new(CountReadings, emit::on_eof);
 //! ```
 //!
 //! The resulting value is a [`TypedStatefulHandler`] suitable for a
 //! `stateful!(Reading -> Count => counts)` stage.
 
 pub use obzenflow_runtime::stages::stateful::{
-    conflate, group_by, reduce, top_n, top_n_by, Accumulator, Conflate, ConflateState,
+    conflate, emit, group_by, reduce, top_n, top_n_by, Accumulator, Conflate, ConflateState,
     ConflateTyped, EmissionStrategy, EmitAlways, EveryInterval, EveryN, GroupBy, GroupByState,
     GroupByTyped, OnEOF, Reduce, ReduceState, ReduceTyped, StatefulWithEmission, TimeWindow, TopN,
     TopNBy, TopNByEntry, TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry, TopNSnapshot,

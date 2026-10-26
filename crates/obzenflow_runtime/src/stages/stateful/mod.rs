@@ -69,7 +69,7 @@ pub use strategies::accumulators::{
     WrapperState,
 };
 pub use strategies::emissions::{
-    EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
+    emit, EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
 };
 
 use obzenflow_core::{OneFactStageOutput, TypedPayload};

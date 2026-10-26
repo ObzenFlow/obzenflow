@@ -4,7 +4,7 @@
 
 mod replay_testkit;
 
-use obzenflow::stages::stateful;
+use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -103,8 +103,8 @@ impl TypedFiniteSourceHandler for Entries {
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let entries = Entries { next: 0 };
-        let updates = balances().emit_always().updated_only();
-        let snapshots = balances().emit_always();
+        let updates = balances().emit(emit::always);
+        let snapshots = balances().emit(emit::always).all_groups();
         let update_sink = replay_testkit::Discard::<Balance>::default();
         let snapshot_sink = replay_testkit::Discard::<Balance>::default();
 

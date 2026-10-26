@@ -31,6 +31,7 @@ use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources::TypedFiniteSourceHandler;
 use obzenflow::stages::sources::{SourceDiagnosticReason, SourceError};
+use obzenflow::stages::stateful::emit;
 use obzenflow::stages::transforms::TryMapTyped;
 use obzenflow::stages::{stateful, transforms};
 use serde::{Deserialize, Serialize};
@@ -299,7 +300,7 @@ fn flow_definition_with_options(
                 }
             },
         )
-        .emit_on_eof();
+        .emit(emit::on_eof);
         let summary_sink_handler = ConsoleSink::new(format_summary);
 
         Ok(flow! {

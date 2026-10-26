@@ -18,6 +18,7 @@ use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sources;
+use obzenflow::stages::stateful::emit;
 use obzenflow::stages::{sinks, stateful, transforms};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -129,7 +130,7 @@ fn main() -> Result<()> {
                     acc.last_was_sentence_end = ends_sentence;
                 },
             )
-            .emit_on_eof();
+            .emit(emit::on_eof);
             let output_handler = sinks::ConsoleSink::<TransformedText, _>::new(format_output);
 
             Ok(flow! {
