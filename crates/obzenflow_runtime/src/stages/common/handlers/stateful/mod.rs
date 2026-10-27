@@ -14,4 +14,5 @@ pub use traits::{
 pub use typed::{
     StatefulEmission, TypedStatefulContribution, TypedStatefulDrainInvocation,
     TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedStatefulInvocation,
+    TypedStatefulOutputIds,
 };

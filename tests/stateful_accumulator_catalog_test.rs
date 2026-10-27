@@ -6,8 +6,8 @@
 
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::stateful::{
-    self, Accumulator, Conflate, EmissionStrategy, GroupBy, Reduce, StatefulEmission, TopN, TopNBy,
-    TopNBySnapshot, TopNSnapshot, TypedStatefulHandler,
+    self, emit, Accumulator, Conflate, EmissionStrategy, GroupBy, Reduce, StatefulEmission, TopN,
+    TopNBy, TopNBySnapshot, TopNSnapshot, TypedStatefulHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,8 +107,8 @@ fn every_accumulator_is_directly_constructible_as_a_public_strategy() {
     assert_accumulator(&top_n);
     assert_accumulator(&top_n_by);
 
-    assert_stateful_handler(top_n.emit_on_eof());
-    assert_stateful_handler(top_n_by.emit_on_eof());
+    assert_stateful_handler(top_n.emit(emit::on_eof));
+    assert_stateful_handler(top_n_by.emit(emit::on_eof));
 }
 
 #[test]
@@ -243,8 +243,10 @@ fn emit_and_advance<H: TypedStatefulHandler>(handler: &H, state: &mut H::State) 
 }
 
 #[test]
-fn conflate_emit_always_retains_the_latest_value_for_every_key() {
-    let handler = stateful::conflate(|score: &Score| score.key.clone()).emit_always();
+fn conflate_all_keys_retains_the_latest_value_for_every_key() {
+    let handler = stateful::conflate(|score: &Score| score.key.clone())
+        .emit(emit::always)
+        .all_keys();
     let mut state = handler.initial_state();
     let mut snapshots = Vec::new();
     for (key, score) in [("a", 10.0), ("b", 8.0), ("a", 4.0)] {
@@ -275,18 +277,12 @@ fn conflate_emit_always_retains_the_latest_value_for_every_key() {
             vec![("a".into(), 4.0), ("b".into(), 8.0)],
         ]
     );
-    assert_eq!(
-        handler.drain(&state).expect("drain the retained view"),
-        vec![
-            Score {
-                key: "a".into(),
-                score: 4.0
-            },
-            Score {
-                key: "b".into(),
-                score: 8.0
-            },
-        ]
+    assert!(
+        handler
+            .drain(&state)
+            .expect("drain the retained view")
+            .is_empty(),
+        "the last emission already published every key"
     );
 }
 
@@ -304,7 +300,7 @@ fn custom_emission_resets_its_cadence_and_retains_the_fold() {
     let handler = stateful::reduce(Count::default(), |count: &mut Count, _: &Score| {
         count.0 += 1;
     })
-    .with_emission(EveryTwoScores);
+    .emit(EveryTwoScores);
     let mut state = handler.initial_state();
     let mut outputs = Vec::new();
     for index in 1..=5 {

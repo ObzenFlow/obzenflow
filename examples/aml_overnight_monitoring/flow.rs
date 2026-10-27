@@ -20,7 +20,7 @@ use obzenflow::stages::joins::AsOfJoin;
 use obzenflow::stages::merges;
 use obzenflow::stages::sinks::{ConsoleSink, CsvProjection, CsvSink};
 use obzenflow::stages::sources::{CsvDecodeError, CsvDecoder, CsvRecord, CsvSource};
-use obzenflow::stages::stateful;
+use obzenflow::stages::stateful::{self, emit};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -239,7 +239,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
             app.rules.fan_out_counterparties,
             app.rules.fan_in_counterparties,
         );
-        let day_totals = stateful::reduce(DayTotals::default(), DayTotals::add).emit_on_eof();
+        let day_totals = stateful::reduce(DayTotals::default(), DayTotals::add).emit(emit::on_eof);
         let open_case = OpenCaseHandler {
             case_system: simulated_case_system(&app.case_ledger, &stats)?,
         };

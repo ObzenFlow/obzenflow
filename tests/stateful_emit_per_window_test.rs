@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow::stages::stateful;
+use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -36,7 +36,7 @@ struct WindowInput {
 }
 
 impl TypedPayload for WindowInput {
-    const EVENT_TYPE: &'static str = "stateful.emit_within.window.input";
+    const EVENT_TYPE: &'static str = "stateful.emit_per_window.window.input";
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ struct WindowAgg {
 }
 
 impl TypedPayload for WindowAgg {
-    const EVENT_TYPE: &'static str = "stateful.emit_within.window.aggregate";
+    const EVENT_TYPE: &'static str = "stateful.emit_per_window.window.aggregate";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,7 +55,7 @@ struct GroupInput {
 }
 
 impl TypedPayload for GroupInput {
-    const EVENT_TYPE: &'static str = "stateful.emit_within.group_by.input";
+    const EVENT_TYPE: &'static str = "stateful.emit_per_window.group_by.input";
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ struct GroupAgg {
 }
 
 impl TypedPayload for GroupAgg {
-    const EVENT_TYPE: &'static str = "stateful.emit_within.group_by.aggregate";
+    const EVENT_TYPE: &'static str = "stateful.emit_per_window.group_by.aggregate";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,7 +74,7 @@ struct GroupAggOutput {
 }
 
 impl TypedPayload for GroupAggOutput {
-    const EVENT_TYPE: &'static str = "stateful.emit_within.group_by.output";
+    const EVENT_TYPE: &'static str = "stateful.emit_per_window.group_by.output";
 }
 
 #[derive(Clone, Debug)]
@@ -295,17 +295,17 @@ fn payload_writer_stage(payload: &FlowControlPayload) -> Option<StageId> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Result<()> {
+async fn emit_per_window_flushes_final_partial_window_before_authored_eof() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
     let source = SequenceSource::new(3);
     let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
-    .emit_within(Duration::from_secs(60));
+    .emit(emit::per_window(Duration::from_secs(60)));
     let harness = test_flow! {
-        name: "emit_within_final_flush",
-        journals: disk_journals(unique_journal_dir("emit_within_final_flush")),
+        name: "emit_per_window_final_flush",
+        journals: disk_journals(unique_journal_dir("emit_per_window_final_flush")),
 
         stages: {
             src = source!(WindowInput => source);
@@ -372,17 +372,17 @@ async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Result<()> {
+async fn emit_per_window_final_aggregate_preserves_buffered_input_lineage() -> Result<()> {
     let (sink, _seen) = AggregateSink::new();
     let source = SequenceSource::new(3);
     let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
-    .emit_within(Duration::from_secs(60));
+    .emit(emit::per_window(Duration::from_secs(60)));
     let harness = test_flow! {
-        name: "emit_within_lineage",
-        journals: disk_journals(unique_journal_dir("emit_within_lineage")),
+        name: "emit_per_window_lineage",
+        journals: disk_journals(unique_journal_dir("emit_per_window_lineage")),
 
         stages: {
             src = source!(WindowInput => source);
@@ -428,17 +428,17 @@ async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn emit_within_final_aggregate_folds_runtime_minted_source_correlations() -> Result<()> {
+async fn emit_per_window_final_aggregate_folds_runtime_minted_source_correlations() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
     let source = SequenceSource::new(2);
     let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
-    .emit_within(Duration::from_secs(60));
+    .emit(emit::per_window(Duration::from_secs(60)));
     let harness = test_flow! {
-        name: "emit_within_runtime_source_correlation",
-        journals: disk_journals(unique_journal_dir("emit_within_runtime_source_correlation")),
+        name: "emit_per_window_runtime_source_correlation",
+        journals: disk_journals(unique_journal_dir("emit_per_window_runtime_source_correlation")),
 
         stages: {
             src = source!(WindowInput => source);
@@ -500,7 +500,8 @@ async fn emit_within_final_aggregate_folds_runtime_minted_source_correlations() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_state() -> Result<()> {
+async fn emit_per_window_emits_more_than_one_window_aggregate_per_run_and_resets_state(
+) -> Result<()> {
     let window = Duration::from_millis(50);
     let per_event_delay = Duration::from_millis(120);
     let total = 3u64;
@@ -511,10 +512,10 @@ async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_sta
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
-    .emit_within(window);
+    .emit(emit::per_window(window));
     let harness = test_flow! {
-        name: "emit_within_multi_window",
-        journals: disk_journals(unique_journal_dir("emit_within_multi_window")),
+        name: "emit_per_window_multi_window",
+        journals: disk_journals(unique_journal_dir("emit_per_window_multi_window")),
 
         stages: {
             src = source!(WindowInput => source);
@@ -565,11 +566,11 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
-    .emit_within(Duration::from_secs(60));
+    .emit(emit::per_window(Duration::from_secs(60)));
     let identity = IdentityTransform;
     let harness = test_flow! {
-        name: "emit_within_forwarded_eof_invariant",
-        journals: disk_journals(unique_journal_dir("emit_within_forwarded_eof_invariant")),
+        name: "emit_per_window_forwarded_eof_invariant",
+        journals: disk_journals(unique_journal_dir("emit_per_window_forwarded_eof_invariant")),
 
         stages: {
             src = source!(WindowInput => source);
@@ -636,7 +637,7 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<()> {
+async fn group_by_emit_per_window_parents_each_group_to_its_own_inputs() -> Result<()> {
     let items = vec![
         ("a".to_string(), 0u64),
         ("b".to_string(), 1u64),
@@ -654,11 +655,12 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
             result: result.clone(),
         },
     )
-    .emit_within(Duration::from_secs(60));
+    .emit(emit::per_window(Duration::from_secs(60)))
+    .updated_groups();
     let sink = AckSink;
     let harness = test_flow! {
-        name: "emit_within_group_by_lineage",
-        journals: disk_journals(unique_journal_dir("emit_within_group_by_lineage")),
+        name: "emit_per_window_group_by_lineage",
+        journals: disk_journals(unique_journal_dir("emit_per_window_group_by_lineage")),
 
         stages: {
             src = source!(GroupInput => source);

@@ -81,76 +81,36 @@ cargo run -p obzenflow --example payment_gateway_resilience -- \
 
 Replay uses the archived inputs and committed effect outcomes without calling the gateway again. A matching replay prints `output matched the original run, 0 differences`.
 
-## Show and verify runs with the CLI
+## The ObzenFlow CLI
 
-The ObzenFlow CLI starts execution, shows recorded history, inspects run files, and verifies replay output. Install it from the repository root:
+Run `obzenflow show` on any run (either live or an archive) to understand precisely what happened and why. It reads the run's journals straight from disk, so it needs no server or database and never changes the run.
+
+This record is from the payment gateway run above:
+
+```text
+EFFECTFUL TRANSFORM (stage: authorize_payment, journal: 4)
+payment.authorized ← authorize_payment(payment.order_validated)
+⟨1:3,2:4,3:1,4:3,5:3,6:2,7:2,8:2,9:2⟩
+payload schema version: 1
+{
+  "amount_cents": 8640,
+  "authorization_id": "AUTH-DEMO-1234",
+  "customer_id": "cust-1187",
+  "order_id": "store-4471",
+  "phase": "Warmup"
+}
+```
+
+Each record names the stage that wrote it, the fact it recorded and the inputs it came from. Its vector clock shows which records it happened after. Here `authorize_payment` called the gateway and recorded its answer as a `payment.authorized` fact, which replay reads back instead of calling the gateway again.
+
+Install the CLI from the repository root, then point it at the archive path the example printed:
 
 ```bash
 cargo install --path . --features cli --locked
+obzenflow show target/payment-gateway-logs/flows/<run_id>
 ```
 
-### Start and follow execution
-
-In terminal A, start the payment gateway example in manual server mode:
-
-```bash
-cargo run -p obzenflow --features web-host --example payment_gateway_resilience -- \
-    --server --startup-mode manual --server-port 9090
-```
-
-In terminal B on the same machine, request execution over unauthenticated loopback HTTP and follow its journal records:
-
-```bash
-obzenflow start --server http://127.0.0.1:9090 --follow
-```
-
-Without `--follow`, `start` requests execution and returns. Viewing options require `--follow` on `start`.
-
-HTTP is used only to discover the run and request execution; journal records do not travel over HTTP. The CLI reads the local journal files directly, displaying newly committed records as the application writes them.
-
-Press Ctrl-C in terminal B to stop observing without stopping the application.
-
-### Show a run
-
-`show` presents a snapshot of a run's recorded execution without starting or changing it. Point it at the run directory containing `run_manifest.json`; it works during or after execution.
-
-```bash
-obzenflow show /path/to/run
-```
-
-Add `--include-runtime` for runtime and system records, `--full` for complete displayed records and the manifest, `--compact` for one-line records, or `--explain` for teaching notes. The same viewing options apply to `start --follow`.
-
-Payloads display as JSON for every record category, including runtime progress and metrics exports.
-
-Event-count summaries use one flat Count / Event / Author table per journal within the existing 90-column limit. Event labels retain kind and `@version`, abbreviating framework prefixes and supervisor identity. Supervisor subjects appear as `stage`, `flow` or `metrics`: for example, `execution/stage.ready@1` and `system/flow.completed@1`. Application names remain verbatim. Live forwarded records identify the original author and forwarding stage; journal records and JSONL retain their full descriptors.
-
-`--follow` keeps reading newly committed records from disk until execution settles and the CLI catches up, or Ctrl-C detaches. `show --follow` does not use HTTP:
-
-```bash
-obzenflow show /path/to/run --follow
-```
-
-For scripts, `--jsonl` emits the same selected records as JSONL, with diagnostics on stderr. Add `--include-runtime` to include all record kinds:
-
-```bash
-obzenflow show /path/to/run --jsonl --include-runtime > records.jsonl
-```
-
-### Inspect run files
-
-`inspect` prints run metadata, stage data journal filenames, and record types with their byte offsets. Use `--stage` or `--event-type` to narrow the listing.
-
-```bash
-obzenflow inspect /path/to/run
-```
-
-### Verify replay output
-
-Compare an original run with its replay to check for differences in recorded stage output. The verifier reports differences and identifies stages whose ordering cannot be certified.
-
-```bash
-obzenflow verify --baseline /path/to/original --candidate /path/to/replay
-```
+Add `--follow` to keep reading a run while it executes, or `--jsonl` to print records for scripts. `obzenflow --help` lists the other commands.
 
 ## Documentation
 

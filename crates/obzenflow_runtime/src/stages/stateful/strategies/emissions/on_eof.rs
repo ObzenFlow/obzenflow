@@ -37,6 +37,10 @@ impl EmissionStrategy for OnEOF {
     fn should_emit(&self, _events_seen: u64, _period_elapsed: Option<Duration>) -> bool {
         false
     }
+
+    fn emits_only_at_end_of_input(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -56,5 +60,6 @@ mod tests {
         let strategy = OnEOF::new();
         assert!(!strategy.should_emit(100, None));
         assert!(!strategy.should_emit(200, Some(Duration::from_secs(1))));
+        assert!(strategy.emits_only_at_end_of_input());
     }
 }

@@ -113,7 +113,7 @@ pub trait StatefulHandler: Send + Sync {
     /// Check if we should transition from Accumulating to Emitting
     ///
     /// Default: false (only emit on drain, i.e., OnEOF behavior)
-    /// Override this OR use .with_emission() for other strategies
+    /// Override this OR give an accumulator another strategy with `.emit(...)`
     fn should_emit(&self, _state: &mut Self::State) -> bool {
         false
     }

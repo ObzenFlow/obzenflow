@@ -347,7 +347,6 @@ async fn assert_every_boundary_emitted(run_dir: &Path) {
             total(6, 3),
             total(10, 4),
             total(15, 5),
-            total(15, 5),
         ]
     );
     assert_eq!(
@@ -510,7 +509,7 @@ fn running_total_flow(
             Sum {
                 copies: Arc::default(),
             },
-            EmitAlways,
+            EveryN::new(2),
         );
         let totals = replay_testkit::CountDeliveries::<Total>::new(delivered);
 
@@ -563,12 +562,12 @@ async fn a_resumed_stage_marks_what_it_rebuilds_and_not_its_live_drain() {
         .await
         .expect("the held flow builds");
     tokio::time::timeout(Duration::from_secs(20), async {
-        while delivered.load(Ordering::SeqCst) < VALUES.len() {
+        while delivered.load(Ordering::SeqCst) < VALUES.len() / 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("every reading's total is delivered while the source holds its end");
+    .expect("every pair's total is delivered while the source holds its end");
     handle.stop().await.expect("the held run stops");
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
@@ -578,8 +577,8 @@ async fn a_resumed_stage_marks_what_it_rebuilds_and_not_its_live_drain() {
     let interrupted = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(
         totals(&interrupted, "running_total").await.len(),
-        VALUES.len(),
-        "the stop lands after every reading and before the drain"
+        VALUES.len() / 2,
+        "the stop lands after every pair and before the drain"
     );
 
     let _bootstrap = install_bootstrap_config(
@@ -603,15 +602,10 @@ async fn a_resumed_stage_marks_what_it_rebuilds_and_not_its_live_drain() {
     assert_ne!(resumed, interrupted);
 
     let (rebuilt, live) = replay_marks_around_crossing(&resumed, "running_total").await;
+    assert_eq!(rebuilt, vec![(total(3, 2), true), (total(10, 4), true)]);
     assert_eq!(
-        rebuilt,
-        vec![
-            (total(1, 1), true),
-            (total(3, 2), true),
-            (total(6, 3), true),
-            (total(10, 4), true),
-            (total(15, 5), true),
-        ]
+        live,
+        vec![(total(15, 5), false)],
+        "the drain publishes the unpaired reading live"
     );
-    assert_eq!(live, vec![(total(15, 5), false)]);
 }

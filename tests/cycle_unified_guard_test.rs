@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::stages::stateful;
+use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::JournalReader;
@@ -283,14 +283,14 @@ async fn cycle_guard_rejects_cycles_with_non_transform_members() {
 }
 
 #[tokio::test]
-async fn cycle_guard_rejects_stateful_emit_within_cycle() {
+async fn cycle_guard_rejects_stateful_emit_per_window_cycle() {
     #[derive(Clone, Debug, Default, Serialize, Deserialize)]
     struct WindowCount {
         count: u64,
     }
 
     impl TypedPayload for WindowCount {
-        const EVENT_TYPE: &'static str = "cycle.stateful_emit_within.count";
+        const EVENT_TYPE: &'static str = "cycle.stateful_emit_per_window.count";
     }
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
@@ -299,13 +299,13 @@ async fn cycle_guard_rejects_stateful_emit_within_cycle() {
             WindowCount::default(),
             |acc: &mut WindowCount, _ev: &SeedEvent| acc.count += 1,
         )
-        .emit_within(Duration::from_millis(10));
+        .emit(emit::per_window(Duration::from_millis(10)));
         let transform = IdentityTransform::<WindowCount>::new();
         let (sink, _count) = EventCounterSink::<WindowCount>::new();
 
         Ok(flow! {
-            name: "cycle_guard_reject_emit_within",
-            journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_emit_within")),
+            name: "cycle_guard_reject_emit_per_window",
+            journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_emit_per_window")),
 
             stages: {
                 src = source!(SeedEvent => source);

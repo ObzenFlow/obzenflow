@@ -122,6 +122,16 @@ impl TraceState {
         *self = Self::default();
     }
 
+    pub(crate) fn clear_parent_ids(&mut self) {
+        self.parent_ids.clear();
+    }
+
+    pub(crate) fn with_previous_output(&self, previous_output: Option<EventId>) -> Self {
+        let mut trace = self.clone();
+        trace.parent_ids.extend(previous_output);
+        trace
+    }
+
     pub(crate) fn parent_ids(&self) -> Vec<EventId> {
         self.parent_ids.iter().copied().collect()
     }

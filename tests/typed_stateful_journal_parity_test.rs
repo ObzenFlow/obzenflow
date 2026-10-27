@@ -6,7 +6,7 @@
 
 mod replay_testkit;
 
-use obzenflow::stages::stateful;
+use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
@@ -211,7 +211,8 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                 count: state.count,
             },
         )
-        .emit_on_eof();
+        .emit(emit::on_eof)
+        .all_groups();
         let current_ranking = stateful::top_n(
             2,
             |input: &Input| input.key.clone(),
@@ -229,7 +230,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                     .collect(),
             },
         )
-        .emit_on_eof();
+        .emit(emit::on_eof);
         let aggregate_ranking = stateful::top_n_by(
             2,
             |input: &Input| input.key.clone(),
@@ -248,7 +249,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                 counts: snapshot.top_n.iter().map(|entry| entry.count).collect(),
             },
         )
-        .emit_on_eof();
+        .emit(emit::on_eof);
         let fold_sink = replay_testkit::Discard::<FoldSnapshot>::default();
         let group_sink = replay_testkit::Discard::<GroupSnapshot>::default();
         let current_ranking_sink = replay_testkit::Discard::<CurrentRanking>::default();

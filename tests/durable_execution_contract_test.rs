@@ -4974,7 +4974,7 @@ mod lagging {
 
 mod ai_digest {
     use super::*;
-    use crate::fake_ai::{last_user_message, FakeChatModels, LedgerCall};
+    use crate::fake_ai::{last_user_message, FakeChatModels, LoggedCall};
     use obzenflow::ai::{
         self, AiOutcome, AiRole, ChatCompletion, ChatCompletionReply, ChatRequestSpec, Chunk,
         Partials,
@@ -5201,7 +5201,7 @@ mod ai_digest {
             }
             _ => FakeChatModels::replying(|_| "ok".to_string()),
         };
-        models.with_ledger(ledger(scenario))
+        models.with_call_log(call_log(scenario))
     }
 
     pub(super) fn config(scenario: &Scenario) -> PathBuf {
@@ -5212,12 +5212,12 @@ mod ai_digest {
         std::fs::write(config(scenario), ai).expect("write the configuration");
     }
 
-    fn ledger(scenario: &Scenario) -> PathBuf {
-        scenario.root.join("ai-ledger.jsonl")
+    fn call_log(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("ai-call-log.jsonl")
     }
 
-    fn calls(scenario: &Scenario) -> Vec<LedgerCall> {
-        read_lines(&ledger(scenario))
+    fn calls(scenario: &Scenario) -> Vec<LoggedCall> {
+        read_lines(&call_log(scenario))
     }
 
     fn map_calls(scenario: &Scenario) -> Vec<(String, String, String)> {

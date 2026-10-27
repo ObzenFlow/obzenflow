@@ -323,7 +323,7 @@ fn blocking_console_disk_flow_preserves_filtering_and_completed_journal() {
             IdlePayload,
             |_: &mut IdlePayload, _: &IdlePayload| {},
         )
-        .emit_on_eof();
+        .emit(obzenflow_runtime::stages::stateful::emit::on_eof);
         let sink = NoopSink;
         Ok(flow! {
             name: "blocking_console_disk",
@@ -593,7 +593,7 @@ fn telemetry_proof(cancel: bool) {
                         accumulator_count.fetch_add(1, Ordering::SeqCst);
                     },
                 )
-                .emit_on_eof();
+                .emit(obzenflow_runtime::stages::stateful::emit::on_eof);
                 let sink = NoopSink;
                 Ok(flow! {
                     name: "console_telemetry",

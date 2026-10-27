@@ -21,4 +21,4 @@ pub use group_by::{GroupBy, GroupByState, GroupByTyped};
 pub use reduce::{Reduce, ReduceState, ReduceTyped};
 pub use top_n::{TopN, TopNEntry, TopNSnapshot, TopNState, TopNTyped};
 pub use top_n_by::{TopNBy, TopNByEntry, TopNBySnapshot, TopNByState, TopNByTyped};
-pub use wrapper::{Accumulator, StatefulWithEmission, WrapperState};
+pub use wrapper::{Accumulator, KeyedEmission, StatefulWithEmission, WrapperState};

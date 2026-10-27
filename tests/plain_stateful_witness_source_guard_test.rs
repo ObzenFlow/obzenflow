@@ -261,18 +261,44 @@ fn first_class_accumulator_catalog_cannot_be_collapsed_or_shrunk() {
             helper_source.contains(&format!("pub fn {module}")),
             "obzenflow_runtime::stages::stateful::{module} must remain a convenience constructor"
         );
-        for combinator in [
-            "emit_on_eof",
-            "emit_every_n",
-            "emit_within",
-            "emit_always",
-            "with_emission",
-        ] {
-            assert!(
-                source.contains(combinator),
-                "{concept} lost emission combinator {combinator}"
-            );
+        assert!(
+            source.contains("pub fn emit<E: EmissionStrategy>(self, emission: E)"),
+            "{concept} lost its emit method"
+        );
+    }
+
+    for (module, clauses) in [
+        (
+            "group_by",
+            ["pub fn updated_groups(self)", "pub fn all_groups(self)"],
+        ),
+        (
+            "conflate",
+            ["pub fn updated_keys(self)", "pub fn all_keys(self)"],
+        ),
+    ] {
+        let source = fs::read_to_string(accumulator_root.join(format!("{module}.rs")))
+            .expect("read keyed accumulator source");
+        for clause in clauses {
+            assert!(source.contains(clause), "{module} lost {clause}");
         }
+    }
+
+    let emit_source = fs::read_to_string(
+        root.join("crates/obzenflow_runtime/src/stages/stateful/strategies/emissions/emit.rs"),
+    )
+    .expect("read the emission values");
+    for value in [
+        "pub use super::EmitAlways as always;",
+        "pub use super::OnEOF as on_eof;",
+        "pub fn every_n(",
+        "pub fn every(",
+        "pub fn per_window(",
+    ] {
+        assert!(
+            emit_source.contains(value),
+            "the emit module lost emission value {value}"
+        );
     }
 
     assert!(

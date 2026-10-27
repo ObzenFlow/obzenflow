@@ -7,6 +7,7 @@ use obzenflow::flow::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::rate_limit;
 use obzenflow::stages::sinks::ConsoleSink;
+use obzenflow::stages::stateful::emit;
 use obzenflow::stages::{joins, stateful};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -61,7 +62,7 @@ pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {
             CatalogAnalyticsSummary::default(),
             handlers::summarise_order,
         )
-        .emit_on_eof();
+        .emit(emit::on_eof);
         let summary_printer_handler = ConsoleSink::new(console::format_summary);
 
         Ok(flow! {

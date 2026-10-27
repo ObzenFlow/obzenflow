@@ -14,6 +14,8 @@ pub const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineagePolicy {
     /// Max ancestor ids carried per derived event; resolver validates >= 1.
+    /// A stateful output cites at most this many inputs, and a keyed output's
+    /// link to its key's previous output is carried in addition.
     pub max_lineage_depth: usize,
 }
 

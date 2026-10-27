@@ -18,7 +18,7 @@ use obzenflow::middleware::rate_limit;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::ConsoleSink;
 use obzenflow::stages::sources::ValuesSource;
-use obzenflow::stages::stateful;
+use obzenflow::stages::stateful::{self, emit};
 use serde::{Deserialize, Serialize};
 
 // FLOWIP-082a: Strongly-typed event with schema version
@@ -279,7 +279,7 @@ fn main() -> Result<()> {
                     capacity: snapshot.capacity,
                 },
             )
-            .emit_every_n(5);
+            .emit(emit::every_n(5));
             let top_current_orders_handler = stateful::top_n(
                 5,
                 |order: &OrderEvent| order.product_id.clone(),
@@ -299,7 +299,7 @@ fn main() -> Result<()> {
                     count: snapshot.count,
                 },
             )
-            .emit_every_n(5);
+            .emit(emit::every_n(5));
             let dashboard_handler = ConsoleSink::new(format_product_dashboard);
             let current_orders_handler = ConsoleSink::new(format_current_orders_dashboard);
 

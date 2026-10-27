@@ -64,11 +64,13 @@ pub use handle::{StatefulHandle, StatefulHandleExt};
 // FLOWIP-080c/FLOWIP-134e: first-class accumulation strategies.
 pub use strategies::accumulators::{
     Accumulator, Conflate, ConflateState, ConflateTyped, GroupBy, GroupByState, GroupByTyped,
-    Reduce, ReduceState, ReduceTyped, StatefulWithEmission, TopN, TopNBy, TopNByEntry,
-    TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry, TopNSnapshot, TopNState, TopNTyped,
-    WrapperState,
+    KeyedEmission, Reduce, ReduceState, ReduceTyped, StatefulWithEmission, TopN, TopNBy,
+    TopNByEntry, TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry, TopNSnapshot, TopNState,
+    TopNTyped, WrapperState,
 };
-pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
+pub use strategies::emissions::{
+    emit, EmissionStrategy, EmitAlways, EveryInterval, EveryN, OnEOF, TimeWindow,
+};
 
 use obzenflow_core::{OneFactStageOutput, TypedPayload};
 use std::fmt::Debug;

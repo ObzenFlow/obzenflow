@@ -6,16 +6,13 @@
 
 use super::{Accumulator, StatefulWithEmission};
 use crate::stages::common::handlers::stateful::TypedStatefulContribution;
-use crate::stages::stateful::strategies::emissions::{
-    EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
-};
+use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::{EventId, OneFactStageOutput, TypedPayload};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::time::Duration;
 
 type TopNTypeMarker<T, K, O> = PhantomData<fn() -> (T, K, O)>;
 
@@ -64,24 +61,9 @@ impl<T, K, O, FKey, FScore, FOutput> TopN<T, K, O, FKey, FScore, FOutput> {
         }
     }
 
-    pub fn with_emission<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
+    /// Emits the ranked snapshot when `emission` decides, for example `emit::always`.
+    pub fn emit<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
         StatefulWithEmission::new(self, emission)
-    }
-
-    pub fn emit_on_eof(self) -> StatefulWithEmission<Self, OnEOF> {
-        self.with_emission(OnEOF::new())
-    }
-
-    pub fn emit_every_n(self, count: u64) -> StatefulWithEmission<Self, EveryN> {
-        self.with_emission(EveryN::new(count))
-    }
-
-    pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
-        self.with_emission(TimeWindow::new(duration))
-    }
-
-    pub fn emit_always(self) -> StatefulWithEmission<Self, EmitAlways> {
-        self.with_emission(EmitAlways)
     }
 }
 

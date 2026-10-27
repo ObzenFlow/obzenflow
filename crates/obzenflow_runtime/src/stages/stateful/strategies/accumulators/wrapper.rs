@@ -11,7 +11,7 @@ use super::trace::TraceState;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::stateful::{
     StatefulEmission, TypedStatefulContribution, TypedStatefulDrainInvocation,
-    TypedStatefulHandler, TypedStatefulInvocation,
+    TypedStatefulHandler, TypedStatefulInvocation, TypedStatefulOutputIds,
 };
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::{OneFactStageOutput, TypedPayload};
@@ -76,6 +76,52 @@ where
             accumulator: self.accumulator.clone(),
             emission: self.emission.clone(),
         }
+    }
+}
+
+/// A `group_by` or `conflate` with its emission strategy, before it names what
+/// each emission publishes.
+///
+/// `group_by` takes `.updated_groups()` or `.all_groups()`, and `conflate`
+/// takes `.updated_keys()` or `.all_keys()`. Each returns the
+/// [`StatefulWithEmission`] handler, and without one there is no handler:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_core::TypedPayload;
+/// # use serde::{Deserialize, Serialize};
+/// use obzenflow_runtime::stages::stateful::{emit, group_by, TypedStatefulHandler};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Sale { store: String, amount: u64 }
+/// # impl TypedPayload for Sale { const EVENT_TYPE: &'static str = "doc.sale"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct StoreTotal(u64);
+/// # impl TypedPayload for StoreTotal { const EVENT_TYPE: &'static str = "doc.store_total"; }
+///
+/// fn stage(_: impl TypedStatefulHandler) {}
+///
+/// let totals = group_by(
+///     |sale: &Sale| sale.store.clone(),
+///     |total: &mut u64, sale: &Sale| *total += sale.amount,
+///     |_: &String, total: &u64| StoreTotal(*total),
+/// );
+/// stage(totals.emit(emit::always));
+/// ```
+#[derive(Clone, Debug)]
+pub struct KeyedEmission<A, E> {
+    accumulator: A,
+    emission: E,
+}
+
+impl<A, E> KeyedEmission<A, E> {
+    pub(super) fn new(accumulator: A, emission: E) -> Self {
+        Self {
+            accumulator,
+            emission,
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (A, E) {
+        (self.accumulator, self.emission)
     }
 }
 
@@ -147,6 +193,25 @@ pub trait Accumulator: Send + Sync + Debug {
             .map(AccumulatorOutput::whole_batch)
             .collect()
     }
+
+    /// Runtime-only hook run once after an accepted emission that keeps the state.
+    #[doc(hidden)]
+    fn post_emit(&self, _state: &mut Self::State) {}
+
+    /// Runtime-only hook run once after an accepted emission that keeps the state,
+    /// carrying the ids of its outputs.
+    ///
+    /// `output_ids` name, in order, the outputs `outputs_with_contribution`
+    /// projected from `state`, and are empty on the value path. The default runs
+    /// `post_emit`.
+    #[doc(hidden)]
+    fn post_emit_with_contribution(
+        &self,
+        state: &mut Self::State,
+        _output_ids: TypedStatefulOutputIds,
+    ) {
+        self.post_emit(state);
+    }
 }
 
 impl<A, E> StatefulWithEmission<A, E>
@@ -179,6 +244,26 @@ where
             StatefulEmission::RetainEpoch { outputs }
         };
         (emission, traces)
+    }
+
+    fn drained_outputs(
+        &self,
+        state: &WrapperState<A::State>,
+    ) -> (Vec<A::Output>, Option<Vec<TraceState>>) {
+        if state.events_seen == 0 && !self.emission.emits_only_at_end_of_input() {
+            return (Vec::new(), None);
+        }
+        self.typed_outputs(state)
+    }
+
+    fn advance(&self, state: &mut WrapperState<A::State>, output_ids: TypedStatefulOutputIds) {
+        state.advance_period();
+        if self.emission.resets_accumulator_on_emit() {
+            state.inner = self.accumulator.initial_state();
+        } else {
+            self.accumulator
+                .post_emit_with_contribution(&mut state.inner, output_ids);
+        }
     }
 }
 
@@ -229,10 +314,11 @@ where
     }
 
     fn post_emit(&self, state: &mut Self::State) {
-        state.advance_period();
-        if self.emission.resets_accumulator_on_emit() {
-            state.inner = self.accumulator.initial_state();
-        }
+        self.advance(state, TypedStatefulOutputIds::new(Vec::new()));
+    }
+
+    fn post_emit_invocation(&self, state: &mut Self::State, output_ids: TypedStatefulOutputIds) {
+        self.advance(state, output_ids);
     }
 
     fn emit_invocation(
@@ -247,14 +333,14 @@ where
     }
 
     fn drain(&self, state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(self.typed_outputs(state).0)
+        Ok(self.drained_outputs(state).0)
     }
 
     fn drain_invocation(
         &self,
         state: &Self::State,
     ) -> Result<TypedStatefulDrainInvocation<Self::Output>, HandlerError> {
-        let (outputs, traces) = self.typed_outputs(state);
+        let (outputs, traces) = self.drained_outputs(state);
         Ok(match traces {
             Some(traces) => TypedStatefulDrainInvocation::with_output_traces(outputs, traces),
             None => TypedStatefulDrainInvocation::facts_only(outputs),
@@ -265,8 +351,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::stateful::strategies::emissions::{EveryN, TimeWindow};
+    use crate::stages::stateful::strategies::emissions::{EmitAlways, EveryN, OnEOF, TimeWindow};
+    use obzenflow_core::EventId;
     use serde::{Deserialize, Serialize};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct Tick;
@@ -322,6 +410,89 @@ mod tests {
         assert_eq!(state.inner, 0);
         assert_eq!(state.events_seen, 0);
         assert_eq!(state.period_started_at, None);
+    }
+
+    #[derive(Debug, Default)]
+    struct LinkedTicks {
+        received: Arc<Mutex<Vec<Vec<EventId>>>>,
+    }
+
+    impl Accumulator for LinkedTicks {
+        type State = u64;
+        type Input = Tick;
+        type Output = Tick;
+
+        fn initial_state(&self) -> u64 {
+            0
+        }
+
+        fn accumulate(&self, count: &mut u64, _: Tick) {
+            *count += 1;
+        }
+
+        fn outputs(&self, _: &u64) -> Vec<Tick> {
+            vec![Tick]
+        }
+
+        fn post_emit_with_contribution(&self, _: &mut u64, output_ids: TypedStatefulOutputIds) {
+            self.received
+                .lock()
+                .expect("recorder lock")
+                .push(output_ids.ids().to_vec());
+        }
+    }
+
+    #[test]
+    fn only_an_emission_that_keeps_the_state_hands_output_ids_to_the_accumulator() {
+        let output_id = EventId::new();
+
+        let retaining = LinkedTicks::default();
+        let received = retaining.received.clone();
+        let retaining = StatefulWithEmission::new(retaining, EveryN::new(1));
+        let mut state = retaining.initial_state();
+        retaining.post_emit_invocation(&mut state, TypedStatefulOutputIds::new(vec![output_id]));
+        retaining.post_emit(&mut state);
+        assert_eq!(
+            *received.lock().expect("recorder lock"),
+            [vec![output_id], Vec::new()]
+        );
+
+        let resetting = LinkedTicks::default();
+        let received = resetting.received.clone();
+        let resetting = StatefulWithEmission::new(resetting, TimeWindow::new(Duration::ZERO));
+        let mut state = resetting.initial_state();
+        resetting.accumulate(&mut state, Tick);
+        resetting.post_emit_invocation(&mut state, TypedStatefulOutputIds::new(vec![output_id]));
+        assert_eq!(state.inner, 0);
+        assert!(received.lock().expect("recorder lock").is_empty());
+    }
+
+    #[test]
+    fn end_of_input_emits_again_only_after_new_inputs_unless_it_is_the_only_emission() {
+        let always = StatefulWithEmission::new(Ticks, EmitAlways);
+        let mut state = always.initial_state();
+        assert!(always.drain(&state).expect("drain projects").is_empty());
+        always.accumulate(&mut state, Tick);
+        always.post_emit(&mut state);
+        assert!(
+            always.drain(&state).expect("drain projects").is_empty(),
+            "the last emission already covered every input"
+        );
+
+        let every_two = StatefulWithEmission::new(Ticks, EveryN::new(2));
+        let mut state = every_two.initial_state();
+        every_two.accumulate(&mut state, Tick);
+        assert_eq!(every_two.drain(&state).expect("drain projects").len(), 1);
+
+        let resetting = StatefulWithEmission::new(Ticks, TimeWindow::new(Duration::ZERO));
+        let mut state = resetting.initial_state();
+        resetting.accumulate(&mut state, Tick);
+        resetting.post_emit(&mut state);
+        assert!(resetting.drain(&state).expect("drain projects").is_empty());
+
+        let at_end = StatefulWithEmission::new(Ticks, OnEOF::new());
+        let state = at_end.initial_state();
+        assert_eq!(at_end.drain(&state).expect("drain projects").len(), 1);
     }
 
     #[test]
