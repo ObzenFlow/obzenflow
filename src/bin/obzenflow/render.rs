@@ -20,6 +20,8 @@ mod event_counts;
 mod join_phase;
 #[path = "render/payload.rs"]
 mod payload;
+#[path = "render/record_counts.rs"]
+mod record_counts;
 #[path = "render/summary.rs"]
 mod summary;
 #[path = "render/terminal.rs"]
@@ -98,6 +100,8 @@ pub(super) struct Renderer {
     event_types: BTreeMap<String, u64>,
     other_event_types: u64,
     event_counts: event_counts::EventCounts,
+    record_counts: record_counts::RecordCounts,
+    rejections: LineageRejections,
     continuations: continuation::Continuations,
 }
 
@@ -134,6 +138,8 @@ impl Renderer {
             event_types: BTreeMap::new(),
             other_event_types: 0,
             event_counts: event_counts::EventCounts::default(),
+            record_counts: record_counts::RecordCounts::default(),
+            rejections: LineageRejections::default(),
             continuations: continuation::Continuations::default(),
         }
     }
@@ -196,6 +202,31 @@ impl Renderer {
         Ok(())
     }
 
+    pub(super) fn lineage(
+        &mut self,
+        output: &mut impl Write,
+        records: Vec<RunRecord>,
+        rejections: LineageRejections,
+    ) -> Result<(), Error> {
+        self.rejections = rejections;
+        for record in &records {
+            self.record_counts
+                .record(record, self.rejections.repeat_of(record).is_some());
+            if !self.jsonl {
+                self.context.remember(record);
+                self.journal_legend(output)?;
+            }
+            self.terminal().render(
+                output,
+                &EventView::from_record(record, &self.context)
+                    .held_by_earlier_run()
+                    .repeating(self.rejections.repeat_of(record)),
+            )?;
+        }
+        output.flush()?;
+        Ok(())
+    }
+
     pub(super) fn record(
         &mut self,
         output: &mut impl Write,
@@ -209,6 +240,8 @@ impl Renderer {
         let journal = format!("{stage}/{}", journal_label(record.journal.kind));
         self.records += 1;
         *self.journals.entry(journal.clone()).or_default() += 1;
+        self.record_counts
+            .record(&record, self.rejections.repeat_of(&record).is_some());
         self.continuations.record(&record);
         self.context.join_phases.record(&record);
         if !self.jsonl {
@@ -231,8 +264,11 @@ impl Renderer {
         }
         if self.jsonl {
             if self.visible(&record) {
-                self.terminal()
-                    .render(output, &EventView::from_record(&record, &self.context))?;
+                self.terminal().render(
+                    output,
+                    &EventView::from_record(&record, &self.context)
+                        .repeating(self.rejections.repeat_of(&record)),
+                )?;
             }
         } else {
             // Hidden rows still supply causal context and journal boundaries.
@@ -326,7 +362,11 @@ impl Renderer {
         for record in records.iter().filter(|record| self.visible(record)) {
             // Resolve the presentation only after pending parents have had a
             // chance to arrive. The view borrows the unmodified source record.
-            terminal.render(output, &EventView::from_record(record, &self.context))?;
+            terminal.render(
+                output,
+                &EventView::from_record(record, &self.context)
+                    .repeating(self.rejections.repeat_of(record)),
+            )?;
         }
         Ok(())
     }
@@ -352,6 +392,7 @@ impl Renderer {
 
     fn visible(&self, record: &RunRecord) -> bool {
         self.include_runtime
+            || record.journal.kind == RunJournalKind::Error
             || Category::of(record) != Category::Runtime
             || matches!(&record.record, RunRecordData::Chain(row) if matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(_) | ExecutionPayload::SinkOperationFailed(_))))
     }

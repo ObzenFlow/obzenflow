@@ -166,24 +166,29 @@ impl JournalPayload for ChainPayload {
         {
             return Err(descriptor_mismatch());
         }
-        let source_failure_category = match self {
-            ChainPayload::Execution(
-                crate::event::payloads::execution_payload::ExecutionPayload::SourcePollError(
-                    failure,
-                ),
-            ) => Some(failure.error_type),
-            ChainPayload::Execution(
-                crate::event::payloads::execution_payload::ExecutionPayload::SourceOpenFailed(
-                    failure,
-                ),
-            ) => Some(failure.error_type),
+        use crate::event::payloads::execution_payload::ExecutionPayload;
+        use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
+        let marked_kind = match self {
+            ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(rejected)) => {
+                if rejected.kind != ErrorKind::Validation {
+                    return Err(descriptor_mismatch());
+                }
+                Some(rejected.kind.clone())
+            }
+            ChainPayload::Execution(ExecutionPayload::SourcePollFailed(failure)) => {
+                Some(failure.kind.clone())
+            }
+            ChainPayload::Execution(ExecutionPayload::SourceOpenFailed(failure)) => {
+                Some(failure.error_type.processing_error_kind())
+            }
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                Some(failure.kind.clone())
+            }
             _ => None,
         };
-        if let Some(category) = source_failure_category {
-            use crate::event::status::processing_status::ProcessingStatus;
+        if let Some(expected) = marked_kind {
             match &provenance.processing.status {
-                ProcessingStatus::Error { kind, .. }
-                    if *kind == Some(category.processing_error_kind()) => {}
+                ProcessingStatus::Error { kind, .. } if kind.as_ref() == Some(&expected) => {}
                 _ => return Err(descriptor_mismatch()),
             }
         }

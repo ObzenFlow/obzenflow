@@ -384,8 +384,8 @@ async fn adjacent_rejections_open_no_breaker_and_reach_natural_eof() {
     let rejections: Vec<_> = errors
         .iter()
         .filter_map(|row| match &row.payload {
-            ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
-                Some(failure.diagnostic.location().record_index())
+            ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(rejected)) => {
+                Some(rejected.diagnostic.location().record_index())
             }
             _ => None,
         })

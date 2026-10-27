@@ -15,7 +15,7 @@ use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::{
-    error_row_in_scope, route_to_error_journal,
+    error_row_in_scope, processing_failed, route_to_error_journal,
 };
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
@@ -31,9 +31,9 @@ use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
+use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -329,46 +329,6 @@ pub(super) async fn dispatch_accumulating<
                         Some(&event),
                         stage_input_position,
                     );
-                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-                        if let Some(state) = &heartbeat_state {
-                            state.record_last_consumed(event_id);
-                        }
-                        let duration = start.elapsed();
-                        ctx.instrumentation
-                            .in_flight_count
-                            .fetch_sub(1, Ordering::Relaxed);
-                        ctx.instrumentation.record_processing_time(duration);
-                        if ctx.instrumentation.check_anomaly(duration) {
-                            ctx.instrumentation
-                                .anomalies_total
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        ctx.instrumentation
-                            .events_processed_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.instrumentation
-                            .events_accumulated_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.events_since_last_heartbeat =
-                            ctx.events_since_last_heartbeat.saturating_add(1);
-                        if let Err(error) =
-                            StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, false)
-                                .await
-                        {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                error = ?error,
-                                "Failed to emit stateful accumulator heartbeat"
-                            );
-                        }
-                        if let Some(reader) = upstream_stage
-                            .and_then(|upstream| ctx.backpressure_readers.get(&upstream))
-                        {
-                            reader.ack_consumed(1);
-                        }
-                        return Ok(EventLoopDirective::Continue);
-                    }
-
                     run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
                     let mut handler = (**ctx
@@ -493,45 +453,23 @@ pub(super) async fn dispatch_accumulating<
 
                     if let Err(err) = accumulate_result {
                         ctx.instrumentation.record_error(err.kind());
-                        let reason = format!("Stateful handler error: {err:?}");
-                        let error_event =
-                            error_row_in_scope(event.mark_as_error(reason, err.kind()), scope);
-
-                        if route_to_error_journal(&error_event) {
-                            crate::supervised_base::publication::append(
-                                &ctx.error_journal,
-                                error_event,
-                                AppendOptions::from_record(Some(&envelope))?,
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!("Failed to write stateful accumulate error: {e}")
-                            })?;
-                        } else {
-                            let flow_id = ctx.flow_id.to_string();
-                            let flow_ctx = make_flow_context(
-                                &ctx.flow_name,
-                                &flow_id,
-                                &ctx.stage_name,
-                                ctx.stage_id,
-                                StageType::Stateful,
-                            );
-                            let enriched_error = ctx
-                                .instrumentation
-                                .capture_accounting()
-                                .attach_to(error_event.with_flow_context(flow_ctx));
-                            crate::supervised_base::publication::append(
-                                &ctx.data_journal,
-                                enriched_error,
-                                AppendOptions::from_record(Some(&envelope))?.with_capture(
-                                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
-                                ),
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!("Failed to write stateful accumulate error: {e}")
-                            })?;
-                        }
+                        let error_event = error_row_in_scope(
+                            processing_failed(
+                                WriterId::from(ctx.stage_id),
+                                &flow_context,
+                                &event,
+                                &err,
+                                ctx.lineage_policy,
+                            ),
+                            scope,
+                        );
+                        crate::supervised_base::publication::append(
+                            &ctx.error_journal,
+                            error_event,
+                            AppendOptions::from_record(Some(&envelope))?,
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to write stateful accumulate error: {e}"))?;
 
                         if let Some(upstream) = upstream_stage {
                             if let Some(reader) = ctx.backpressure_readers.get(&upstream) {

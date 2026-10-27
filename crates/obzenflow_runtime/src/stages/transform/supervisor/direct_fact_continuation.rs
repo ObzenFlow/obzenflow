@@ -18,7 +18,7 @@ use crate::stages::common::supervision::backpressure_drain::{
     PendingOutput,
 };
 use crate::stages::common::supervision::error_routing::{
-    error_row_in_scope, route_to_error_journal,
+    error_row_in_scope, processing_failed, route_to_error_journal,
 };
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -61,12 +61,6 @@ pub(super) async fn start_if_eligible<
     scope: MiddlewareExecutionScope,
     flow_context: &FlowContext,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    if matches!(
-        envelope.envelope.provenance.event.processing.status,
-        ProcessingStatus::Error { .. }
-    ) {
-        return Ok(false);
-    }
     let Some(bound) = ctx.direct_fact_plan.bound_for(&envelope.event_type()) else {
         return Ok(false);
     };
@@ -106,6 +100,8 @@ pub(super) async fn start_if_eligible<
     let instrumentation = ctx.instrumentation.clone();
     let future_envelope = envelope.clone();
     let error_envelope = envelope.clone();
+    let lineage = ctx.lineage_policy;
+    let error_flow_context = flow_context.clone();
     let event = envelope.authored();
     let event_id = event.id;
     let effect_context = EffectInvocationContext {
@@ -151,10 +147,13 @@ pub(super) async fn start_if_eligible<
                     Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
                 }
                 Err(error) => {
-                    let reason = format!("Transform handler error: {error:?}");
-                    let error_event = error_envelope
-                        .authored()
-                        .mark_as_error(reason, error.kind());
+                    let error_event = processing_failed(
+                        writer_id,
+                        &error_flow_context,
+                        &error_envelope.authored(),
+                        &error,
+                        lineage,
+                    );
                     if let Some(state) = &handler_heartbeat_state {
                         state.record_last_consumed(event_id);
                     }
@@ -274,7 +273,6 @@ async fn finish_success<
     );
 
     let mut pending = VecDeque::<PendingOutput>::new();
-    let mut rejected_inputs = VecDeque::<PendingOutput>::new();
     for event in transformed_events {
         let is_error_row = matches!(event.processing.status, ProcessingStatus::Error { .. });
         if event.consumes_data_credit() && !is_error_row {
@@ -328,14 +326,6 @@ async fn finish_success<
                 .record_error(kind.clone().unwrap_or(ErrorKind::Unknown));
         }
         let event = error_row_in_scope(event, continuation.scope);
-        if is_error_row && !route_to_error_journal(&event) {
-            rejected_inputs.push_back(PendingOutput {
-                causal: crate::supervised_base::publication::capture(),
-                event,
-                scope: continuation.scope,
-            });
-            continue;
-        }
         if route_to_error_journal(&event) {
             if let Err(error) = crate::supervised_base::publication::append(
                 &ctx.error_journal,
@@ -412,12 +402,6 @@ async fn finish_success<
         heartbeat
             .state
             .record_last_consumed(continuation.envelope.envelope.provenance.event.id);
-    }
-    if !rejected_inputs.is_empty() {
-        ctx.pending_parent = Some(continuation.envelope.clone());
-        ctx.pending_ack_upstream = continuation.upstream_stage;
-        ctx.pending_outputs.extend(rejected_inputs);
-        return Ok(EventLoopDirective::Continue);
     }
     acknowledge(ctx, continuation.upstream_stage);
     Ok(EventLoopDirective::Continue)

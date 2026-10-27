@@ -38,6 +38,8 @@ impl fmt::Display for JournalNumber {
 pub(super) struct EventView<'a> {
     record: &'a RunRecord,
     context: &'a Context,
+    earlier_run: bool,
+    repeat_of: Option<&'a RecordedAt>,
 }
 
 pub(super) struct HeaderView<'a> {
@@ -45,6 +47,7 @@ pub(super) struct HeaderView<'a> {
     pub heading: &'static str,
     pub reporter: Cow<'a, str>,
     pub journal: JournalNumber,
+    pub error_journal: bool,
     pub read_model: bool,
     pub phase: Option<String>,
 }
@@ -104,11 +107,46 @@ impl<'a> ClockView<'a> {
 
 impl<'a> EventView<'a> {
     pub fn from_record(record: &'a RunRecord, context: &'a Context) -> Self {
-        Self { record, context }
+        Self {
+            record,
+            context,
+            earlier_run: false,
+            repeat_of: None,
+        }
+    }
+
+    pub fn held_by_earlier_run(mut self) -> Self {
+        self.earlier_run = true;
+        self
+    }
+
+    pub fn repeating(mut self, first: Option<&'a RecordedAt>) -> Self {
+        self.repeat_of = first;
+        self
     }
 
     pub fn source(&self) -> &'a RunRecord {
         self.record
+    }
+
+    pub fn repeat_of(&self) -> Option<&'a RecordedAt> {
+        self.repeat_of
+    }
+
+    pub fn lineage_marker(&self) -> Option<String> {
+        let recorded = self
+            .earlier_run
+            .then(|| format!("recorded by run {}", self.record.run.flow_id));
+        let repeat = self.repeat_of.map(|first| {
+            format!(
+                "rejected again, first recorded by run {}",
+                first.run.flow_id
+            )
+        });
+        match (recorded, repeat) {
+            (Some(recorded), Some(repeat)) => Some(format!("{recorded}; {repeat}")),
+            (recorded, repeat) => recorded.or(repeat),
+        }
     }
 
     pub fn header(&self) -> HeaderView<'a> {
@@ -135,6 +173,7 @@ impl<'a> EventView<'a> {
             heading: category.heading(self.record),
             reporter,
             journal: self.context.journal_number(&self.record.journal.id).into(),
+            error_journal: self.record.journal.kind == RunJournalKind::Error,
             read_model: self.record.journal.stage.as_ref().is_some_and(|stage| {
                 matches!(stage.stage_type, StageType::Stateful | StageType::Join)
             }),
@@ -143,7 +182,7 @@ impl<'a> EventView<'a> {
     }
 
     pub fn relation(&self) -> RelationView<'a> {
-        let inputs = if self.record.kind == RunRecordKind::SourceFact {
+        let inputs = if self.record.kind == RunRecordKind::SourceFact || source_error(self.record) {
             InputsView::Source
         } else if uses_inputs(self.record) {
             InputsView::Recorded(
@@ -247,6 +286,9 @@ impl Category {
     }
 
     fn heading(self, record: &RunRecord) -> &'static str {
+        if let (RunJournalKind::Error, Some(stage)) = (record.journal.kind, &record.journal.stage) {
+            return stage_error_heading(stage.stage_type, stage.is_effectful);
+        }
         if self != Self::Fact {
             return self.label();
         }
@@ -269,6 +311,19 @@ pub(super) fn stage_heading(stage_type: StageType, is_effectful: bool) -> &'stat
     }
 }
 
+fn stage_error_heading(stage_type: StageType, is_effectful: bool) -> &'static str {
+    match stage_type {
+        StageType::FiniteSource | StageType::InfiniteSource => "SOURCE ERROR",
+        StageType::Transform if is_effectful => "EFFECTFUL TRANSFORM ERROR",
+        StageType::Transform => "TRANSFORM ERROR",
+        StageType::Stateful if is_effectful => "EFFECTFUL STATEFUL ERROR",
+        StageType::Stateful => "STATEFUL ERROR",
+        StageType::Join => "JOIN ERROR",
+        StageType::Merge => "MERGE ERROR",
+        StageType::Sink => "SINK ERROR",
+    }
+}
+
 fn effect_fact(record: &RunRecord) -> bool {
     matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Fact(_)) && row.envelope.provenance.event.effect_provenance.is_some())
 }
@@ -284,7 +339,11 @@ fn uses_inputs(record: &RunRecord) -> bool {
             | RunRecordKind::CompositeData
             | RunRecordKind::Effect
             | RunRecordKind::Delivery
-    )
+    ) || matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))))
+}
+
+fn source_error(record: &RunRecord) -> bool {
+    matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(_) | ExecutionPayload::SourcePollFailed(_))))
 }
 
 pub(super) fn fact_error(record: &RunRecord) -> Option<&str> {

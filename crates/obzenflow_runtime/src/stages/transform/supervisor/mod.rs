@@ -26,6 +26,7 @@ use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::stages::common::supervision::error_routing::processing_failure_record;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
 use crate::supervised_base::base::{self, Registration, Supervisor};
@@ -491,7 +492,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
 
         if envelope.consumes_data_credit() {
             let checked = guard.check_data(envelope.authored_mut());
-            if let Err(error_event) = checked {
+            if let Err(detail) = checked {
                 let flow_context = FlowContext {
                     flow_name: ctx.flow_name.clone(),
                     flow_id: ctx.flow_id.to_string(),
@@ -499,11 +500,17 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
                     stage_id: self.stage_id,
                     stage_type: StageType::Transform,
                 };
-
-                let error_event = ctx
-                    .instrumentation
-                    .capture_accounting()
-                    .attach_to((*error_event).with_flow_context(flow_context));
+                let error_event =
+                    ctx.instrumentation
+                        .capture_accounting()
+                        .attach_to(processing_failure_record(
+                            WriterId::from(self.stage_id),
+                            &flow_context,
+                            &envelope.authored(),
+                            ErrorKind::Unknown,
+                            detail,
+                            ctx.lineage_policy,
+                        ));
 
                 let journal = ctx.error_journal.clone();
                 let parent = envelope.clone();

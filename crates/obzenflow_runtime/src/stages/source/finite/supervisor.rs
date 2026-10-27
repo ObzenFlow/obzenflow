@@ -22,9 +22,9 @@ use crate::stages::source::supervision::{
     announce_resumed_live, around_source_boundary, begin_catch_up_handoff, commit_reader_acquired,
     commit_source_fact, commit_source_open_failure, commit_source_seek_failure,
     complete_catch_up_handoff, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    normalise_source_poll_error, observe_source_boundary_rejection, poll_error_backoff,
-    poll_error_summary, record_source_release, record_source_stage_fatal,
-    refuse_source_continuation, source_error_kind, stage_boundary_control_events,
+    observe_source_boundary_rejection, poll_error_backoff, poll_error_summary,
+    record_source_release, record_source_stage_fatal, refuse_source_continuation,
+    source_error_kind, source_poll_error_record, stage_boundary_control_events,
     stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceExit,
     SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
@@ -742,7 +742,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                 Duration::from_nanos(0)
                             };
 
-                            let events_to_write = self.run_if_not_error(event, |e| vec![e]);
+                            let events_to_write = vec![event];
                             emit_batch_to_pending_outputs(
                                 events_to_write,
                                 &stage_flow_context,
@@ -960,11 +960,8 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                     poll_error_summary(&ctx.stage_name, &error)
                                 );
                                 let kind = source_error_kind(&error);
-                                let diagnostic = normalise_source_poll_error(
-                                    WriterId::from(self.stage_id),
-                                    SourcePollKind::Finite,
-                                    &error,
-                                );
+                                let diagnostic =
+                                    source_poll_error_record(WriterId::from(self.stage_id), &error);
                                 self.pending_failure =
                                     terminal_poll_failure(&ctx.stage_name, &error, &diagnostic);
                                 let mut events = vec![diagnostic];

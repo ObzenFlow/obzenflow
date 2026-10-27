@@ -759,18 +759,6 @@ fn record_chain_event_projection(
     Ok(())
 }
 
-fn expected_error_route(kind: &ErrorKind) -> SinkJournalRoute {
-    match kind {
-        ErrorKind::Validation | ErrorKind::Domain => SinkJournalRoute::Data,
-        ErrorKind::Timeout
-        | ErrorKind::Remote
-        | ErrorKind::RateLimited
-        | ErrorKind::PermanentFailure
-        | ErrorKind::Deserialization
-        | ErrorKind::Unknown => SinkJournalRoute::Error,
-    }
-}
-
 fn event_error_kind(event: &ChainEvent) -> Option<&ErrorKind> {
     match &event.processing.status {
         ProcessingStatus::Error {
@@ -800,12 +788,17 @@ fn failed_receipt_disposition(event: &ChainEvent) -> Option<SinkWriteFailureDisp
     }
 }
 
-fn same_data_payload(left: &ChainEvent, right: &ChainEvent) -> bool {
-    left.consumes_data_credit()
-        && right.consumes_data_credit()
-        && left.event_kind == right.event_kind
-        && left.event_type() == right.event_type()
-        && left.payload.contract_body().ok() == right.payload.contract_body().ok()
+fn records_failed_input(input: &ChainEvent, route: &ChainEvent, kind: &ErrorKind) -> bool {
+    route.event_type() == obzenflow_core::event::vocabulary::stage::PROCESSING_FAILED
+        && matches!(
+            &route.payload,
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure))
+                if failure.kind == *kind
+                    && failure.input.event_type.0 == input.event_type()
+                    && failure.input.payload_schema_version == input.payload_schema_version
+                    && failure.input.payload
+                        == input.typed_payload().unwrap_or_else(|| input.payload())
+        )
 }
 
 fn inherited_route_context_matches(input: &ChainEvent, route: &ChainEvent) -> bool {
@@ -875,12 +868,12 @@ fn write_failure_route_matches(
         && route.id != receipt.id
         && route.id != operation_event.id
         && !route.causality.parent_ids.contains(&route.id)
-        && direct_parent(route) == Some(operation_event.id)
-        && same_data_payload(input, route)
+        && direct_parent(route) == Some(input.id)
+        && records_failed_input(input, route, &operation.kind)
         && inherited_route_context_matches(input, route)
         && route.flow_context.stage_id == operation.stage_id
         && event_error_kind(route) == Some(&operation.kind)
-        && journal_route == Some(&expected_error_route(&operation.kind))
+        && journal_route == Some(&SinkJournalRoute::Error)
 }
 
 fn require_happened_before(
@@ -1426,16 +1419,20 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
 
             let routes = chain_events
                 .iter()
-                .filter(|candidate| direct_parent(candidate) == Some(event.id))
+                .filter(|candidate| {
+                    direct_parent(candidate) == Some(input_id)
+                        && candidate.flow_context.stage_id == operation.stage_id
+                        && matches!(
+                            candidate.payload,
+                            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))
+                        )
+                })
                 .collect::<Vec<_>>();
             if routes.len() != 1 {
                 return Err(failure(
                     "journal-truth",
                     event.id.to_string(),
-                    format!(
-                        "operation failure has {} direct route successors",
-                        routes.len()
-                    ),
+                    format!("the failed input has {} records", routes.len()),
                 ));
             }
             let route = routes[0];
@@ -1451,7 +1448,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                 return Err(failure(
                     "journal-truth",
                     event.id.to_string(),
-                    "operation successor is not a fresh, correctly routed error copy of the input",
+                    "the failed input's record does not match its operation failure",
                 ));
             }
             require_happened_before(&clocks, event, route, "O-to-X")?;
@@ -1924,14 +1921,21 @@ mod tests {
         .with_causality(CausalityContext::with_parent(receipt.id))
         .mark_as_error("redacted failure", ErrorKind::Remote);
 
-        let route = ChainEventFactory::data_event(
+        let route = ChainEventFactory::execution_event(
             WriterId::from(sink_stage),
-            "failure.projection.input",
-            std::num::NonZeroU32::MIN,
-            serde_json::json!({"id": 7}),
+            ExecutionPayload::StageProcessingFailed(
+                obzenflow_core::event::payloads::stage_processing_payload::StageProcessingFailed {
+                    kind: ErrorKind::Remote,
+                    detail: "redacted failure".to_string(),
+                    input:
+                        obzenflow_core::event::payloads::stage_processing_payload::FailedInput::of(
+                            &input,
+                        ),
+                },
+            ),
         )
         .with_flow_context(context("output", sink_stage, StageType::Sink))
-        .with_causality(CausalityContext::with_parent(operation_event.id))
+        .with_causality(CausalityContext::with_parent(input.id))
         .mark_as_error("redacted failure", ErrorKind::Remote);
 
         let coordinate = CausalCoordinate::new(obzenflow_core::JournalWriterId::new());

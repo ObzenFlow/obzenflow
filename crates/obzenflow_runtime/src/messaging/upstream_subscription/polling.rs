@@ -12,9 +12,10 @@ use obzenflow_core::event::payloads::chain_payload::EventKind;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::CompositeActivationContext;
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::{StageId, WriterId};
 use std::any::Any;
@@ -420,6 +421,20 @@ where
             let slot = &self.readers[reader_index];
             (slot.stage_id, slot.stage_key.clone())
         };
+        if let Some(record) = (&envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>()
+        {
+            if matches!(
+                record.envelope.provenance.event.processing.status,
+                ProcessingStatus::Error { .. }
+            ) {
+                return PollResult::Error(Box::new(io::Error::other(format!(
+                    "edge '{}' delivered error-marked `{}`; a rejected record belongs in the \
+                     error journal of the stage that rejected it",
+                    stage_key.as_str(),
+                    record.event_type_name()
+                ))));
+            }
+        }
 
         // FLOWIP-120n: a catch-up watermark delivers at the generation it
         // closes, then advances its reader to the announced value. The

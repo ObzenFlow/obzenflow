@@ -20,8 +20,8 @@ pub mod read {
     pub use obzenflow_core::journal::{RunManifest, RUN_MANIFEST_FILENAME};
     pub use obzenflow_infra::journal::read::{
         open_disk_run, read_config_changes, ConfigChanges, ConfigDifference, EvidenceHolder,
-        JournalReadError, Rebuild, ResumedFrom, RunConfigChanges, RunLineage, RunSnapshot, RunTail,
-        Standing,
+        JournalReadError, LineageRejections, Rebuild, RecordedAt, ResumedFrom, RunConfigChanges,
+        RunLineage, RunSnapshot, RunTail, Standing,
     };
 }
 

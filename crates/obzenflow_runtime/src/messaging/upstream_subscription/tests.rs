@@ -2121,7 +2121,6 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symmetrically() {
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::event::provenance::replay_context::ReplayContext;
-    use obzenflow_core::event::status::processing_status::ProcessingStatus;
 
     let upstream_stage = StageId::new();
     let archived_upstream_stage = StageId::new();
@@ -2151,15 +2150,14 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             .unwrap();
     }
 
-    let mut forwarded_error = ChainEventFactory::data_event(
+    let forwarded = ChainEventFactory::data_event(
         WriterId::Stage(foreign_author),
         "test.joined",
         std::num::NonZeroU32::MIN,
         json!({"foreign": true}),
     );
-    forwarded_error.processing.status = ProcessingStatus::error("forwarded pre-error row");
     upstream_journal
-        .append(forwarded_error, Default::default())
+        .append(forwarded, Default::default())
         .await
         .unwrap();
 
@@ -2222,7 +2220,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
         .transport_only();
 
     let mut progress = [ReaderProgress::new(upstream_stage)];
-    let mut saw_foreign_error = false;
+    let mut saw_forwarded_data = false;
     let mut saw_forwarded_eof = false;
     loop {
         match subscription
@@ -2230,7 +2228,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             .await
         {
             PollResult::Event(envelope) => {
-                saw_foreign_error |= envelope.envelope.provenance.event.writer_id
+                saw_forwarded_data |= envelope.envelope.provenance.event.writer_id
                     == WriterId::Stage(foreign_author)
                     && envelope.consumes_data_credit();
                 saw_forwarded_eof |= envelope.envelope.provenance.event.writer_id
@@ -2246,10 +2244,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
         }
     }
 
-    assert!(
-        saw_foreign_error,
-        "forwarded pre-error Data remains deliverable"
-    );
+    assert!(saw_forwarded_data, "forwarded Data remains deliverable");
     assert!(saw_forwarded_eof, "forwarded EOF remains deliverable");
     assert_eq!(progress[0].reader_seq, SeqNo(2));
     assert_eq!(progress[0].advertised_writer_seq, Some(SeqNo(2)));
@@ -5133,4 +5128,60 @@ async fn a_decision_row_that_fails_to_append_delivers_nothing() {
         [0, 0],
         "nothing delivered under no row"
     );
+}
+
+fn rejected_row(writer: StageId) -> ChainEvent {
+    merge_data(writer, "probe.order").mark_as_error(
+        "order 2 has no customer",
+        obzenflow_core::event::status::processing_status::ErrorKind::Validation,
+    )
+}
+
+async fn first_poll_error(subscription: &mut UpstreamSubscription<ChainEvent>) -> String {
+    for _ in 0..4 {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Error(error) => return error.to_string(),
+            PollResult::Event(envelope) => assert!(
+                envelope.event_type() != "probe.order",
+                "the rejected row is never delivered"
+            ),
+            PollResult::CursorAdvanced { .. } | PollResult::NoEvents => {}
+        }
+    }
+    panic!("expected the subscription to refuse the rejected row");
+}
+
+#[tokio::test]
+async fn every_delivery_path_refuses_an_error_marked_record() {
+    let refusal = "edge 'check' delivered error-marked `probe.order`; a rejected record \
+                   belongs in the error journal of the stage that rejected it";
+
+    let stage = StageId::new();
+    let journal = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage)));
+    let upstreams = [(
+        stage,
+        "check".to_string(),
+        journal.clone() as Arc<dyn Journal<ChainEvent>>,
+    )];
+    let mut available = UpstreamSubscription::new_with_names("written", &upstreams)
+        .await
+        .unwrap();
+    journal.append_with_clock(rejected_row(stage), VectorClock::new());
+    assert_eq!(first_poll_error(&mut available).await, refusal);
+
+    let (mut merge, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("check", "other").await;
+    journal_a.append_with_clock(rejected_row(stage_a), VectorClock::new());
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+    assert_eq!(first_poll_error(&mut merge).await, refusal);
+
+    let (mut recorded, (stage_a, journal_a), _, _) = recorded_pair_with(
+        "check",
+        "other",
+        RecordedOrder::following(vec![selection("check", 0, 0)], AfterRecord::Canonical),
+        0,
+    )
+    .await;
+    journal_a.append_with_clock(rejected_row(stage_a), VectorClock::new());
+    assert_eq!(first_poll_error(&mut recorded).await, refusal);
 }

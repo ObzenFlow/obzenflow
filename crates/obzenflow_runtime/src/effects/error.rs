@@ -4,6 +4,7 @@
 
 use super::binding::EffectPortSlotLabel;
 use super::*;
+use obzenflow_core::event::status::processing_status::ErrorKind;
 
 #[derive(Debug, Clone, Error)]
 pub enum EffectError {
@@ -353,6 +354,43 @@ impl EffectError {
         RetryDisposition::from_bool(self.recovery_eligible_by_default())
     }
 
+    /// The failure's kind, read from its recorded type so a live failure and
+    /// its replay agree.
+    pub fn error_kind(&self) -> ErrorKind {
+        match self.error_type().as_str() {
+            "timeout" => ErrorKind::Timeout,
+            "transport" | "remote" => ErrorKind::Remote,
+            "rate_limited" => ErrorKind::RateLimited,
+            "validation" | "invalid_request" | "unsupported" => ErrorKind::Validation,
+            "domain" => ErrorKind::Domain,
+            "authentication"
+            | "binding_authority_fault"
+            | "serialization"
+            | "journal"
+            | "missing_recorded_effect"
+            | "recording_departure"
+            | "recording_ended"
+            | "duplicate_recorded_effect"
+            | "descriptor_mismatch"
+            | "boundary_rejected"
+            | "effect_provenance_mismatch"
+            | "incomplete_outcome_group"
+            | "missing_idempotency_key"
+            | "undeclared_effect"
+            | "undeclared_output"
+            | "emit_unsupported"
+            | "completed_without_output"
+            | "completed_empty_with_output"
+            | "target_invariant_violation"
+            | "recovery_abandoned"
+            | "transactional_commit_missing"
+            | "execution"
+            | "permanent"
+            | "replay_archive" => ErrorKind::PermanentFailure,
+            _ => ErrorKind::Unknown,
+        }
+    }
+
     pub(super) fn error_type(&self) -> EffectFailureKind {
         match self {
             EffectError::BindingAuthority { .. } => "binding_authority_fault",
@@ -500,6 +538,7 @@ impl From<ReplayError> for EffectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stages::common::handler_error::HandlerError;
 
     /// FLOWIP-120i: the semantic reason is identical across the live error,
     /// what gets recorded, and the replay-side rehydration, with no Display
@@ -555,5 +594,92 @@ mod tests {
             effect_type: "demo.effect".to_string(),
         };
         assert_eq!(infra.semantic_reason(), infra.to_string());
+    }
+
+    fn replayed(live: &EffectError) -> EffectError {
+        EffectError::RecordedFailure {
+            error_type: live.error_type(),
+            error_message: live.error_message(),
+            retry: live.retry_disposition(),
+            cause: live.failure_cause(),
+            detail: live.failure_detail().map(Box::new),
+        }
+    }
+
+    fn dependency(code: &str) -> EffectError {
+        EffectError::DependencyFailed {
+            failure_source: EffectFailureSource::new("chat_client"),
+            code: EffectFailureCode::new(code),
+            message: "provider".to_string(),
+            retry: RetryDisposition::NotRetryable,
+        }
+    }
+
+    #[test]
+    fn a_live_failure_and_its_replay_have_one_kind() {
+        let cases = [
+            (EffectError::Timeout("timeout".into()), ErrorKind::Timeout),
+            (EffectError::Transport("offline".into()), ErrorKind::Remote),
+            (
+                EffectError::RateLimited {
+                    message: "slow down".into(),
+                    retry_after: Duration::from_millis(250),
+                },
+                ErrorKind::RateLimited,
+            ),
+            (
+                EffectError::Permanent("denied".into()),
+                ErrorKind::PermanentFailure,
+            ),
+            (
+                EffectError::Validation("invalid".into()),
+                ErrorKind::Validation,
+            ),
+            (EffectError::Domain("declined".into()), ErrorKind::Domain),
+            (
+                EffectError::Execution("opaque".into()),
+                ErrorKind::PermanentFailure,
+            ),
+            (
+                EffectError::Serialization("garbled".into()),
+                ErrorKind::PermanentFailure,
+            ),
+            (
+                EffectError::BoundaryRejected {
+                    rejected_by: EffectFailureSource::new("effect_boundary"),
+                    code: EffectFailureCode::new("breaker_open"),
+                    message: "circuit breaker open".into(),
+                    retry: RetryDisposition::from_bool(true),
+                },
+                ErrorKind::PermanentFailure,
+            ),
+            (dependency("timeout"), ErrorKind::Timeout),
+            (dependency("remote"), ErrorKind::Remote),
+            (dependency("rate_limited"), ErrorKind::RateLimited),
+            (dependency("authentication"), ErrorKind::PermanentFailure),
+            (dependency("invalid_request"), ErrorKind::Validation),
+            (dependency("unsupported"), ErrorKind::Validation),
+            (dependency("other"), ErrorKind::Unknown),
+        ];
+        for (live, kind) in cases {
+            assert_eq!(live.error_kind(), kind, "{live:?}");
+            assert_eq!(replayed(&live).error_kind(), kind, "{live:?}");
+        }
+    }
+
+    #[test]
+    fn a_handler_error_from_a_failure_matches_its_replay() {
+        for live in [
+            EffectError::Permanent("denied".into()),
+            EffectError::Transport("offline".into()),
+            dependency("authentication"),
+            dependency("other"),
+        ] {
+            let from_live = HandlerError::from(live.clone());
+            let from_replay = HandlerError::from(replayed(&live));
+            assert_eq!(from_live.kind(), from_replay.kind(), "{live:?}");
+            assert_eq!(from_live.message(), from_replay.message(), "{live:?}");
+            assert_eq!(from_live.message(), live.semantic_reason(), "{live:?}");
+        }
     }
 }

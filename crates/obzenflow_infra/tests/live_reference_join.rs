@@ -1700,8 +1700,12 @@ async fn live_join_reference_errors_are_per_record() {
         .await
         .expect("read join error journal");
     let saw_reference_error = error_events.iter().any(|env| {
-        env.envelope.provenance.event.writer_id == reference_writer
-            && CatalogRow::from_event(&env.authored()).is_some()
+        env.envelope.provenance.event.writer_id == WriterId::from(join_stage)
+            && matches!(
+                &env.payload,
+                ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure))
+                    if failure.input.event_type.0 == CatalogRow::event_type_name()
+            )
             && matches!(
                 env.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
@@ -1709,6 +1713,6 @@ async fn live_join_reference_errors_are_per_record() {
     });
     assert!(
         saw_reference_error,
-        "expected reference error event in error journal"
+        "the join records the failed reference in its error journal"
     );
 }

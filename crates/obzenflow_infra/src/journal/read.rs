@@ -18,12 +18,14 @@ use std::path::{Component, Path, PathBuf};
 
 mod config_changes;
 mod lineage;
+mod rejections;
 pub use config_changes::{
     compare_with_runs, read_config_changes, read_configuration_refusals,
     read_logic_version_changes, ConfigChanges, LogicVersionChange, RunConfigChanges,
 };
 pub use lineage::{read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing};
 pub use obzenflow_runtime::runtime_config::ConfigDifference;
+pub use rejections::{LineageRejections, RecordedAt};
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalReadError {

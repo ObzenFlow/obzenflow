@@ -10,7 +10,6 @@
 //! - Flow control signals: attenuate amplification in topologies with backflow edges.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, EventId};
 use obzenflow_core::{CycleDepth, SccId, StageId, WriterId};
 use std::collections::HashMap;
@@ -181,8 +180,8 @@ impl CycleGuard {
     /// pass through without modification. When an event enters a different
     /// SCC, its depth is reset.
     ///
-    /// Returns an error-marked clone of `event` when the iteration limit is exceeded.
-    pub(crate) fn check_data(&mut self, event: &mut ChainEvent) -> Result<(), Box<ChainEvent>> {
+    /// Returns why `event` is refused when the iteration limit is exceeded.
+    pub(crate) fn check_data(&mut self, event: &mut ChainEvent) -> Result<(), String> {
         if !self.is_entry_point {
             return Ok(());
         }
@@ -219,12 +218,10 @@ impl CycleGuard {
                 "CycleGuard: aborting data event, cycle depth exceeded max iterations"
             );
 
-            let mut error_event = event.clone();
-            error_event.processing.status = ProcessingStatus::error(format!(
+            return Err(format!(
                 "Cycle depth {} exceeds max iterations {} ({}) in stage {}",
                 depth, self.max_iterations, self.scc_id, self.stage_name
             ));
-            return Err(Box::new(error_event));
         }
 
         Ok(())
@@ -307,7 +304,6 @@ impl CycleGuard {
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::event::status::processing_status::ProcessingStatus;
     use obzenflow_core::{StageId, WriterId};
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -451,10 +447,10 @@ mod tests {
         let err = guard
             .check_data(&mut event)
             .expect_err("third iteration should abort");
-        assert!(matches!(
-            &err.processing.status,
-            ProcessingStatus::Error { .. }
-        ));
+        assert!(
+            err.starts_with("Cycle depth 3 exceeds max iterations 2"),
+            "{err}"
+        );
     }
 
     #[test]

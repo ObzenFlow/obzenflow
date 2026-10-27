@@ -148,9 +148,10 @@ fn chain_fact(event: &ChainEvent) -> Option<&'static str> {
         Some("R")
     } else if SinkOperationFailed::from_event(event).is_some() {
         Some("O")
-    } else if ProbeInput::from_event(event).is_some()
-        && matches!(event.processing.status, ProcessingStatus::Error { .. })
-    {
+    } else if matches!(
+        event.payload,
+        ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))
+    ) {
         Some("X")
     } else if matches!(
         event.payload,
@@ -743,8 +744,10 @@ fn failure_chain(
     let route_records = errors
         .iter()
         .filter(|envelope| {
-            direct_parent(&envelope.authored())
-                == Some(operation_envelope.envelope.provenance.event.id)
+            matches!(
+                envelope.payload,
+                ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))
+            )
         })
         .collect::<Vec<_>>();
     let routes = route_records
@@ -754,7 +757,7 @@ fn failure_chain(
     assert_eq!(
         routes.len(),
         1,
-        "O has exactly one fresh error-route successor"
+        "the failed input has exactly one record of its own"
     );
     let route = routes[0].clone();
 
@@ -762,11 +765,14 @@ fn failure_chain(
         direct_parent(&operation_envelope.authored()),
         Some(receipt.id)
     );
-    assert_ne!(
-        route.id,
-        operation.causal_event_id.expect("current input id")
+    let input = operation.causal_event_id.expect("current input id");
+    assert_ne!(route.id, input);
+    assert_eq!(
+        direct_parent(&route),
+        Some(input),
+        "X's parent is the input"
     );
-    assert_eq!(route.event_type(), ProbeInput::event_type_name());
+    assert_eq!(route.event_type(), "runtime.stage.processing_failed");
     assert!(matches!(
         route.processing.status,
         ProcessingStatus::Error { .. }
@@ -878,7 +884,7 @@ async fn current_only_failure_is_accounted_linked_and_continuable() {
         direct_parent(&chain.operation_event),
         Some(chain.receipt.id)
     );
-    assert_eq!(direct_parent(&chain.route), Some(chain.operation_event.id));
+    assert_eq!(direct_parent(&chain.route), chain.operation.causal_event_id);
 
     let outcomes = data
         .iter()

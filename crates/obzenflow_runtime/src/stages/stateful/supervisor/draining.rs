@@ -12,7 +12,9 @@ use crate::stages::common::handlers::{
 };
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
+use crate::stages::common::supervision::error_routing::{
+    error_row_in_scope, processing_failed, route_to_error_journal,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -27,10 +29,9 @@ use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::StageId;
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::StateVariant;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -223,42 +224,6 @@ pub(super) async fn dispatch_draining<
                         Some(&event),
                         stage_input_position,
                     );
-                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-                        if let Some(state) = &heartbeat_state {
-                            state.record_last_consumed(event_id);
-                        }
-                        let duration = start.elapsed();
-                        ctx.instrumentation
-                            .in_flight_count
-                            .fetch_sub(1, Ordering::Relaxed);
-                        ctx.instrumentation.record_processing_time(duration);
-                        if ctx.instrumentation.check_anomaly(duration) {
-                            ctx.instrumentation
-                                .anomalies_total
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        ctx.instrumentation
-                            .events_processed_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.instrumentation
-                            .events_accumulated_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.events_since_last_heartbeat =
-                            ctx.events_since_last_heartbeat.saturating_add(1);
-                        if let Err(error) =
-                            StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, false)
-                                .await
-                        {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                error = ?error,
-                                "Failed to emit stateful accumulator heartbeat during draining"
-                            );
-                        }
-                        acknowledge_consumed_drain_input(&ctx.backpressure_readers, upstream_stage);
-                        return Ok(EventLoopDirective::Continue);
-                    }
-
                     run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
                     let mut handler = (**ctx
@@ -377,31 +342,23 @@ pub(super) async fn dispatch_draining<
 
                     if let Err(err) = accumulate_result {
                         ctx.instrumentation.record_error(err.kind());
-                        let reason = format!("Stateful handler error during drain: {err:?}");
-                        let error_event = event.mark_as_error(reason, err.kind());
-                        if route_to_error_journal(&error_event) {
-                            crate::supervised_base::publication::append(
-                                &ctx.error_journal,
-                                error_event,
-                                AppendOptions::from_record(Some(&envelope))?,
-                            )
-                            .await
-                            .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;
-                        } else {
-                            let enriched_error = ctx
-                                .instrumentation
-                                .capture_accounting()
-                                .attach_to(error_event.with_flow_context(flow_context.clone()));
-                            crate::supervised_base::publication::append(
-                                &ctx.data_journal,
-                                enriched_error,
-                                AppendOptions::from_record(Some(&envelope))?.with_capture(
-                                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
-                                ),
-                            )
-                            .await
-                            .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;
-                        }
+                        let error_event = error_row_in_scope(
+                            processing_failed(
+                                WriterId::from(ctx.stage_id),
+                                &flow_context,
+                                &event,
+                                &err,
+                                ctx.lineage_policy,
+                            ),
+                            scope,
+                        );
+                        crate::supervised_base::publication::append(
+                            &ctx.error_journal,
+                            error_event,
+                            AppendOptions::from_record(Some(&envelope))?,
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;
 
                         // Match the running loop: once ordinary handler-error evidence is
                         // durable, the input has been consumed even though accumulation failed.
@@ -572,56 +529,35 @@ pub(super) async fn dispatch_draining<
                                     "Failed to emit aggregated events during draining; mapping to error-marked event"
                                 );
 
-                                // Per-record handler failure during draining: turn the input into an
-                                // error-marked event and route it using the ErrorKind policy instead
-                                // of failing the stage.
-                                let reason =
-                                    format!("Stateful handler emit error during drain: {err:?}");
-                                let error_event =
-                                    envelope.authored().mark_as_error(reason, err.kind());
-
-                                // Count all error-marked events for lifecycle / flow rollups, even
-                                // when they are not stage-fatal.
+                                let error_event = error_row_in_scope(
+                                    processing_failed(
+                                        WriterId::from(ctx.stage_id),
+                                        &flow_context,
+                                        &envelope.authored(),
+                                        &err,
+                                        ctx.lineage_policy,
+                                    ),
+                                    observer_scope,
+                                );
                                 ctx.instrumentation.record_error(err.kind());
-
-                                if route_to_error_journal(&error_event) {
-                                    tracing::info!(
-                                        stage_name = %ctx.stage_name,
-                                        event_id = %error_event.id,
-                                        "Writing stateful drain error event to error journal (FLOWIP-082h)"
-                                    );
-
-                                    // Error events are still data, so record them for transport
-                                    // contracts and metrics.
-                                    if error_event.consumes_data_credit() {
-                                        if let Some(subscription) = sup.subscription.as_mut() {
-                                            subscription.track_output_event();
-                                        }
-                                    }
-
-                                    crate::stages::common::supervision::output_committer::commit_error_output(
-                                        &ctx.error_journal,
-                                        &ctx.instrumentation,
-                                        error_event,
-                                        Some(&envelope),
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        format!("Failed to write stateful drain error event: {e}")
-                                    })?;
-                                } else {
-                                    if let Some(upstream) = upstream_stage {
-                                        ctx.pending_ack_upstream = Some(upstream);
-                                    }
-                                    let scope = observer_scope;
-                                    ctx.pending_outputs.push_back(
-                                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                        causal: crate::supervised_base::publication::capture(),
-                                            event: error_event,
-                                            scope,
-                                        },
-                                    );
+                                tracing::info!(
+                                    stage_name = %ctx.stage_name,
+                                    event_id = %error_event.id,
+                                    "Writing stateful drain error event to error journal"
+                                );
+                                if let Some(subscription) = sup.subscription.as_mut() {
+                                    subscription.track_output_event();
                                 }
+                                crate::stages::common::supervision::output_committer::commit_error_output(
+                                    &ctx.error_journal,
+                                    &ctx.instrumentation,
+                                    error_event,
+                                    Some(&envelope),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write stateful drain error event: {e}")
+                                })?;
 
                                 // Keep draining; do not transition to Failed on per-record handler errors.
                             }

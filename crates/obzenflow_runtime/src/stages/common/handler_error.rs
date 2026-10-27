@@ -143,6 +143,24 @@ impl HandlerError {
             _ => None,
         }
     }
+
+    /// The message the handler gave, without its kind.
+    pub fn message(&self) -> String {
+        match self {
+            HandlerError::Fatal(fatal) => fatal.detail.clone(),
+            HandlerError::Timeout(message)
+            | HandlerError::Remote(message)
+            | HandlerError::RateLimited { message, .. }
+            | HandlerError::PermanentFailure(message)
+            | HandlerError::Deserialization(message)
+            | HandlerError::Validation(message)
+            | HandlerError::Domain(message)
+            | HandlerError::ContractViolation(message)
+            | HandlerError::Other(message) => message.clone(),
+            HandlerError::SinkOperation(error) => error.message(),
+            HandlerError::SinkWrite(failure) => failure.error().message(),
+        }
+    }
 }
 
 impl fmt::Display for HandlerError {
@@ -188,11 +206,26 @@ impl std::error::Error for HandlerError {}
 
 impl From<crate::effects::EffectError> for HandlerError {
     fn from(error: crate::effects::EffectError) -> Self {
-        match error {
+        let retry_after = match &error {
             crate::effects::EffectError::BindingAuthority { fault } => {
-                Self::Fatal(fault.stage_fatal())
+                return Self::Fatal(fault.stage_fatal())
             }
-            error => Self::Other(error.to_string()),
+            crate::effects::EffectError::RateLimited { retry_after, .. } => Some(*retry_after),
+            _ => None,
+        };
+        let message = error.semantic_reason().into_owned();
+        match error.error_kind() {
+            ErrorKind::Timeout => Self::Timeout(message),
+            ErrorKind::Remote => Self::Remote(message),
+            ErrorKind::RateLimited => Self::RateLimited {
+                message,
+                retry_after,
+            },
+            ErrorKind::PermanentFailure => Self::PermanentFailure(message),
+            ErrorKind::Deserialization => Self::Deserialization(message),
+            ErrorKind::Validation => Self::Validation(message),
+            ErrorKind::Domain => Self::Domain(message),
+            ErrorKind::Unknown => Self::Other(message),
         }
     }
 }

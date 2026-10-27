@@ -143,7 +143,11 @@ impl Context {
         if let Entry::Vacant(entry) = self.journals.entry(record.journal.id) {
             // An earlier clock may have referenced this journal before its
             // metadata arrived. Resolve its legend name without renumbering.
-            entry.insert(JournalContext::new(&record.journal));
+            let mut journal = JournalContext::new(&record.journal);
+            if let Some(name) = self.ancestor_names.get(&record.journal.id) {
+                journal.name = name.clone();
+            }
+            entry.insert(journal);
             self.journal_label_updates.insert(record.journal.id);
         }
         self.number_journal(record.journal.id);

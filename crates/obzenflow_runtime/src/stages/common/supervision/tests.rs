@@ -868,6 +868,102 @@ async fn missing_or_saturated_observations_do_not_gate_fact_commit_or_terminal_a
     assert_eq!(protected[0], protected[1]);
 }
 
+#[tokio::test]
+async fn the_data_journal_refuses_an_error_marked_row_under_any_commit_options() {
+    use super::output_committer::{CommitOptions, OutputCommitter};
+    use obzenflow_core::event::payloads::effect_payload::EffectRecord;
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+
+    let stage = StageId::new();
+    let journal_impl = Arc::new(NoopJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+    let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let committer = OutputCommitter {
+        data_journal: &journal,
+        flow_context: None,
+
+        instrumentation: Some(&instrumentation),
+        heartbeat_state: None,
+        output_contract: None,
+        backpressure_writer: None,
+        observer_scope: MiddlewareExecutionScope::LiveHandler,
+    };
+    let rejected = ChainEventFactory::data_event(
+        stage.into(),
+        "probe.order",
+        std::num::NonZeroU32::MIN,
+        json!({"customer": null, "id": 2}),
+    )
+    .mark_as_error("order 2 has no customer", ErrorKind::Validation);
+    let failed_call: EffectRecord = serde_json::from_value(json!({
+        "cursor": {
+            "recorded_flow_id": FlowId::new(),
+            "stage_key": "score",
+            "input_seq": 1,
+            "effect_ordinal": 0
+        },
+        "descriptor_hash": "fixture",
+        "descriptor": {
+            "effect_type": "risk.score",
+            "label": "score",
+            "schema_version": 1,
+            "stage_logic_version": "v1",
+            "canonical_input_hash": "fixture",
+            "binding": {"mode": "portless"}
+        },
+        "observation": {
+            "observation": "execution_failed",
+            "authority": "port_return",
+            "external_completion": "unknown"
+        },
+        "outcome": {
+            "outcome": "failed",
+            "error_type": "timeout",
+            "error_message": "risk engine unavailable",
+            "retry": "retryable"
+        }
+    }))
+    .expect("effect record");
+    let marked_call = ChainEventFactory::execution_event(
+        stage.into(),
+        ExecutionPayload::EffectRecord(failed_call),
+    )
+    .mark_as_error("risk engine unavailable", ErrorKind::Remote);
+
+    for event in [rejected, marked_call] {
+        for options in [
+            CommitOptions::default(),
+            CommitOptions {
+                count_output: true,
+                validate_output_contract: true,
+            },
+            CommitOptions {
+                count_output: false,
+                validate_output_contract: false,
+            },
+        ] {
+            let error = committer
+                .commit_prebuilt(event.clone(), None, options)
+                .await
+                .expect_err("an error-marked row is refused");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "data journal refused error-marked `{}`; a rejected record belongs in the error journal of the stage that rejected it",
+                    event.event_type()
+                )
+            );
+        }
+    }
+    assert!(journal_impl.records.lock().unwrap().is_empty());
+    assert_eq!(
+        instrumentation
+            .events_emitted_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
     // One healthy downstream trickling acks, one wedged: the spurious wakes

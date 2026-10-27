@@ -8,6 +8,7 @@
 use super::payload::{abbreviated, compact, pretty, safe_text, wrap_fields};
 use super::view::{Category, ClockView, EventView, HeaderView, InputsView, ReplayNote};
 use super::Error;
+use obzenflow::journal::read::{RecordedAt, RunRecord};
 use serde::Serialize;
 use std::io::Write;
 
@@ -80,7 +81,13 @@ impl TerminalRenderer {
         if matches!(self.options.mode, OutputMode::Jsonl) {
             // The universal view retains the source. Machine output never
             // needs human aliases, parent resolution, payload projection or proof.
-            serde_json::to_writer(&mut *output, view.source())?;
+            serde_json::to_writer(
+                &mut *output,
+                &JsonlRecord {
+                    record: view.source(),
+                    repeat_of: view.repeat_of(),
+                },
+            )?;
             writeln!(output)?;
             return Ok(());
         }
@@ -152,7 +159,12 @@ impl TerminalRenderer {
                 Span::new(&header.reporter, Role::Reporter),
                 Span::new(
                     format!(
-                        ", journal: {}{})",
+                        ", {}: {}{})",
+                        if header.error_journal {
+                            "error journal"
+                        } else {
+                            "journal"
+                        },
                         header.journal,
                         header.phase.as_deref().unwrap_or_default()
                     ),
@@ -183,7 +195,14 @@ impl TerminalRenderer {
             // above the same payload inside its canonical envelope.
             self.json(output, view.source(), false)?;
         } else {
-            self.json(output, &view.body(), header.category == Category::Runtime)?;
+            self.json(
+                output,
+                &view.body(),
+                header.category == Category::Runtime && !header.error_journal,
+            )?;
+        }
+        if let Some(marker) = view.lineage_marker() {
+            self.spans(output, &palette, &[Span::new(marker, Role::Muted)])?;
         }
         if explain {
             self.spans(
@@ -300,6 +319,14 @@ impl TerminalRenderer {
         };
         format!("\x1b[{emphasis}38;5;{shade}m{text}\x1b[0m")
     }
+}
+
+#[derive(Serialize)]
+struct JsonlRecord<'a> {
+    #[serde(flatten)]
+    record: &'a RunRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_of: Option<&'a RecordedAt>,
 }
 
 fn plain(spans: &[Span]) -> String {

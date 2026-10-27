@@ -673,24 +673,6 @@ pub(super) fn build_effect_record_event(
         &parent.authored(),
         deterministic_effect_record_event_time(&record.cursor),
     );
-    if let EffectOutcomePayload::Failed { error_message, .. } = &record.outcome {
-        event.processing.status =
-            obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(
-                error_message.clone(),
-                Some(
-                    if matches!(
-                        record.observation,
-                        EffectObservation::OutcomePreparationFailed {}
-                            | EffectObservation::ExecutionRejected {}
-                    ) {
-                        obzenflow_core::event::status::processing_status::ErrorKind::Validation
-                    } else {
-                        obzenflow_core::event::status::processing_status::ErrorKind::Remote
-                    },
-                ),
-            );
-    }
-
     Ok(event)
 }
 

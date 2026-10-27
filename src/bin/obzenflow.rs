@@ -366,8 +366,10 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         std::env::var_os("NO_COLOR").is_some(),
         snapshot.journals(),
     );
-    renderer.name_ancestor_journals(ancestor_journals(&snapshot).await);
+    let lineage = read_lineage(&snapshot).await?;
+    renderer.name_ancestor_journals(lineage.journals);
     renderer.begin(&mut output, snapshot.identity(), view.follow)?;
+    renderer.lineage(&mut output, lineage.source_errors, lineage.rejections)?;
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     if !view.follow {
@@ -412,25 +414,51 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
     .await
 }
 
-async fn ancestor_journals(snapshot: &RunSnapshot) -> Vec<(RunJournal, String)> {
+#[derive(Default)]
+struct Lineage {
+    journals: Vec<(RunJournal, String)>,
+    source_errors: Vec<RunRecord>,
+    rejections: LineageRejections,
+}
+
+async fn read_lineage(snapshot: &RunSnapshot) -> Result<Lineage, Error> {
     let Ok(lineage) = snapshot.lineage() else {
-        return Vec::new();
+        return Ok(Lineage::default());
     };
-    let mut journals = Vec::new();
-    for holder in lineage.evidence.iter().filter(|holder| !holder.missing) {
-        let Ok(run) = open_disk_run(&holder.run).await else {
+    let mut read = Lineage::default();
+    for holder in lineage
+        .evidence
+        .iter()
+        .rev()
+        .filter(|holder| !holder.missing)
+    {
+        let Ok(mut run) = open_disk_run(&holder.run).await else {
             continue;
         };
         let label = holder.generation.map_or_else(
             || run.identity().flow_id.to_string(),
             |generation| format!("gen {generation}"),
         );
-        journals.extend(
+        read.journals.extend(
             run.journals()
                 .map(|journal| (journal.clone(), label.clone())),
         );
+        let mut records = Vec::new();
+        while let Some(record) = run.next().await? {
+            records.push(record);
+        }
+        read.rejections.fold_run(&records);
+        read.source_errors
+            .extend(records.into_iter().filter(|record| {
+                record.journal.kind == RunJournalKind::Error
+                    && record
+                        .journal
+                        .stage
+                        .as_ref()
+                        .is_some_and(|stage| stage.stage_type.is_source())
+            }));
     }
-    journals
+    Ok(read)
 }
 
 /// The wait is reached only after the real tail read and settlement decision.

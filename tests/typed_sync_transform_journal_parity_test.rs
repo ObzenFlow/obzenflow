@@ -349,7 +349,16 @@ fn try_map_error_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<(u64,
     events
         .iter()
         .filter_map(|envelope| {
-            let record = TryMapRecord::from_event(&envelope.authored())?;
+            let ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) =
+                &envelope.payload
+            else {
+                return None;
+            };
+            if failure.input.event_type.0 != TryMapRecord::event_type_name() {
+                return None;
+            }
+            let record: TryMapRecord =
+                serde_json::from_value(failure.input.payload.clone()).ok()?;
             let ProcessingStatus::Error {
                 kind: Some(kind), ..
             } = &envelope.envelope.provenance.event.processing.status
@@ -686,26 +695,29 @@ async fn assert_journal_parity(console: bool) {
             TryMapRecord::from_event(&envelope.authored()).is_some_and(|record| record.index == 0)
         })
         .expect("source journal contains rejected try-map input");
-    let error_parent = live_try_map_errors
+    let error_record = live_try_map_errors
         .iter()
-        .find(|envelope| TryMapRecord::matches_event_type(&envelope.event_type()))
-        .expect("try-map error journal contains rejected parent");
+        .find(|envelope| {
+            matches!(
+                &envelope.payload,
+                ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure))
+                    if failure.input.event_type.0 == TryMapRecord::event_type_name()
+            )
+        })
+        .expect("try-map error journal records the rejected input");
     assert_eq!(
-        error_parent.envelope.provenance.event.id,
-        rejected_input.envelope.provenance.event.id
-    );
-    assert_eq!(
-        error_parent.envelope.provenance.event.writer_id,
-        rejected_input.envelope.provenance.event.writer_id
-    );
-    assert_eq!(
-        error_parent.envelope.provenance.event.causality.parent_ids,
-        rejected_input
+        error_record
             .envelope
             .provenance
             .event
             .causality
             .parent_ids
+            .first(),
+        Some(&rejected_input.envelope.provenance.event.id)
+    );
+    assert_eq!(
+        error_record.envelope.provenance.event.writer_id,
+        stage_writer(&live, "try_map")
     );
 
     run(&journal_base, Some(&live), console).await;

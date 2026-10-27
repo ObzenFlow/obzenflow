@@ -7,6 +7,7 @@
 mod replay_testkit;
 
 use obzenflow::stages::stateful::{self, emit};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
@@ -427,25 +428,28 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
         aggregate_ranking_sink,
     } = journals;
     assert!(
-        validate_errors.is_empty(),
-        "ordinary in-band transform errors remain on the data path"
+        !validate.iter().any(|envelope| matches!(
+            envelope.envelope.provenance.event.processing.status,
+            ProcessingStatus::Error { .. }
+        )),
+        "the validator's data journal holds no error-marked row"
     );
-    let pre_errors = validate
+    let rejected = validate_errors
         .iter()
-        .filter(|envelope| {
-            matches!(
-                envelope.envelope.provenance.event.processing.status,
-                ProcessingStatus::Error { .. }
-            )
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                serde_json::from_value::<Input>(failure.input.payload.clone()).ok()
+            }
+            _ => None,
         })
-        .filter_map(|envelope| Input::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(
-        pre_errors,
+        rejected,
         vec![Input {
             value: 3,
             key: "a".into()
-        }]
+        }],
+        "the validator records its rejection in its error journal"
     );
 
     let successful_inputs = validate

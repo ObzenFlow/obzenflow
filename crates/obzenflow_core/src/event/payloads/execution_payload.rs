@@ -79,7 +79,8 @@ pub enum ExecutionPayload {
     Recovery(RecoveryFact),
     RateLimiter(RateLimiterFact),
     Backpressure(BackpressureFact),
-    SourcePollError(SourcePollErrorFact),
+    SourceRecordRejected(SourceRecordRejectedFact),
+    SourcePollFailed(SourcePollFailedFact),
     SourceOpenFailed(SourceOpenFailedFact),
     SourceReaderAcquired(SourceReaderAcquiredFact),
     SourceCleanupSucceeded(SourceCleanupSucceededFact),
@@ -102,6 +103,7 @@ pub enum ExecutionPayload {
     JoinPhase(JoinPhaseFact),
     SinkAudit(super::delivery_payload::SinkAuditPayload),
     StageFatalRecorded(super::stage_fatal_payload::StageFatalRecorded),
+    StageProcessingFailed(super::stage_processing_payload::StageProcessingFailed),
     SinkOperationFailed(super::sink_operation_payload::SinkOperationFailed),
     EffectRecord(EffectRecord),
     EffectAttemptStarted(EffectAttemptStarted),
@@ -528,14 +530,23 @@ pub enum SourceOpenIntent {
     Resume,
 }
 
+/// A row a source refused and read past.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourcePollErrorFact {
-    pub source_type: SourcePollKind,
-    pub error_type: SourcePollErrorKind,
+pub struct SourceRecordRejectedFact {
+    pub kind: ErrorKind,
+    pub detail: String,
+    pub diagnostic: super::source_diagnostic::SourceDiagnostic,
+}
+
+/// Any other source poll error, including one that stops the source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePollFailedFact {
+    pub kind: ErrorKind,
+    pub detail: String,
     pub continuation: SourcePollContinuation,
     pub diagnostic: super::source_diagnostic::SourceDiagnostic,
-    pub timestamp_ms: u64,
 }
 
 /// Opening evidence, distinct from a poll failure; no poll occurred.
@@ -690,9 +701,9 @@ pub struct AiChunkingPlannedFact {
 impl ExecutionPayload {
     pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
         match self {
-            Self::SinkOperationFailed(_)
-            | Self::SourcePollError(_)
-            | Self::SourceCleanupFailed(_) => std::num::NonZeroU32::new(2).unwrap(),
+            Self::SinkOperationFailed(_) | Self::SourceCleanupFailed(_) => {
+                std::num::NonZeroU32::new(2).unwrap()
+            }
             _ => std::num::NonZeroU32::MIN,
         }
     }
@@ -717,7 +728,8 @@ impl ExecutionPayload {
             Self::Recovery(fact) => fact.event_type(),
             Self::RateLimiter(fact) => fact.event_type(),
             Self::Backpressure(_) => vocabulary::backpressure::STALL_DETECTED,
-            Self::SourcePollError(_) => "source.poll_error",
+            Self::SourceRecordRejected(_) => vocabulary::source::RECORD_REJECTED,
+            Self::SourcePollFailed(_) => vocabulary::source::POLL_FAILED,
             Self::SourceOpenFailed(_) => vocabulary::source::OPEN_FAILED,
             Self::SourceReaderAcquired(_) => vocabulary::source::READER_ACQUIRED,
             Self::SourceCleanupSucceeded(_) => vocabulary::source::CLEANUP_SUCCEEDED,
@@ -735,6 +747,7 @@ impl ExecutionPayload {
             Self::JoinPhase(fact) => fact.event_type(),
             Self::SinkAudit(audit) => audit.event_type(),
             Self::StageFatalRecorded(_) => "obzenflow.stage_fatal_recorded",
+            Self::StageProcessingFailed(_) => vocabulary::stage::PROCESSING_FAILED,
             Self::SinkOperationFailed(_) => "obzenflow.sink_operation_failed",
             Self::EffectRecord(record) => record.event_type(),
             Self::EffectAttemptStarted(_) => {
@@ -752,6 +765,7 @@ impl ExecutionPayload {
     pub const fn consumes_data_credit(&self) -> bool {
         match self {
             Self::StageFatalRecorded(_)
+            | Self::StageProcessingFailed(_)
             | Self::SinkOperationFailed(_)
             | Self::EffectRecord(_)
             | Self::EffectAttemptStarted(_)
@@ -767,7 +781,8 @@ impl ExecutionPayload {
             | Self::Recovery(_)
             | Self::RateLimiter(_)
             | Self::Backpressure(_)
-            | Self::SourcePollError(_)
+            | Self::SourceRecordRejected(_)
+            | Self::SourcePollFailed(_)
             | Self::SourceOpenFailed(_)
             | Self::SourceReaderAcquired(_)
             | Self::SourceCleanupSucceeded(_)

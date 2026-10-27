@@ -268,6 +268,7 @@ fn runs(journal_root: &Path) -> Vec<PathBuf> {
 
 struct Archive {
     rows: Vec<(String, JournalRecord<ChainPayload>)>,
+    error_rows: Vec<(String, JournalRecord<ChainPayload>)>,
     stage_ids: BTreeMap<String, StageId>,
 }
 
@@ -279,6 +280,7 @@ impl Archive {
                 let mut snapshot = open_disk_run(run).await.expect("the archive opens");
                 let mut archive = Self {
                     rows: Vec::new(),
+                    error_rows: Vec::new(),
                     stage_ids: BTreeMap::new(),
                 };
                 while let Some(record) = snapshot.next().await.expect("the archive reads") {
@@ -286,10 +288,14 @@ impl Archive {
                         continue;
                     };
                     archive.stage_ids.insert(stage.key.clone(), stage.id);
-                    if let (RunJournalKind::Data, RunRecordData::Chain(row)) =
-                        (record.journal.kind, record.record)
-                    {
-                        archive.rows.push((stage.key, *row));
+                    match (record.journal.kind, record.record) {
+                        (RunJournalKind::Data, RunRecordData::Chain(row)) => {
+                            archive.rows.push((stage.key, *row));
+                        }
+                        (RunJournalKind::Error, RunRecordData::Chain(row)) => {
+                            archive.error_rows.push((stage.key, *row));
+                        }
+                        _ => {}
                     }
                 }
                 archive
@@ -304,6 +310,13 @@ impl Archive {
             .iter()
             .filter(move |(key, _)| key == stage)
             .map(|(_, row)| row)
+    }
+
+    fn errors(&self, stage: &str) -> usize {
+        self.error_rows
+            .iter()
+            .filter(|(key, _)| key == stage)
+            .count()
     }
 
     fn facts(&self, stage: &str, event_type: &str) -> Vec<serde_json::Value> {
@@ -750,6 +763,11 @@ fn the_outage_stub_refuses_every_score_and_a_replay_naming_the_simulated_engine_
     assert!(failures
         .iter()
         .all(|(source, code)| source == "risk_engine" && code == "unavailable"));
+    assert_eq!(
+        archive.errors("score"),
+        0,
+        "a failed call's record commits without the mark"
+    );
 
     let case_calls = line_count(&case_ledger);
     assert_eq!(

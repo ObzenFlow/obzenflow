@@ -59,8 +59,8 @@ use obzenflow::stages::sinks::{
     SinkRedeliverySafety, SinkWriteFailure, SinkWritePhase,
 };
 use obzenflow::stages::sources::{
-    HostedIngressSource, IngressDecoder, SourcePollErrorKind, YamlDecodeError, YamlDecoder,
-    YamlRecord, YamlSelection, YamlSource,
+    HostedIngressSource, IngressDecoder, YamlDecodeError, YamlDecoder, YamlRecord, YamlSelection,
+    YamlSource,
 };
 use obzenflow::stages::stateful::{Accumulator, OnEOF, StatefulWithEmission};
 use obzenflow::stages::transforms::EffectfulTransformHandler;
@@ -612,7 +612,7 @@ fn durable_execution_contract_child() {
     let mut app = FlowApplication::builder().with_cli_args(args);
     let scenario = &plan.scenario;
     let result = match scenario.graph {
-        Graph::Payment => {
+        Graph::Payment | Graph::NarrowPayment => {
             let web = match scenario.http {
                 Some(_) => WebOrders::Http(app.http_ingress(
                     HttpOrders,
@@ -639,6 +639,7 @@ fn durable_execution_contract_child() {
             app.run_blocking(two_effects::build_flow(scenario, plan.hold, plan.fix))
         }
         Graph::EmitOnly => app.run_blocking(emit_only::build_flow(scenario)),
+        Graph::RejectedCall => app.run_blocking(rejected_call::build_flow(scenario)),
         Graph::FlashSale => app
             .with_config_file(flash_sale::config(scenario))
             .run_blocking(flash_sale::build_flow(scenario)),
@@ -673,6 +674,7 @@ struct Scenario {
 enum Graph {
     #[default]
     Payment,
+    NarrowPayment,
     ThenLive,
     ThenLiveEffect,
     ThenLiveBatchStream,
@@ -683,6 +685,7 @@ enum Graph {
     PaymentDemo,
     TwoEffects,
     EmitOnly,
+    RejectedCall,
     FlashSale,
     RateLimitedSink,
     UnorderedFanIn,
@@ -691,9 +694,15 @@ enum Graph {
 
 fn payment_config(scenario: &Scenario) -> PathBuf {
     let path = scenario.root.join("obzenflow.toml");
+    let window = match scenario.graph {
+        Graph::NarrowPayment => 2,
+        _ => 4,
+    };
     std::fs::write(
         &path,
-        "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = 4\nstall_timeout_ms = 120000\n",
+        format!(
+            "[runtime.backpressure.flow]\nmode = \"enforce\"\nwindow = {window}\nstall_timeout_ms = 120000\n"
+        ),
     )
     .expect("write the configuration");
     path
@@ -712,6 +721,12 @@ impl Scenario {
     fn fresh(name: &str) -> Self {
         let scenario = Self::create(name, None);
         std::fs::write(scenario.web_input(), web_input()).expect("write web orders");
+        scenario
+    }
+
+    fn narrow(name: &str) -> Self {
+        let mut scenario = Self::fresh(name);
+        scenario.graph = Graph::NarrowPayment;
         scenario
     }
 
@@ -1331,6 +1346,17 @@ impl Archive {
         delivered
     }
 
+    fn rejected_rows(&self) -> BTreeSet<u64> {
+        self.rows("store_orders", RunJournalKind::Error)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(rejected)) => {
+                    rejected.diagnostic.location().record_index()
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The store channel's record rejections.
     fn rejections(&self) -> usize {
         ["store_orders"]
@@ -1343,8 +1369,7 @@ impl Archive {
             .filter(|row| {
                 matches!(
                     &row.payload,
-                    ChainPayload::Execution(ExecutionPayload::SourcePollError(error))
-                        if error.error_type == SourcePollErrorKind::Validation
+                    ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(_))
                 )
             })
             .count()
@@ -1642,7 +1667,8 @@ impl History {
                 (ended, _) => panic!("{name} {dir}: {ended:?} does not end this history"),
             }
             // I2: its rejection lives in the run that read it, found by links.
-            // A lineage that never read past the invalid record holds none.
+            // It can commit before the next record, so a run cut short of
+            // S-03 may already hold it, and its resume records it again.
             let read_past = seen.contains(FIRST_AFTER_INVALID);
             let mut lineage = vec![archive.dir.clone()];
             while let Some(link) = self
@@ -1660,10 +1686,14 @@ impl History {
                     .map(|(archive, _)| archive)
             };
             let rejections: usize = along().map(Archive::rejections).sum();
-            assert_eq!(
-                rejections,
-                usize::from(read_past),
-                "{name} {dir}: rejections along {lineage:?}"
+            let rows: BTreeSet<u64> = along().flat_map(Archive::rejected_rows).collect();
+            assert!(
+                rows.len() <= 1 && (!read_past || rows.len() == 1),
+                "{name} {dir}: rejected rows {rows:?} along {lineage:?}"
+            );
+            assert!(
+                rejections >= rows.len(),
+                "{name} {dir}: each rejected row is recorded at least once"
             );
             // The invalid HTTP order's refusal lives in the run that received it.
             let refused = http_refused_in
@@ -1951,12 +1981,34 @@ impl History {
                 .iter()
                 .map(|record| serde_json::to_value(record).expect("a record serializes"))
                 .collect();
+            let run = read.first().map(|record| record["run"].clone());
+            let (own, lineage): (Vec<_>, Vec<_>) = shown
+                .into_iter()
+                .partition(|line| Some(&line["run"]) == run.as_ref());
+            let own: Vec<_> = own
+                .into_iter()
+                .map(|mut line| {
+                    line.as_object_mut().expect("a record").remove("repeat_of");
+                    line
+                })
+                .collect();
             assert_eq!(
-                shown,
+                own,
                 read,
                 "{}: show differs from the checker",
                 archive.dir.display()
             );
+            for line in &lineage {
+                assert_eq!(
+                    (
+                        line["journal"]["kind"].as_str(),
+                        line["journal"]["stage"]["stage_type"].as_str()
+                    ),
+                    (Some("error"), Some("FiniteSource")),
+                    "{}: show lists only earlier runs' source error records",
+                    archive.dir.display()
+                );
+            }
             println!(
                 "{}: {} · obzenflow show {}",
                 self.name,
@@ -2294,6 +2346,97 @@ async fn durable_execution_contract() {
         );
         never_pinned.report();
     }
+
+    let s9 = Scenario::narrow("s9");
+    let mut repeated = History::new("S9", &s9);
+    let child = Child::spawn(&s9, Vec::new(), Some(Hold::Gateway("S-01".into())));
+    let killed = child.run().await;
+    cut(&killed, "S9", |archive| {
+        archive.rejections() == 1
+            && s9.calls().iter().any(|call| call.order_id() == "S-01")
+            && !archive
+                .admitted()
+                .iter()
+                .any(|(order, _)| order == FIRST_AFTER_INVALID)
+    })
+    .await;
+    child.signal(Signal::Kill);
+    assert!(!child.exit().await.success());
+    repeated
+        .record(&killed, Ended::Interrupted { killed: true })
+        .await;
+    let resumed = Child::spawn(&s9, resume(&killed), None).completed().await;
+    let again = repeated.record(&resumed, Ended::Natural).await;
+    assert_eq!(
+        again.rejections(),
+        1,
+        "S9: the resumed run rejects S-BAD again"
+    );
+    let replayed = strict_replay(&mut repeated, &resumed).await;
+    for run in [&resumed, &replayed] {
+        assert_repeat_shown_once(run, &killed, &resumed);
+    }
+    repeated.check(Some(&reference));
+    repeated.report();
+}
+
+fn assert_repeat_shown_once(run: &Path, first_run: &Path, second_run: &Path) {
+    let show = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+            .arg("show")
+            .arg(run)
+            .args(args)
+            .output()
+            .expect("obzenflow show runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("show prints UTF-8")
+    };
+    let flow_id = |dir: &Path| {
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join("run_manifest.json")).expect("a manifest"),
+        )
+        .expect("the manifest parses");
+        manifest["flow_id"]
+            .as_str()
+            .expect("a flow id")
+            .trim_start_matches("flow_")
+            .to_string()
+    };
+    let rejected: Vec<serde_json::Value> = show(&["--jsonl"])
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("one record per line"))
+        .filter(|line| {
+            line["record"]["envelope"]["provenance"]["event"]["event_type"]
+                == "runtime.source.record_rejected"
+        })
+        .collect();
+    assert_eq!(rejected.len(), 2, "{}: {rejected:?}", run.display());
+    assert_eq!(rejected[0]["run"]["flow_id"], json!(flow_id(first_run)));
+    assert_eq!(rejected[1]["run"]["flow_id"], json!(flow_id(second_run)));
+    assert!(rejected[0].get("repeat_of").is_none());
+    assert_eq!(
+        rejected[1]["repeat_of"],
+        json!({
+            "run": rejected[0]["run"],
+            "journal": rejected[0]["journal"],
+            "position": rejected[0]["position"]
+        })
+    );
+    let human = show(&["--color", "never"]);
+    let journals = human
+        .split_once("\nJOURNALS\n")
+        .expect("a journal summary")
+        .1;
+    let store = journals
+        .lines()
+        .find(|line| line.trim_start().starts_with("store_orders"))
+        .expect("the store channel's counts");
+    assert!(store.trim_end().ends_with(" 1 Validation"), "{store}");
+    assert!(journals.contains("\n  A row rejected again after a crash counts once.\n"));
 }
 
 /// FLOWIP-084l B5: the HTTP rows. One lineage over the mixed store and HTTP
@@ -4397,6 +4540,246 @@ mod emit_only {
             archive.manifest()["recorded_flow_id"],
             namespace,
             "{name}: the head mints in the original run's namespace"
+        );
+    }
+}
+
+mod rejected_call {
+    use super::*;
+    use obzenflow::journal::EffectOutcomePayload;
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+
+    const ORDERS: [&str; 3] = ["Q-01", "Q-02", "Q-03"];
+    const UNREACHABLE: &str = "Q-02";
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct QuoteOrder {
+        order_id: String,
+    }
+    impl TypedPayload for QuoteOrder {
+        const EVENT_TYPE: &'static str = "durable_contract.rejected_call.order";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Quoted {
+        order_id: String,
+    }
+    impl TypedPayload for Quoted {
+        const EVENT_TYPE: &'static str = "durable_contract.rejected_call.quoted";
+    }
+
+    fn desk_log(scenario: &Scenario) -> PathBuf {
+        scenario.root.join("quote-desk.jsonl")
+    }
+
+    fn input(scenario: &Scenario) -> PathBuf {
+        scenario.inputs.join("quotes.yaml")
+    }
+
+    fn fresh(name: &str) -> Scenario {
+        let scenario = Scenario::for_graph(name, Graph::RejectedCall);
+        let orders: String = ORDERS
+            .iter()
+            .map(|order| format!("  - order_id: \"{order}\"\n"))
+            .collect();
+        std::fs::write(input(&scenario), format!("orders:\n{orders}")).expect("write orders");
+        scenario
+    }
+
+    #[derive(Clone, Debug)]
+    struct QuoteOrderYaml;
+    impl YamlDecoder for QuoteOrderYaml {
+        type Output = QuoteOrder;
+        fn decode(&self, record: YamlRecord<'_>) -> Result<QuoteOrder, YamlDecodeError> {
+            record.deserialize()
+        }
+    }
+
+    #[obzenflow::port]
+    struct QuoteDesk {
+        path: PathBuf,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct RequestQuote {
+        order_id: String,
+    }
+
+    #[async_trait]
+    impl CallRequest for RequestQuote {
+        const EFFECT_TYPE: &'static str = "durable_contract.rejected_call.quote";
+        type Safety = RequiresKey;
+        type Port = QuoteDesk;
+        type Outcome = Quoted;
+
+        async fn call(
+            &self,
+            desk: &QuoteDesk,
+            _: &mut EffectContext,
+        ) -> Result<Quoted, EffectError> {
+            append_line(&desk.path, &self.order_id)
+                .map_err(|error| EffectError::Transport(error.to_string()))?;
+            if self.order_id == UNREACHABLE {
+                return Err(EffectError::Transport(
+                    "the quote desk refused the connection".into(),
+                ));
+            }
+            Ok(Quoted {
+                order_id: self.order_id.clone(),
+            })
+        }
+    }
+
+    impl Keyed for RequestQuote {
+        fn idempotency_key(&self) -> IdempotencyKey {
+            IdempotencyKey(format!("quote:{}", self.order_id))
+        }
+    }
+
+    type QuoteCall = obzenflow::effects::Call<RequestQuote>;
+
+    #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
+    struct Quote {
+        #[system]
+        desk: obzenflow::effects::System<QuoteDesk>,
+    }
+
+    #[async_trait]
+    impl EffectfulTransformHandler for Quote {
+        type Input = QuoteOrder;
+        type Output = Quoted;
+        type AllowedEffects = obzenflow::effects::effect_set![QuoteCall];
+
+        async fn process(
+            &self,
+            order: QuoteOrder,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            fx.call(RequestQuote {
+                order_id: order.order_id,
+            })
+            .await?;
+            Ok(fx.complete()?)
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
+        let orders_input = YamlSource::builder(QuoteOrderYaml)
+            .path(input(scenario))
+            .selection(YamlSelection::SequenceAt("/orders".into()))
+            .batch_size(1)
+            .build()
+            .expect("the order channel is configured");
+        let quote = Quote {
+            desk: obzenflow::effects::System::eager(
+                "quote-desk",
+                std::sync::Arc::new(QuoteDesk {
+                    path: desk_log(scenario),
+                }),
+            )
+            .expect("a valid system name"),
+        };
+        let journals = scenario.journals();
+        FlowDefinition::materialize(move |_runtime_config| {
+            let quoted = DiscardSink::<Quoted>::new();
+            Ok(flow! {
+                name: "durable_execution_contract_rejected_call",
+                journals: disk_journals(journals),
+
+                stages: {
+                    orders = source!(QuoteOrder => orders_input);
+                    quote = effectful_transform!(QuoteOrder -> Quoted => quote);
+                    quoted = sink!(Quoted => quoted);
+                },
+
+                topology: {
+                    orders |> quote;
+                    quote |> quoted;
+                }
+            })
+        })
+    }
+
+    fn rejections(archive: &Archive) -> Vec<(ErrorKind, String, serde_json::Value)> {
+        archive
+            .rows("quote", RunJournalKind::Error)
+            .filter_map(|row| match &row.payload {
+                ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                    Some((
+                        failure.kind.clone(),
+                        failure.detail.clone(),
+                        failure.input.payload.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_strict_replay_records_a_failed_calls_rejection_once_with_its_kind() {
+        let name = "rejected_call";
+        let scenario = fresh(name);
+        let run = Child::spawn(&scenario, Vec::new(), None).completed().await;
+        assert_eq!(read_lines::<String>(&desk_log(&scenario)), ORDERS);
+        let live = Archive::read(&run).await;
+        let recorded = rejections(&live);
+        assert_eq!(
+            recorded,
+            [(
+                ErrorKind::Remote,
+                recorded[0].1.clone(),
+                json!({ "order_id": UNREACHABLE })
+            )],
+            "{name}: the call error's own kind is recorded"
+        );
+        assert!(
+            live.rows("quote", RunJournalKind::Data).any(|row| {
+                row.envelope.provenance.event.processing.status.is_success()
+                    && matches!(
+                        &row.payload,
+                        ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                            if matches!(record.outcome, EffectOutcomePayload::Failed { .. })
+                    )
+            }),
+            "{name}: the failed call's record is unmarked"
+        );
+
+        remove_input(&input(&scenario));
+        let replayed = Child::spawn(&scenario, replay(&run), None)
+            .completed()
+            .await;
+        assert_eq!(
+            read_lines::<String>(&desk_log(&scenario)),
+            ORDERS,
+            "{name}: the replay calls nothing"
+        );
+        let (code, report) = verify_exit(&run, &replayed);
+        assert_eq!(code, Some(0), "{name}: {report}");
+        assert_eq!(
+            rejections(&Archive::read(&replayed).await),
+            recorded,
+            "{name}: the replay records the same kind and detail"
+        );
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+            .arg("show")
+            .arg(&replayed)
+            .arg("--jsonl")
+            .output()
+            .expect("obzenflow show runs");
+        assert!(output.status.success());
+        let listed = String::from_utf8(output.stdout)
+            .expect("show prints UTF-8")
+            .lines()
+            .filter(|line| line.contains("\"runtime.stage.processing_failed\""))
+            .count();
+        assert_eq!(
+            listed, 1,
+            "{name}: show of the replay lists the rejection once"
         );
     }
 }

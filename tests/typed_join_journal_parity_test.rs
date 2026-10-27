@@ -624,27 +624,28 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
 
     let validator_rows = read_stage_appended(&live, "stream_validate").await;
     let validator_writer = stage_writer(&live, "stream_validate");
-    let foreign = validator_rows
-        .iter()
-        .find(|envelope| {
-            envelope.consumes_data_credit()
-                && matches!(
-                    envelope.envelope.provenance.event.processing.status,
-                    ProcessingStatus::Error { .. }
-                )
-        })
-        .expect("validator foreign-family error row");
-    let forwarded = live_join
-        .iter()
-        .find(|envelope| {
-            envelope.envelope.provenance.event.id == foreign.envelope.provenance.event.id
-        })
-        .expect("join forwards the same error envelope");
-    assert_eq!(
-        forwarded.envelope.provenance.event.writer_id,
-        foreign.envelope.provenance.event.writer_id
+    let error_marked = |envelope: &JournalRecord<ChainPayload>| {
+        matches!(
+            envelope.envelope.provenance.event.processing.status,
+            ProcessingStatus::Error { .. }
+        )
+    };
+    assert!(
+        !validator_rows.iter().any(error_marked),
+        "the validator's data journal holds no error-marked row"
     );
-    assert_eq!(forwarded.event_type(), foreign.event_type());
+    let rejections = replay_testkit::processing_failures(&live, "stream_validate").await;
+    let [(rejection, _)] = rejections.as_slice() else {
+        panic!("the validator records its one rejection: {rejections:?}");
+    };
+    assert_eq!(
+        rejection.envelope.provenance.event.writer_id,
+        validator_writer
+    );
+    assert!(
+        !live_join.iter().any(error_marked),
+        "the join receives no rejected row"
+    );
 
     let validator_authored = validator_rows
         .iter()

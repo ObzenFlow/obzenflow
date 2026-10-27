@@ -52,6 +52,11 @@ event_names! {
         REATTACHED => "reattached",
         CONTINUATION_REFUSED => "continuation_refused",
         SEEK_FAILED => "seek_failed",
+        RECORD_REJECTED => "record_rejected",
+        POLL_FAILED => "poll_failed",
+    },
+    stage => "stage" {
+        PROCESSING_FAILED => "processing_failed",
     },
     subscription => "subscription" {
         PROGRESS_REPORTED => "progress_reported",

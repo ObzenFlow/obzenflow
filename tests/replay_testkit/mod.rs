@@ -14,6 +14,7 @@
 
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::stage_processing_payload::StageProcessingFailed;
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
 use obzenflow_core::id::StageId;
@@ -105,6 +106,34 @@ pub async fn read_stage_envelopes_appended(
         .as_str()
         .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
     read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(stage_journal)).await
+}
+
+pub async fn read_stage_error_envelopes(
+    run_dir: &Path,
+    stage_key: &str,
+) -> Vec<JournalRecord<ChainPayload>> {
+    let manifest = archive_manifest(run_dir);
+    let error_journal = manifest["stages"][stage_key]["error_journal_file"]
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest should contain error journal for '{stage_key}'"));
+    read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(error_journal)).await
+}
+
+pub async fn processing_failures(
+    run_dir: &Path,
+    stage_key: &str,
+) -> Vec<(JournalRecord<ChainPayload>, StageProcessingFailed)> {
+    read_stage_error_envelopes(run_dir, stage_key)
+        .await
+        .into_iter()
+        .filter_map(|record| match &record.payload {
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                let failure = failure.clone();
+                Some((record, failure))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 pub async fn passing_verdicts(run_dir: &Path) -> BTreeMap<String, usize> {

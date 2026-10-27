@@ -14,8 +14,9 @@ use obzenflow_adapters::sources::{
 };
 use obzenflow_core::event::payloads::execution_payload::{
     ExecutionPayload, SourceCleanupPhase, SourceCleanupTrigger, SourceOpenIntent,
-    SourcePollContinuation, SourcePollErrorKind, StageLifecycleFact,
+    SourcePollContinuation, StageLifecycleFact,
 };
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord, SourceDiagnosticReason};
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, RequestSpec};
 use obzenflow_core::{EventId, TypedPayload};
@@ -218,7 +219,7 @@ async fn fatal_decode_after_a_valid_page_fails_without_eof_and_replays_cold() {
     let failures: Vec<_> = errors
         .iter()
         .filter_map(|row| match &row.payload {
-            ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
+            ChainPayload::Execution(ExecutionPayload::SourcePollFailed(failure)) => {
                 Some((row.envelope.provenance.event.id, failure))
             }
             _ => None,
@@ -227,7 +228,7 @@ async fn fatal_decode_after_a_valid_page_fails_without_eof_and_replays_cold() {
     assert_eq!(failures.len(), 1, "{failures:?}");
     let (diagnostic_id, failure) = failures[0];
     assert_eq!(failure.continuation, SourcePollContinuation::Terminal);
-    assert_eq!(failure.error_type, SourcePollErrorKind::Validation);
+    assert_eq!(failure.kind, ErrorKind::Validation);
     assert_eq!(
         failure.diagnostic.reason(),
         SourceDiagnosticReason::RemoteRejected
@@ -258,6 +259,8 @@ async fn fatal_decode_after_a_valid_page_fails_without_eof_and_replays_cold() {
     );
     assert!(!replay_errors.iter().any(|row| matches!(
         row.payload,
-        ChainPayload::Execution(ExecutionPayload::SourcePollError(_))
+        ChainPayload::Execution(
+            ExecutionPayload::SourcePollFailed(_) | ExecutionPayload::SourceRecordRejected(_)
+        )
     )));
 }

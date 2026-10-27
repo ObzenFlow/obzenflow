@@ -3521,7 +3521,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         .expect_err("the domain-fact append failure leaves the input unsettled");
     assert!(matches!(
         error,
-        crate::stages::common::handler_error::HandlerError::Other(_)
+        crate::stages::common::handler_error::HandlerError::PermanentFailure(_)
             | crate::stages::common::handler_error::HandlerError::Fatal(_)
     ));
     assert_eq!(live_consults.load(Ordering::SeqCst), 1);
@@ -8090,18 +8090,20 @@ async fn local_preparation_failure_is_distinct_and_capture_failure_has_no_termin
             .perform(PreparationFailureEffect { binding: bound() })
             .await
             .is_err());
+        let record = &effect_records(&journal)[0];
         assert_eq!(
-            effect_records(&journal)[0].observation,
+            record.observation,
             EffectObservation::OutcomePreparationFailed {}
         );
+        assert!(matches!(
+            record.outcome,
+            EffectOutcomePayload::Failed { .. }
+        ));
         let events = journal.events();
         assert_eq!(events[0].event_type(), "effect.outcome_preparation_failed");
         assert!(matches!(
             events[0].envelope.provenance.event.processing.status,
-            obzenflow_core::event::status::processing_status::ProcessingStatus::Error {
-                kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Validation),
-                ..
-            }
+            obzenflow_core::event::status::processing_status::ProcessingStatus::Success
         ));
     }
 }

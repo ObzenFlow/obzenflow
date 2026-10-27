@@ -433,12 +433,12 @@ fn every_source_supervisor_closes_poll_timing_before_error_normalisation() {
         let duration_capture = live_poll
             .find("poll_started_at.elapsed()")
             .unwrap_or_else(|| panic!("{relative} must capture raw poll duration"));
-        let normalisation = live_poll
-            .find("normalise_source_poll_error(")
-            .unwrap_or_else(|| panic!("{relative} must retain source-error normalisation"));
+        let record = live_poll
+            .find("source_poll_error_record(")
+            .unwrap_or_else(|| panic!("{relative} must record its poll errors"));
         assert!(
-            duration_capture < normalisation,
-            "{relative} must end poll_duration before normalising the raw result"
+            duration_capture < record,
+            "{relative} must end poll_duration before recording the raw result"
         );
     }
 }
