@@ -64,10 +64,6 @@ where
             emission,
         }
     }
-
-    pub(super) fn into_parts(self) -> (A, E) {
-        (self.accumulator, self.emission)
-    }
 }
 
 impl<A, E> Clone for StatefulWithEmission<A, E>
@@ -80,6 +76,52 @@ where
             accumulator: self.accumulator.clone(),
             emission: self.emission.clone(),
         }
+    }
+}
+
+/// A `group_by` or `conflate` with its emission strategy, before it names what
+/// each emission publishes.
+///
+/// `group_by` takes `.updated_groups()` or `.all_groups()`, and `conflate`
+/// takes `.updated_keys()` or `.all_keys()`. Each returns the
+/// [`StatefulWithEmission`] handler, and without one there is no handler:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_core::TypedPayload;
+/// # use serde::{Deserialize, Serialize};
+/// use obzenflow_runtime::stages::stateful::{emit, group_by, TypedStatefulHandler};
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct Sale { store: String, amount: u64 }
+/// # impl TypedPayload for Sale { const EVENT_TYPE: &'static str = "doc.sale"; }
+/// # #[derive(Clone, Debug, Serialize, Deserialize)]
+/// # struct StoreTotal(u64);
+/// # impl TypedPayload for StoreTotal { const EVENT_TYPE: &'static str = "doc.store_total"; }
+///
+/// fn stage(_: impl TypedStatefulHandler) {}
+///
+/// let totals = group_by(
+///     |sale: &Sale| sale.store.clone(),
+///     |total: &mut u64, sale: &Sale| *total += sale.amount,
+///     |_: &String, total: &u64| StoreTotal(*total),
+/// );
+/// stage(totals.emit(emit::always));
+/// ```
+#[derive(Clone, Debug)]
+pub struct KeyedEmission<A, E> {
+    accumulator: A,
+    emission: E,
+}
+
+impl<A, E> KeyedEmission<A, E> {
+    pub(super) fn new(accumulator: A, emission: E) -> Self {
+        Self {
+            accumulator,
+            emission,
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (A, E) {
+        (self.accumulator, self.emission)
     }
 }
 

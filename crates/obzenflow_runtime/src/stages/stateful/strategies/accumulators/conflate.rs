@@ -6,7 +6,7 @@
 
 use super::trace::TraceState;
 use super::wrapper::AccumulatorOutput;
-use super::{Accumulator, StatefulWithEmission};
+use super::{Accumulator, KeyedEmission, StatefulWithEmission};
 use crate::stages::common::handlers::stateful::TypedStatefulContribution;
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::TypedPayload;
@@ -36,30 +36,43 @@ impl<T, K, FKey> Conflate<T, K, FKey> {
     pub fn new(key_fn: FKey) -> Self {
         Self {
             key_fn,
-            projection: Projection::UpdatedKeys,
+            projection: Projection::EveryKey,
             _types: PhantomData,
         }
     }
 
-    /// Emits when `emission` decides, publishing the latest value of each key
-    /// that received one since the previous emission.
-    pub fn emit<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
+    /// Emits when `emission` decides, after `.updated_keys()` or `.all_keys()`
+    /// names the keys each emission publishes.
+    pub fn emit<E: EmissionStrategy>(self, emission: E) -> KeyedEmission<Self, E> {
+        KeyedEmission::new(self, emission)
+    }
+}
+
+impl<T, K, FKey, E> KeyedEmission<Conflate<T, K, FKey>, E>
+where
+    E: EmissionStrategy,
+{
+    /// Publishes the latest value of each key that received one since the
+    /// previous emission.
+    pub fn updated_keys(self) -> StatefulWithEmission<Conflate<T, K, FKey>, E> {
+        let (conflate, emission) = self.into_parts();
         let projection =
             if emission.resets_accumulator_on_emit() || emission.emits_only_at_end_of_input() {
                 Projection::EveryKey
             } else {
-                self.projection
+                Projection::UpdatedKeys
             };
-        StatefulWithEmission::new(Self { projection, ..self }, emission)
+        StatefulWithEmission::new(
+            Conflate {
+                projection,
+                ..conflate
+            },
+            emission,
+        )
     }
-}
 
-impl<T, K, FKey, E> StatefulWithEmission<Conflate<T, K, FKey>, E>
-where
-    E: EmissionStrategy,
-{
     /// Publishes every key's latest value at each emission.
-    pub fn all_keys(self) -> Self {
+    pub fn all_keys(self) -> StatefulWithEmission<Conflate<T, K, FKey>, E> {
         let (conflate, emission) = self.into_parts();
         StatefulWithEmission::new(
             Conflate {
@@ -274,7 +287,9 @@ mod tests {
 
     #[test]
     fn conflate_retains_the_latest_inputs_exact_frontier_per_key() {
-        let conflate = Conflate::new(|reading: &Reading| reading.sensor.clone()).emit(emit::on_eof);
+        let conflate = Conflate::new(|reading: &Reading| reading.sensor.clone())
+            .emit(emit::on_eof)
+            .all_keys();
         let writer_id = WriterId::from(StageId::new());
         let mut adapter = TypedStatefulHandlerAdapter::new(conflate);
         StatefulHandler::install_writer_id(&mut adapter, writer_id);
@@ -311,8 +326,9 @@ mod tests {
 
     #[test]
     fn an_emission_publishes_only_the_keys_that_received_a_value() {
-        let handler =
-            Conflate::new(|reading: &Reading| reading.sensor.clone()).emit(emit::every_n(2));
+        let handler = Conflate::new(|reading: &Reading| reading.sensor.clone())
+            .emit(emit::every_n(2))
+            .updated_keys();
         let mut state = handler.initial_state();
         let mut emissions = Vec::new();
 

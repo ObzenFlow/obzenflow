@@ -8,9 +8,10 @@
 //!
 //! Accumulators describe the fold, and `.emit(...)` takes the
 //! [`EmissionStrategy`] that decides when the result is emitted, either a value
-//! from [`emit`] or a strategy of your own. `group_by` and `conflate` publish
-//! the groups or keys updated since the previous emission, and `.all_groups()`
-//! or `.all_keys()` publishes all of them:
+//! from [`emit`] or a strategy of your own. `group_by` and `conflate` then name
+//! what each emission publishes. `.updated_groups()` or `.updated_keys()`
+//! publishes the groups or keys updated since the previous emission, and
+//! `.all_groups()` or `.all_keys()` publishes all of them:
 //!
 //! ```
 //! use obzenflow::stages::stateful::{self, emit, EmissionStrategy};
@@ -32,7 +33,8 @@
 //! }
 //!
 //! let latest = stateful::conflate(|reading: &Reading| reading.sensor.clone())
-//!     .emit(emit::every(Duration::from_secs(1)));
+//!     .emit(emit::every(Duration::from_secs(1)))
+//!     .updated_keys();
 //! let every_sensor = stateful::conflate(|reading: &Reading| reading.sensor.clone())
 //!     .emit(emit::always)
 //!     .all_keys();
@@ -84,9 +86,9 @@
 pub use obzenflow_runtime::stages::stateful::{
     conflate, emit, group_by, reduce, top_n, top_n_by, Accumulator, Conflate, ConflateState,
     ConflateTyped, EmissionStrategy, EmitAlways, EveryInterval, EveryN, GroupBy, GroupByState,
-    GroupByTyped, OnEOF, Reduce, ReduceState, ReduceTyped, StatefulWithEmission, TimeWindow, TopN,
-    TopNBy, TopNByEntry, TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry, TopNSnapshot,
-    TopNState, TopNTyped, WrapperState,
+    GroupByTyped, KeyedEmission, OnEOF, Reduce, ReduceState, ReduceTyped, StatefulWithEmission,
+    TimeWindow, TopN, TopNBy, TopNByEntry, TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry,
+    TopNSnapshot, TopNState, TopNTyped, WrapperState,
 };
 
 pub use obzenflow_runtime::stages::common::handlers::{

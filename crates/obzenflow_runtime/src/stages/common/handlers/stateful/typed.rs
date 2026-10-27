@@ -173,7 +173,8 @@ impl<O> TypedStatefulDrainInvocation<O> {
 #[diagnostic::on_unimplemented(
     message = "this stateful handler does not witness its arrow contract",
     label = "this handler does not implement the typed plain-stateful contract",
-    note = "implement TypedStatefulHandler with Input and Output matching the stateful! arrow (FLOWIP-134e)"
+    note = "implement TypedStatefulHandler with Input and Output matching the stateful! arrow (FLOWIP-134e)",
+    note = "an accumulator becomes a handler with `.emit(...)`, after which `group_by` needs `.updated_groups()` or `.all_groups()` and `conflate` needs `.updated_keys()` or `.all_keys()`"
 )]
 pub trait TypedStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;

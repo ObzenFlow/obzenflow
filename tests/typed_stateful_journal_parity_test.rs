@@ -211,7 +211,8 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                 count: state.count,
             },
         )
-        .emit(emit::on_eof);
+        .emit(emit::on_eof)
+        .all_groups();
         let current_ranking = stateful::top_n(
             2,
             |input: &Input| input.key.clone(),

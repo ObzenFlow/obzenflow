@@ -267,6 +267,23 @@ fn first_class_accumulator_catalog_cannot_be_collapsed_or_shrunk() {
         );
     }
 
+    for (module, clauses) in [
+        (
+            "group_by",
+            ["pub fn updated_groups(self)", "pub fn all_groups(self)"],
+        ),
+        (
+            "conflate",
+            ["pub fn updated_keys(self)", "pub fn all_keys(self)"],
+        ),
+    ] {
+        let source = fs::read_to_string(accumulator_root.join(format!("{module}.rs")))
+            .expect("read keyed accumulator source");
+        for clause in clauses {
+            assert!(source.contains(clause), "{module} lost {clause}");
+        }
+    }
+
     let emit_source = fs::read_to_string(
         root.join("crates/obzenflow_runtime/src/stages/stateful/strategies/emissions/emit.rs"),
     )

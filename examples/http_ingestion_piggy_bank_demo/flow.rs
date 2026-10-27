@@ -127,7 +127,8 @@ pub fn build_flow(
             AccountLedger::record,
             |account_id: &String, ledger: &AccountLedger| ledger.snapshot(account_id),
         )
-        .emit(emit::always);
+        .emit(emit::always)
+        .updated_groups();
         let printer_sink = sinks::ConsoleSink::<CheckbookSnapshot, _>::new(
             SnapshotTableFormatter::new(
                 &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],

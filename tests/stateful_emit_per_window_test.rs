@@ -655,7 +655,8 @@ async fn group_by_emit_per_window_parents_each_group_to_its_own_inputs() -> Resu
             result: result.clone(),
         },
     )
-    .emit(emit::per_window(Duration::from_secs(60)));
+    .emit(emit::per_window(Duration::from_secs(60)))
+    .updated_groups();
     let sink = AckSink;
     let harness = test_flow! {
         name: "emit_per_window_group_by_lineage",

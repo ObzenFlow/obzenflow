@@ -159,7 +159,8 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
                 result: result.clone(),
             },
         )
-        .emit(emit::on_eof);
+        .emit(emit::on_eof)
+        .all_groups();
         let collecting_sink = CollectingSink::<ProductStatsUpdate>::new(events_for_flow);
 
         Ok(flow! {
@@ -265,7 +266,8 @@ async fn conflate_emits_latest_value_per_key() {
         let transaction_source = TransactionSource::new(8);
         let latest_by_product =
             ConflateTyped::new(|event: &TransactionEvent| event.product_id.clone())
-                .emit(emit::per_window(Duration::from_millis(1)));
+                .emit(emit::per_window(Duration::from_millis(1)))
+                .updated_keys();
         let collecting_sink = CollectingSink::<TransactionEvent>::new(events_for_flow);
 
         Ok(flow! {

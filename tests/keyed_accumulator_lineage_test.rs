@@ -103,7 +103,7 @@ impl TypedFiniteSourceHandler for Entries {
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let entries = Entries { next: 0 };
-        let updates = balances().emit(emit::always);
+        let updates = balances().emit(emit::always).updated_groups();
         let snapshots = balances().emit(emit::always).all_groups();
         let update_sink = replay_testkit::Discard::<Balance>::default();
         let snapshot_sink = replay_testkit::Discard::<Balance>::default();

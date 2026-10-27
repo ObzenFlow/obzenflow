@@ -6,7 +6,7 @@
 
 use super::trace::TraceState;
 use super::wrapper::AccumulatorOutput;
-use super::{Accumulator, StatefulWithEmission};
+use super::{Accumulator, KeyedEmission, StatefulWithEmission};
 use crate::stages::common::handlers::stateful::{
     TypedStatefulContribution, TypedStatefulOutputIds,
 };
@@ -18,6 +18,9 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 type GroupByTypeMarker<T, K, S, O> = PhantomData<fn() -> (T, K, S, O)>;
+
+type GroupByHandler<T, K, S, O, FKey, FUpdate, FOutput, E> =
+    StatefulWithEmission<GroupBy<T, K, S, O, FKey, FUpdate, FOutput>, E>;
 
 /// Folds inputs into independent per-key aggregate state.
 ///
@@ -48,29 +51,41 @@ impl<T, K, S, O, FKey, FUpdate, FOutput> GroupBy<T, K, S, O, FKey, FUpdate, FOut
             key_fn,
             update_fn,
             output_fn,
-            projection: Projection::UpdatedGroups,
+            projection: Projection::EveryGroup,
             _types: PhantomData,
         }
     }
 
-    /// Emits when `emission` decides, publishing the groups updated since the
-    /// previous emission.
-    pub fn emit<E: EmissionStrategy>(self, emission: E) -> StatefulWithEmission<Self, E> {
-        let projection =
-            if emission.resets_accumulator_on_emit() || emission.emits_only_at_end_of_input() {
-                Projection::EveryGroup
-            } else {
-                self.projection
-            };
-        StatefulWithEmission::new(Self { projection, ..self }, emission)
+    /// Emits when `emission` decides, after `.updated_groups()` or
+    /// `.all_groups()` names the groups each emission publishes.
+    pub fn emit<E: EmissionStrategy>(self, emission: E) -> KeyedEmission<Self, E> {
+        KeyedEmission::new(self, emission)
     }
 }
 
 impl<T, K, S, O, FKey, FUpdate, FOutput, E>
-    StatefulWithEmission<GroupBy<T, K, S, O, FKey, FUpdate, FOutput>, E>
+    KeyedEmission<GroupBy<T, K, S, O, FKey, FUpdate, FOutput>, E>
 where
     E: EmissionStrategy,
 {
+    /// Publishes the groups updated since the previous emission.
+    pub fn updated_groups(self) -> GroupByHandler<T, K, S, O, FKey, FUpdate, FOutput, E> {
+        let (group_by, emission) = self.into_parts();
+        let projection =
+            if emission.resets_accumulator_on_emit() || emission.emits_only_at_end_of_input() {
+                Projection::EveryGroup
+            } else {
+                Projection::UpdatedGroups
+            };
+        StatefulWithEmission::new(
+            GroupBy {
+                projection,
+                ..group_by
+            },
+            emission,
+        )
+    }
+
     /// Publishes every group at each emission.
     ///
     /// Accumulators that publish one result do not offer it:
@@ -89,7 +104,7 @@ where
     /// let counts = reduce(Count(0), |count: &mut Count, _: &Entry| count.0 += 1);
     /// let _ = counts.emit(emit::always).all_groups();
     /// ```
-    pub fn all_groups(self) -> Self {
+    pub fn all_groups(self) -> GroupByHandler<T, K, S, O, FKey, FUpdate, FOutput, E> {
         let (group_by, emission) = self.into_parts();
         StatefulWithEmission::new(
             GroupBy {
@@ -399,7 +414,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_emission_publishes_only_the_groups_each_input_updated() {
-        let mut adapter = adapter(store_totals().emit(emit::always), DEFAULT_MAX_LINEAGE_DEPTH);
+        let mut adapter = adapter(
+            store_totals().emit(emit::always).updated_groups(),
+            DEFAULT_MAX_LINEAGE_DEPTH,
+        );
         let mut state = StatefulHandler::initial_state(&adapter);
         let mut previous_outputs = HashMap::new();
 
@@ -437,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn a_coarser_trigger_publishes_the_groups_updated_since_its_last_emission() {
         let mut adapter = adapter(
-            store_totals().emit(emit::every_n(3)),
+            store_totals().emit(emit::every_n(3)).updated_groups(),
             DEFAULT_MAX_LINEAGE_DEPTH,
         );
         let mut state = StatefulHandler::initial_state(&adapter);
@@ -487,7 +505,7 @@ mod tests {
 
     #[test]
     fn the_value_path_publishes_only_the_updated_groups() {
-        let handler = store_totals().emit(emit::always);
+        let handler = store_totals().emit(emit::always).updated_groups();
         let mut state = handler.initial_state();
         let mut emissions = Vec::new();
 
@@ -549,7 +567,7 @@ mod tests {
 
     #[test]
     fn a_key_past_the_cap_cites_its_latest_inputs_then_its_previous_output() {
-        let mut adapter = adapter(store_totals().emit(emit::every_n(4)), 2);
+        let mut adapter = adapter(store_totals().emit(emit::every_n(4)).updated_groups(), 2);
         let mut state = StatefulHandler::initial_state(&adapter);
         let inputs: Vec<_> = (1..=8).map(|id| sale(id, "a", 1)).collect();
         let mut outputs = Vec::new();
