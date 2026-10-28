@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
-use obzenflow_core::event::provenance::causality_context::CausalityContext;
+use obzenflow_core::event::provenance::causality_context::{CausalInput, CausalityContext};
 use obzenflow_core::event::provenance::composite_activation_context::union_composite_activations;
 use obzenflow_core::event::provenance::{CompositeActivationContext, ReplayContext};
 use obzenflow_core::event::types::{CorrelationId, EventId};
@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, VecDeque};
 // configuration must not leak into persisted state snapshots.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct TraceState {
-    parent_ids: VecDeque<EventId>,
+    inputs: VecDeque<CausalInput>,
 
     correlation_seen: bool,
     correlation_mixed: bool,
@@ -52,9 +52,9 @@ impl TraceState {
 
         let max_depth = lineage.max_lineage_depth.max(1);
 
-        self.parent_ids.push_back(event.id);
-        while self.parent_ids.len() > max_depth {
-            self.parent_ids.pop_front();
+        self.inputs.push_back(CausalInput::of(event));
+        while self.inputs.len() > max_depth {
+            self.inputs.pop_front();
         }
         self.replay_context = event.replay_context.clone();
 
@@ -122,18 +122,18 @@ impl TraceState {
         *self = Self::default();
     }
 
-    pub(crate) fn clear_parent_ids(&mut self) {
-        self.parent_ids.clear();
+    pub(crate) fn clear_inputs(&mut self) {
+        self.inputs.clear();
     }
 
-    pub(crate) fn with_previous_output(&self, previous_output: Option<EventId>) -> Self {
+    pub(crate) fn with_previous_output(&self, previous_output: Option<CausalInput>) -> Self {
         let mut trace = self.clone();
-        trace.parent_ids.extend(previous_output);
+        trace.inputs.extend(previous_output);
         trace
     }
 
     pub(crate) fn parent_ids(&self) -> Vec<EventId> {
-        self.parent_ids.iter().copied().collect()
+        self.inputs.iter().map(|input| input.id).collect()
     }
 
     pub(crate) fn correlation_id(&self) -> Option<CorrelationId> {
@@ -180,11 +180,10 @@ impl TraceState {
     }
 
     pub(crate) fn apply_to_event(&self, event: &mut ChainEvent) {
-        let parent_ids = self.parent_ids();
-        if parent_ids.is_empty() {
+        if self.inputs.is_empty() {
             return;
         }
-        event.causality = CausalityContext { parent_ids };
+        event.causality = CausalityContext::from_inputs(self.inputs.iter().cloned().collect());
         self.apply_correlation_to_event(event);
     }
 }
@@ -258,6 +257,10 @@ mod tests {
             let mut output = event_with_correlation(deterministic_correlation_id(2));
             trace.apply_to_event(&mut output);
             assert_eq!(output.causality.parent_ids, vec![first.id, second.id]);
+            assert_eq!(
+                output.causality.inputs,
+                [CausalInput::of(&first), CausalInput::of(&second)]
+            );
             assert_eq!(output.correlation_id(), first.correlation_id());
             assert_eq!(
                 output.correlation_payload(),

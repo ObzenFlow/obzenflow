@@ -9,6 +9,7 @@ use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use async_trait::async_trait;
 use obzenflow_core::config::LineagePolicy;
+use obzenflow_core::event::provenance::causality_context::CausalInput;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, OneFactStageOutput, TypedPayload, WriterId};
 use std::time::Duration;
@@ -54,22 +55,22 @@ impl TypedStatefulContribution {
     }
 }
 
-/// Opaque ids of one accepted emission's outputs, in emission order.
+/// Opaque identities of one accepted emission's outputs, in emission order.
 ///
 /// Only framework-owned facades can read them. They reach the handler through
 /// a hidden hook so ordinary authored handlers never see an event id.
 #[doc(hidden)]
 pub struct TypedStatefulOutputIds {
-    ids: Vec<EventId>,
+    outputs: Vec<CausalInput>,
 }
 
 impl TypedStatefulOutputIds {
-    pub(crate) fn new(ids: Vec<EventId>) -> Self {
-        Self { ids }
+    pub(crate) fn new(outputs: Vec<CausalInput>) -> Self {
+        Self { outputs }
     }
 
-    pub(crate) fn ids(&self) -> &[EventId] {
-        &self.ids
+    pub(crate) fn outputs(&self) -> &[CausalInput] {
+        &self.outputs
     }
 }
 
@@ -412,9 +413,9 @@ where
             StatefulEmission::ResetEpoch { outputs } => (outputs, true),
         };
         let events = self.lower_outputs(outputs, traces, &state.trace)?;
-        let output_ids = events.iter().map(|event| event.id).collect();
+        let outputs = events.iter().map(|event| CausalInput::of(event)).collect();
         self.handler
-            .post_emit_invocation(&mut state.inner, TypedStatefulOutputIds::new(output_ids));
+            .post_emit_invocation(&mut state.inner, TypedStatefulOutputIds::new(outputs));
         if reset_epoch {
             state.trace.reset();
         }
@@ -528,7 +529,7 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct RecordsOutputIds {
-        received: Arc<Mutex<Vec<Vec<EventId>>>>,
+        received: Arc<Mutex<Vec<Vec<CausalInput>>>>,
     }
 
     impl TypedStatefulHandler for RecordsOutputIds {
@@ -563,7 +564,7 @@ mod tests {
             self.received
                 .lock()
                 .expect("recorder lock")
-                .push(output_ids.ids().to_vec());
+                .push(output_ids.outputs().to_vec());
             self.post_emit(state);
         }
     }
@@ -585,7 +586,10 @@ mod tests {
         assert!(received.lock().expect("recorder lock").is_empty());
 
         let outputs = StatefulHandler::emit(&adapter, &mut state).expect("emission lowers");
-        let output_ids: Vec<_> = outputs.iter().map(|output| output.id).collect();
+        let output_ids: Vec<_> = outputs
+            .iter()
+            .map(|output| CausalInput::of(output))
+            .collect();
         assert_eq!(*received.lock().expect("recorder lock"), [output_ids]);
     }
 

@@ -22,6 +22,7 @@ use crate::middleware::{
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerHealthClassification, RetryStopReason,
 };
+use obzenflow_core::event::provenance::causality_context::CausalInput;
 use obzenflow_core::event::{
     ChainEventFactory, CircuitBreakerAttemptSettledEventParams, EffectFailureCause,
     RecoveryCompletedEventParams,
@@ -1192,7 +1193,7 @@ impl EffectResilienceMiddleware {
                         dependency_elapsed_ms: duration_ms(dependency_elapsed),
                         admission_wait_ms: duration_ms(admission_wait),
                     },
-                    event.id,
+                    CausalInput::of(event),
                 ));
             } else {
                 ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
@@ -1201,7 +1202,7 @@ impl EffectResilienceMiddleware {
                     attempt,
                     duration_ms(dependency_elapsed),
                     duration_ms(admission_wait),
-                    event.id,
+                    CausalInput::of(event),
                 ));
             }
 
@@ -1225,7 +1226,7 @@ impl EffectResilienceMiddleware {
                         self.writer_id,
                         identity.cursor.clone(),
                         recovery.attempts(),
-                        event.id,
+                        CausalInput::of(event),
                     ));
                 }
                 return repeatable_physical_terminal(
@@ -1243,7 +1244,7 @@ impl EffectResilienceMiddleware {
                         self.writer_id,
                         identity.cursor.clone(),
                         recovery.attempts(),
-                        event.id,
+                        CausalInput::of(event),
                     ));
                 }
                 return repeatable_physical_terminal(
@@ -1307,7 +1308,7 @@ impl EffectResilienceMiddleware {
                 identity.cursor.clone(),
                 recovery.next_attempt(),
                 duration_ms(delay),
-                event.id,
+                CausalInput::of(event),
             ));
             let backoff_started = Instant::now();
             tokio::time::sleep(delay).await;
@@ -1445,7 +1446,7 @@ impl EffectResilienceMiddleware {
                     dependency_elapsed_ms: duration_ms(dependency_elapsed),
                     admission_wait_ms: duration_ms(admission_wait),
                 },
-                event.id,
+                CausalInput::of(event),
             ));
         } else {
             ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
@@ -1454,7 +1455,7 @@ impl EffectResilienceMiddleware {
                 attempt,
                 duration_ms(dependency_elapsed),
                 duration_ms(admission_wait),
-                event.id,
+                CausalInput::of(event),
             ));
         }
 
@@ -1594,7 +1595,7 @@ impl EffectResilienceMiddleware {
                     dependency_elapsed_ms: duration_ms(dependency_elapsed),
                     admission_wait_ms: duration_ms(admission_wait),
                 },
-                event.id,
+                CausalInput::of(event),
             ));
         } else {
             ctx.write_control_event(ChainEventFactory::recovery_attempt_completed(
@@ -1603,7 +1604,7 @@ impl EffectResilienceMiddleware {
                 attempt,
                 duration_ms(dependency_elapsed),
                 duration_ms(admission_wait),
-                event.id,
+                CausalInput::of(event),
             ));
         }
 
@@ -1637,7 +1638,7 @@ fn write_recovery_completed(
             backoff_elapsed_ms: duration_ms(completion.backoff_elapsed),
             recovery_elapsed_ms: duration_ms(completion.recovery_elapsed),
         },
-        event.id,
+        CausalInput::of(event),
     ));
 }
 
@@ -1949,7 +1950,7 @@ fn write_exhausted(
         identity.cursor.clone(),
         attempts,
         reason,
-        event.id,
+        CausalInput::of(event),
     ));
 }
 

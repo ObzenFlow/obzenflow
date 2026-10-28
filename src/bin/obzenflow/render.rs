@@ -93,6 +93,8 @@ pub(super) struct Renderer {
     width: usize,
     context: Context,
     pending: VecDeque<RunRecord>,
+    held_errors: BTreeMap<obzenflow_core::JournalId, VecDeque<RunRecord>>,
+    printed_counts: BTreeMap<obzenflow_core::JournalId, u64>,
     records: u64,
     shown_records: u64,
     journals: BTreeMap<String, u64>,
@@ -131,6 +133,8 @@ impl Renderer {
                 .clamp(40, 90),
             context: Context::new(journals),
             pending: VecDeque::new(),
+            held_errors: BTreeMap::new(),
+            printed_counts: BTreeMap::new(),
             records: 0,
             shown_records: 0,
             journals: BTreeMap::new(),
@@ -275,7 +279,15 @@ impl Renderer {
             // Filtering them before buffering could join non-adjacent facts.
             self.context.remember(&record);
             self.journal_legend(output)?;
-            self.pending.push_back(record);
+            if record.journal.kind == RunJournalKind::Error {
+                self.held_errors
+                    .entry(record.journal.id)
+                    .or_default()
+                    .push_back(record);
+                self.render_released(output, false)?;
+            } else {
+                self.pending.push_back(record);
+            }
             self.drain_ready(output, false)?;
             if self.pending.len() >= MAX_PENDING {
                 // Never let an absent/evicted parent stall a live display.
@@ -289,6 +301,7 @@ impl Renderer {
 
     pub(super) fn flush_pending(&mut self, output: &mut impl Write) -> Result<(), Error> {
         self.drain_ready(output, true)?;
+        self.render_released(output, true)?;
         output.flush()?;
         Ok(())
     }
@@ -354,7 +367,47 @@ impl Renderer {
             .map(|index| self.pending.remove(index).expect("pending index"))
             .collect();
         records.reverse();
-        self.render_group(output, &records)
+        self.render_counted(output, &records)?;
+        self.render_released(output, false)
+    }
+
+    fn render_counted(
+        &mut self,
+        output: &mut impl Write,
+        records: &[RunRecord],
+    ) -> Result<(), Error> {
+        for record in records {
+            if let Some(count) = context::clock_count(record, &record.journal.id) {
+                let printed = self.printed_counts.entry(record.journal.id).or_default();
+                *printed = (*printed).max(count);
+            }
+        }
+        self.render_group(output, records)
+    }
+
+    fn render_released(&mut self, output: &mut impl Write, force: bool) -> Result<(), Error> {
+        loop {
+            let released = self.release_held(force);
+            if released.is_empty() {
+                return Ok(());
+            }
+            self.render_counted(output, &released)?;
+        }
+    }
+
+    fn release_held(&mut self, force: bool) -> Vec<RunRecord> {
+        let (context, printed) = (&self.context, &self.printed_counts);
+        let mut released = Vec::new();
+        self.held_errors.retain(|_, held| {
+            while held
+                .front()
+                .is_some_and(|record| force || !awaits_its_clock(context, printed, record))
+            {
+                released.extend(held.pop_front());
+            }
+            !held.is_empty()
+        });
+        released
     }
 
     fn render_group(&self, output: &mut impl Write, records: &[RunRecord]) -> Result<(), Error> {
@@ -414,6 +467,19 @@ fn journal_label(kind: RunJournalKind) -> &'static str {
         RunJournalKind::Data => "data",
         RunJournalKind::Error => "error",
     }
+}
+
+fn awaits_its_clock(
+    context: &Context,
+    printed: &BTreeMap<obzenflow_core::JournalId, u64>,
+    record: &RunRecord,
+) -> bool {
+    context::clock(record).iter().any(|(coordinate, count)| {
+        let journal = coordinate.journal_writer_id.as_journal_id();
+        *journal != record.journal.id
+            && context.in_run(journal)
+            && printed.get(journal).is_none_or(|printed| printed < count)
+    })
 }
 
 fn branchable(record: &RunRecord) -> bool {

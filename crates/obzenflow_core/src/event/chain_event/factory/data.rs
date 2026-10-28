@@ -4,7 +4,7 @@
 
 use super::ChainEventFactory;
 use crate::config::LineagePolicy;
-use crate::event::provenance::causality_context::CausalityContext;
+use crate::event::provenance::causality_context::{CausalInput, CausalityContext};
 use crate::event::types::WriterId;
 use crate::event::{ChainEvent, ChainPayload};
 use serde_json::Value;
@@ -63,7 +63,7 @@ impl ChainEventFactory {
         event.cycle_depth = parent.cycle_depth;
         event.cycle_scc_id = parent.cycle_scc_id;
 
-        event.causality = CausalityContext::with_parent(parent.id);
+        event.causality = CausalityContext::with_input(CausalInput::of(parent));
 
         let ancestors_to_add = parent
             .causality

@@ -7,7 +7,8 @@
 //! Tracks parent-child relationships between events to maintain
 //! causal ordering in distributed systems.
 
-use crate::event::types::EventId;
+use super::ChainEventProvenance;
+use crate::event::types::{EventId, EventType};
 use serde::{Deserialize, Serialize};
 
 /// Causality information for an event
@@ -15,6 +16,26 @@ use serde::{Deserialize, Serialize};
 pub struct CausalityContext {
     /// Parent event IDs that caused this event
     pub parent_ids: Vec<EventId>,
+    /// The events this event was made from, each with its event type
+    #[serde(default)]
+    pub inputs: Vec<CausalInput>,
+}
+
+/// An event that another event was made from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CausalInput {
+    pub id: EventId,
+    pub event_type: EventType,
+}
+
+impl CausalInput {
+    /// The identity and event type `event` records.
+    pub fn of(event: &ChainEventProvenance) -> Self {
+        Self {
+            id: event.id,
+            event_type: EventType(event.event_type.clone()),
+        }
+    }
 }
 
 impl CausalityContext {
@@ -22,13 +43,20 @@ impl CausalityContext {
     pub fn new() -> Self {
         Self {
             parent_ids: Vec::new(),
+            inputs: Vec::new(),
         }
     }
 
-    /// Create with a single parent
-    pub fn with_parent(parent: EventId) -> Self {
+    /// Create with a single input
+    pub fn with_input(input: CausalInput) -> Self {
+        Self::from_inputs(vec![input])
+    }
+
+    /// Create from the inputs an event was made from, in order
+    pub fn from_inputs(inputs: Vec<CausalInput>) -> Self {
         Self {
-            parent_ids: vec![parent],
+            parent_ids: inputs.iter().map(|input| input.id).collect(),
+            inputs,
         }
     }
 

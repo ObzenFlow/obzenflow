@@ -50,7 +50,10 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
                 "event": {
                     "id":id(event), "writer_id":{"type":"Stage", "id":id(stage)},
                     "event_kind":"fact", "event_type":event_type, "payload_schema_version":1,
-                    "causality":{"parent_ids":parents.iter().map(|p| id(*p)).collect::<Vec<_>>()},
+                    "causality":{
+                        "parent_ids":parents.iter().map(|p| id(*p)).collect::<Vec<_>>(),
+                        "inputs":parents.iter().map(|p| json!({"id":id(*p), "event_type":"sensor.reading"})).collect::<Vec<_>>()
+                    },
                     "flow_context":{"flow_name":"sensors", "flow_id":id(10), "stage_name":key, "stage_id":id(stage), "stage_type":stage_type},
                     "processing":{"event_time":0, "status":"Success"}, "composite_activations":[]
                 },
@@ -65,6 +68,17 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
             "payload":payload
         }
     })).unwrap()
+}
+
+fn with_inputs(mut record: RunRecord, inputs: &[(u64, &str)]) -> RunRecord {
+    if let RunRecordData::Chain(row) = &mut record.record {
+        row.envelope.provenance.event.causality.inputs = serde_json::from_value(json!(inputs
+            .iter()
+            .map(|(event, event_type)| json!({"id": id(*event), "event_type": event_type}))
+            .collect::<Vec<_>>()))
+        .unwrap();
+    }
+    record
 }
 
 fn renderer() -> Renderer {
@@ -1083,7 +1097,10 @@ fn hidden_runtime_records_preserve_parent_resolution_and_separate_fact_groups() 
         fact(2, 101, &[100], json!({"n":1})),
         progress,
         fact(2, 103, &[100], json!({"n":2})),
-        fact(2, 104, &[102], json!({"n":3})),
+        with_inputs(
+            fact(2, 104, &[102], json!({"n":3})),
+            &[(102, &progress_type)],
+        ),
     ] {
         renderer.record(&mut output, record).unwrap();
     }
@@ -1275,7 +1292,10 @@ fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_
         if let RunRecordData::Chain(row) = &mut input.record {
             row.envelope.provenance.event.event_type = "payment.order_validated".into();
         }
-        let mut result = fact(2, 101, &[100], json!({"reason":"unavailable"}));
+        let mut result = with_inputs(
+            fact(2, 101, &[100], json!({"reason":"unavailable"})),
+            &[(100, "payment.order_validated")],
+        );
         let stage = result.journal.stage.as_mut().unwrap();
         stage.key = "authorize_payment".into();
         stage.is_effectful = true;
@@ -1450,7 +1470,7 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
 }
 
 #[test]
-fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_facts() {
+fn missing_parents_flush_naming_only_recorded_input_types_without_grouping_unrelated_facts() {
     let mut renderer = renderer();
     let mut output = Vec::new();
     renderer
@@ -1460,7 +1480,10 @@ fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_fac
         .record(&mut output, fact(2, 101, &[98], json!({"n":1})))
         .unwrap();
     renderer
-        .record(&mut output, fact(2, 102, &[99], json!({"n":1})))
+        .record(
+            &mut output,
+            with_inputs(fact(2, 102, &[99], json!({"n":1})), &[]),
+        )
         .unwrap();
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
@@ -1481,12 +1504,17 @@ fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_fac
         3,
         "matching values do not establish shared parents"
     );
-    assert!(!text.contains("classify(sensor.reading)"));
     assert_eq!(
-        text.matches("sensor.classified ← classify(recorded input (unresolved))")
+        text.matches("sensor.classified ← classify(sensor.reading)")
             .count(),
-        2,
-        "unknown inputs never replace the known output heading"
+        1,
+        "a missing parent's type comes from the record that names it: {text}"
+    );
+    assert_eq!(
+        text.matches("sensor.classified ← classify(input not recorded)")
+            .count(),
+        1,
+        "no type is taken from anywhere but the record: {text}"
     );
 }
 
@@ -1793,7 +1821,10 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         if let RunRecordData::Chain(row) = &mut catalog.record {
             row.envelope.provenance.event.event_type = "sensor.calibration".into();
         }
-        let mut result = fact(2, 101, &[99, 100], json!({"celsius":40}));
+        let mut result = with_inputs(
+            fact(2, 101, &[99, 100], json!({"celsius":40})),
+            &[(99, "sensor.calibration"), (100, "sensor.reading")],
+        );
         result.journal.stage.as_mut().unwrap().stage_type = stage_type;
         if let RunRecordData::Chain(row) = &mut result.record {
             row.envelope.provenance.event.flow_context.stage_type = stage_type;
@@ -1829,7 +1860,10 @@ fn a_linked_stateful_output_names_its_input_and_its_previous_output() {
         fact(1, 100, &[], json!({"celsius":38})),
         stateful(101, &[100]),
         fact(1, 102, &[], json!({"celsius":40})),
-        stateful(103, &[102, 101]),
+        with_inputs(
+            stateful(103, &[102, 101]),
+            &[(102, "sensor.reading"), (101, "sensor.classified")],
+        ),
     ] {
         renderer.record(&mut output, record).unwrap();
     }
@@ -2020,8 +2054,8 @@ fn in_error_journal(mut record: RunRecord, payload: ExecutionPayload) -> RunReco
     };
     record.kind = RunRecordKind::Execution;
     record.journal.kind = RunJournalKind::Error;
-    record.journal.id = serde_json::from_value(json!(format!("{}F", &owner.to_string()[..25])))
-        .unwrap_or(record.journal.id);
+    record.journal.id =
+        serde_json::from_value(json!(format!("7{}", &owner.as_ulid().to_string()[1..]))).unwrap();
     if let RunRecordData::Chain(row) = &mut record.record {
         row.payload = ChainPayload::Execution(payload);
         row.envelope.provenance.event.event_kind = row.payload.kind();
@@ -2256,6 +2290,103 @@ fn a_rejected_row_reads_as_a_source_error_with_no_inputs() {
         r#"  "detail": "record 117: invalid record (line 119)","#
     );
     assert!(!block.contains("execution_type"));
+}
+
+#[test]
+fn a_source_error_prints_after_the_data_records_its_clock_counts() {
+    let readings = (100..=103).map(|n| fact(1, n, &[], json!({ "reading": n })));
+    let mut rejected = rejected_row(110, 7);
+    let mut beyond_snapshot = rejected_row(111, 8);
+    assert_ne!(rejected.journal.id, fact(1, 100, &[], json!({})).journal.id);
+    for (record, count) in [(&mut rejected, 102), (&mut beyond_snapshot, 200)] {
+        let RunRecordData::Chain(row) = &mut record.record else {
+            unreachable!()
+        };
+        row.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .clocks
+            .insert(coordinate(1), count);
+    }
+    let records: Vec<_> = [rejected, beyond_snapshot]
+        .into_iter()
+        .chain(readings)
+        .collect();
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from\n{text}"))
+    };
+    let errors: Vec<_> = text
+        .match_indices("SOURCE ERROR (stage: thermometer, error journal: ")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(errors.len(), 2, "{text}");
+    assert!(at(r#""reading": 102"#) < errors[0], "{text}");
+    assert!(errors[0] < at(r#""reading": 103"#), "{text}");
+    assert!(at(r#""reading": 103"#) < errors[1], "{text}");
+    assert!(renderer.held_errors.is_empty());
+}
+
+#[test]
+fn a_stage_error_prints_right_after_its_input_however_far_ahead_it_was_read() {
+    let inputs = (100..250).map(|n| fact(1, n, &[], json!({ "reading": n })));
+    let errors = (100..250).map(|n| {
+        let mut failed = processing_failed(2, n + 1000, n, "rejected");
+        let RunRecordData::Chain(row) = &mut failed.record else {
+            unreachable!()
+        };
+        let clock = &mut row.envelope.provenance.journal.vector_clock.clocks;
+        clock.clear();
+        clock.insert(coordinate(1), n);
+        failed
+    });
+    let records: Vec<_> = errors.chain(inputs).collect();
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    assert_eq!(
+        text.matches("runtime.stage.processing_failed ← classify(sensor.reading)")
+            .count(),
+        150,
+        "{text}"
+    );
+    for n in [100, 180, 249] {
+        let input = text
+            .find(&format!("\"reading\": {n}\n"))
+            .unwrap_or_else(|| panic!("reading {n} missing from\n{text}"));
+        let after = &text[input..];
+        let error = after
+            .find("TRANSFORM ERROR (stage: classify")
+            .unwrap_or_else(|| panic!("no error after reading {n} in\n{text}"));
+        assert!(
+            after
+                .find("SOURCE (stage: thermometer")
+                .is_none_or(|next| error < next),
+            "{text}"
+        );
+    }
+    assert!(renderer.held_errors.is_empty());
+}
+
+#[test]
+fn an_output_printed_before_its_input_names_the_input_type_it_recorded() {
+    let outputs = (100..250).map(|n| fact(2, n + 1000, &[n], json!({ "n": n })));
+    let inputs = (100..250).map(|n| fact(1, n, &[], json!({ "reading": n })));
+    let records: Vec<_> = outputs.chain(inputs).collect();
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let first_output = text.find("TRANSFORM (stage: classify").expect("an output");
+    let first_input = text.find("SOURCE (stage: thermometer").expect("an input");
+    assert!(first_output < first_input, "{text}");
+    assert_eq!(
+        text.matches("sensor.classified ← classify(sensor.reading)")
+            .count(),
+        150,
+        "{text}"
+    );
+    assert!(!text.contains("input not recorded"), "{text}");
 }
 
 #[test]

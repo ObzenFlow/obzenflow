@@ -192,3 +192,71 @@ fn test_flow_signals() {
     assert!(drain.is_control());
     assert_eq!(drain.event_type(), "runtime.stream.drain_requested");
 }
+
+#[test]
+fn a_derived_event_names_its_own_input_and_type_but_not_its_ancestors() {
+    use crate::config::LineagePolicy;
+    use crate::event::provenance::causality_context::CausalInput;
+    use crate::event::types::EventType;
+
+    let writer_id = WriterId::from(StageId::new());
+    let reading = ChainEventFactory::data_event(
+        writer_id,
+        "sensor.reading",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
+    let classified = ChainEventFactory::derived_data_event(
+        writer_id,
+        &reading,
+        "sensor.classified",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+        LineagePolicy::default(),
+    );
+    let summary = ChainEventFactory::derived_data_event(
+        writer_id,
+        &classified,
+        "sensor.summary",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+        LineagePolicy::default(),
+    );
+
+    assert_eq!(summary.causality.parent_ids, [classified.id, reading.id]);
+    assert_eq!(
+        summary.causality.inputs,
+        [CausalInput {
+            id: classified.id,
+            event_type: EventType("sensor.classified".into()),
+        }]
+    );
+
+    let encoded = serde_json::to_value(&summary.causality).unwrap();
+    assert_eq!(
+        encoded["inputs"],
+        json!([{"id": classified.id, "event_type": "sensor.classified"}])
+    );
+}
+
+#[test]
+fn a_delivery_receipt_names_its_subject_as_its_input() {
+    use crate::event::payloads::delivery_payload::{test_receipt, DeliveryMethod, DeliveryOutcome};
+    use crate::event::provenance::causality_context::CausalInput;
+    use crate::event::types::EventType;
+
+    let input = crate::EventId::new();
+    let receipt = ChainEventFactory::delivery_event(
+        WriterId::from(StageId::new()),
+        test_receipt(input, DeliveryOutcome::success(DeliveryMethod::Noop, None)),
+    );
+
+    assert_eq!(receipt.causality.parent_ids, [input]);
+    assert_eq!(
+        receipt.causality.inputs,
+        [CausalInput {
+            id: input,
+            event_type: EventType("test.event".into()),
+        }]
+    );
+}

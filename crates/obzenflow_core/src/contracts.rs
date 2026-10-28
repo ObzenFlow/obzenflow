@@ -763,7 +763,7 @@ impl DivergenceContract {
 mod tests {
     use super::*;
     use crate::event::payloads::delivery_payload::DeliveryMethod;
-    use crate::event::provenance::causality_context::CausalityContext;
+    use crate::event::provenance::causality_context::{CausalInput, CausalityContext};
     use crate::event::types::SeqNo;
     use crate::event::{ChainEventFactory, ConsumptionProgressEventParams};
     use crate::{CycleDepth, WriterId};
@@ -897,8 +897,7 @@ mod tests {
         let receipt = ChainEventFactory::delivery_event(
             WriterId::from(downstream),
             crate::event::payloads::delivery_payload::test_receipt(parent_id, receipt_payload),
-        )
-        .with_causality(CausalityContext::with_parent(parent_id));
+        );
 
         contract.on_write(&receipt, &mut write_ctx);
 
@@ -945,8 +944,7 @@ mod tests {
         let receipt = ChainEventFactory::delivery_event(
             WriterId::from(downstream),
             crate::event::payloads::delivery_payload::test_receipt(parent_id, receipt_payload),
-        )
-        .with_causality(CausalityContext::with_parent(parent_id));
+        );
 
         contract.on_write(&receipt, &mut write_ctx);
 
@@ -1000,7 +998,9 @@ mod tests {
             WriterId::from(downstream),
             crate::event::payloads::delivery_payload::test_receipt(consumed_a.id, receipt_payload),
         )
-        .with_causality(CausalityContext::with_parent(consumed_a.id).add_parent(consumed_b.id));
+        .with_causality(
+            CausalityContext::with_input(CausalInput::of(&consumed_a)).add_parent(consumed_b.id),
+        );
 
         contract.on_write(&receipt, &mut write_ctx);
 
@@ -1036,8 +1036,7 @@ mod tests {
         let receipt = ChainEventFactory::delivery_event(
             WriterId::from(downstream),
             crate::event::payloads::delivery_payload::test_receipt(parent_id, receipt_payload),
-        )
-        .with_causality(CausalityContext::with_parent(parent_id));
+        );
 
         contract.on_write(&receipt, &mut write_ctx);
 

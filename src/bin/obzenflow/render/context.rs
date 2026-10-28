@@ -11,12 +11,6 @@ use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque};
 
 const MAX_REFERENCES: usize = 4096;
 
-#[derive(Clone)]
-pub(super) struct Reference {
-    pub event_type: String,
-    pub parents: Vec<String>,
-}
-
 pub(super) struct Stage {
     pub writer: String,
     pub key: String,
@@ -64,11 +58,12 @@ pub(super) struct Context {
     pub stages: Vec<Stage>,
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
     pub journals: BTreeMap<obzenflow_core::JournalId, JournalContext>,
+    run_journals: BTreeSet<obzenflow_core::JournalId>,
     ancestor_names: BTreeMap<obzenflow_core::JournalId, String>,
     replayed_authors: BTreeMap<String, String>,
     journal_numbers: BTreeMap<obzenflow_core::JournalId, usize>,
     journal_label_updates: BTreeSet<obzenflow_core::JournalId>,
-    references: BTreeMap<String, Reference>,
+    references: BTreeSet<String>,
     insertion_order: VecDeque<String>,
     pub join_phases: super::join_phase::JoinPhases,
 }
@@ -83,6 +78,7 @@ impl Context {
                 stages.insert(stage.key.clone(), stage.clone());
             }
         }
+        let run_journals = journal_contexts.keys().copied().collect();
         let mut stages: Vec<_> = stages.into_values().collect();
         stages.sort_by_key(|stage| {
             let rank = match stage.stage_type {
@@ -127,11 +123,12 @@ impl Context {
                 })
                 .collect(),
             journals: journal_contexts,
+            run_journals,
             ancestor_names: BTreeMap::new(),
             replayed_authors: BTreeMap::new(),
             journal_numbers,
             journal_label_updates,
-            references: BTreeMap::new(),
+            references: BTreeSet::new(),
             supervisors: BTreeMap::new(),
             insertion_order: VecDeque::new(),
             join_phases: Default::default(),
@@ -176,7 +173,7 @@ impl Context {
             });
         }
         let id = event_id(record);
-        if self.references.contains_key(&id) {
+        if self.references.contains(&id) {
             return;
         }
         if self.references.len() == MAX_REFERENCES {
@@ -184,39 +181,18 @@ impl Context {
                 self.references.remove(&oldest);
             }
         }
-        self.references.insert(
-            id.clone(),
-            Reference {
-                event_type: event_type(record).into(),
-                parents: parent_ids(record),
-            },
-        );
+        self.references.insert(id.clone());
         self.insertion_order.push_back(id);
+    }
+
+    pub fn in_run(&self, journal: &obzenflow_core::JournalId) -> bool {
+        self.run_journals.contains(journal)
     }
 
     pub fn parents_available(&self, record: &RunRecord) -> bool {
         parent_ids(record)
             .iter()
-            .all(|id| self.references.contains_key(id))
-    }
-
-    /// Omit a redundant ancestor only when another recorded parent explicitly
-    /// names it. No guessing from clock dominance, correlation or adjacency.
-    pub fn inputs(&self, record: &RunRecord) -> Vec<Option<&Reference>> {
-        let parents = parent_ids(record);
-        parents
-            .iter()
-            .filter(|id| {
-                !parents.iter().any(|other| {
-                    other != *id
-                        && self
-                            .references
-                            .get(other)
-                            .is_some_and(|reference| reference.parents.contains(id))
-                })
-            })
-            .map(|id| self.references.get(id))
-            .collect()
+            .all(|id| self.references.contains(id))
     }
 
     fn remember_replayed_author(&mut self, record: &RunRecord) {
@@ -388,6 +364,13 @@ pub(super) fn clock(record: &RunRecord) -> &BTreeMap<CausalCoordinate, u64> {
         RunRecordData::Chain(row) => &row.envelope.provenance.journal.vector_clock.clocks,
         RunRecordData::System(row) => &row.envelope.provenance.journal.vector_clock.clocks,
     }
+}
+
+pub(super) fn clock_count(record: &RunRecord, journal: &obzenflow_core::JournalId) -> Option<u64> {
+    clock(record)
+        .iter()
+        .find(|(coordinate, _)| coordinate.journal_writer_id.as_journal_id() == journal)
+        .map(|(_, count)| *count)
 }
 
 pub(super) fn writer_id(record: &RunRecord) -> String {

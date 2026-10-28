@@ -410,13 +410,17 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
         error_events[0].payload()["input"]["payload"]["index"],
         serde_json::json!(0)
     );
+    assert_eq!(
+        error_events[0].payload()["detail"],
+        serde_json::json!("index zero is invalid")
+    );
     assert!(matches!(
         &error_events[0].processing.status,
         ProcessingStatus::Error {
             kind: Some(ErrorKind::Unknown),
             message,
             ..
-        } if message.contains("typed try-map failed: index zero is invalid")
+        } if message == "index zero is invalid"
     ));
 
     let successful_events = read_journal(data_journal.expect("try-map data journal exists"))

@@ -9,6 +9,7 @@ mod replay_testkit;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+use obzenflow_core::event::provenance::causality_context::CausalInput;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{
@@ -764,6 +765,22 @@ fn failure_chain(
     assert_eq!(
         direct_parent(&operation_envelope.authored()),
         Some(receipt.id)
+    );
+    assert_eq!(
+        operation_envelope.authored().causality.inputs,
+        [CausalInput::of(&receipt)],
+        "O names R and its type"
+    );
+    let ChainPayload::Delivery(receipt_payload) = &receipt.payload else {
+        panic!("R is a delivery receipt");
+    };
+    assert_eq!(
+        receipt.causality.inputs,
+        [CausalInput {
+            id: receipt_payload.subject.input.event_id,
+            event_type: receipt_payload.subject.event_type.clone(),
+        }],
+        "R names its input and that input's type"
     );
     let input = operation.causal_event_id.expect("current input id");
     assert_ne!(route.id, input);

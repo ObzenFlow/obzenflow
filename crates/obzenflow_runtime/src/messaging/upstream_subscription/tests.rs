@@ -19,7 +19,6 @@ use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectPro
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
-use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
@@ -1140,8 +1139,7 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
                 ),
             outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
         },
-    )
-    .with_causality(CausalityContext::with_parent(second.id));
+    );
 
     assert!(subscription
         .record_delivery_receipt(&second_receipt, &mut reader_progress)
@@ -1157,8 +1155,7 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
                 ),
             outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
         },
-    )
-    .with_causality(CausalityContext::with_parent(first.id));
+    );
 
     let watermark = subscription
         .record_delivery_receipt(&first_receipt, &mut reader_progress)
@@ -1283,8 +1280,7 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
                 ),
             outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
         },
-    )
-    .with_causality(CausalityContext::with_parent(forwarded.id));
+    );
 
     assert!(subscription
         .record_delivery_receipt(&receipt, &mut reader_progress)

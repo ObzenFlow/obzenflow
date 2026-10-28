@@ -101,7 +101,7 @@ impl TerminalRenderer {
                 let mut labels: Vec<_> = inputs
                     .iter()
                     .take(3)
-                    .map(|input| input.unwrap_or("recorded input (unresolved)").to_owned())
+                    .map(|input| (*input).to_owned())
                     .collect();
                 if labels.is_empty() {
                     labels.push("input not recorded".into());

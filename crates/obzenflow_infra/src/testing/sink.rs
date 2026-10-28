@@ -1753,7 +1753,7 @@ mod tests {
     use obzenflow_adapters::sources;
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-    use obzenflow_core::event::provenance::causality_context::CausalityContext;
+    use obzenflow_core::event::provenance::causality_context::{CausalInput, CausalityContext};
     use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::{CausalCoordinate, ChainEventFactory};
     use obzenflow_core::WriterId;
@@ -1895,8 +1895,7 @@ mod tests {
                 outcome: receipt_payload,
             },
         )
-        .with_flow_context(context("output", sink_stage, StageType::Sink))
-        .with_causality(CausalityContext::with_parent(input.id));
+        .with_flow_context(context("output", sink_stage, StageType::Sink));
 
         let operation = SinkOperationFailed {
             stage_id: sink_stage,
@@ -1918,7 +1917,7 @@ mod tests {
             serde_json::to_value(&operation).expect("operation serialises"),
         )
         .with_flow_context(context("output", sink_stage, StageType::Sink))
-        .with_causality(CausalityContext::with_parent(receipt.id))
+        .with_causality(CausalityContext::with_input(CausalInput::of(&receipt)))
         .mark_as_error("redacted failure", ErrorKind::Remote);
 
         let route = ChainEventFactory::execution_event(
@@ -1935,7 +1934,7 @@ mod tests {
             ),
         )
         .with_flow_context(context("output", sink_stage, StageType::Sink))
-        .with_causality(CausalityContext::with_parent(input.id))
+        .with_causality(CausalityContext::with_input(CausalInput::of(&input)))
         .mark_as_error("redacted failure", ErrorKind::Remote);
 
         let coordinate = CausalCoordinate::new(obzenflow_core::JournalWriterId::new());

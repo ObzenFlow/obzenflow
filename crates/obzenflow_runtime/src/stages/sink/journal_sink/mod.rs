@@ -102,11 +102,6 @@ pub(super) fn journalled_delivery_event(
             outcome: payload,
         },
     )
-    .with_causality(
-        obzenflow_core::event::provenance::causality_context::CausalityContext::with_parent(
-            *parent.id(),
-        ),
-    )
 }
 
 pub(super) fn journalled_sink_audit(

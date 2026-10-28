@@ -890,7 +890,7 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
                 kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Unknown),
                 message,
                 ..
-            } if message.contains("typed try-map failed: index zero is invalid")
+            } if message == "index zero is invalid"
         ));
 
         assert!(

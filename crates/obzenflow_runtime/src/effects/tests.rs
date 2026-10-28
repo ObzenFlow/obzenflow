@@ -7100,6 +7100,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
             CircuitBreakerAttemptSettledEventParams, RecoveryCompletedEventParams,
         };
         use obzenflow_core::event::payloads::execution_payload::CircuitBreakerHealthClassification;
+        use obzenflow_core::event::provenance::causality_context::CausalInput;
 
         assert_eq!(identity.safety, EffectSafety::NonIdempotentAtLeastOnce);
         self.consults.fetch_add(1, Ordering::SeqCst);
@@ -7117,7 +7118,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
                 identity.cursor.clone(),
                 attempt.saturating_add(1),
                 0,
-                event.id,
+                CausalInput::of(event),
             ));
         }
         controls.push(if self.breaker_free {
@@ -7127,7 +7128,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
                 attempt,
                 0,
                 0,
-                event.id,
+                CausalInput::of(event),
             )
         } else {
             ChainEventFactory::circuit_breaker_attempt_settled(
@@ -7141,7 +7142,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
                     dependency_elapsed_ms: 0,
                     admission_wait_ms: 0,
                 },
-                event.id,
+                CausalInput::of(event),
             )
         });
         controls.push(ChainEventFactory::recovery_completed(
@@ -7152,7 +7153,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
                 backoff_elapsed_ms: 0,
                 recovery_elapsed_ms: 0,
             },
-            event.id,
+            CausalInput::of(event),
         ));
         execution.into_report(controls)
     }

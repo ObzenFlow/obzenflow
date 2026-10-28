@@ -54,7 +54,7 @@ pub(super) struct HeaderView<'a> {
 
 pub(super) enum InputsView<'a> {
     Source,
-    Recorded(Vec<Option<&'a str>>),
+    Recorded(Vec<&'a str>),
     None,
 }
 
@@ -185,13 +185,7 @@ impl<'a> EventView<'a> {
         let inputs = if self.record.kind == RunRecordKind::SourceFact || source_error(self.record) {
             InputsView::Source
         } else if uses_inputs(self.record) {
-            InputsView::Recorded(
-                self.context
-                    .inputs(self.record)
-                    .into_iter()
-                    .map(|reference| reference.map(|reference| reference.event_type.as_str()))
-                    .collect(),
-            )
+            InputsView::Recorded(recorded_input_types(self.record))
         } else {
             InputsView::None
         };
@@ -340,6 +334,21 @@ fn uses_inputs(record: &RunRecord) -> bool {
             | RunRecordKind::Effect
             | RunRecordKind::Delivery
     ) || matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))))
+}
+
+fn recorded_input_types(record: &RunRecord) -> Vec<&str> {
+    match &record.record {
+        RunRecordData::Chain(row) => row
+            .envelope
+            .provenance
+            .event
+            .causality
+            .inputs
+            .iter()
+            .map(|input| input.event_type.0.as_str())
+            .collect(),
+        RunRecordData::System(_) => Vec::new(),
+    }
 }
 
 fn source_error(record: &RunRecord) -> bool {

@@ -31,7 +31,7 @@ use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryOutcome, DeliveryResult};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::provenance::causality_context::CausalityContext;
+use obzenflow_core::event::provenance::causality_context::{CausalInput, CausalityContext};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 
@@ -662,9 +662,9 @@ async fn journal_sink_operation_failure<
             ctx.stage_id,
             StageType::Sink,
         ))
-        .with_causality(CausalityContext::with_parent(
-            failed_receipt.envelope.provenance.event.id,
-        ))
+        .with_causality(CausalityContext::with_input(CausalInput::of(
+            &failed_receipt.envelope.provenance.event,
+        )))
         .with_correlation_from(input)
         .with_cycle_state_from(input)
         .mark_as_error(error.detail(), error.kind());
@@ -739,9 +739,9 @@ async fn journal_policy_evidence<
                 ctx.stage_id,
                 StageType::Sink,
             ))
-            .with_causality(CausalityContext::with_parent(
-                parent.envelope.provenance.event.id,
-            ))
+            .with_causality(CausalityContext::with_input(CausalInput::of(
+                &parent.envelope.provenance.event,
+            )))
             .with_correlation_from(&parent.authored())
             .with_cycle_state_from(&parent.authored());
         event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
@@ -1269,9 +1269,6 @@ async fn journal_delivery_receipt<
         payload,
     )
     .with_flow_context(flow_context)
-    .with_causality(CausalityContext::with_parent(
-        parent_envelope.envelope.provenance.event.id,
-    ))
     .with_correlation_from(&parent_envelope.authored())
     .with_cycle_state_from(&parent_envelope.authored());
     let delivery_event = delivery_event

@@ -39,7 +39,6 @@ use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryOutcome};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainPayload, CommandDiscardDisposition, SinkOperationPhase};
 use obzenflow_core::journal::{AppendOptions, Journal};
@@ -1174,9 +1173,6 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         payload,
     )
     .with_flow_context(flow_ctx)
-    .with_causality(CausalityContext::with_parent(
-        parent_envelope.envelope.provenance.event.id,
-    ))
     .with_correlation_from(&parent_envelope.authored())
     .with_cycle_state_from(&parent_envelope.authored());
     let evt = evt

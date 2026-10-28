@@ -11,6 +11,7 @@ use crate::stages::common::handlers::stateful::{
     TypedStatefulContribution, TypedStatefulOutputIds,
 };
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
+use obzenflow_core::event::provenance::causality_context::CausalInput;
 use obzenflow_core::{EventId, OneFactStageOutput, TypedPayload};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
@@ -132,7 +133,7 @@ impl<T, K, S, O, FKey, FUpdate, FOutput> Debug for GroupBy<T, K, S, O, FKey, FUp
 struct GroupByBucket<S> {
     value: S,
     trace: TraceState,
-    previous_output: Option<EventId>,
+    previous_output: Option<CausalInput>,
     first_event_id: Option<EventId>,
     first_ordinal: u64,
 }
@@ -143,12 +144,13 @@ impl<S> GroupByBucket<S> {
     }
 
     fn evidence(&self) -> TraceState {
-        self.trace.with_previous_output(self.previous_output)
+        self.trace
+            .with_previous_output(self.previous_output.clone())
     }
 
-    fn link(&mut self, output_id: EventId) {
-        self.trace.clear_parent_ids();
-        self.previous_output = Some(output_id);
+    fn link(&mut self, output: CausalInput) {
+        self.trace.clear_inputs();
+        self.previous_output = Some(output);
     }
 }
 
@@ -277,9 +279,9 @@ where
             .into_iter()
             .map(|(key, _)| key.clone())
             .collect();
-        for (key, output_id) in emitted.iter().zip(output_ids.ids()) {
+        for (key, output) in emitted.iter().zip(output_ids.outputs()) {
             if let Some(bucket) = state.buckets.get_mut(key) {
-                bucket.link(*output_id);
+                bucket.link(output.clone());
             }
         }
         state.updated.clear();
@@ -588,6 +590,14 @@ mod tests {
         assert_eq!(
             second.causality.parent_ids,
             [inputs[6].id, inputs[7].id, first.id]
+        );
+        assert_eq!(
+            second.causality.inputs,
+            [
+                CausalInput::of(&inputs[6]),
+                CausalInput::of(&inputs[7]),
+                CausalInput::of(first)
+            ]
         );
     }
 

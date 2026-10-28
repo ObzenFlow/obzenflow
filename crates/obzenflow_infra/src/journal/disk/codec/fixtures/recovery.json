@@ -13,6 +13,12 @@
         "causality": {
           "parent_ids": [
             "01M2R1P9BW8HY0RX3NQGTKYGMG"
+          ],
+          "inputs": [
+            {
+              "id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
+              "event_type": "application.input"
+            }
           ]
         },
         "flow_context": {
