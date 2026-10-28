@@ -597,6 +597,9 @@ fn retained_measurement_verifies_declared_source_limiter_policy() -> Result<()> 
 
 #[test]
 fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_rows() -> Result<()> {
+    use obzenflow_core::event::payloads::stage_processing_payload::{
+        FailedInput, StageProcessingFailed,
+    };
     use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::{ChainEventFactory, JournalRecord};
     use obzenflow_core::journal::read::{
@@ -613,12 +616,13 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
         json!({"id": 0, "should_fail": true, "batch": 0}),
     )
     .with_flow_context(FlowContext::new(SOURCE, source));
+    let run = RunIdentity {
+        flow_id: FlowId::new(),
+        pipeline_writer_id: SystemId::new().into(),
+    };
     let row = RunRecord {
         version: RUN_RECORD_VERSION,
-        run: RunIdentity {
-            flow_id: FlowId::new(),
-            pipeline_writer_id: SystemId::new().into(),
-        },
+        run: run.clone(),
         journal: RunJournal {
             id: journal,
             kind: RunJournalKind::Data,
@@ -631,7 +635,7 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
         },
         position: JournalPosition(0),
         kind: RunRecordKind::SourceFact,
-        record: JournalRecord::new(journal.into(), event).into(),
+        record: JournalRecord::new(journal.into(), event.clone()).into(),
     };
     let mut source_one = row.clone();
     if let RunRecordData::Chain(record) = &mut source_one.record {
@@ -639,19 +643,36 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
         record.payload = ChainPayload::Fact(json!({"id": 1, "should_fail": false, "batch": 0}));
     }
     let transform = StageId::new();
-    let mut error_zero = row.clone();
-    error_zero.journal.kind = RunJournalKind::Error;
-    let stage = error_zero.journal.stage.as_mut().unwrap();
-    stage.key = TRANSFORM.into();
-    stage.id = transform;
-    stage.stage_type = obzenflow_core::event::context::StageType::Transform;
-    if let RunRecordData::Chain(record) = &mut error_zero.record {
-        record.envelope.provenance.event.processing.status =
-            obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(
-                "Simulated processing error",
-                Some(ErrorKind::Unknown),
-            );
-    }
+    let error_journal = JournalId::new();
+    let failure = ChainEventFactory::derived_execution_event(
+        transform.into(),
+        &event,
+        ExecutionPayload::StageProcessingFailed(StageProcessingFailed {
+            kind: ErrorKind::Unknown,
+            detail: "Simulated processing error".into(),
+            input: FailedInput::of(&event),
+        }),
+        obzenflow_core::config::LineagePolicy::default(),
+    )
+    .with_flow_context(FlowContext::new(TRANSFORM, transform))
+    .mark_as_error("Simulated processing error", ErrorKind::Unknown);
+    let error_zero = RunRecord {
+        version: RUN_RECORD_VERSION,
+        run,
+        journal: RunJournal {
+            id: error_journal,
+            kind: RunJournalKind::Error,
+            stage: Some(RunStage {
+                key: TRANSFORM.into(),
+                id: transform,
+                stage_type: obzenflow_core::event::context::StageType::Transform,
+                is_effectful: false,
+            }),
+        },
+        position: JournalPosition(0),
+        kind: RunRecordKind::Execution,
+        record: JournalRecord::new(error_journal.into(), failure).into(),
+    };
     let mut success_one = source_one.clone();
     success_one.journal.stage = error_zero.journal.stage.clone();
     if let RunRecordData::Chain(record) = &mut success_one.record {
