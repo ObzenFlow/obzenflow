@@ -5,6 +5,7 @@
 use super::*;
 use fake_ai::{chat_model, embedding_model, runtime_config};
 use obzenflow::ai::{AiClientError, EmbeddingResponse};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_dsl::infinite_source;
@@ -258,6 +259,30 @@ async fn wait_for_outputs(outputs: &Mutex<Vec<TicketEmbedded>>, expected: usize)
     .expect("timed out waiting for AI stage outputs");
 }
 
+async fn wait_for_committed_receipts(run_dir: &Path, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while committed_receipts(run_dir).await < expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the sink's committed receipts");
+}
+
+async fn committed_receipts(run_dir: &Path) -> usize {
+    stage_events(run_dir, "collected")
+        .await
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                ChainPayload::Delivery(delivery)
+                    if matches!(delivery.result, DeliveryResult::Success { .. })
+            )
+        })
+        .count()
+}
+
 async fn wait_for_running(handle: &FlowHandle) {
     let mut states = handle.state_receiver();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -286,12 +311,14 @@ fn models_context(chat: &FakeChatModels, embed: &FakeEmbeddingModels) -> FlowBui
 async fn run_resumable_until(
     flow: FlowDefinition,
     context: FlowBuildContext,
+    journal_base: &Path,
     outputs: &Mutex<Vec<TicketEmbedded>>,
     expected: usize,
 ) {
     let handle = flow.build(context).await.expect("resumable AI flow builds");
     wait_for_running(&handle).await;
     wait_for_outputs(outputs, expected).await;
+    wait_for_committed_receipts(&latest_run_dir(journal_base), expected).await;
     handle.stop().await.expect("test flow accepts stop");
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
@@ -326,6 +353,7 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
     run_resumable_until(
         resumable_flow(journal_base.clone(), 1, 1, recorded_outputs.clone()),
         models_context(&recorded_chat, &recorded_embed),
+        &journal_base,
         &recorded_outputs,
         1,
     )
@@ -340,6 +368,7 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
     run_resumable_until(
         resumable_flow(journal_base.clone(), 2, 1, resumed_outputs.clone()),
         models_context(&resumed_chat, &resumed_embed),
+        &journal_base,
         &resumed_outputs,
         2,
     )
