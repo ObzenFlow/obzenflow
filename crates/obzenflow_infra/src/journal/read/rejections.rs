@@ -3,16 +3,21 @@
 // https://obzenflow.dev
 
 //! Rows a lineage's sources rejected. A row is one source's record index while
-//! that source pinned one input across the lineage, so a later run that
-//! rejects the same row again records a repeat.
+//! that source pinned one input across the earlier runs, so a later run that
+//! rejects the same row again records a repeat. Cursors read the earlier
+//! journals one record at a time, in row order, and hold no rejection beyond
+//! their own.
 
+use super::{JournalCursor, JournalReadError, SourceJournals};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::read::{
     JournalPosition, RunIdentity, RunJournal, RunJournalKind, RunRecord, RunRecordData,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// The run, journal and position that hold a record.
 #[derive(Debug, Clone, Serialize)]
@@ -30,48 +35,148 @@ impl RecordedAt {
             position: record.position,
         }
     }
-
-    fn holds(&self, record: &RunRecord) -> bool {
-        self.run == record.run
-            && self.journal.id == record.journal.id
-            && self.position == record.position
-    }
 }
 
-/// The rows a lineage's sources rejected, folded from its runs oldest first.
-#[derive(Debug, Default)]
-pub struct LineageRejections {
+/// Finds the first record of a rejected row among the earlier runs, oldest
+/// first. A cursor per source and pair of runs walks the older run's
+/// rejections forward while the newer run's rejections rise.
+#[derive(Default)]
+pub(super) struct Repeats {
+    runs: Vec<SourceJournals>,
     inputs: BTreeMap<String, BTreeSet<String>>,
-    first: BTreeMap<(String, u64), RecordedAt>,
+    ordered: BTreeMap<JournalId, bool>,
+    cursors: BTreeMap<(String, usize, usize), RowCursor>,
 }
 
-impl LineageRejections {
-    /// Folds one record, after every record of the runs before its own.
-    pub fn fold(&mut self, record: &RunRecord) {
-        if let Some((source, digest)) = pinned_input(record) {
-            self.inputs
-                .entry(source.to_owned())
-                .or_default()
-                .insert(digest);
+struct RowCursor {
+    journal: JournalCursor,
+    front: Option<(u64, RecordedAt)>,
+    last: u64,
+}
+
+impl Repeats {
+    pub(super) fn add(&mut self, run: SourceJournals) {
+        self.runs.push(run);
+    }
+
+    pub(super) async fn repeat_of(
+        &mut self,
+        shown: &RunIdentity,
+        record: &RunRecord,
+    ) -> Result<Option<RecordedAt>, JournalReadError> {
+        let Some((source, row)) = rejected_row(record) else {
+            return Ok(None);
+        };
+        let newer = if record.run == *shown {
+            self.runs.len()
+        } else {
+            match self.runs.iter().position(|run| run.run == record.run) {
+                Some(newer) => newer,
+                None => return Ok(None),
+            }
+        };
+        if newer == 0 || self.inputs(&source).await?.len() != 1 {
+            return Ok(None);
         }
-        if let Some(row) = rejected_row(record) {
-            self.first
-                .entry(row)
-                .or_insert_with(|| RecordedAt::of(record));
+        self.cursors
+            .retain(|(key, by, _), _| key != &source || *by >= newer);
+        for older in 0..newer {
+            let Some((journal, path)) = self.runs[older].errors.get(&source).cloned() else {
+                continue;
+            };
+            let run = self.runs[older].run.clone();
+            let ordered = self.ordered(&run, &journal, &path).await?;
+            let cursor = self
+                .cursors
+                .entry((source.clone(), newer, older))
+                .or_insert_with(|| RowCursor {
+                    journal: JournalCursor::new(run, journal, path),
+                    front: None,
+                    last: 0,
+                });
+            if let Some(first) = cursor.find(row, ordered).await? {
+                return Ok(Some(first));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn inputs(&mut self, source: &str) -> Result<&BTreeSet<String>, JournalReadError> {
+        if !self.inputs.contains_key(source) {
+            let mut inputs = BTreeSet::new();
+            for run in &self.runs {
+                let Some((journal, path)) = run.data.get(source) else {
+                    continue;
+                };
+                let mut cursor = JournalCursor::new(run.run.clone(), journal.clone(), path.clone());
+                while let Some(record) = cursor.next().await? {
+                    if let Some((_, digest)) = pinned_input(&record) {
+                        inputs.insert(digest);
+                    }
+                }
+            }
+            self.inputs.insert(source.to_owned(), inputs);
+        }
+        Ok(&self.inputs[source])
+    }
+
+    async fn ordered(
+        &mut self,
+        run: &RunIdentity,
+        journal: &RunJournal,
+        path: &Path,
+    ) -> Result<bool, JournalReadError> {
+        if let Some(ordered) = self.ordered.get(&journal.id) {
+            return Ok(*ordered);
+        }
+        let mut cursor = JournalCursor::new(run.clone(), journal.clone(), path.to_path_buf());
+        let mut ordered = true;
+        let mut last = 0;
+        while let Some(record) = cursor.next().await? {
+            if let Some((_, row)) = rejected_row(&record) {
+                if row < last {
+                    ordered = false;
+                    break;
+                }
+                last = row;
+            }
+        }
+        self.ordered.insert(journal.id, ordered);
+        Ok(ordered)
+    }
+}
+
+impl RowCursor {
+    async fn find(
+        &mut self,
+        row: u64,
+        ordered: bool,
+    ) -> Result<Option<RecordedAt>, JournalReadError> {
+        if !ordered || row < self.last {
+            self.journal.restart();
+            self.front = None;
+        }
+        self.last = row;
+        loop {
+            if self.front.is_none() {
+                self.front = self.next_row().await?;
+            }
+            match &self.front {
+                None => return Ok(None),
+                Some((at, first)) if *at == row => return Ok(Some(first.clone())),
+                Some((at, _)) if ordered && *at > row => return Ok(None),
+                Some(_) => self.front = None,
+            }
         }
     }
 
-    /// The record that first rejected the row `record` rejects again.
-    pub fn repeat_of(&self, record: &RunRecord) -> Option<&RecordedAt> {
-        let row = rejected_row(record)?;
-        if self
-            .inputs
-            .get(&row.0)
-            .is_none_or(|inputs| inputs.len() != 1)
-        {
-            return None;
+    async fn next_row(&mut self) -> Result<Option<(u64, RecordedAt)>, JournalReadError> {
+        while let Some(record) = self.journal.next().await? {
+            if let Some((_, row)) = rejected_row(&record) {
+                return Ok(Some((row, RecordedAt::of(&record))));
+            }
         }
-        self.first.get(&row).filter(|first| !first.holds(record))
+        Ok(None)
     }
 }
 
@@ -119,211 +224,4 @@ fn rejected_row(record: &RunRecord) -> Option<(String, u64)> {
         source.to_owned(),
         rejected.diagnostic.location().record_index()?,
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use obzenflow_core::event::context::StageType;
-    use obzenflow_core::event::payloads::execution_payload::{
-        SourceInputPinnedFact, SourceRecordRejectedFact, SourceResumeFact,
-    };
-    use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{
-        ChainEventFactory, JournalRecord, SourceDiagnostic, SourceDiagnosticReason,
-    };
-    use obzenflow_core::id::{FlowId, JournalId, StageId};
-    use obzenflow_core::journal::read::{RunRecordKind, RunStage, RUN_RECORD_VERSION};
-    use obzenflow_core::source::SourceInputIdentity;
-    use obzenflow_core::{JournalWriterId, SystemId, WriterId};
-
-    struct Run {
-        identity: RunIdentity,
-        stage: StageId,
-        data: JournalId,
-        error: JournalId,
-        records: Vec<RunRecord>,
-    }
-
-    impl Run {
-        fn new() -> Self {
-            Self {
-                identity: RunIdentity {
-                    flow_id: FlowId::new(),
-                    pipeline_writer_id: SystemId::new().into(),
-                },
-                stage: StageId::new(),
-                data: JournalId::new(),
-                error: JournalId::new(),
-                records: Vec::new(),
-            }
-        }
-
-        fn journal(&self, id: JournalId, kind: RunJournalKind) -> RunJournal {
-            RunJournal {
-                id,
-                kind,
-                stage: Some(RunStage {
-                    key: "transactions".into(),
-                    id: self.stage,
-                    stage_type: StageType::FiniteSource,
-                    is_effectful: false,
-                }),
-            }
-        }
-
-        fn push(&mut self, kind: RunJournalKind, payload: ExecutionPayload) -> &RunRecord {
-            let journal = match kind {
-                RunJournalKind::Error => self.error,
-                _ => self.data,
-            };
-            let position = JournalPosition(
-                self.records
-                    .iter()
-                    .filter(|record| record.journal.id == journal)
-                    .count() as u64,
-            );
-            let event = ChainEventFactory::execution_event(WriterId::from(self.stage), payload);
-            self.records.push(RunRecord {
-                version: RUN_RECORD_VERSION,
-                run: self.identity.clone(),
-                journal: self.journal(journal, kind),
-                position,
-                kind: RunRecordKind::Execution,
-                record: RunRecordData::Chain(Box::new(JournalRecord::new(
-                    JournalWriterId::new(),
-                    event,
-                ))),
-            });
-            self.records.last().expect("pushed record")
-        }
-
-        fn pin(&mut self, file: &str) {
-            let identity = SourceInputIdentity::new("csv", &serde_json::json!({ "file": file }))
-                .expect("identity");
-            let beginning = serde_json::from_value(serde_json::json!({
-                "schema_version": 1,
-                "value": 0
-            }))
-            .expect("position");
-            self.push(
-                RunJournalKind::Data,
-                ExecutionPayload::SourceInputPinned(SourceInputPinnedFact {
-                    identity,
-                    beginning,
-                }),
-            );
-        }
-
-        fn positioned(&mut self, file: &str) {
-            let identity_digest =
-                SourceInputIdentity::new("csv", &serde_json::json!({ "file": file }))
-                    .expect("identity")
-                    .digest();
-            self.push(
-                RunJournalKind::Data,
-                ExecutionPayload::SourcePositioned(SourceResumeFact {
-                    identity_digest,
-                    generation: 1,
-                }),
-            );
-        }
-
-        fn reject(&mut self, index: u64) -> RunRecord {
-            let diagnostic =
-                SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord).record(index);
-            self.push(
-                RunJournalKind::Error,
-                ExecutionPayload::SourceRecordRejected(SourceRecordRejectedFact {
-                    kind: ErrorKind::Validation,
-                    detail: format!("record {index}: {diagnostic}"),
-                    diagnostic,
-                }),
-            )
-            .clone()
-        }
-    }
-
-    fn folded(runs: &[&Run]) -> LineageRejections {
-        let mut lineage = LineageRejections::default();
-        for record in runs.iter().flat_map(|run| &run.records) {
-            lineage.fold(record);
-        }
-        lineage
-    }
-
-    #[test]
-    fn a_row_rejected_again_after_a_resume_repeats_the_first_record() {
-        let mut killed = Run::new();
-        killed.pin("transactions.csv");
-        let first = killed.reject(164);
-        let other = killed.reject(117);
-        let mut resumed = Run::new();
-        resumed.positioned("transactions.csv");
-        let again = resumed.reject(164);
-        let new = resumed.reject(201);
-
-        let lineage = folded(&[&killed, &resumed]);
-
-        assert!(lineage.repeat_of(&first).is_none());
-        assert!(lineage.repeat_of(&other).is_none());
-        assert!(lineage.repeat_of(&new).is_none());
-        let repeated = lineage.repeat_of(&again).expect("a repeat");
-        assert!(repeated.holds(&first));
-        assert_eq!(repeated.run, killed.identity);
-    }
-
-    #[test]
-    fn a_shown_run_repeats_a_row_its_lineage_rejected() {
-        let mut killed = Run::new();
-        killed.pin("transactions.csv");
-        let first = killed.reject(164);
-        let mut resumed = Run::new();
-        let again = resumed.reject(164);
-
-        let lineage = folded(&[&killed]);
-
-        let repeated = lineage.repeat_of(&again).expect("a repeat");
-        assert!(repeated.holds(&first));
-    }
-
-    #[test]
-    fn rows_repeat_only_while_their_source_pinned_one_input() {
-        let mut unpinned = Run::new();
-        unpinned.reject(164);
-        let mut resumed = Run::new();
-        let again = resumed.reject(164);
-        let lineage = folded(&[&unpinned, &resumed]);
-        assert!(
-            lineage.repeat_of(&again).is_none(),
-            "no pin names the input"
-        );
-
-        let mut first = Run::new();
-        first.pin("monday.csv");
-        first.reject(164);
-        let mut second = Run::new();
-        second.positioned("tuesday.csv");
-        let again = second.reject(164);
-        let lineage = folded(&[&first, &second]);
-        assert!(lineage.repeat_of(&again).is_none(), "two inputs");
-    }
-
-    #[test]
-    fn a_rejection_that_names_no_record_never_repeats() {
-        let mut killed = Run::new();
-        killed.pin("transactions.csv");
-        let unplaced = || {
-            ExecutionPayload::SourceRecordRejected(SourceRecordRejectedFact {
-                kind: ErrorKind::Validation,
-                detail: "invalid record".into(),
-                diagnostic: SourceDiagnosticReason::InvalidRecord.into(),
-            })
-        };
-        killed.push(RunJournalKind::Error, unplaced());
-        let mut resumed = Run::new();
-        let again = resumed.push(RunJournalKind::Error, unplaced()).clone();
-        let lineage = folded(&[&killed, &resumed]);
-        assert!(lineage.repeat_of(&again).is_none());
-    }
 }

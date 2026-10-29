@@ -81,6 +81,21 @@ impl<'a> Observed<'a> {
     }
 }
 
+/// A record as listed, with the first record of the row it rejects again.
+pub(super) struct Listed {
+    pub record: RunRecord,
+    pub repeat_of: Option<RecordedAt>,
+}
+
+impl From<RunRecord> for Listed {
+    fn from(record: RunRecord) -> Self {
+        Self {
+            record,
+            repeat_of: None,
+        }
+    }
+}
+
 pub(super) struct Renderer {
     jsonl: bool,
     full: bool,
@@ -99,7 +114,6 @@ pub(super) struct Renderer {
     other_event_types: u64,
     event_counts: event_counts::EventCounts,
     record_counts: record_counts::RecordCounts,
-    rejections: LineageRejections,
     continuations: continuation::Continuations,
 }
 
@@ -137,7 +151,6 @@ impl Renderer {
             other_event_types: 0,
             event_counts: event_counts::EventCounts::default(),
             record_counts: record_counts::RecordCounts::default(),
-            rejections: LineageRejections::default(),
             continuations: continuation::Continuations::default(),
         }
     }
@@ -201,18 +214,14 @@ impl Renderer {
         Ok(())
     }
 
-    pub(super) fn lineage(&mut self, rejections: LineageRejections) {
-        self.rejections = rejections;
-    }
-
     pub(super) fn record(
         &mut self,
         output: &mut impl Write,
-        record: RunRecord,
+        listed: impl Into<Listed>,
     ) -> Result<(), Error> {
+        let Listed { record, repeat_of } = listed.into();
         let this_run = self.run.as_ref().is_none_or(|run| *run == record.run);
-        self.record_counts
-            .record(&record, self.rejections.repeat_of(&record).is_some());
+        self.record_counts.record(&record, repeat_of.is_some());
         if this_run {
             self.count(&record)?;
         }
@@ -221,8 +230,7 @@ impl Renderer {
             self.journal_legend(output)?;
         }
         if self.visible(&record) {
-            let view = EventView::from_record(&record, &self.context)
-                .repeating(self.rejections.repeat_of(&record));
+            let view = EventView::from_record(&record, &self.context).repeating(repeat_of.as_ref());
             if this_run {
                 self.terminal().render(output, &view)?;
             } else {

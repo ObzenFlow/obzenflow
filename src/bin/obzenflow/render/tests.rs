@@ -2146,11 +2146,16 @@ fn manifest_for(records: &[&RunRecord]) -> RunManifest {
 }
 
 fn rendered_with_summary(renderer: &mut Renderer, records: &[RunRecord]) -> String {
-    let manifest = manifest_for(&records.iter().collect::<Vec<_>>());
     let mut output = Vec::new();
     for record in records {
         renderer.record(&mut output, record.clone()).unwrap();
     }
+    String::from_utf8(output).unwrap() + &summary_text(renderer, records)
+}
+
+fn summary_text(renderer: &mut Renderer, records: &[RunRecord]) -> String {
+    let manifest = manifest_for(&records.iter().collect::<Vec<_>>());
+    let mut output = Vec::new();
     renderer
         .finish(
             &mut output,
@@ -2425,43 +2430,27 @@ fn the_summary_counts_each_record_once_with_errors_by_kind() {
 
 #[test]
 fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
-    use obzenflow_core::event::payloads::execution_payload::SourceInputPinnedFact;
-    use obzenflow_core::source::SourceInputIdentity;
-
-    let mut killed_pin = fact(1, 99, &[], json!({}));
-    killed_pin.kind = RunRecordKind::Execution;
-    if let RunRecordData::Chain(row) = &mut killed_pin.record {
-        row.payload =
-            ChainPayload::Execution(ExecutionPayload::SourceInputPinned(SourceInputPinnedFact {
-                identity: SourceInputIdentity::new("csv", &json!({"file": "night.csv"})).unwrap(),
-                beginning: serde_json::from_value(json!({"schema_version": 1, "value": 0}))
-                    .unwrap(),
-            }));
-    }
     let mut killed_rejection = rejected_row(100, 164);
-    let killed_run = RunIdentity {
+    killed_rejection.run = RunIdentity {
         flow_id: serde_json::from_value(json!(id(20))).unwrap(),
         pipeline_writer_id: killed_rejection.run.pipeline_writer_id,
     };
-    killed_pin.run = killed_run.clone();
-    killed_rejection.run = killed_run.clone();
     killed_rejection.journal.id = serde_json::from_value(json!(id(35))).unwrap();
-    let killed_records = [killed_pin, killed_rejection.clone()];
-    let mut rejections = LineageRejections::default();
-    for record in &killed_records {
-        rejections.fold(record);
-    }
+    let repeated = || Listed {
+        record: rejected_row(101, 164),
+        repeat_of: Some(RecordedAt::of(&killed_rejection)),
+    };
 
     let repeat = rejected_row(101, 164);
     let records = [repeat.clone()];
     let mut renderer = renderer_over(&records);
     renderer.begin(&mut Vec::new(), &repeat.run, false).unwrap();
-    renderer.lineage(rejections);
     let mut output = Vec::new();
     renderer
         .record(&mut output, killed_rejection.clone())
         .unwrap();
-    let text = String::from_utf8(output).unwrap() + &rendered_with_summary(&mut renderer, &records);
+    renderer.record(&mut output, repeated()).unwrap();
+    let text = String::from_utf8(output).unwrap() + &summary_text(&mut renderer, &records);
     let killed = format!("flow_{}", id(20));
     assert_eq!(
         text.matches("runtime.source.record_rejected ← thermometer()")
@@ -2495,15 +2484,10 @@ fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
         false,
         records.iter().map(|record| &record.journal),
     );
-    let mut rejections = LineageRejections::default();
-    for record in &killed_records {
-        rejections.fold(record);
-    }
     jsonl.begin(&mut Vec::new(), &repeat.run, false).unwrap();
-    jsonl.lineage(rejections);
     let mut output = Vec::new();
     jsonl.record(&mut output, killed_rejection.clone()).unwrap();
-    jsonl.record(&mut output, repeat).unwrap();
+    jsonl.record(&mut output, repeated()).unwrap();
     let lines: Vec<Value> = String::from_utf8(output)
         .unwrap()
         .lines()

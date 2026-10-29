@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 mod config_changes;
+mod earlier;
 mod lineage;
 mod merge;
 mod rejections;
@@ -26,9 +27,10 @@ pub use config_changes::{
     compare_with_runs, read_config_changes, read_configuration_refusals,
     read_logic_version_changes, ConfigChanges, LogicVersionChange, RunConfigChanges,
 };
+pub use earlier::EarlierRun;
 pub use lineage::{read_run_lineage, EvidenceHolder, Rebuild, ResumedFrom, RunLineage, Standing};
 pub use obzenflow_runtime::runtime_config::ConfigDifference;
-pub use rejections::{LineageRejections, RecordedAt};
+pub use rejections::RecordedAt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalReadError {
@@ -88,6 +90,111 @@ struct SelectedJournal {
     reader: Reader,
 }
 
+/// One journal of an earlier run, read from its start one record at a time up
+/// to the end it had when opened.
+struct JournalCursor {
+    run: RunIdentity,
+    journal: RunJournal,
+    path: PathBuf,
+    reader: Option<DiskJournalReader<ChainEvent>>,
+    exhausted: bool,
+}
+
+impl JournalCursor {
+    fn new(run: RunIdentity, journal: RunJournal, path: PathBuf) -> Self {
+        Self {
+            run,
+            journal,
+            path,
+            reader: None,
+            exhausted: false,
+        }
+    }
+
+    async fn open(&mut self) -> Result<(), JournalReadError> {
+        if self.reader.is_none() && !self.exhausted {
+            self.reader =
+                Some(DiskJournalReader::open_observer(self.path.clone(), self.journal.id).await?);
+        }
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<RunRecord>, JournalReadError> {
+        self.open().await?;
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(None);
+        };
+        if reader.initial_prefix_complete()? {
+            self.close();
+            return Ok(None);
+        }
+        let position = JournalPosition(reader.position());
+        match reader.next().await? {
+            Some(record) => Ok(Some(run_record(
+                &self.run,
+                self.journal.clone(),
+                position,
+                RunRecordData::Chain(Box::new(record)),
+            ))),
+            None => {
+                self.close();
+                Ok(None)
+            }
+        }
+    }
+
+    fn restart(&mut self) {
+        self.reader = None;
+        self.exhausted = false;
+    }
+
+    fn close(&mut self) {
+        self.reader = None;
+        self.exhausted = true;
+    }
+}
+
+/// An earlier run's source journals, by source.
+struct SourceJournals {
+    run: RunIdentity,
+    data: BTreeMap<String, (RunJournal, PathBuf)>,
+    errors: BTreeMap<String, (RunJournal, PathBuf)>,
+}
+
+impl SourceJournals {
+    fn of(run: &AdmittedRun) -> Self {
+        let mut sources = Self {
+            run: run.identity.clone(),
+            data: BTreeMap::new(),
+            errors: BTreeMap::new(),
+        };
+        for (journal, path) in &run.journals {
+            let Some(stage) = journal
+                .stage
+                .as_ref()
+                .filter(|stage| stage.stage_type.is_source())
+            else {
+                continue;
+            };
+            let journals = match journal.kind {
+                RunJournalKind::Data => &mut sources.data,
+                RunJournalKind::Error => &mut sources.errors,
+                _ => continue,
+            };
+            journals.insert(stage.key.clone(), (journal.clone(), path.clone()));
+        }
+        sources
+    }
+}
+
+/// A run's identity, manifest and selected journals, checked without reading
+/// any record.
+struct AdmittedRun {
+    identity: RunIdentity,
+    manifest: RunManifest,
+    journals: Vec<(RunJournal, PathBuf)>,
+}
+
 /// A finite per-journal committed prefix, with independent cursors.
 pub struct RunSnapshot {
     state: ReadState,
@@ -104,7 +211,8 @@ struct ReadState {
     manifest: RunManifest,
     journals: Vec<SelectedJournal>,
     merge: merge::CausalMerge<RunRecord>,
-    earlier: merge::EarlierRuns<RunRecord>,
+    earlier: earlier::EarlierRuns,
+    repeats: rejections::Repeats,
     progress: RunReadProgress,
     settled_ends: BTreeMap<JournalId, JournalPosition>,
     failure: Option<String>,
@@ -112,6 +220,41 @@ struct ReadState {
 
 /// Admit all manifest-selected journals without creating or changing any file.
 pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError> {
+    let AdmittedRun {
+        identity,
+        manifest,
+        journals: files,
+    } = admit_run(path)?;
+    let mut journals = Vec::with_capacity(files.len());
+    for (journal, file) in files {
+        let reader = match journal.kind {
+            RunJournalKind::System
+            | RunJournalKind::MetricsCoordination
+            | RunJournalKind::MetricsExport => {
+                Reader::System(DiskJournalReader::open_observer(file, journal.id).await?)
+            }
+            _ => Reader::Chain(DiskJournalReader::open_observer(file, journal.id).await?),
+        };
+        journals.push(SelectedJournal { journal, reader });
+    }
+    let merge = merge::CausalMerge::new(journals.iter().map(|selected| selected.journal.id));
+    Ok(RunSnapshot {
+        state: ReadState {
+            run_dir: path.to_path_buf(),
+            identity,
+            manifest,
+            journals,
+            merge,
+            earlier: earlier::EarlierRuns::default(),
+            repeats: rejections::Repeats::default(),
+            progress: RunReadProgress::default(),
+            settled_ends: BTreeMap::new(),
+            failure: None,
+        },
+    })
+}
+
+fn admit_run(path: &Path) -> Result<AdmittedRun, JournalReadError> {
     let manifest = load_manifest(path)?;
     let flow_id: FlowId = manifest
         .flow_id
@@ -202,33 +345,19 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
                 "journal belongs to another run".into(),
             ));
         }
-        let id = descriptor.journal_id;
-        let reader = match kind {
-            RunJournalKind::System
-            | RunJournalKind::MetricsCoordination
-            | RunJournalKind::MetricsExport => {
-                Reader::System(DiskJournalReader::open_observer(file, id).await?)
-            }
-            _ => Reader::Chain(DiskJournalReader::open_observer(file, id).await?),
-        };
-        journals.push(SelectedJournal {
-            journal: RunJournal { id, kind, stage },
-            reader,
-        });
+        journals.push((
+            RunJournal {
+                id: descriptor.journal_id,
+                kind,
+                stage,
+            },
+            file,
+        ));
     }
-    let merge = merge::CausalMerge::new(journals.iter().map(|selected| selected.journal.id));
-    Ok(RunSnapshot {
-        state: ReadState {
-            run_dir: path.to_path_buf(),
-            identity,
-            manifest,
-            journals,
-            merge,
-            earlier: merge::EarlierRuns::default(),
-            progress: RunReadProgress::default(),
-            settled_ends: BTreeMap::new(),
-            failure: None,
-        },
+    Ok(AdmittedRun {
+        identity,
+        manifest,
+        journals,
     })
 }
 
@@ -239,10 +368,6 @@ impl RunSnapshot {
     /// Persisted manifest admitted with this handle. Run outcomes come from journals.
     pub fn manifest(&self) -> &RunManifest {
         &self.state.manifest
-    }
-    /// The generation this run entered, 0 for a run that resumed nothing.
-    pub fn generation(&self) -> u64 {
-        lineage::entered_generation(&self.state.manifest)
     }
     /// Manifest-selected journal identities, available before reading any rows.
     pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {
@@ -257,14 +382,26 @@ impl RunSnapshot {
     pub async fn next(&mut self) -> Result<Option<RunRecord>, JournalReadError> {
         self.state.next(true).await
     }
-    /// Adds an earlier run's source error records before reading. Each one
-    /// follows the record of this run that re-admitted the row it followed.
-    pub fn merge_earlier_run<'a>(
+    /// Lists the source error records of `runs`, oldest first, before reading.
+    /// Each follows the record of this run that re-admitted the row it followed.
+    /// Their journals are read one record at a time as this run reaches them,
+    /// and a run that cannot be admitted is skipped.
+    pub async fn list_earlier_runs<'a>(
         &mut self,
-        journals: impl IntoIterator<Item = &'a RunJournal>,
-        records: Vec<RunRecord>,
-    ) {
-        self.state.merge_earlier_run(journals, records);
+        runs: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<Vec<EarlierRun>, JournalReadError> {
+        self.state.list_earlier_runs(runs).await
+    }
+    /// The first record of the row `record` rejects again: the oldest listed
+    /// earlier run's, while its source pinned one input across those runs.
+    pub async fn repeat_of(
+        &mut self,
+        record: &RunRecord,
+    ) -> Result<Option<RecordedAt>, JournalReadError> {
+        self.state
+            .repeats
+            .repeat_of(&self.state.identity, record)
+            .await
     }
     pub fn into_tail(self) -> RunTail {
         RunTail { state: self.state }
@@ -302,12 +439,30 @@ impl RunTail {
             None => TailRead::Pending,
         })
     }
-    /// Every record still held, in rank order, then any earlier-run record this
-    /// run never re-admitted a row for.
-    pub fn take_held(&mut self) -> Vec<RunRecord> {
-        let mut held = self.state.merge.drain();
-        held.extend(std::iter::from_fn(|| self.state.earlier.take_unreached()));
-        held
+    /// The first record of the row `record` rejects again: the oldest listed
+    /// earlier run's, while its source pinned one input across those runs.
+    pub async fn repeat_of(
+        &mut self,
+        record: &RunRecord,
+    ) -> Result<Option<RecordedAt>, JournalReadError> {
+        self.state
+            .repeats
+            .repeat_of(&self.state.identity, record)
+            .await
+    }
+    /// The next record still held, in rank order, then each earlier-run record
+    /// this run never re-admitted a row for.
+    pub async fn next_held(&mut self) -> Result<Option<RunRecord>, JournalReadError> {
+        self.state.fill_earlier().await?;
+        let next = self
+            .state
+            .merge
+            .lowest()
+            .or_else(|| self.state.earlier.take_unreached());
+        if let Some(record) = &next {
+            self.state.earlier.taken(record);
+        }
+        Ok(next)
     }
 }
 
@@ -316,10 +471,13 @@ impl ReadState {
         if let Some(error) = &self.failure {
             return Err(JournalReadError::Integrity(error.clone()));
         }
+        self.fill_earlier().await?;
         for index in 0..self.journals.len() {
             let selected = &mut self.journals[index];
             if self.merge.holds(&selected.journal.id)
                 || (snapshot && selected.reader.initial_prefix_complete()?)
+                || source_data_stage(&selected.journal)
+                    .is_some_and(|source| self.earlier.holds_back(source))
             {
                 continue;
             }
@@ -343,15 +501,8 @@ impl ReadState {
                             return Err(error);
                         }
                     }
-                    let kind = classify(&journal, &record);
-                    self.hold(RunRecord {
-                        version: RUN_RECORD_VERSION,
-                        run: self.identity.clone(),
-                        journal,
-                        position,
-                        kind,
-                        record,
-                    });
+                    let record = run_record(&self.identity, journal, position, record);
+                    self.hold(record);
                 }
                 None if !snapshot
                     && at_end
@@ -370,21 +521,72 @@ impl ReadState {
         } else {
             self.merge.lowest_ready()
         };
+        if let Some(record) = &next {
+            self.earlier.taken(record);
+        }
         self.refresh_settlement();
         Ok(next)
     }
 
+    async fn list_earlier_runs<'a>(
+        &mut self,
+        runs: impl IntoIterator<Item = &'a Path>,
+    ) -> Result<Vec<EarlierRun>, JournalReadError> {
+        let mut listed = Vec::new();
+        for path in runs {
+            let Ok(admitted) = admit_run(path) else {
+                continue;
+            };
+            let sources = SourceJournals::of(&admitted);
+            let Ok(streams) = open_streams(&sources).await else {
+                continue;
+            };
+            for (cursor, anchor) in streams {
+                self.earlier.add(cursor, anchor);
+            }
+            self.repeats.add(sources);
+            listed.push(EarlierRun {
+                generation: lineage::entered_generation(&admitted.manifest),
+                identity: admitted.identity,
+                journals: admitted
+                    .journals
+                    .into_iter()
+                    .map(|(journal, _)| journal)
+                    .collect(),
+            });
+        }
+        self.fill_earlier().await?;
+        Ok(listed)
+    }
+
+    async fn fill_earlier(&mut self) -> Result<(), JournalReadError> {
+        let placed = match self.earlier.fill().await {
+            Ok(placed) => placed,
+            Err(error) => {
+                self.failure = Some(error.to_string());
+                return Err(error);
+            }
+        };
+        for (earlier, clock) in placed {
+            self.place(earlier, &clock);
+        }
+        Ok(())
+    }
+
+    fn place(&mut self, earlier: RunRecord, clock: &VectorClock) {
+        let journal = earlier.journal.id;
+        let sequence = sequence_of(&earlier.record);
+        let mut order = clock.clone();
+        order.clocks.insert(coordinate_of(journal), sequence);
+        let event = event_of(&earlier.record);
+        self.merge.push(journal, sequence, order, event, earlier);
+    }
+
     fn hold(&mut self, record: RunRecord) {
-        if let Some(source) = source_data_stage(&record.journal).map(str::to_owned) {
+        if let Some(source) = source_data_stage(&record.journal) {
             let clock = clock_of(&record.record);
-            for (journal, earlier) in self.earlier.reached(&source, clock) {
-                let mut order = clock.clone();
-                order
-                    .clocks
-                    .insert(coordinate_of(journal), sequence_of(&earlier.record));
-                let event = event_of(&earlier.record);
-                self.merge
-                    .push(journal, sequence_of(&earlier.record), order, event, earlier);
+            for earlier in self.earlier.reach(source, clock) {
+                self.place(earlier, clock);
             }
         }
         self.merge.push(
@@ -396,37 +598,9 @@ impl ReadState {
         );
     }
 
-    fn merge_earlier_run<'a>(
-        &mut self,
-        journals: impl IntoIterator<Item = &'a RunJournal>,
-        records: Vec<RunRecord>,
-    ) {
-        let sources: BTreeMap<String, JournalId> = journals
-            .into_iter()
-            .filter_map(|journal| {
-                source_data_stage(journal).map(|key| (key.to_owned(), journal.id))
-            })
-            .collect();
-        for record in records {
-            let source = record
-                .journal
-                .stage
-                .as_ref()
-                .filter(|stage| stage.stage_type.is_source())
-                .and_then(|stage| {
-                    sources
-                        .get(&stage.key)
-                        .map(|anchor| (stage.key.clone(), coordinate_of(*anchor)))
-                });
-            match source {
-                Some((source, anchor)) => {
-                    let count = clock_of(&record.record).get(&anchor);
-                    self.earlier
-                        .wait(record.journal.id, source, anchor, count, record);
-                }
-                None => self.earlier.unplaced(record),
-            }
-        }
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.merge.len() + self.earlier.waiting()
     }
 
     fn every_end_observed(&self) -> bool {
@@ -501,6 +675,38 @@ impl ReadState {
             });
         }
         Ok(())
+    }
+}
+
+async fn open_streams(
+    sources: &SourceJournals,
+) -> Result<Vec<(JournalCursor, Option<(String, CausalCoordinate)>)>, JournalReadError> {
+    let mut streams = Vec::new();
+    for (key, (journal, path)) in &sources.errors {
+        let mut cursor = JournalCursor::new(sources.run.clone(), journal.clone(), path.clone());
+        cursor.open().await?;
+        let anchor = sources
+            .data
+            .get(key)
+            .map(|(data, _)| (key.clone(), coordinate_of(data.id)));
+        streams.push((cursor, anchor));
+    }
+    Ok(streams)
+}
+
+fn run_record(
+    run: &RunIdentity,
+    journal: RunJournal,
+    position: JournalPosition,
+    record: RunRecordData,
+) -> RunRecord {
+    RunRecord {
+        version: RUN_RECORD_VERSION,
+        run: run.clone(),
+        kind: classify(&journal, &record),
+        journal,
+        position,
+        record,
     }
 }
 

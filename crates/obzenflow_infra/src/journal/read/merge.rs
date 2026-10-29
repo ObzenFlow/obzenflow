@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::CausalCoordinate;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::EventId;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -39,6 +38,11 @@ impl<T> CausalMerge<T> {
         self.held.values().all(VecDeque::is_empty)
     }
 
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.held.values().map(VecDeque::len).sum()
+    }
+
     pub(super) fn push(
         &mut self,
         journal: JournalId,
@@ -63,10 +67,6 @@ impl<T> CausalMerge<T> {
 
     pub(super) fn lowest_ready(&mut self) -> Option<T> {
         self.take(true)
-    }
-
-    pub(super) fn drain(&mut self) -> Vec<T> {
-        std::iter::from_fn(|| self.lowest()).collect()
     }
 
     fn take(&mut self, ready_only: bool) -> Option<T> {
@@ -95,90 +95,10 @@ impl<T> CausalMerge<T> {
     }
 }
 
-struct Waiting<T> {
-    source: String,
-    anchor: CausalCoordinate,
-    records: VecDeque<(u64, T)>,
-}
-
-pub(super) struct EarlierRuns<T> {
-    waiting: BTreeMap<JournalId, Waiting<T>>,
-    unplaced: VecDeque<T>,
-}
-
-impl<T> Default for EarlierRuns<T> {
-    fn default() -> Self {
-        Self {
-            waiting: BTreeMap::new(),
-            unplaced: VecDeque::new(),
-        }
-    }
-}
-
-impl<T> EarlierRuns<T> {
-    pub(super) fn wait(
-        &mut self,
-        journal: JournalId,
-        source: String,
-        anchor: CausalCoordinate,
-        count: u64,
-        item: T,
-    ) {
-        self.waiting
-            .entry(journal)
-            .or_insert_with(|| Waiting {
-                source,
-                anchor,
-                records: VecDeque::new(),
-            })
-            .records
-            .push_back((count, item));
-    }
-
-    pub(super) fn unplaced(&mut self, item: T) {
-        self.unplaced.push_back(item);
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.unplaced.is_empty()
-            && self
-                .waiting
-                .values()
-                .all(|waiting| waiting.records.is_empty())
-    }
-
-    pub(super) fn reached(&mut self, source: &str, clock: &VectorClock) -> Vec<(JournalId, T)> {
-        let mut reached = Vec::new();
-        for (journal, waiting) in self
-            .waiting
-            .iter_mut()
-            .filter(|(_, waiting)| waiting.source == source)
-        {
-            let count = clock.get(&waiting.anchor);
-            while waiting
-                .records
-                .front()
-                .is_some_and(|(anchor, _)| *anchor <= count)
-            {
-                if let Some((_, item)) = waiting.records.pop_front() {
-                    reached.push((*journal, item));
-                }
-            }
-        }
-        reached
-    }
-
-    pub(super) fn take_unreached(&mut self) -> Option<T> {
-        self.waiting
-            .values_mut()
-            .find_map(|waiting| waiting.records.pop_front().map(|(_, item)| item))
-            .or_else(|| self.unplaced.pop_front())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::CausalCoordinate;
     use obzenflow_core::JournalWriterId;
 
     struct Rng(u64);
@@ -334,7 +254,7 @@ mod tests {
                 }
                 order.extend(merge.lowest_ready());
             }
-            order.extend(merge.drain());
+            order.extend(std::iter::from_fn(|| merge.lowest()));
             assert_causal(&graph, &order);
             assert!(merge.is_empty());
         }
@@ -355,26 +275,5 @@ mod tests {
         assert_eq!(merge.lowest_ready(), Some("shown"));
         assert_eq!(merge.lowest_ready(), Some("waits"));
         assert!(merge.is_empty());
-    }
-
-    #[test]
-    fn an_earlier_runs_record_is_reached_by_its_own_sources_count() {
-        let anchor = coordinate(JournalId::new());
-        let rejections = JournalId::new();
-        let mut earlier = EarlierRuns::default();
-        earlier.wait(rejections, "transactions".into(), anchor, 121, "row 117");
-        earlier.wait(rejections, "transactions".into(), anchor, 167, "row 164");
-        earlier.unplaced("no source");
-        let mut clock = VectorClock::new();
-        clock.clocks.insert(anchor, 121);
-        assert!(earlier.reached("fx_rates", &clock).is_empty());
-        assert_eq!(
-            earlier.reached("transactions", &clock),
-            vec![(rejections, "row 117")]
-        );
-        assert!(!earlier.is_empty());
-        assert_eq!(earlier.take_unreached(), Some("row 164"));
-        assert_eq!(earlier.take_unreached(), Some("no source"));
-        assert!(earlier.is_empty());
     }
 }
