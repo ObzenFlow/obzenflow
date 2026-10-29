@@ -35,10 +35,10 @@
 //!         0
 //!     }
 //!
-//!     fn emit(&self, state: &Self::State) -> Result<StatefulEmission<CountSnapshot>, HandlerError> {
-//!         Ok(StatefulEmission::RetainEpoch {
+//!     fn emit(&self, state: &Self::State) -> StatefulEmission<CountSnapshot> {
+//!         StatefulEmission::RetainEpoch {
 //!             outputs: vec![CountSnapshot { total: *state }],
-//!         })
+//!         }
 //!     }
 //!
 //!     fn post_emit(&self, _: &mut Self::State) {}

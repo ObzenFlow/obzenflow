@@ -2,20 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Bounded presentation context. Parent links come only from recorded IDs;
-//! clock components never stand in for input records or journal positions.
+//! Presentation context. Parent links come only from recorded IDs; clock
+//! components never stand in for input records or journal positions.
 
 use obzenflow::journal::read::*;
 use obzenflow_core::event::CausalCoordinate;
-use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque};
-
-const MAX_REFERENCES: usize = 4096;
-
-#[derive(Clone)]
-pub(super) struct Reference {
-    pub event_type: String,
-    pub parents: Vec<String>,
-}
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 
 pub(super) struct Stage {
     pub writer: String,
@@ -68,8 +60,6 @@ pub(super) struct Context {
     replayed_authors: BTreeMap<String, String>,
     journal_numbers: BTreeMap<obzenflow_core::JournalId, usize>,
     journal_label_updates: BTreeSet<obzenflow_core::JournalId>,
-    references: BTreeMap<String, Reference>,
-    insertion_order: VecDeque<String>,
     pub join_phases: super::join_phase::JoinPhases,
 }
 
@@ -131,9 +121,7 @@ impl Context {
             replayed_authors: BTreeMap::new(),
             journal_numbers,
             journal_label_updates,
-            references: BTreeMap::new(),
             supervisors: BTreeMap::new(),
-            insertion_order: VecDeque::new(),
             join_phases: Default::default(),
         }
     }
@@ -143,7 +131,11 @@ impl Context {
         if let Entry::Vacant(entry) = self.journals.entry(record.journal.id) {
             // An earlier clock may have referenced this journal before its
             // metadata arrived. Resolve its legend name without renumbering.
-            entry.insert(JournalContext::new(&record.journal));
+            let mut journal = JournalContext::new(&record.journal);
+            if let Some(name) = self.ancestor_names.get(&record.journal.id) {
+                journal.name = name.clone();
+            }
+            entry.insert(journal);
             self.journal_label_updates.insert(record.journal.id);
         }
         self.number_journal(record.journal.id);
@@ -171,48 +163,6 @@ impl Context {
                 values: clock(record).clone(),
             });
         }
-        let id = event_id(record);
-        if self.references.contains_key(&id) {
-            return;
-        }
-        if self.references.len() == MAX_REFERENCES {
-            if let Some(oldest) = self.insertion_order.pop_front() {
-                self.references.remove(&oldest);
-            }
-        }
-        self.references.insert(
-            id.clone(),
-            Reference {
-                event_type: event_type(record).into(),
-                parents: parent_ids(record),
-            },
-        );
-        self.insertion_order.push_back(id);
-    }
-
-    pub fn parents_available(&self, record: &RunRecord) -> bool {
-        parent_ids(record)
-            .iter()
-            .all(|id| self.references.contains_key(id))
-    }
-
-    /// Omit a redundant ancestor only when another recorded parent explicitly
-    /// names it. No guessing from clock dominance, correlation or adjacency.
-    pub fn inputs(&self, record: &RunRecord) -> Vec<Option<&Reference>> {
-        let parents = parent_ids(record);
-        parents
-            .iter()
-            .filter(|id| {
-                !parents.iter().any(|other| {
-                    other != *id
-                        && self
-                            .references
-                            .get(other)
-                            .is_some_and(|reference| reference.parents.contains(id))
-                })
-            })
-            .map(|id| self.references.get(id))
-            .collect()
     }
 
     fn remember_replayed_author(&mut self, record: &RunRecord) {
@@ -361,21 +311,6 @@ pub(super) fn event_id(record: &RunRecord) -> String {
     match &record.record {
         RunRecordData::Chain(row) => row.id().to_string(),
         RunRecordData::System(row) => row.id().to_string(),
-    }
-}
-
-pub(super) fn parent_ids(record: &RunRecord) -> Vec<String> {
-    match &record.record {
-        RunRecordData::Chain(row) => row
-            .envelope
-            .provenance
-            .event
-            .causality
-            .parent_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
-        RunRecordData::System(_) => Vec::new(),
     }
 }
 

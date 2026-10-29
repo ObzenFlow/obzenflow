@@ -7,10 +7,11 @@
 mod replay_testkit;
 
 use obzenflow::stages::stateful::{self, emit};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
+use obzenflow_core::{EventId, StageId, StageOutputFacts, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -71,8 +72,8 @@ impl TypedStatefulHandler for WindowedFold {
         state.contributions >= 2
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::ResetEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::ResetEpoch {
             outputs: (state.contributions > 0)
                 .then_some(FoldSnapshot {
                     running_total: state.running_total,
@@ -80,7 +81,7 @@ impl TypedStatefulHandler for WindowedFold {
                 })
                 .into_iter()
                 .collect(),
-        })
+        }
     }
 
     fn post_emit(&self, state: &mut Self::State) {
@@ -427,25 +428,28 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
         aggregate_ranking_sink,
     } = journals;
     assert!(
-        validate_errors.is_empty(),
-        "ordinary in-band transform errors remain on the data path"
+        !validate.iter().any(|envelope| matches!(
+            envelope.envelope.provenance.event.processing.status,
+            ProcessingStatus::Error { .. }
+        )),
+        "the validator's data journal holds no error-marked row"
     );
-    let pre_errors = validate
+    let rejected = validate_errors
         .iter()
-        .filter(|envelope| {
-            matches!(
-                envelope.envelope.provenance.event.processing.status,
-                ProcessingStatus::Error { .. }
-            )
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                serde_json::from_value::<Input>(failure.input.payload.clone()).ok()
+            }
+            _ => None,
         })
-        .filter_map(|envelope| Input::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(
-        pre_errors,
+        rejected,
         vec![Input {
             value: 3,
             key: "a".into()
-        }]
+        }],
+        "the validator records its rejection in its error journal"
     );
 
     let successful_inputs = validate
@@ -689,4 +693,133 @@ async fn typed_stateful_boundaries_have_live_replay_journal_parity() {
         facts::<AggregateRanking>(&replay_aggregate_ranking),
         facts::<AggregateRanking>(&live_aggregate_ranking)
     );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct KeyTotal {
+    key: String,
+    total: u64,
+}
+
+impl TypedPayload for KeyTotal {
+    const EVENT_TYPE: &'static str = "flowip_134e.key_total";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct KeyOverLimit {
+    key: String,
+    total: u64,
+    limit: u64,
+}
+
+impl TypedPayload for KeyOverLimit {
+    const EVENT_TYPE: &'static str = "flowip_134e.key_over_limit";
+}
+
+#[derive(Clone, Debug, StageOutputFacts)]
+enum KeyVerdict {
+    Total(KeyTotal),
+    OverLimit(KeyOverLimit),
+}
+
+#[derive(Clone, Debug)]
+struct KeyLimit {
+    limit: u64,
+}
+
+impl TypedStatefulHandler for KeyLimit {
+    type State = BTreeMap<String, u64>;
+    type Input = Input;
+    type Output = KeyVerdict;
+
+    fn initial_state(&self) -> Self::State {
+        BTreeMap::new()
+    }
+
+    fn accumulate(&self, totals: &mut Self::State, input: Self::Input) {
+        *totals.entry(input.key).or_default() += input.value;
+    }
+
+    fn emit(&self, totals: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
+            outputs: totals
+                .iter()
+                .map(|(key, &total)| {
+                    if total > self.limit {
+                        KeyVerdict::OverLimit(KeyOverLimit {
+                            key: key.clone(),
+                            total,
+                            limit: self.limit,
+                        })
+                    } else {
+                        KeyVerdict::Total(KeyTotal {
+                            key: key.clone(),
+                            total,
+                        })
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn post_emit(&self, _: &mut Self::State) {}
+}
+
+fn build_limit_flow(journal_base: PathBuf) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let input_handler = ValuesSource::new();
+        let limit_handler = KeyLimit { limit: 10 };
+        let totals_sink = replay_testkit::Discard::<KeyTotal>::default();
+        let over_limit_sink = replay_testkit::Discard::<KeyOverLimit>::default();
+
+        Ok(flow! {
+            name: "typed_stateful_rejection_fact",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                inputs = source!(Input => input_handler);
+                limits = stateful!(Input -> { KeyTotal, KeyOverLimit } => limit_handler);
+                totals = sink!(KeyTotal => totals_sink);
+                over_limit = sink!(KeyOverLimit => over_limit_sink);
+            },
+
+            topology: {
+                inputs |> limits;
+                limits |> totals;
+                limits |> over_limit;
+            }
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_aggregate_is_a_fact_and_leaves_the_error_journal_empty() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    FlowApplication::builder()
+        .with_cli_args(vec![OsString::from("obzenflow")])
+        .run_async(build_limit_flow(journal_base.clone()))
+        .await
+        .expect("the limit flow completes");
+    let run = latest_run_dir(&journal_base);
+
+    let limits = read_stage(&run, "limits").await;
+    assert_eq!(
+        facts::<KeyTotal>(&limits),
+        [KeyTotal {
+            key: "a".into(),
+            total: 9,
+        }]
+    );
+    assert_eq!(
+        facts::<KeyOverLimit>(&limits),
+        [KeyOverLimit {
+            key: "b".into(),
+            total: 12,
+            limit: 10,
+        }]
+    );
+    assert!(read_stage_errors(&run, "limits").await.is_empty());
+    assert_eq!(delivery_count(&read_stage(&run, "totals").await), 1);
+    assert_eq!(delivery_count(&read_stage(&run, "over_limit").await), 1);
 }

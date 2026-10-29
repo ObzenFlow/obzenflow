@@ -5,11 +5,18 @@
 use super::*;
 use crate::journal::DiskJournal;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::{ChainEventFactory, SystemEventFactory};
+use obzenflow_core::event::payloads::execution_payload::{
+    SourceInputPinnedFact, SourceRecordRejectedFact, SourceResumeFact,
+};
+use obzenflow_core::event::status::processing_status::ErrorKind;
+use obzenflow_core::event::{
+    ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason, SystemEventFactory,
+};
 use obzenflow_core::journal::archive::manifest::{
     RunManifest, RunManifestStage, JOURNAL_SCHEMA_VERSION, OBSERVABILITY_CAPTURE_CAPABILITY,
     RUN_MANIFEST_FILENAME,
 };
+use obzenflow_core::source::SourceInputIdentity;
 use obzenflow_core::{Journal, JournalOwner, SystemId};
 use std::io::Write;
 
@@ -18,6 +25,7 @@ struct Run {
     manifest: RunManifest,
     system: DiskJournal<SystemEvent>,
     data: DiskJournal<ChainEvent>,
+    error: DiskJournal<ChainEvent>,
     factory: SystemEventFactory,
     stage: StageId,
 }
@@ -40,7 +48,7 @@ impl Run {
             run_id,
         )
         .unwrap();
-        let _error = DiskJournal::<ChainEvent>::with_owner_in_run(
+        let error = DiskJournal::<ChainEvent>::with_owner_in_run(
             dir.path().join("error.log"),
             JournalOwner::stage(stage),
             run_id,
@@ -84,6 +92,7 @@ impl Run {
             manifest,
             system,
             data,
+            error,
             factory: SystemEventFactory::new(pipeline),
             stage,
         };
@@ -117,6 +126,68 @@ impl Run {
 
     async fn system(&self, event: SystemEvent) {
         self.system.append(event, Default::default()).await.unwrap();
+    }
+
+    fn rejection(&self, row: Option<u64>) -> ChainEvent {
+        let diagnostic = SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord);
+        let diagnostic = match row {
+            Some(row) => diagnostic.record(row),
+            None => diagnostic,
+        };
+        ChainEventFactory::execution_event(
+            self.stage.into(),
+            ExecutionPayload::SourceRecordRejected(SourceRecordRejectedFact {
+                kind: ErrorKind::Validation,
+                detail: "invalid record".into(),
+                diagnostic,
+            }),
+        )
+        .mark_as_error("invalid record", ErrorKind::Validation)
+    }
+
+    async fn reject(&self, row: Option<u64>) {
+        self.error
+            .append(self.rejection(row), Default::default())
+            .await
+            .unwrap();
+    }
+
+    async fn pin(&self, file: &str) {
+        let pin = SourceInputPinnedFact {
+            identity: SourceInputIdentity::new("csv", &serde_json::json!({ "file": file }))
+                .unwrap(),
+            beginning: serde_json::from_value(serde_json::json!({"schema_version": 1, "value": 0}))
+                .unwrap(),
+        };
+        self.data
+            .append(
+                ChainEventFactory::execution_event(
+                    self.stage.into(),
+                    ExecutionPayload::SourceInputPinned(pin),
+                ),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn positioned(&self, file: &str) {
+        let identity_digest = SourceInputIdentity::new("csv", &serde_json::json!({ "file": file }))
+            .unwrap()
+            .digest();
+        self.data
+            .append(
+                ChainEventFactory::execution_event(
+                    self.stage.into(),
+                    ExecutionPayload::SourcePositioned(SourceResumeFact {
+                        identity_digest,
+                        generation: 1,
+                    }),
+                ),
+                Default::default(),
+            )
+            .await
+            .unwrap();
     }
 
     async fn open(&self) -> RunSnapshot {
@@ -467,4 +538,309 @@ async fn admitted_run_cannot_silently_retarget_a_replaced_journal() {
     std::fs::rename(&path, run.dir.path().join("original.log")).unwrap();
     std::fs::write(&path, []).unwrap();
     assert!(tail.read_next().await.is_err());
+}
+
+#[tokio::test]
+async fn an_earlier_runs_rejection_follows_the_row_this_run_re_admitted() {
+    use obzenflow_core::journal::AppendOptions;
+
+    let earlier = Run::new();
+    let first = earlier
+        .data
+        .append(earlier.event(0), Default::default())
+        .await
+        .unwrap();
+    let rejection = earlier
+        .error
+        .append(
+            earlier.event(1),
+            AppendOptions::from_record(Some(&first)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let next = earlier
+        .data
+        .append(
+            earlier.event(2),
+            AppendOptions::from_record(Some(&rejection)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let shown = Run::new();
+    for (index, re_admitted) in [(0, &first), (2, &next)] {
+        shown
+            .data
+            .append(
+                shown.event(index),
+                AppendOptions::from_record(Some(re_admitted)).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut snapshot = shown.open().await;
+    let listed = snapshot
+        .list_earlier_runs([earlier.dir.path()])
+        .await
+        .unwrap();
+    let earlier_run = listed[0].identity.clone();
+    let mut order = Vec::new();
+    while let Some(record) = snapshot.next().await.unwrap() {
+        order.push((
+            record.run == earlier_run,
+            record.journal.kind,
+            record.position.0,
+        ));
+    }
+    assert_eq!(
+        order,
+        [
+            (false, RunJournalKind::Data, 0),
+            (true, RunJournalKind::Error, 0),
+            (false, RunJournalKind::Data, 1),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_tail_lists_causally_and_hands_over_an_unreached_record_on_detach() {
+    use obzenflow_core::journal::AppendOptions;
+
+    let run = Run::new();
+    let first = run
+        .data
+        .append(run.event(0), Default::default())
+        .await
+        .unwrap();
+    run.error
+        .append(
+            run.event(1),
+            AppendOptions::from_record(Some(&first)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let earlier = Run::new();
+    let row = earlier
+        .data
+        .append(earlier.event(0), Default::default())
+        .await
+        .unwrap();
+    earlier
+        .error
+        .append(
+            earlier.event(1),
+            AppendOptions::from_record(Some(&row)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut snapshot = run.open().await;
+    let earlier_run = snapshot
+        .list_earlier_runs([earlier.dir.path()])
+        .await
+        .unwrap()[0]
+        .identity
+        .clone();
+    let mut tail = snapshot.into_tail();
+    let listed: Vec<_> = available(&mut tail)
+        .await
+        .into_iter()
+        .map(|record| record.journal.kind)
+        .collect();
+    assert_eq!(listed, [RunJournalKind::Data, RunJournalKind::Error]);
+    let held = tail
+        .next_held()
+        .await
+        .unwrap()
+        .expect("the earlier rejection");
+    assert_eq!(held.run, earlier_run);
+    assert!(tail.next_held().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn earlier_rejections_keep_their_places_while_each_journal_holds_one() {
+    use obzenflow_core::journal::AppendOptions;
+
+    const BURST: u64 = 1_000;
+    let earlier = Run::new();
+    let first = earlier
+        .data
+        .append(earlier.event(0), Default::default())
+        .await
+        .unwrap();
+    let mut last = None;
+    for row in 0..BURST {
+        last = Some(
+            earlier
+                .error
+                .append(
+                    earlier.rejection(Some(row)),
+                    AppendOptions::from_record(Some(&first)).unwrap(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let second = earlier
+        .data
+        .append(
+            earlier.event(1),
+            AppendOptions::from_record(last.as_ref()).unwrap(),
+        )
+        .await
+        .unwrap();
+    earlier
+        .error
+        .append(
+            earlier.rejection(Some(BURST)),
+            AppendOptions::from_record(Some(&second)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let shown = Run::new();
+    for (index, re_admitted) in [(0, &first), (1, &second)] {
+        shown
+            .data
+            .append(
+                shown.event(index),
+                AppendOptions::from_record(Some(re_admitted)).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut snapshot = shown.open().await;
+    snapshot
+        .list_earlier_runs([earlier.dir.path()])
+        .await
+        .unwrap();
+    let mut order = Vec::new();
+    let mut most_held = 0;
+    while let Some(record) = snapshot.next().await.unwrap() {
+        most_held = most_held.max(snapshot.state.held());
+        order.push((record.journal.kind, record.position.0));
+    }
+    let mut expected = vec![(RunJournalKind::Data, 0)];
+    expected.extend((0..BURST).map(|position| (RunJournalKind::Error, position)));
+    expected.extend([(RunJournalKind::Data, 1), (RunJournalKind::Error, BURST)]);
+    assert_eq!(order, expected);
+    assert!(
+        most_held <= 4,
+        "{most_held} records held for three journals and one earlier journal"
+    );
+}
+
+#[tokio::test]
+async fn a_row_rejected_again_names_the_oldest_run_that_rejected_it() {
+    let first = Run::new();
+    first.pin("night.csv").await;
+    first.reject(Some(3)).await;
+    first.reject(Some(5)).await;
+    let second = Run::new();
+    second.positioned("night.csv").await;
+    second.reject(Some(5)).await;
+    second.reject(Some(7)).await;
+    let shown = Run::new();
+    shown.reject(Some(7)).await;
+    shown.reject(Some(9)).await;
+
+    let mut snapshot = shown.open().await;
+    let runs: Vec<RunIdentity> = snapshot
+        .list_earlier_runs([first.dir.path(), second.dir.path()])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|run| run.identity)
+        .chain([snapshot.identity().clone()])
+        .collect();
+    let ordinal = |run: &RunIdentity| runs.iter().position(|listed| listed == run).unwrap();
+    let mut repeats = Vec::new();
+    let mut second_row_five = None;
+    while let Some(record) = snapshot.next().await.unwrap() {
+        if record.journal.kind != RunJournalKind::Error {
+            continue;
+        }
+        let repeat = snapshot.repeat_of(&record).await.unwrap();
+        let at = (ordinal(&record.run), record.position.0);
+        if at == (1, 0) {
+            second_row_five = Some(record);
+        }
+        repeats.push((
+            at,
+            repeat.map(|first| (ordinal(&first.run), first.position.0)),
+        ));
+    }
+    repeats.sort();
+    assert_eq!(
+        repeats,
+        [
+            ((0, 0), None),
+            ((0, 1), None),
+            ((1, 0), Some((0, 1))),
+            ((1, 1), None),
+            ((2, 0), Some((1, 1))),
+            ((2, 1), None),
+        ]
+    );
+    let again = snapshot
+        .repeat_of(&second_row_five.unwrap())
+        .await
+        .unwrap()
+        .expect("a query for an earlier row reads its run again");
+    assert_eq!((ordinal(&again.run), again.position.0), (0, 1));
+}
+
+#[tokio::test]
+async fn a_run_that_rejected_rows_out_of_order_still_names_the_first() {
+    let killed = Run::new();
+    killed.pin("night.csv").await;
+    killed.reject(Some(5)).await;
+    killed.reject(Some(3)).await;
+    let shown = Run::new();
+    shown.reject(Some(3)).await;
+    assert_eq!(shown_repeats(&shown, &[&killed]).await, [Some(1)]);
+}
+
+#[tokio::test]
+async fn rows_repeat_only_while_their_source_pinned_one_input() {
+    let unpinned = Run::new();
+    unpinned.reject(Some(164)).await;
+    let shown = Run::new();
+    shown.reject(Some(164)).await;
+    assert_eq!(shown_repeats(&shown, &[&unpinned]).await, [None]);
+
+    let monday = Run::new();
+    monday.pin("monday.csv").await;
+    monday.reject(Some(164)).await;
+    let tuesday = Run::new();
+    tuesday.positioned("tuesday.csv").await;
+    tuesday.reject(Some(164)).await;
+    let shown = Run::new();
+    shown.reject(Some(164)).await;
+    assert_eq!(shown_repeats(&shown, &[&monday, &tuesday]).await, [None]);
+}
+
+#[tokio::test]
+async fn a_rejection_that_names_no_record_never_repeats() {
+    let killed = Run::new();
+    killed.pin("night.csv").await;
+    killed.reject(None).await;
+    let shown = Run::new();
+    shown.reject(None).await;
+    assert_eq!(shown_repeats(&shown, &[&killed]).await, [None]);
+}
+
+async fn shown_repeats(shown: &Run, earlier: &[&Run]) -> Vec<Option<u64>> {
+    let mut snapshot = shown.open().await;
+    snapshot
+        .list_earlier_runs(earlier.iter().map(|run| run.dir.path()))
+        .await
+        .unwrap();
+    let mut repeats = Vec::new();
+    while let Some(record) = snapshot.next().await.unwrap() {
+        if record.run == *snapshot.identity() && record.journal.kind == RunJournalKind::Error {
+            let repeat = snapshot.repeat_of(&record).await.unwrap();
+            repeats.push(repeat.map(|first| first.position.0));
+        }
+    }
+    repeats
 }

@@ -131,15 +131,15 @@ impl<T> KeyGroups<T> {
 pub struct AiGroupingState<T, K> {
     keys: BTreeMap<Option<K>, KeyGroups<T>>,
     pending: Vec<ChainEvent>,
-    failure: Option<HandlerError>,
+    failure: Option<StageFatal>,
 }
 
-fn protocol_fatal(detail: impl Into<String>) -> HandlerError {
-    HandlerError::Fatal(StageFatal::new(
+fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
+    StageFatal::new(
         StageFatalCode::Protocol,
         StageFatalReason::ProtocolInputIntegrity,
         detail,
-    ))
+    )
 }
 
 fn grouped_count(value: u64) -> String {
@@ -183,14 +183,14 @@ where
         !groups.open.is_empty() || self.window_open(groups)
     }
 
-    fn key_value(key: &Option<K>) -> Result<Option<serde_json::Value>, HandlerError> {
+    fn key_value(key: &Option<K>) -> Result<Option<serde_json::Value>, StageFatal> {
         key.as_ref()
             .map(serde_json::to_value)
             .transpose()
             .map_err(|error| protocol_fatal(format!("ai group key does not serialize: {error}")))
     }
 
-    fn writer_id(&self) -> Result<WriterId, HandlerError> {
+    fn writer_id(&self) -> Result<WriterId, StageFatal> {
         self.writer_id.ok_or_else(|| {
             protocol_fatal("ai grouping member ran before its writer identity was installed")
         })
@@ -200,7 +200,7 @@ where
         &self,
         payload: P,
         trace: &TraceState,
-    ) -> Result<ChainEvent, HandlerError> {
+    ) -> Result<ChainEvent, StageFatal> {
         let mut event = TypedFact::from_payload(payload)
             .map_err(|error| protocol_fatal(error.to_string()))?
             .into_event(self.writer_id()?);
@@ -213,7 +213,7 @@ where
         key: &Option<K>,
         groups: &mut KeyGroups<T>,
         closed_by: GroupClosedBy,
-    ) -> Result<ChainEvent, HandlerError> {
+    ) -> Result<ChainEvent, StageFatal> {
         let group = GroupOrdinal::new(groups.groups);
         let items = std::mem::take(&mut groups.open);
         let first_number = match self.trigger {
@@ -246,7 +246,7 @@ where
         &self,
         state: &mut AiGroupingState<T, K>,
         event: ChainEvent,
-    ) -> Result<(), HandlerError> {
+    ) -> Result<(), StageFatal> {
         let item = T::try_from_event(&event)
             .map_err(|error| protocol_fatal(format!("ai grouping input decode failed: {error}")))?;
         let key = match &self.keying {
@@ -268,7 +268,7 @@ where
                     let shown = Self::key_value(&key)?
                         .map(|value| value.to_string())
                         .unwrap_or_default();
-                    return Err(HandlerError::Fatal(StageFatal::new(
+                    return Err(StageFatal::new(
                         StageFatalCode::Resource,
                         StageFatalReason::ResourceExhaustion,
                         format!(
@@ -279,7 +279,7 @@ where
                             nth = ordinal(open + 1),
                             limit = grouped_count(max_open_keys.get()),
                         ),
-                    )));
+                    ));
                 }
             }
         }
@@ -297,7 +297,7 @@ where
         Ok(())
     }
 
-    fn finish(&self, state: &AiGroupingState<T, K>) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn finish(&self, state: &AiGroupingState<T, K>) -> Result<Vec<ChainEvent>, StageFatal> {
         let mut events = Vec::new();
         let mut unkeyed_seen = false;
         for (key, groups) in &state.keys {
@@ -358,9 +358,9 @@ where
         event: ChainEvent,
     ) -> Result<(), HandlerError> {
         if let Some(failure) = state.failure.as_ref() {
-            return Err(failure.clone());
+            return Err(HandlerError::Fatal(failure.clone()));
         }
-        self.admit(state, event)
+        self.admit(state, event).map_err(HandlerError::Fatal)
     }
 
     fn initial_state(&self) -> Self::State {
@@ -371,7 +371,7 @@ where
         }
     }
 
-    fn create_events(&self, _: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, _: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         Ok(Vec::new())
     }
 
@@ -379,14 +379,14 @@ where
         state.failure.is_some() || !state.pending.is_empty()
     }
 
-    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         if let Some(failure) = state.failure.take() {
             return Err(failure);
         }
         Ok(std::mem::take(&mut state.pending))
     }
 
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         if let Some(failure) = state.failure.as_ref() {
             return Err(failure.clone());
         }

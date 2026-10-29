@@ -9,9 +9,7 @@ use anyhow::{bail, ensure, Context, Result};
 use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryMethod, DeliveryPayload, DeliveryResult,
 };
-use obzenflow_core::event::payloads::execution_payload::{
-    ExecutionPayload, SourcePollErrorKind, SourcePollKind,
-};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{ChainPayload, JournalCommitRef};
 use obzenflow_core::journal::read::{
@@ -96,13 +94,7 @@ impl ArchiveCohorts {
                     ));
                     return Ok(());
                 }
-                let id = payload["id"].as_u64().context("business input identity")?;
-                let should_fail = id.is_multiple_of(100);
-                ensure!(
-                    payload["batch"].as_u64() == Some(id / 100)
-                        && payload["should_fail"].as_bool() == Some(should_fail),
-                    "input {id} has a changed deterministic payload"
-                );
+                let (id, should_fail) = business_input(payload)?;
                 let cohort = match physical {
                     (SOURCE, RunJournalKind::Data) => {
                         ensure!(
@@ -126,16 +118,6 @@ impl ArchiveCohorts {
                         );
                         &mut self.successes
                     }
-                    (TRANSFORM, RunJournalKind::Error) => {
-                        ensure!(
-                            !status.is_success()
-                                && should_fail
-                                && status.kind() == Some(&ErrorKind::Unknown),
-                            "unexpected transform error {id}"
-                        );
-                        ensure!(row.event_type_name() == "data.request", "error schema");
-                        &mut self.errors
-                    }
                     _ => bail!("business input {id} in unexpected physical journal {physical:?}"),
                 };
                 cohort.insert(
@@ -146,11 +128,32 @@ impl ArchiveCohorts {
                     },
                 )?;
             }
-            ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                ensure!(
+                    physical == (TRANSFORM, RunJournalKind::Error),
+                    "processing failure in unexpected physical journal {physical:?}"
+                );
+                let (id, should_fail) = business_input(&failure.input.payload)?;
+                let status = &row.envelope.provenance.event.processing.status;
+                ensure!(
+                    should_fail
+                        && failure.kind == ErrorKind::Unknown
+                        && status.kind() == Some(&ErrorKind::Unknown),
+                    "unexpected transform error {id}"
+                );
+                ensure!(failure.input.event_type.0 == "data.request", "error schema");
+                self.errors.insert(
+                    id,
+                    BusinessStamp {
+                        commitment: row.commitment(),
+                        parent_ids: row.envelope.provenance.event.causality.parent_ids.clone(),
+                    },
+                )?;
+            }
+            ChainPayload::Execution(ExecutionPayload::SourcePollFailed(failure)) => {
                 ensure!(
                     physical == (SOURCE, RunJournalKind::Error)
-                        && matches!(failure.source_type, SourcePollKind::Finite)
-                        && failure.error_type == SourcePollErrorKind::Timeout,
+                        && failure.kind == ErrorKind::Timeout,
                     "unexpected source poll failure or physical journal: {physical:?}"
                 );
                 self.source_poll_errors += 1;
@@ -180,8 +183,10 @@ impl ArchiveCohorts {
             .verify((0..count).step_by(100), "transform error")?;
         for (id, error) in &self.errors.rows {
             ensure!(
-                error.commitment.event_id == self.sources.rows[id].commitment.event_id,
-                "error {id} did not retain its source input identity"
+                error
+                    .parent_ids
+                    .contains(&self.sources.rows[id].commitment.event_id),
+                "error {id} is not recorded against its source input"
             );
         }
         for (id, success) in &self.successes.rows {
@@ -225,6 +230,17 @@ impl ArchiveCohorts {
         );
         Ok(())
     }
+}
+
+fn business_input(payload: &Value) -> Result<(u64, bool)> {
+    let id = payload["id"].as_u64().context("business input identity")?;
+    let should_fail = id.is_multiple_of(100);
+    ensure!(
+        payload["batch"].as_u64() == Some(id / 100)
+            && payload["should_fail"].as_bool() == Some(should_fail),
+        "input {id} has a changed deterministic payload"
+    );
+    Ok((id, should_fail))
 }
 
 fn verify_source_rate_limit(
@@ -581,6 +597,11 @@ fn retained_measurement_verifies_declared_source_limiter_policy() -> Result<()> 
 
 #[test]
 fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_rows() -> Result<()> {
+    use obzenflow_core::config::LineagePolicy;
+    use obzenflow_core::event::context::StageType;
+    use obzenflow_core::event::payloads::stage_processing_failed_payload::{
+        FailedInput, StageProcessingFailed,
+    };
     use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::{ChainEventFactory, JournalRecord};
     use obzenflow_core::journal::read::{
@@ -597,25 +618,26 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
         json!({"id": 0, "should_fail": true, "batch": 0}),
     )
     .with_flow_context(FlowContext::new(SOURCE, source));
+    let run = RunIdentity {
+        flow_id: FlowId::new(),
+        pipeline_writer_id: SystemId::new().into(),
+    };
     let row = RunRecord {
         version: RUN_RECORD_VERSION,
-        run: RunIdentity {
-            flow_id: FlowId::new(),
-            pipeline_writer_id: SystemId::new().into(),
-        },
+        run: run.clone(),
         journal: RunJournal {
             id: journal,
             kind: RunJournalKind::Data,
             stage: Some(RunStage {
                 key: SOURCE.into(),
                 id: source,
-                stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+                stage_type: StageType::FiniteSource,
                 is_effectful: false,
             }),
         },
         position: JournalPosition(0),
         kind: RunRecordKind::SourceFact,
-        record: JournalRecord::new(journal.into(), event).into(),
+        record: JournalRecord::new(journal.into(), event.clone()).into(),
     };
     let mut source_one = row.clone();
     if let RunRecordData::Chain(record) = &mut source_one.record {
@@ -623,19 +645,36 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
         record.payload = ChainPayload::Fact(json!({"id": 1, "should_fail": false, "batch": 0}));
     }
     let transform = StageId::new();
-    let mut error_zero = row.clone();
-    error_zero.journal.kind = RunJournalKind::Error;
-    let stage = error_zero.journal.stage.as_mut().unwrap();
-    stage.key = TRANSFORM.into();
-    stage.id = transform;
-    stage.stage_type = obzenflow_core::event::context::StageType::Transform;
-    if let RunRecordData::Chain(record) = &mut error_zero.record {
-        record.envelope.provenance.event.processing.status =
-            obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(
-                "Simulated processing error",
-                Some(ErrorKind::Unknown),
-            );
-    }
+    let error_journal = JournalId::new();
+    let failure = ChainEventFactory::derived_execution_event(
+        transform.into(),
+        &event,
+        ExecutionPayload::StageProcessingFailed(StageProcessingFailed {
+            kind: ErrorKind::Unknown,
+            detail: "Simulated processing error".into(),
+            input: FailedInput::of(&event),
+        }),
+        LineagePolicy::default(),
+    )
+    .with_flow_context(FlowContext::new(TRANSFORM, transform))
+    .mark_as_error("Simulated processing error", ErrorKind::Unknown);
+    let error_zero = RunRecord {
+        version: RUN_RECORD_VERSION,
+        run,
+        journal: RunJournal {
+            id: error_journal,
+            kind: RunJournalKind::Error,
+            stage: Some(RunStage {
+                key: TRANSFORM.into(),
+                id: transform,
+                stage_type: StageType::Transform,
+                is_effectful: false,
+            }),
+        },
+        position: JournalPosition(0),
+        kind: RunRecordKind::Execution,
+        record: JournalRecord::new(error_journal.into(), failure).into(),
+    };
     let mut success_one = source_one.clone();
     success_one.journal.stage = error_zero.journal.stage.clone();
     if let RunRecordData::Chain(record) = &mut success_one.record {

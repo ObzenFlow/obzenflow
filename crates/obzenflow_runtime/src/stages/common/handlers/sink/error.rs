@@ -180,6 +180,10 @@ impl SinkOperationError {
         bounded_detail(&self.error.to_string())
     }
 
+    pub(crate) fn message(&self) -> String {
+        self.error.message()
+    }
+
     pub fn retry_after(&self) -> Option<Duration> {
         match &self.error {
             HandlerError::RateLimited { retry_after, .. } => *retry_after,

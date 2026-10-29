@@ -5,10 +5,11 @@
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
-use crate::stages::common::handler_error::StageFatal;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::await_signal_gate;
+use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
@@ -22,6 +23,7 @@ use crate::stages::observer::{
     JoinDeliverySnapshot, JoinObserverContext, JoinObserverOccurrence, JoinSide, JoinSignalKind,
     JoinSignalSnapshot,
 };
+use crate::supervised_base::publication;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -30,7 +32,7 @@ use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 use super::JoinSupervisor;
 
@@ -179,6 +181,51 @@ pub(super) async fn record_join_stage_fatal<H: UnifiedJoinHandler>(
         },
     )
     .await?;
+    Ok(())
+}
+
+pub(super) async fn dead_letter_reference<H: UnifiedJoinHandler>(
+    ctx: &JoinResources<H>,
+    scope: obzenflow_core::MiddlewareExecutionScope,
+    envelope: &DeliveredRecord<ChainPayload>,
+    delivery: Option<&JoinDeliverySnapshot>,
+    error: &HandlerError,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let input = envelope.authored();
+    let record = error_row_in_scope(
+        processing_failed(
+            WriterId::from(ctx.stage_id),
+            &make_flow_context(
+                &ctx.flow_name,
+                &ctx.flow_id.to_string(),
+                &ctx.stage_name,
+                ctx.stage_id,
+                StageType::Join,
+            ),
+            &input,
+            error,
+            ctx.lineage_policy,
+        ),
+        scope,
+    );
+    ctx.instrumentation.record_error(error.kind());
+    observe_join_outputs(
+        ctx,
+        scope,
+        Some(&input),
+        delivery,
+        None,
+        std::slice::from_ref(&record),
+        Some(envelope),
+    )
+    .await?;
+    publication::append(
+        &ctx.error_journal,
+        record,
+        AppendOptions::from_record(Some(envelope))?,
+    )
+    .await
+    .map_err(|e| format!("Failed to write join error event: {e}"))?;
     Ok(())
 }
 
@@ -408,7 +455,7 @@ pub(in crate::stages::join) async fn emit_join_heartbeat_if_due<
         ChainEventFactory::execution_event(writer_id, payload).with_flow_context(flow_context);
     let heartbeat = runtime_context.attach_to(heartbeat);
 
-    crate::supervised_base::publication::append(
+    publication::append(
         &ctx.data_journal,
         heartbeat,
         AppendOptions::default()

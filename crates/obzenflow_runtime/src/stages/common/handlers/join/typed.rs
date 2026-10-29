@@ -32,6 +32,17 @@ pub(super) fn installed_writer_id(writer_id: Option<WriterId>) -> Result<WriterI
     })
 }
 
+pub(super) fn terminal_output_failure(error: HandlerError) -> StageFatal {
+    match error {
+        HandlerError::Fatal(fatal) => fatal,
+        error => StageFatal::new(
+            StageFatalCode::Protocol,
+            StageFatalReason::OutputSerializationFailure,
+            error.message(),
+        ),
+    }
+}
+
 pub(super) fn lower_join_outputs<O>(
     writer_id: WriterId,
     lineage: LineagePolicy,
@@ -187,20 +198,22 @@ pub trait TypedJoinHandler: Send + Sync {
         stream: Self::Stream,
     ) -> Result<Vec<Self::Output>, HandlerError>;
 
+    /// Returns the facts for the stream's final end of input, and no error.
     fn on_stream_eof(
         &self,
         _state: &mut Self::State,
         _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
-    ) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(Vec::new())
+    ) -> Vec<Self::Output> {
+        Vec::new()
     }
 
+    /// Returns the facts the join publishes as it drains, and no error.
     fn drain(
         &self,
         _state: &Self::State,
         _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
-    ) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(Vec::new())
+    ) -> Vec<Self::Output> {
+        Vec::new()
     }
 
     /// Runtime-only seam for sealed framework control authoring.
@@ -375,15 +388,16 @@ where
         event: ChainEvent,
         _source_id: StageId,
         _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        self.writer_id()?;
+    ) -> Result<Vec<ChainEvent>, StageFatal> {
+        self.writer_id().map_err(terminal_output_failure)?;
         let mut references = JoinReferenceView::new(&state.projection);
         let outputs = self
             .handler
-            .on_stream_eof(&mut state.inner, &mut references)?;
+            .on_stream_eof(&mut state.inner, &mut references);
         let selected = references.into_selected_activations();
         let (events, framework_eof) = self
-            .lower_outputs(outputs, Some(&event), selected, None)?
+            .lower_outputs(outputs, Some(&event), selected, None)
+            .map_err(terminal_output_failure)?
             .into_parts();
         debug_assert!(framework_eof.is_none());
         Ok(events)
@@ -393,13 +407,14 @@ where
         &self,
         state: &Self::State,
         parent: Option<&ChainEvent>,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        self.writer_id()?;
+    ) -> Result<Vec<ChainEvent>, StageFatal> {
+        self.writer_id().map_err(terminal_output_failure)?;
         let mut references = JoinReferenceView::new(&state.projection);
-        let outputs = self.handler.drain(&state.inner, &mut references)?;
+        let outputs = self.handler.drain(&state.inner, &mut references);
         let selected = references.into_selected_activations();
         let (events, framework_eof) = self
-            .lower_outputs(outputs, parent, selected, None)?
+            .lower_outputs(outputs, parent, selected, None)
+            .map_err(terminal_output_failure)?
             .into_parts();
         debug_assert!(framework_eof.is_none());
         Ok(events)
@@ -496,15 +511,15 @@ mod tests {
             &self,
             _state: &mut Self::State,
             references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
-        ) -> Result<Vec<Self::Output>, HandlerError> {
+        ) -> Vec<Self::Output> {
             let selected_values = references
                 .select(&"terminal".to_string())
                 .map(|reference| vec![reference.value])
                 .unwrap_or_default();
-            Ok(vec![TestOutput {
+            vec![TestOutput {
                 selected_values,
                 ordinal: 0,
-            }])
+            }]
         }
     }
 

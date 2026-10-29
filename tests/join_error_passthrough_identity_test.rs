@@ -2,26 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-095d adjacency: error-passthrough through a join with foreign
-//! authorship on the forwarded row.
-//!
-//! A business error (Validation/Domain) stays in the main pipeline:
-//! `mark_as_error` preserves the input event's `writer_id`, so the error row
-//! in the validator's journal names the original author, not the validator.
-//! The join's stream side then consumes a data row whose `writer_id` is not
-//! its direct upstream. Edge identity for acks, pending-ack routing, and
-//! heartbeat attribution must come from the reader slot
-//! (`last_delivered_upstream_stage()`), never from the event author; the
-//! subscription-level contract is pinned in
-//! `delivered_upstream_identity_ignores_event_writer`. This test pins the
-//! join arm end to end: the error row traverses the join's passthrough path
-//! and every valid row still joins, asserted from the event-sourced journals.
+//! A validator on either side of a join records each row it rejects in its
+//! own error journal, so the join receives only valid rows and joins them all.
 
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -69,8 +57,8 @@ impl TypedPayload for JoinedItem {
     const EVENT_TYPE: &'static str = "join_err.joined";
 }
 
-/// Reference source: four catalog rows. The reference validator below marks
-/// the final row as an in-band business error.
+/// Reference source: four catalog rows. The reference validator below rejects
+/// the final row.
 #[derive(Clone, Debug)]
 struct RefSource {
     next_index: usize,
@@ -125,8 +113,8 @@ impl TypedFiniteSourceHandler for StreamSource {
     }
 }
 
-/// Validation stage: rejects value 3 with a Domain error (in-band routing per
-/// FLOWIP error classification), re-emits everything else.
+/// Validation stage: rejects value 3 with a Domain error, re-emits everything
+/// else.
 #[derive(Clone, Debug)]
 struct Validator;
 
@@ -272,7 +260,7 @@ fn is_error_row(envelope: &JournalRecord<ChainPayload>) -> bool {
 }
 
 #[tokio::test]
-async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
+async fn a_join_never_receives_a_rejected_row_and_joins_the_rest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
     let typed_handler_calls = Arc::new(AtomicUsize::new(0));
@@ -284,7 +272,7 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
             typed_handler_calls.clone(),
         ))
         .await
-        .expect("flow with an in-band business error must complete");
+        .expect("flow with a rejected row on each join side must complete");
 
     assert_eq!(
         typed_handler_calls.load(Ordering::SeqCst),
@@ -293,48 +281,41 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
     );
 
     let run_dir = replay_testkit::latest_run_dir(&journal_base);
+    for (stage, rejected, kind_detail) in [
+        ("validator", "stream_src", "rejected stream value 3"),
+        ("ref_validator", "ref_src", "rejected reference value 4"),
+    ] {
+        let data = replay_testkit::read_stage_envelopes_appended(&run_dir, stage).await;
+        assert!(
+            !data.iter().any(is_error_row),
+            "{stage}'s data journal holds no error-marked row"
+        );
+        let failures = replay_testkit::processing_failures(&run_dir, stage).await;
+        let [(record, failure)] = failures.as_slice() else {
+            panic!("{stage} records exactly one rejection: {failures:?}");
+        };
+        assert_eq!(
+            record.envelope.provenance.event.writer_id,
+            replay_testkit::stage_writer(&run_dir, stage),
+            "the validator is the record's author"
+        );
+        assert_eq!(failure.kind, ErrorKind::Domain);
+        assert_eq!(failure.detail, kind_detail);
+        let source_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, rejected).await;
+        let input = source_rows
+            .iter()
+            .find(|row| {
+                row.envelope.provenance.event.id
+                    == record.envelope.provenance.event.causality.parent_ids[0]
+            })
+            .expect("the record's parent is the rejected input");
+        assert_eq!(failure.input.payload, input.payload());
+    }
 
-    // Premise: the validator's journal carries the error row with the
-    // ORIGINAL author's writer_id (mark_as_error preserves authorship), so
-    // the join's stream side really consumes a foreign-writer data row.
-    let stream_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "stream_src").await;
-    let source_writer = stream_rows
-        .iter()
-        .find(|envelope| envelope.consumes_data_credit())
-        .map(|envelope| envelope.envelope.provenance.event.writer_id)
-        .expect("stream source journal must contain data rows");
-
-    let validator_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "validator").await;
-    let error_rows: Vec<_> = validator_rows
-        .iter()
-        .filter(|envelope| envelope.consumes_data_credit() && is_error_row(envelope))
-        .collect();
-    assert_eq!(
-        error_rows.len(),
-        1,
-        "exactly one stream row is rejected by validation"
-    );
-    assert_eq!(
-        error_rows[0].envelope.provenance.event.writer_id, source_writer,
-        "premise: the error row preserves the original author's writer_id"
-    );
-    let valid_writer = validator_rows
-        .iter()
-        .find(|envelope| envelope.consumes_data_credit() && !is_error_row(envelope))
-        .map(|envelope| envelope.envelope.provenance.event.writer_id)
-        .expect("validator journal must contain re-emitted valid rows");
-    assert_ne!(
-        error_rows[0].envelope.provenance.event.writer_id, valid_writer,
-        "premise: the forwarded error row's author differs from the validator's own writer"
-    );
-
-    // The join consumed the foreign-writer row through the error-passthrough
-    // arm and every valid row still joined: four joined outputs (values
-    // 1, 2, 4, 5), asserted from the join's journal.
     let join_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "joined").await;
+    assert!(!join_rows.iter().any(is_error_row));
     let mut joined_values: Vec<u64> = join_rows
         .iter()
-        .filter(|envelope| !is_error_row(envelope))
         .filter_map(|envelope| JoinedItem::from_event(&envelope.authored()))
         .map(|item| item.value)
         .collect();
@@ -344,35 +325,110 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
         vec![1, 2, 4, 5],
         "every valid stream row joins; the rejected row does not"
     );
-
-    // The error row itself is forwarded through the join (business errors
-    // stay in the main pipeline as the durable record).
-    let forwarded_stream_errors: Vec<_> = join_rows
-        .iter()
-        .filter(|envelope| envelope.consumes_data_credit() && is_error_row(envelope))
-        .filter(|envelope| StreamItem::from_event(&envelope.authored()).is_some())
-        .collect();
-    assert_eq!(
-        forwarded_stream_errors.len(),
-        1,
-        "the join forwards the error-marked row downstream"
+    assert!(
+        replay_testkit::read_stage_error_envelopes(&run_dir, "joined")
+            .await
+            .is_empty(),
+        "the join rejects nothing it never received"
     );
-    assert_eq!(
-        StreamItem::from_event(&forwarded_stream_errors[0].authored())
-            .expect("forwarded error row keeps its payload")
-            .value,
-        3,
-        "the forwarded error row is the rejected stream item"
-    );
+}
 
-    let forwarded_reference_errors: Vec<_> = join_rows
+#[derive(Clone, Debug)]
+struct RejectingJoin;
+
+impl TypedJoinHandler for RejectingJoin {
+    type State = ();
+    type ReferenceKey = String;
+    type Reference = RefItem;
+    type Stream = StreamItem;
+    type Output = JoinedItem;
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        Ok(reference.key.clone())
+    }
+
+    fn process_stream(
+        &self,
+        _state: &mut Self::State,
+        references: &mut JoinReferenceView<'_, String, RefItem>,
+        stream: StreamItem,
+    ) -> Result<Vec<JoinedItem>, HandlerError> {
+        if stream.value == 2 {
+            return Err(HandlerError::Domain("stream value 2 has no match".into()));
+        }
+        let Some(reference) = references.select(&stream.key) else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![JoinedItem {
+            key: stream.key,
+            label: reference.label,
+            value: stream.value,
+        }])
+    }
+}
+
+#[tokio::test]
+async fn a_join_records_the_stream_row_its_handler_rejects() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+    let journals = journal_base.clone();
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(FlowDefinition::materialize(move |_runtime_config| {
+            let reference_source = RefSource::new();
+            let stream_source = StreamSource::new();
+            let collector = DropSink;
+            Ok(flow! {
+                name: "join_rejects_a_stream_row",
+                journals: disk_journals(journals.clone()),
+
+                stages: {
+                    ref_src = source!(RefItem => reference_source);
+                    stream_src = source!(StreamItem => stream_source);
+                    joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => RejectingJoin);
+                    collector = sink!(JoinedItem => collector);
+                },
+
+                topology: {
+                    (ref_src, stream_src) |> joined;
+                    joined |> collector;
+                }
+            })
+        }))
+        .await
+        .expect("a join that rejects one row completes");
+
+    let run_dir = replay_testkit::latest_run_dir(&journal_base);
+    let join_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "joined").await;
+    assert!(!join_rows.iter().any(is_error_row));
+    let mut joined_values: Vec<u64> = join_rows
         .iter()
-        .filter(|envelope| envelope.consumes_data_credit() && is_error_row(envelope))
-        .filter(|envelope| RefItem::from_event(&envelope.authored()).is_some())
+        .filter_map(|envelope| JoinedItem::from_event(&envelope.authored()))
+        .map(|item| item.value)
         .collect();
+    joined_values.sort_unstable();
+    assert_eq!(joined_values, vec![1, 3, 4, 5]);
+
+    let failures = replay_testkit::processing_failures(&run_dir, "joined").await;
+    let [(record, failure)] = failures.as_slice() else {
+        panic!("the join records its one rejection: {failures:?}");
+    };
     assert_eq!(
-        forwarded_reference_errors.len(),
-        1,
-        "the join forwards a pre-error reference row without hydrating it"
+        record.envelope.provenance.event.writer_id,
+        replay_testkit::stage_writer(&run_dir, "joined")
+    );
+    assert_eq!(failure.kind, ErrorKind::Domain);
+    assert_eq!(failure.detail, "stream value 2 has no match");
+    assert_eq!(failure.input.event_type.0, StreamItem::EVENT_TYPE);
+    let stream_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "stream_src").await;
+    let input = stream_rows
+        .iter()
+        .find(|row| StreamItem::from_event(&row.authored()).is_some_and(|item| item.value == 2))
+        .expect("the rejected stream row");
+    assert_eq!(
+        record.envelope.provenance.event.causality.parent_ids[0],
+        input.envelope.provenance.event.id
     );
 }

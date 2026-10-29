@@ -108,6 +108,7 @@ pub(super) enum Layout {
     Context,
     Processing,
     Causality,
+    CausalInput,
     Correlation,
     Origin,
     Runtime,
@@ -206,7 +207,22 @@ impl Layout {
                     ]
                 }
             }
-            S::Causality => const { &[field("parent_ids", K::List(&K::Id))] },
+            S::Causality => {
+                const {
+                    &[
+                        field("parent_ids", K::List(&K::Id)),
+                        field("inputs", K::List(&K::Struct(S::CausalInput))),
+                    ]
+                }
+            }
+            S::CausalInput => {
+                const {
+                    &[
+                        field("id", K::Id),
+                        field("event_type", K::Definition(D::Descriptor)),
+                    ]
+                }
+            }
             S::Correlation => {
                 const {
                     &[

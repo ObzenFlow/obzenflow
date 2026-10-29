@@ -19,7 +19,7 @@ use std::time::Duration;
 
 #[path = "obzenflow/render.rs"]
 mod render;
-use render::{ColorMode, ObservationEnd, Observed, Renderer};
+use render::{ColorMode, Listed, ObservationEnd, Observed, Renderer};
 
 #[cfg(test)]
 #[path = "obzenflow/args_tests.rs"]
@@ -366,7 +366,16 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         std::env::var_os("NO_COLOR").is_some(),
         snapshot.journals(),
     );
-    renderer.name_ancestor_journals(ancestor_journals(&snapshot).await);
+    let earlier = match snapshot.lineage() {
+        Ok(lineage) => snapshot.list_earlier_runs(lineage.earlier_runs()).await?,
+        Err(_) => Vec::new(),
+    };
+    renderer.name_ancestor_journals(earlier.into_iter().flat_map(|run| {
+        let label = format!("gen {}", run.generation);
+        run.journals
+            .into_iter()
+            .map(move |journal| (journal, label.clone()))
+    }));
     renderer.begin(&mut output, snapshot.identity(), view.follow)?;
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
@@ -375,22 +384,15 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
             let record = tokio::select! { biased;
                 result = &mut interrupt => {
                     result?;
-                    let tail = snapshot.into_tail();
-                    renderer.finish(&mut output, &mut diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
-                    return Ok(0);
+                    return detach(&mut snapshot.into_tail(), &mut renderer, &mut output, &mut diagnostics).await;
                 }
-                record = snapshot.next() => match record {
-                    Ok(record) => record,
-                    Err(error) => {
-                        renderer.flush_pending(&mut output)?;
-                        return Err(error.into());
-                    }
-                },
+                record = snapshot.next() => record?,
             };
             let Some(record) = record else {
                 break;
             };
-            renderer.record(&mut output, record)?;
+            let repeat_of = snapshot.repeat_of(&record).await?;
+            renderer.record(&mut output, Listed { record, repeat_of })?;
         }
         let tail = snapshot.into_tail();
         renderer.finish(
@@ -412,27 +414,6 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
     .await
 }
 
-async fn ancestor_journals(snapshot: &RunSnapshot) -> Vec<(RunJournal, String)> {
-    let Ok(lineage) = snapshot.lineage() else {
-        return Vec::new();
-    };
-    let mut journals = Vec::new();
-    for holder in lineage.evidence.iter().filter(|holder| !holder.missing) {
-        let Ok(run) = open_disk_run(&holder.run).await else {
-            continue;
-        };
-        let label = holder.generation.map_or_else(
-            || run.identity().flow_id.to_string(),
-            |generation| format!("gen {generation}"),
-        );
-        journals.extend(
-            run.journals()
-                .map(|journal| (journal.clone(), label.clone())),
-        );
-    }
-    journals
-}
-
 /// The wait is reached only after the real tail read and settlement decision.
 /// Tests can hold that exact boundary without sampling scheduler liveness.
 async fn follow_records<F, P>(
@@ -452,21 +433,14 @@ where
         let next = tokio::select! { biased;
             result = &mut interrupt => {
                 result?;
-                renderer.finish(output, diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
-                return Ok(0);
+                return detach(&mut tail, renderer, output, diagnostics).await;
             }
-            next = tail.read_next() => match next {
-                Ok(next) => next,
-                Err(error) => {
-                    renderer.flush_pending(output)?;
-                    return Err(error.into());
-                }
-            },
+            next = tail.read_next() => next?,
         };
         let pending = matches!(next, TailRead::Pending);
-        match next {
-            TailRead::Record(record) => renderer.record(output, record)?,
-            TailRead::Pending => renderer.flush_pending(output)?,
+        if let TailRead::Record(record) = next {
+            let repeat_of = tail.repeat_of(&record).await?;
+            renderer.record(output, Listed { record, repeat_of })?;
         }
         if tail.progress().settled_prefix.is_some() {
             if view.jsonl {
@@ -487,11 +461,29 @@ where
             tokio::select! { biased;
                 result = &mut interrupt => {
                     result?;
-                    renderer.finish(output, diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
-                    return Ok(0);
+                    return detach(&mut tail, renderer, output, diagnostics).await;
                 }
                 _ = pending_wait() => {}
             }
         }
     }
+}
+
+async fn detach(
+    tail: &mut RunTail,
+    renderer: &mut Renderer,
+    output: &mut impl Write,
+    diagnostics: &mut impl Write,
+) -> Result<u8, Error> {
+    while let Some(record) = tail.next_held().await? {
+        let repeat_of = tail.repeat_of(&record).await?;
+        renderer.record(output, Listed { record, repeat_of })?;
+    }
+    renderer.finish(
+        output,
+        diagnostics,
+        Observed::of(tail),
+        ObservationEnd::Detached,
+    )?;
+    Ok(0)
 }

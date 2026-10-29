@@ -75,9 +75,7 @@ impl ChainPayload {
                 }
                 (
                     EventKind::Execution,
-                    "obzenflow.sink_operation_failed"
-                    | "source.poll_error"
-                    | "runtime.source.cleanup_failed",
+                    "obzenflow.sink_operation_failed" | "runtime.source.cleanup_failed",
                 ) => 2,
                 _ => 1,
             };
@@ -203,6 +201,7 @@ impl ChainPayload {
     pub fn contract_body(&self) -> Result<Value, serde_json::Error> {
         match self {
             Self::Execution(ExecutionPayload::StageFatalRecorded(p)) => serde_json::to_value(p),
+            Self::Execution(ExecutionPayload::StageProcessingFailed(p)) => serde_json::to_value(p),
             Self::Execution(ExecutionPayload::SinkOperationFailed(p)) => serde_json::to_value(p),
             Self::Execution(ExecutionPayload::EffectRecord(p)) => serde_json::to_value(p),
             Self::Execution(ExecutionPayload::EffectAttemptStarted(p)) => serde_json::to_value(p),
@@ -247,7 +246,9 @@ impl ChainPayload {
                 | ExecutionPayload::Recovery(_)
                 | ExecutionPayload::RateLimiter(_)
                 | ExecutionPayload::Backpressure(_)
-                | ExecutionPayload::SourcePollError(_)
+                | ExecutionPayload::StageProcessingFailed(_)
+                | ExecutionPayload::SourceRecordRejected(_)
+                | ExecutionPayload::SourcePollFailed(_)
                 | ExecutionPayload::SourceOpenFailed(_)
                 | ExecutionPayload::HttpPullState(_)
                 | ExecutionPayload::AiChunkingPlanned(_)

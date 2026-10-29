@@ -11,12 +11,15 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::handler_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::stage_processing_failed_payload::StageProcessingFailed;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{JournalRecord, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
@@ -219,14 +222,13 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     handle.run().await?;
 
-    // Only the Domain error should be written to the transform data journal (and reach the sink).
-    assert_eq!(counter.load(Ordering::Relaxed), 1);
+    assert_eq!(counter.load(Ordering::Relaxed), 0);
 
     // Find the transform stage data/error journals on disk and validate routing.
     let flows_dir = journal_root.join("flows");
@@ -270,32 +272,34 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         Ok(replay_testkit::read_journal_envelopes::<ChainEvent>(&path).await)
     }
 
-    let error_events: Vec<ChainEvent> = read_chain_journal(error_journals[0].clone())
+    let failures: Vec<StageProcessingFailed> = read_chain_journal(error_journals[0].clone())
         .await?
         .into_iter()
-        .map(|env| env.authored())
-        .filter(|e| e.consumes_data_credit())
+        .filter_map(|env| match env.into_parts().1 {
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                Some(failure)
+            }
+            _ => None,
+        })
         .collect();
-
+    let recorded: Vec<_> = failures
+        .iter()
+        .map(|failure| {
+            (
+                failure.input.payload["index"].as_u64(),
+                failure.kind.clone(),
+                failure.detail.as_str(),
+            )
+        })
+        .collect();
     assert_eq!(
-        error_events.len(),
-        1,
-        "expected 1 data event in error journal"
+        recorded,
+        [
+            (Some(0), ErrorKind::Timeout, "simulated timeout"),
+            (Some(1), ErrorKind::Domain, "simulated domain error"),
+        ],
+        "every kind of handler error is recorded in the error journal"
     );
-    assert_eq!(
-        error_events[0]
-            .payload()
-            .get("index")
-            .and_then(|v| v.as_u64()),
-        Some(0)
-    );
-    assert!(matches!(
-        error_events[0].processing.status,
-        ProcessingStatus::Error {
-            kind: Some(ErrorKind::Timeout),
-            ..
-        }
-    ));
 
     let data_events: Vec<ChainEvent> = read_chain_journal(data_journals[0].clone())
         .await?
@@ -303,28 +307,9 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         .map(|env| env.authored())
         .filter(|e| e.consumes_data_credit())
         .collect();
-
-    // Transform data journal should contain the Domain error event (index=1) and no Timeout event (index=0).
-    let mut saw_domain = false;
-    for event in data_events {
-        if event.payload().get("index").and_then(|v| v.as_u64()) == Some(1) {
-            assert!(matches!(
-                event.processing.status,
-                ProcessingStatus::Error {
-                    kind: Some(ErrorKind::Domain),
-                    ..
-                }
-            ));
-            saw_domain = true;
-        }
-        if event.payload().get("index").and_then(|v| v.as_u64()) == Some(0) {
-            anyhow::bail!("did not expect index=0 event in transform data journal");
-        }
-    }
-
     assert!(
-        saw_domain,
-        "expected Domain error event in transform data journal"
+        data_events.is_empty(),
+        "no rejected input enters the transform data journal: {data_events:?}"
     );
 
     // Sanity: ensure EOF exists somewhere in the transform data journal.
@@ -376,7 +361,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create typed try-map flow: {error:?}"))?;
 
@@ -418,14 +403,25 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
         .filter(|event| event.consumes_data_credit())
         .collect::<Vec<_>>();
     assert_eq!(error_events.len(), 1);
-    assert_eq!(error_events[0].payload()["index"], serde_json::json!(0));
+    assert_eq!(
+        error_events[0].event_type(),
+        "runtime.stage.processing_failed"
+    );
+    assert_eq!(
+        error_events[0].payload()["input"]["payload"]["index"],
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        error_events[0].payload()["detail"],
+        serde_json::json!("index zero is invalid")
+    );
     assert!(matches!(
         &error_events[0].processing.status,
         ProcessingStatus::Error {
             kind: Some(ErrorKind::Unknown),
             message,
             ..
-        } if message.contains("typed try-map failed: index zero is invalid")
+        } if message == "index zero is invalid"
     ));
 
     let successful_events = read_journal(data_journal.expect("try-map data journal exists"))
@@ -480,7 +476,7 @@ async fn transform_applies_stage_middleware() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -505,5 +501,229 @@ async fn transform_applies_stage_middleware() -> Result<()> {
         "the handler observer sees every live data output"
     );
 
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CheckedEvent {
+    index: u64,
+}
+
+impl TypedPayload for CheckedEvent {
+    const EVENT_TYPE: &'static str = "transform.checked.event";
+}
+
+#[derive(Clone, Debug)]
+struct RejectFirst;
+
+impl TypedTransformHandler for RejectFirst {
+    type Input = TransformStageEvent;
+    type Output = TransformStageEvent;
+
+    fn process(
+        &self,
+        event: TransformStageEvent,
+    ) -> std::result::Result<TransformStageEvent, HandlerError> {
+        match event.index {
+            0 => Err(HandlerError::Validation("event 0 is invalid".to_string())),
+            _ => Ok(event),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CheckFirst;
+
+impl TypedTransformHandler for CheckFirst {
+    type Input = TransformStageEvent;
+    type Output = CheckedEvent;
+
+    fn process(
+        &self,
+        event: TransformStageEvent,
+    ) -> std::result::Result<CheckedEvent, HandlerError> {
+        match event.index {
+            0 => Err(HandlerError::Validation("event 0 is invalid".to_string())),
+            index => Ok(CheckedEvent { index }),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct IndexSink<T> {
+    written: Arc<Mutex<Vec<u64>>>,
+    index: fn(&T) -> u64,
+}
+
+#[async_trait]
+impl<T: TypedPayload + Clone + Send + Sync + std::fmt::Debug + 'static> InlineSink
+    for IndexSink<T>
+{
+    type Input = T;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::method(DeliveryMethod::Custom("Index".to_string()))
+    }
+
+    async fn write(&mut self, event: T) -> Result<(), SinkWriteFailure> {
+        self.written.lock().unwrap().push((self.index)(&event));
+        Ok(())
+    }
+}
+
+fn index_sink<T>(index: fn(&T) -> u64) -> (IndexSink<T>, Arc<Mutex<Vec<u64>>>) {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    (
+        IndexSink {
+            written: written.clone(),
+            index,
+        },
+        written,
+    )
+}
+
+async fn the_one_rejection(run: &std::path::Path, stage: &str) -> StageProcessingFailed {
+    let data = replay_testkit::read_stage_envelopes_appended(run, stage).await;
+    assert!(
+        !data.iter().any(|record| matches!(
+            record.envelope.provenance.event.processing.status,
+            ProcessingStatus::Error { .. }
+        )),
+        "{stage}'s data journal holds no error-marked row"
+    );
+    let failures = replay_testkit::processing_failures(run, stage).await;
+    let [(record, failure)] = failures.as_slice() else {
+        panic!("{stage} records each rejection once: {failures:?}");
+    };
+    assert_eq!(
+        record.envelope.provenance.event.writer_id,
+        replay_testkit::stage_writer(run, stage)
+    );
+    assert_eq!(failure.kind, ErrorKind::Validation);
+    assert_eq!(failure.detail, "event 0 is invalid");
+    assert_eq!(failure.input.event_type.0, TransformStageEvent::EVENT_TYPE);
+    assert_eq!(failure.input.payload["index"], serde_json::json!(0));
+    failure.clone()
+}
+
+#[tokio::test]
+async fn a_sink_behind_a_same_type_validator_writes_only_valid_records() -> Result<()> {
+    let journal_root = unique_journal_dir("same_type_validator");
+    let journals = journal_root.clone();
+    let (written_sink, written) = index_sink(|event: &TransformStageEvent| event.index);
+    let handle = FlowDefinition::materialize(move |_| {
+        let source_handler = TestEventSource::new();
+        let written_sink = written_sink.clone();
+        Ok(flow! {
+            name: "same_type_validator",
+            journals: disk_journals(journals.clone()),
+            stages: {
+                source = source!(TransformStageEvent => source_handler);
+                check = transform!(TransformStageEvent -> TransformStageEvent => RejectFirst);
+                written = sink!(TransformStageEvent => written_sink);
+            },
+            topology: {
+                source |> check;
+                check |> written;
+            }
+        })
+    })
+    .build(FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
+    handle.run().await?;
+
+    assert_eq!(*written.lock().unwrap(), [1]);
+    let run = replay_testkit::latest_run_dir(&journal_root);
+    the_one_rejection(&run, "check").await;
+    assert!(replay_testkit::read_stage_error_envelopes(&run, "written")
+        .await
+        .is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_type_changing_validator_keeps_its_rejection_out_of_its_data() -> Result<()> {
+    let journal_root = unique_journal_dir("type_changing_validator");
+    let journals = journal_root.clone();
+    let (written_sink, written) = index_sink(|event: &CheckedEvent| event.index);
+    let handle = FlowDefinition::materialize(move |_| {
+        let source_handler = TestEventSource::new();
+        let written_sink = written_sink.clone();
+        Ok(flow! {
+            name: "type_changing_validator",
+            journals: disk_journals(journals.clone()),
+            stages: {
+                source = source!(TransformStageEvent => source_handler);
+                check = transform!(TransformStageEvent -> CheckedEvent => CheckFirst);
+                written = sink!(CheckedEvent => written_sink);
+            },
+            topology: {
+                source |> check;
+                check |> written;
+            }
+        })
+    })
+    .build(FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
+    handle.run().await?;
+
+    assert_eq!(*written.lock().unwrap(), [1]);
+    let run = replay_testkit::latest_run_dir(&journal_root);
+    the_one_rejection(&run, "check").await;
+    let data_types: Vec<_> = replay_testkit::read_stage_envelopes_appended(&run, "check")
+        .await
+        .into_iter()
+        .filter(|record| matches!(record.payload, ChainPayload::Fact(_)))
+        .map(|record| record.event_type())
+        .collect();
+    assert_eq!(data_types, [CheckedEvent::EVENT_TYPE]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_validator_feeding_two_sinks_records_each_rejection_once() -> Result<()> {
+    let journal_root = unique_journal_dir("validator_fan_out");
+    let journals = journal_root.clone();
+    let (ledger_sink, ledger) = index_sink(|event: &TransformStageEvent| event.index);
+    let (audit_sink, audit) = index_sink(|event: &TransformStageEvent| event.index);
+    let handle = FlowDefinition::materialize(move |_| {
+        let source_handler = TestEventSource::new();
+        let ledger_sink = ledger_sink.clone();
+        let audit_sink = audit_sink.clone();
+        Ok(flow! {
+            name: "validator_fan_out",
+            journals: disk_journals(journals.clone()),
+            stages: {
+                source = source!(TransformStageEvent => source_handler);
+                check = transform!(TransformStageEvent -> TransformStageEvent => RejectFirst);
+                ledger = sink!(TransformStageEvent => ledger_sink);
+                audit = sink!(TransformStageEvent => audit_sink);
+            },
+            topology: {
+                source |> check;
+                check |> ledger;
+                check |> audit;
+            }
+        })
+    })
+    .build(FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
+    handle.run().await?;
+
+    assert_eq!(*ledger.lock().unwrap(), [1]);
+    assert_eq!(*audit.lock().unwrap(), [1]);
+    let run = replay_testkit::latest_run_dir(&journal_root);
+    the_one_rejection(&run, "check").await;
+    for sink in ["ledger", "audit"] {
+        assert!(
+            replay_testkit::read_stage_error_envelopes(&run, sink)
+                .await
+                .is_empty(),
+            "{sink} records nothing it never received"
+        );
+    }
     Ok(())
 }

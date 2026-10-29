@@ -14,6 +14,7 @@ pub mod flow_control_payload;
 pub mod sink_operation_payload;
 pub mod source_diagnostic;
 pub mod stage_fatal_payload;
+pub mod stage_processing_failed_payload;
 pub mod supervisor_descriptor;
 
 pub mod journal_payload;

@@ -6,16 +6,17 @@ use crate::messaging::DeliveredRecord;
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, PendingOutput,
+};
+use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
-use crate::supervised_base::EventLoopDirective;
+use crate::supervised_base::{publication, EventLoopDirective};
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -222,41 +223,6 @@ async fn handle_reference_envelope<
             )
             .await?;
 
-            if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-                if let Some(state) = &heartbeat_state {
-                    state.record_last_consumed(event_id);
-                }
-                let mut outputs = vec![event.clone()];
-                common::observe_join_outputs(
-                    ctx,
-                    scope,
-                    Some(&event),
-                    delivery_snapshot.as_ref(),
-                    None,
-                    outputs.as_mut_slice(),
-                    Some(&envelope),
-                )
-                .await?;
-                write_stage_outputs_and_ack(
-                    subscription,
-                    ctx,
-                    JoinSubscriptionSide::Reference,
-                    source_id,
-                    outputs.into(),
-                    Some(&envelope),
-                )
-                .await?;
-                subscription
-                    .maybe_check_contracts_tick(
-                        &mut ctx.reference_contract_state[..],
-                        &mut ctx.reference_last_contract_check,
-                    )
-                    .await
-                    .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
-                    .into_result()?;
-                return Ok(Some(EventLoopDirective::Continue));
-            }
-
             ctx.instrumentation
                 .in_flight_count
                 .fetch_add(1, Ordering::Relaxed);
@@ -334,41 +300,16 @@ async fn handle_reference_envelope<
                             fatal.detail.clone(),
                         ))));
                     }
-                    let reason = format!("Join handler error during live reference: {err:?}");
-                    let mut error_event = envelope.authored().mark_as_error(reason, err.kind());
-                    ctx.instrumentation.record_error(err.kind());
-                    common::observe_join_outputs(
+                    common::dead_letter_reference(
                         ctx,
                         scope,
-                        Some(&event),
+                        &envelope,
                         delivery_snapshot.as_ref(),
-                        None,
-                        std::slice::from_mut(&mut error_event),
-                        Some(&envelope),
+                        &err,
                     )
                     .await?;
-
-                    if route_to_error_journal(&error_event) {
-                        crate::supervised_base::publication::append(
-                            &ctx.error_journal,
-                            error_event,
-                            AppendOptions::from_record(Some(&envelope))?,
-                        )
-                        .await
-                        .map_err(|e| format!("Failed to write join error event: {e}"))?;
-                        if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
-                            reader.ack_consumed(1);
-                        }
-                    } else {
-                        write_stage_outputs_and_ack(
-                            subscription,
-                            ctx,
-                            JoinSubscriptionSide::Reference,
-                            source_id,
-                            VecDeque::from([error_event]),
-                            Some(&envelope),
-                        )
-                        .await?;
+                    if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
+                        reader.ack_consumed(1);
                     }
                 }
             }
@@ -514,41 +455,6 @@ async fn handle_stream_envelope<
             )
             .await?;
 
-            if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-                if let Some(state) = &heartbeat_state {
-                    state.record_last_consumed(event_id);
-                }
-                let mut outputs = vec![event.clone()];
-                common::observe_join_outputs(
-                    ctx,
-                    scope,
-                    Some(&event),
-                    delivery_snapshot.as_ref(),
-                    None,
-                    outputs.as_mut_slice(),
-                    Some(&envelope),
-                )
-                .await?;
-                write_stage_outputs_and_ack(
-                    subscription,
-                    ctx,
-                    JoinSubscriptionSide::Stream,
-                    source_id,
-                    outputs.into(),
-                    Some(&envelope),
-                )
-                .await?;
-                subscription
-                    .maybe_check_contracts_tick(
-                        &mut ctx.stream_contract_state[..],
-                        &mut ctx.stream_last_contract_check,
-                    )
-                    .await
-                    .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
-                    .into_result()?;
-                return Ok(Some(EventLoopDirective::Continue));
-            }
-
             let merged_parent = envelope.clone();
 
             ctx.instrumentation
@@ -632,8 +538,22 @@ async fn handle_stream_envelope<
                             fatal.detail.clone(),
                         ))));
                     }
-                    let reason = format!("Join handler error during live enrichment: {err:?}");
-                    let mut error_event = envelope.authored().mark_as_error(reason, err.kind());
+                    let mut error_event = error_row_in_scope(
+                        processing_failed(
+                            WriterId::from(ctx.stage_id),
+                            &make_flow_context(
+                                &ctx.flow_name,
+                                &ctx.flow_id.to_string(),
+                                &ctx.stage_name,
+                                ctx.stage_id,
+                                StageType::Join,
+                            ),
+                            &envelope.authored(),
+                            &err,
+                            ctx.lineage_policy,
+                        ),
+                        scope,
+                    );
                     ctx.instrumentation.record_error(err.kind());
                     common::observe_join_outputs(
                         ctx,
@@ -646,27 +566,15 @@ async fn handle_stream_envelope<
                     )
                     .await?;
 
-                    if route_to_error_journal(&error_event) {
-                        crate::supervised_base::publication::append(
-                            &ctx.error_journal,
-                            error_event,
-                            AppendOptions::from_record(Some(&merged_parent))?,
-                        )
-                        .await
-                        .map_err(|e| format!("Failed to write join error event: {e}"))?;
-                        if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
-                            reader.ack_consumed(1);
-                        }
-                    } else {
-                        write_stage_outputs_and_ack(
-                            subscription,
-                            ctx,
-                            JoinSubscriptionSide::Stream,
-                            source_id,
-                            VecDeque::from([error_event]),
-                            Some(&merged_parent),
-                        )
-                        .await?;
+                    publication::append(
+                        &ctx.error_journal,
+                        error_event,
+                        AppendOptions::from_record(Some(&merged_parent))?,
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to write join error event: {e}"))?;
+                    if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
+                        reader.ack_consumed(1);
                     }
                 }
             }
@@ -1049,8 +957,7 @@ async fn append_join_selection<H: UnifiedJoinHandler>(
         ctx.stage_id,
         StageType::Join,
     ));
-    crate::supervised_base::publication::append(&ctx.data_journal, event, Default::default())
-        .await?;
+    publication::append(&ctx.data_journal, event, Default::default()).await?;
     Ok(())
 }
 
@@ -1386,17 +1293,13 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         subscription.last_delivered_stage_input_position(),
         subscription.last_delivered_generation(),
     );
-    let mut outputs: VecDeque<
-        crate::stages::common::supervision::backpressure_drain::PendingOutput,
-    > = outputs
+    let mut outputs: VecDeque<PendingOutput> = outputs
         .into_iter()
-        .map(
-            |event| crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                causal: crate::supervised_base::publication::capture(),
-                event,
-                scope,
-            },
-        )
+        .map(|event| PendingOutput {
+            causal: publication::capture(),
+            event,
+            scope,
+        })
         .collect();
 
     while let Some(event) = outputs.pop_front() {

@@ -142,10 +142,10 @@ impl stateful::TypedStatefulHandler for Pure {
     fn accumulate(&self, state: &mut u64, input: Fact) {
         *state += input.0;
     }
-    fn emit(&self, state: &u64) -> Result<stateful::StatefulEmission<Fact>, HandlerError> {
-        Ok(stateful::StatefulEmission::RetainEpoch {
+    fn emit(&self, state: &u64) -> stateful::StatefulEmission<Fact> {
+        stateful::StatefulEmission::RetainEpoch {
             outputs: vec![Fact(*state)],
-        })
+        }
     }
     fn post_emit(&self, _: &mut u64) {}
 }

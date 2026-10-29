@@ -60,8 +60,7 @@ where
     type Output = O;
 
     fn process(&self, input: I) -> Result<O, HandlerError> {
-        (self.converter)(input)
-            .map_err(|error| HandlerError::Other(format!("typed try-map failed: {error}")))
+        (self.converter)(input).map_err(|error| HandlerError::Other(error.to_string()))
     }
 }
 
@@ -96,7 +95,7 @@ mod tests {
         let error = mapper.process(Input(1)).expect_err("fails");
         assert!(matches!(
             error,
-            HandlerError::Other(message) if message == "typed try-map failed: invalid"
+            HandlerError::Other(message) if message == "invalid"
         ));
     }
 }

@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use super::domain::{ReservationConfirmed, StockReserved};
-use obzenflow::error::HandlerError;
 use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
 
 #[derive(Clone, Debug, Default)]
@@ -37,10 +36,10 @@ impl TypedStatefulHandler for ReservationDesk {
         state.pending.is_some()
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::ResetEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::ResetEpoch {
             outputs: state.pending.iter().cloned().collect(),
-        })
+        }
     }
 
     fn post_emit(&self, state: &mut Self::State) {

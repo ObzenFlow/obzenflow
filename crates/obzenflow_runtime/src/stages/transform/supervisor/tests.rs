@@ -872,24 +872,25 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
             .collect::<Vec<_>>();
         assert_eq!(errors.len(), 1, "one terminal error parent is journalled");
         assert_eq!(
-            errors[0].envelope.provenance.event.id,
-            original.envelope.provenance.event.id
+            errors[0].envelope.provenance.event.event_type,
+            "runtime.stage.processing_failed"
+        );
+        assert_eq!(
+            errors[0].envelope.provenance.event.causality.parent_ids,
+            vec![original.envelope.provenance.event.id]
         );
         assert_eq!(
             errors[0].envelope.provenance.event.writer_id,
-            original.envelope.provenance.event.writer_id
+            WriterId::from(t)
         );
-        assert_eq!(
-            serde_json::to_value(&errors[0].envelope.provenance.event.flow_context).unwrap(),
-            serde_json::to_value(&original.envelope.provenance.event.flow_context).unwrap()
-        );
+        assert_eq!(errors[0].envelope.provenance.event.flow_context.stage_id, t);
         assert!(matches!(
             &errors[0].envelope.provenance.event.processing.status,
             obzenflow_core::event::status::processing_status::ProcessingStatus::Error {
                 kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Unknown),
                 message,
                 ..
-            } if message.contains("typed try-map failed: index zero is invalid")
+            } if message == "index zero is invalid"
         ));
 
         assert!(

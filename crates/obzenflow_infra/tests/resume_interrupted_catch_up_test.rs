@@ -675,6 +675,8 @@ async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() ->
             evidence: Vec::new(),
         }
     );
+    let torn = read_run_lineage(&r1)?;
+    assert_eq!(torn.earlier_runs().collect::<Vec<_>>(), [r0.as_path()]);
 
     let mut expected_src = ticks(1..=RECORDED);
     expected_src.push(catch_up("src", 1));
@@ -732,12 +734,14 @@ async fn resuming_a_torn_resume_continues_the_prefix_its_ancestor_committed() ->
                 requires: Vec::new(),
             }),
             evidence: vec![EvidenceHolder {
-                run: r0,
+                run: r0.clone(),
                 generation: Some(0),
                 missing: false,
             }],
         }
     );
+    let continued = read_run_lineage(&r1)?;
+    assert_eq!(continued.earlier_runs().collect::<Vec<_>>(), [r0.as_path()]);
     assert_eq!(
         resume_rows(&replay_testkit::read_stage_envelopes_appended(&r2, "src").await),
         expected_src

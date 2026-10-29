@@ -23,6 +23,7 @@ use obzenflow_core::event::payloads::execution_payload::{
     StageLifecycleFact,
 };
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::archive::{
     ArchiveStatus, ReplayArchive, ReplayError, StatusDerivation,
@@ -277,7 +278,8 @@ fn source_failures(rows: &Rows) -> Vec<(EventId, &ExecutionPayload)> {
     rows.iter()
         .filter_map(|row| match &row.payload {
             ChainPayload::Execution(
-                payload @ (ExecutionPayload::SourcePollError(_)
+                payload @ (ExecutionPayload::SourceRecordRejected(_)
+                | ExecutionPayload::SourcePollFailed(_)
                 | ExecutionPayload::SourceOpenFailed(_)),
             ) => Some((row.envelope.provenance.event.id, payload)),
             _ => None,
@@ -612,10 +614,11 @@ macro_rules! lifecycle_family {
                 let errors = journals.error.read_all_unordered().await.unwrap();
                 let failures = source_failures(&errors);
                 assert_eq!(failures.len(), 1, "{failures:?}");
-                let (diagnostic_id, ExecutionPayload::SourcePollError(poll)) = failures[0] else {
-                    panic!("expected source.poll_error, got {failures:?}");
+                let (diagnostic_id, ExecutionPayload::SourcePollFailed(poll)) = failures[0] else {
+                    panic!("expected runtime.source.poll_failed, got {failures:?}");
                 };
                 assert_eq!(poll.continuation, SourcePollContinuation::Terminal);
+                assert_eq!(poll.kind, ErrorKind::Remote);
                 assert_eq!(failed_cause(&data), Some(Some(diagnostic_id)));
                 assert!(!has_eof(&data), "a terminal source writes no EOF");
                 assert_eq!(
@@ -642,11 +645,10 @@ macro_rules! lifecycle_family {
                 let errors = journals.error.read_all_unordered().await.unwrap();
                 let failures = source_failures(&errors);
                 assert_eq!(failures.len(), 1, "{failures:?}");
-                let (_, ExecutionPayload::SourcePollError(poll)) = failures[0] else {
-                    panic!("expected source.poll_error, got {failures:?}");
+                let (_, ExecutionPayload::SourceRecordRejected(rejected)) = failures[0] else {
+                    panic!("expected runtime.source.record_rejected, got {failures:?}");
                 };
-                assert_eq!(poll.continuation, SourcePollContinuation::Recoverable);
-                assert_eq!(poll.error_type, SourcePollErrorKind::Validation);
+                assert_eq!(rejected.kind, ErrorKind::Validation);
                 handle.send_event(Event::BeginDrain).await.unwrap();
                 finish(&handle).await.unwrap();
             }

@@ -9,14 +9,14 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, PendingOutput,
+};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
-use crate::stages::common::supervision::error_routing::{
-    error_row_in_scope, route_to_error_journal,
-};
+use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -28,12 +28,13 @@ use crate::stages::observer::dispatch::{
     run_stateful_before_accumulate_observers,
 };
 use crate::stages::observer::StatefulObserverContext;
-use crate::supervised_base::EventLoopDirective;
+use crate::supervised_base::{publication, EventLoopDirective};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
+use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -329,46 +330,6 @@ pub(super) async fn dispatch_accumulating<
                         Some(&event),
                         stage_input_position,
                     );
-                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-                        if let Some(state) = &heartbeat_state {
-                            state.record_last_consumed(event_id);
-                        }
-                        let duration = start.elapsed();
-                        ctx.instrumentation
-                            .in_flight_count
-                            .fetch_sub(1, Ordering::Relaxed);
-                        ctx.instrumentation.record_processing_time(duration);
-                        if ctx.instrumentation.check_anomaly(duration) {
-                            ctx.instrumentation
-                                .anomalies_total
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        ctx.instrumentation
-                            .events_processed_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.instrumentation
-                            .events_accumulated_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.events_since_last_heartbeat =
-                            ctx.events_since_last_heartbeat.saturating_add(1);
-                        if let Err(error) =
-                            StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, false)
-                                .await
-                        {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                error = ?error,
-                                "Failed to emit stateful accumulator heartbeat"
-                            );
-                        }
-                        if let Some(reader) = upstream_stage
-                            .and_then(|upstream| ctx.backpressure_readers.get(&upstream))
-                        {
-                            reader.ack_consumed(1);
-                        }
-                        return Ok(EventLoopDirective::Continue);
-                    }
-
                     run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
                     let mut handler = (**ctx
@@ -493,45 +454,23 @@ pub(super) async fn dispatch_accumulating<
 
                     if let Err(err) = accumulate_result {
                         ctx.instrumentation.record_error(err.kind());
-                        let reason = format!("Stateful handler error: {err:?}");
-                        let error_event =
-                            error_row_in_scope(event.mark_as_error(reason, err.kind()), scope);
-
-                        if route_to_error_journal(&error_event) {
-                            crate::supervised_base::publication::append(
-                                &ctx.error_journal,
-                                error_event,
-                                AppendOptions::from_record(Some(&envelope))?,
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!("Failed to write stateful accumulate error: {e}")
-                            })?;
-                        } else {
-                            let flow_id = ctx.flow_id.to_string();
-                            let flow_ctx = make_flow_context(
-                                &ctx.flow_name,
-                                &flow_id,
-                                &ctx.stage_name,
-                                ctx.stage_id,
-                                StageType::Stateful,
-                            );
-                            let enriched_error = ctx
-                                .instrumentation
-                                .capture_accounting()
-                                .attach_to(error_event.with_flow_context(flow_ctx));
-                            crate::supervised_base::publication::append(
-                                &ctx.data_journal,
-                                enriched_error,
-                                AppendOptions::from_record(Some(&envelope))?.with_capture(
-                                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
-                                ),
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!("Failed to write stateful accumulate error: {e}")
-                            })?;
-                        }
+                        let error_event = error_row_in_scope(
+                            processing_failed(
+                                WriterId::from(ctx.stage_id),
+                                &flow_context,
+                                &event,
+                                &err,
+                                ctx.lineage_policy,
+                            ),
+                            scope,
+                        );
+                        publication::append(
+                            &ctx.error_journal,
+                            error_event,
+                            AppendOptions::from_record(Some(&envelope))?,
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to write stateful accumulate error: {e}"))?;
 
                         if let Some(upstream) = upstream_stage {
                             if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
@@ -847,10 +786,7 @@ pub(super) async fn dispatch_emitting<
     let emit_result = process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
         handler
             .emit_with_context(&mut *current_state, output_context)
-            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
-                instrumentation.record_error(err.kind());
-                err.into()
-            })
+            .inspect_err(|_| instrumentation.record_error(ErrorKind::Unknown))
     })
     .await;
 
@@ -899,38 +835,12 @@ pub(super) async fn dispatch_emitting<
                     continue;
                 }
 
-                if route_to_error_journal(&event) {
-                    tracing::info!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %event.id,
-                        "Writing stateful emitted error event to error journal (FLOWIP-082h)"
-                    );
-
-                    // Error events are still data for output accounting.
-                    if event.consumes_data_credit() {
-                        if let Some(subscription) = sup.subscription.as_mut() {
-                            subscription.track_output_event();
-                        }
-                    }
-
-                    crate::stages::common::supervision::output_committer::commit_error_output(
-                        &ctx.error_journal,
-                        &ctx.instrumentation,
-                        event,
-                        ctx.last_consumed_envelope.as_ref(),
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to write stateful error event: {e}"))?;
-                } else {
-                    let scope = observer_scope;
-                    ctx.pending_outputs.push_back(
-                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                            causal: crate::supervised_base::publication::capture(),
-                            event,
-                            scope,
-                        },
-                    );
-                }
+                let scope = observer_scope;
+                ctx.pending_outputs.push_back(PendingOutput {
+                    causal: publication::capture(),
+                    event,
+                    scope,
+                });
             }
 
             ctx.pending_transition = Some(PendingTransition::EmitComplete);
@@ -956,47 +866,33 @@ pub(super) async fn dispatch_emitting<
             }
             Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete))
         }
-        Err(e) => {
-            if let Some(handler_error) =
-                e.downcast_ref::<crate::stages::common::handler_error::HandlerError>()
-            {
-                if let Some(fatal) = handler_error.as_fatal() {
-                    let writer_id = ctx.writer_id.ok_or_else(|| {
-                        "fatal stateful emission has no stage writer id".to_string()
-                    })?;
-                    let parent = ctx.last_consumed_envelope.as_ref().ok_or_else(|| {
-                        "fatal stateful emission has no causal input envelope".to_string()
-                    })?;
-                    record_stage_fatal(
-                        fatal,
-                        StageFatalCommit {
-                            error_journal: &ctx.error_journal,
-                            writer_id,
-                            stage_id: ctx.stage_id,
-                            stage_key: &ctx.stage_name,
-                            input_position: ctx.last_input_position,
-                            parent: Some(parent),
-                            lineage: ctx.lineage_policy,
-                        },
-                    )
-                    .await?;
-                    if let Some(upstream) = ctx.pending_ack_upstream.take() {
-                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                            reader.ack_consumed(1);
-                        }
-                    }
-                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                        fatal.detail.clone(),
-                    )));
+        Err(fatal) => {
+            let writer_id = ctx
+                .writer_id
+                .ok_or_else(|| "fatal stateful emission has no stage writer id".to_string())?;
+            let parent = ctx.last_consumed_envelope.as_ref().ok_or_else(|| {
+                "fatal stateful emission has no causal input envelope".to_string()
+            })?;
+            record_stage_fatal(
+                &fatal,
+                StageFatalCommit {
+                    error_journal: &ctx.error_journal,
+                    writer_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: &ctx.stage_name,
+                    input_position: ctx.last_input_position,
+                    parent: Some(parent),
+                    lineage: ctx.lineage_policy,
+                },
+            )
+            .await?;
+            if let Some(upstream) = ctx.pending_ack_upstream.take() {
+                if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                    reader.ack_consumed(1);
                 }
             }
-            tracing::error!(
-                stage_name = %ctx.stage_name,
-                error = ?e,
-                "Failed to emit aggregated event, transitioning to Failed"
-            );
             Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                format!("Emit error: {e}"),
+                fatal.detail,
             )))
         }
     }

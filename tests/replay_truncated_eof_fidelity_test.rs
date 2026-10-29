@@ -129,10 +129,10 @@ impl TypedStatefulHandler for SumHandler {
         0
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: vec![SumResult { total: *state }],
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}

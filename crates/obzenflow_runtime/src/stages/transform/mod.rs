@@ -130,7 +130,7 @@ mod helper_tests {
             .expect_err("try-map fails");
         assert!(matches!(
             error,
-            HandlerError::Other(message) if message == "typed try-map failed: invalid"
+            HandlerError::Other(message) if message == "invalid"
         ));
     }
 }

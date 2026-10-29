@@ -21,11 +21,11 @@ use crate::stages::source::supervision::SourceControl;
 use crate::stages::source::supervision::{
     announce_resumed_live, around_source_boundary, begin_catch_up_handoff, commit_reader_acquired,
     commit_source_open_failure, commit_source_reattached, complete_catch_up_handoff,
-    drain_pending_outputs_async, emit_batch_to_pending_outputs, normalise_source_poll_error,
-    observe_source_boundary_rejection, poll_error_backoff, poll_error_summary,
-    record_source_release, record_source_stage_fatal, source_error_kind,
-    stage_boundary_control_events, stage_source_poll_outputs, terminal_poll_failure,
-    PendingFailure, SourceExit, SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
+    drain_pending_outputs_async, emit_batch_to_pending_outputs, observe_source_boundary_rejection,
+    poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
+    source_error_kind, source_poll_error_record, stage_boundary_control_events,
+    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceExit,
+    SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourceContinuation, SourcePollCompletion,
@@ -810,7 +810,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                 Duration::from_nanos(0)
                             };
 
-                            let events_to_write = self.run_if_not_error(event, |e| vec![e]);
+                            let events_to_write = vec![event];
                             emit_batch_to_pending_outputs(
                                 events_to_write,
                                 &stage_flow_context,
@@ -1163,11 +1163,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     poll_error_summary(&ctx.stage_name, &error)
                                 );
                                 let kind = source_error_kind(&error);
-                                let diagnostic = normalise_source_poll_error(
-                                    WriterId::from(self.stage_id),
-                                    SourcePollKind::AsyncInfinite,
-                                    &error,
-                                );
+                                let diagnostic =
+                                    source_poll_error_record(WriterId::from(self.stage_id), &error);
                                 self.pending_failure =
                                     terminal_poll_failure(&ctx.stage_name, &error, &diagnostic);
                                 let mut events = vec![diagnostic];

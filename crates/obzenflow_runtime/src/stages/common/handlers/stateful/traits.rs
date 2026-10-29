@@ -91,14 +91,12 @@ pub trait StatefulHandler: Send + Sync {
     /// Called when emission is triggered (by emission strategy or drain).
     /// Return the events you want to emit based on current state.
     ///
-    /// `Ok(events)` means emission succeeded. `Err(HandlerError)` means a
-    /// per-record failure occurred while creating outputs (e.g. IO or
-    /// encoding problems); the supervisor will turn this into an
-    /// error-marked event and continue running the stage.
+    /// An emission either succeeds or fails the stage; the supervisor records
+    /// the `StageFatal` before failing.
     fn create_events(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal>;
 
     // --- Advanced methods with sensible defaults ---
 
@@ -122,7 +120,7 @@ pub trait StatefulHandler: Send + Sync {
     ///
     /// Default: Calls create_events()
     /// Override only if you need to modify state during emission
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         self.create_events(state)
     }
 
@@ -130,10 +128,7 @@ pub trait StatefulHandler: Send + Sync {
     ///
     /// Default: Calls create_events()
     /// Override only if drain behavior differs from normal emission
-    async fn drain(
-        &self,
-        state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, state: &Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         self.create_events(state)
     }
 
@@ -189,7 +184,7 @@ pub trait UnifiedStatefulHandler: Send + Sync {
     fn create_events(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal>;
 
     fn emit_interval_hint(&self) -> Option<Duration> {
         None
@@ -199,7 +194,7 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         false
     }
 
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         self.create_events(state)
     }
 
@@ -207,14 +202,11 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         &self,
         state: &mut Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         self.emit(state)
     }
 
-    async fn drain(
-        &self,
-        state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, state: &Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         self.create_events(state)
     }
 
@@ -222,7 +214,7 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         &self,
         state: &Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         self.drain(state).await
     }
 
@@ -278,7 +270,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
     fn create_events(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         StatefulHandler::create_events(self, state)
     }
 
@@ -290,7 +282,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         StatefulHandler::should_emit(self, state)
     }
 
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         StatefulHandler::emit(self, state)
     }
 
@@ -298,14 +290,11 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         &self,
         state: &mut Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         StatefulHandler::emit(self, state)
     }
 
-    async fn drain(
-        &self,
-        state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, state: &Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         StatefulHandler::drain(self, state).await
     }
 
@@ -313,7 +302,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         &self,
         state: &Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         StatefulHandler::drain(self, state).await
     }
 
@@ -571,7 +560,7 @@ where
     fn create_events(
         &self,
         _state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         Ok(Vec::new())
     }
 
@@ -586,7 +575,7 @@ where
         false
     }
 
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         let _ = state;
         Ok(Vec::new())
     }
@@ -595,7 +584,7 @@ where
         &self,
         state: &mut Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         let _ = state;
         Ok(Vec::new())
     }
@@ -603,7 +592,7 @@ where
     async fn drain(
         &self,
         _state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         Ok(Vec::new())
     }
 
@@ -611,7 +600,7 @@ where
         &self,
         state: &Self::State,
         _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         let _ = state;
         Ok(Vec::new())
     }

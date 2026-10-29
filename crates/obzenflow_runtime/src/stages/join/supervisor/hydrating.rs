@@ -6,7 +6,6 @@ use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::supervised_base::EventLoopDirective;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
@@ -14,9 +13,7 @@ use std::time::Instant;
 
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
-use crate::stages::join::fsm::{
-    JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
-};
+use crate::stages::join::fsm::{JoinEvent, JoinResources, JoinState, JoinSubscriptionSide};
 
 pub(super) async fn dispatch_hydrating<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -126,56 +123,6 @@ pub(super) async fn dispatch_hydrating<
                     )
                     .await?;
 
-                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-                        if let Some(state) = &heartbeat_state {
-                            state.record_last_consumed(event_id);
-                        }
-                        ctx.instrumentation
-                            .events_processed_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.instrumentation
-                            .events_accumulated_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        ctx.events_since_last_heartbeat =
-                            ctx.events_since_last_heartbeat.saturating_add(1);
-                        if let Err(error) =
-                            common::emit_join_heartbeat_if_due(ctx, ctx.stage_id).await
-                        {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                error = ?error,
-                                "Failed to emit join hydration heartbeat"
-                            );
-                        }
-
-                        let mut outputs = vec![event];
-                        common::observe_join_outputs(
-                            ctx,
-                            scope,
-                            Some(&envelope.authored()),
-                            delivery_snapshot.as_ref(),
-                            None,
-                            outputs.as_mut_slice(),
-                            Some(&envelope),
-                        )
-                        .await?;
-                        ctx.pending_outputs.extend(outputs.into_iter().map(|event| {
-                            crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                                causal: crate::supervised_base::publication::capture(),
-                                event,
-                                scope,
-                            }
-                        }));
-                        ctx.pending_subscription_ack = subscription
-                            .last_delivered_upstream_stage()
-                            .map(|upstream| PendingSubscriptionAck {
-                                side: JoinSubscriptionSide::Reference,
-                                upstream,
-                            });
-                        ctx.pending_parent = Some(envelope);
-                        return Ok(EventLoopDirective::Continue);
-                    }
-
                     ctx.instrumentation
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
@@ -256,29 +203,24 @@ pub(super) async fn dispatch_hydrating<
                                     subscription.last_delivered_stage_input_position(),
                                 )
                                 .await?;
-                            } else {
-                                common::observe_join_outputs(
-                                    ctx,
-                                    scope,
-                                    Some(&event),
-                                    delivery_snapshot.as_ref(),
-                                    None,
-                                    &[],
-                                    Some(&envelope),
-                                )
-                                .await?;
+                                tracing::error!(
+                                    stage_name = %ctx.stage_name,
+                                    error = ?err,
+                                    "Join handler error during reference hydration"
+                                );
+                                ctx.instrumentation.record_error(err.kind());
+                                return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                    fatal.detail.clone(),
+                                )));
                             }
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                error = ?err,
-                                "Join handler error during reference hydration"
-                            );
-                            ctx.instrumentation.record_error(err.kind());
-                            let message = match err.as_fatal() {
-                                Some(fatal) => fatal.detail.clone(),
-                                None => format!("Join handler hydration error: {err:?}"),
-                            };
-                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(message)));
+                            common::dead_letter_reference(
+                                ctx,
+                                scope,
+                                &envelope,
+                                delivery_snapshot.as_ref(),
+                                &err,
+                            )
+                            .await?;
                         }
                     }
 

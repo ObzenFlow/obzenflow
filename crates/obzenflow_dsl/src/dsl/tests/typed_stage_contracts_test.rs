@@ -394,11 +394,8 @@ mod tests {
 
         fn initial_state(&self) -> Self::State {}
 
-        fn emit(
-            &self,
-            _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch { outputs: vec![] })
+        fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::RetainEpoch { outputs: vec![] }
         }
 
         fn post_emit(&self, _: &mut Self::State) {}
@@ -416,11 +413,8 @@ mod tests {
 
         fn accumulate(&self, _state: &mut Self::State, _input: InputEvent) {}
 
-        fn emit(
-            &self,
-            _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch { outputs: vec![] })
+        fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::RetainEpoch { outputs: vec![] }
         }
 
         fn post_emit(&self, _: &mut Self::State) {}

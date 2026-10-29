@@ -35,7 +35,7 @@ impl Renderer {
             lineage,
             config_changes,
         } = observed;
-        self.flush_pending(output)?;
+        output.flush()?;
         if self.jsonl {
             writeln!(
                 diagnostics,
@@ -144,8 +144,32 @@ impl Renderer {
         let stages = manifest.stages.len();
         writeln!(output)?;
         self.summary_line(output, HEADING, "JOURNALS")?;
-        let data_width = self.records.to_string().len().max(12);
-        let error_width = self.records.to_string().len().max(13);
+        let rows: Vec<_> = self
+            .context
+            .stages
+            .iter()
+            .map(|stage| {
+                let counts = self.record_counts.stage(&stage.key);
+                (
+                    stage.key.as_str(),
+                    counts.map_or(0, |counts| counts.data).to_string(),
+                    counts.map_or_else(|| "0".into(), |counts| counts.error_cell()),
+                )
+            })
+            .collect();
+        let data_width = rows
+            .iter()
+            .map(|(_, data, _)| data.len())
+            .chain([self.records.to_string().len()])
+            .max()
+            .unwrap_or(0)
+            .max(12);
+        let error_width = rows
+            .iter()
+            .map(|(_, _, errors)| errors.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(13);
         let name_width = self
             .context
             .stages
@@ -210,19 +234,25 @@ impl Renderer {
                 MUTED,
                 &format!(
                     "  {:<name_width$}  {:>data_width$}  {:>error_width$}",
-                    "Stage", "Data journal", "Error journal"
+                    "Stage", "Data records", "Error records"
                 ),
             )?;
             // Match the stage order in the clock legend; both are derived from
             // admitted manifest metadata, including journals with no entries.
-            for stage in &self.context.stages {
-                let data = self.observed(&format!("{}/data", stage.key));
-                let error = self.observed(&format!("{}/error", stage.key));
-                let key = fit(&safe_text(&stage.key), name_width);
+            for (key, data, errors) in rows {
+                let key = fit(&safe_text(key), name_width);
                 self.summary_write(
                     output,
                     BODY,
-                    &format!("  {key:<name_width$}  {data:>data_width$}  {error:>error_width$}"),
+                    &format!("  {key:<name_width$}  {data:>data_width$}  {errors:>error_width$}"),
+                )?;
+            }
+            if self.record_counts.repeats() > 0 {
+                self.summary_indented(
+                    output,
+                    BODY,
+                    2,
+                    "A row rejected again after a crash counts once.",
                 )?;
             }
         }
@@ -230,7 +260,7 @@ impl Renderer {
         self.summary_line(
             output,
             MUTED,
-            "Journal counts include every observed entry, including hidden runtime entries.",
+            "Records in an error journal were delivered but not processed.",
         )?;
         if stages > 0 {
             self.summary_line(

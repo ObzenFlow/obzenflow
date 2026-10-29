@@ -2,8 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115g source guards for supervisor-owned pre-error routing.
+//! Source guards: an error-marked input is refused by the subscription that
+//! would deliver it, so no family supervisor routes one itself.
 
+const TRANSFORM_RUNNING: &str = include_str!("../src/stages/transform/supervisor/running.rs");
+const TRANSFORM_DRAINING: &str = include_str!("../src/stages/transform/supervisor/draining.rs");
+const TRANSFORM_DIRECT_FACT: &str =
+    include_str!("../src/stages/transform/supervisor/direct_fact_continuation.rs");
+const MERGE_COMMON: &str = include_str!("../src/stages/merge/supervisor/common.rs");
 const STATEFUL_RUNNING: &str = include_str!("../src/stages/stateful/supervisor/running.rs");
 const STATEFUL_DRAINING: &str = include_str!("../src/stages/stateful/supervisor/draining.rs");
 const JOIN_HYDRATING: &str = include_str!("../src/stages/join/supervisor/hydrating.rs");
@@ -12,7 +18,7 @@ const JOIN_LIVE: &str = include_str!("../src/stages/join/supervisor/live.rs");
 const JOIN_DRAINING: &str = include_str!("../src/stages/join/supervisor/draining.rs");
 
 const PRE_ERROR_GUARD: &str = "if matches!(event.processing.status, ProcessingStatus::Error";
-const FATAL_BRANCH: &str = "if let Some(fatal) = err.as_fatal()";
+const STAGE_FATAL_RECORD: &str = "common::record_join_stage_fatal(";
 
 fn positions(source: &str, needle: &str) -> Vec<usize> {
     // Resource ownership can introduce multiline handler access. Compare the
@@ -30,44 +36,6 @@ fn positions(source: &str, needle: &str) -> Vec<usize> {
         .collect()
 }
 
-fn assert_each_handler_call_has_an_immediately_preceding_guard(
-    label: &str,
-    source: &str,
-    handler_calls: &[&str],
-    expected_paths: usize,
-) {
-    let guards = positions(source, PRE_ERROR_GUARD);
-    let mut calls = handler_calls
-        .iter()
-        .flat_map(|handler_call| positions(source, handler_call))
-        .collect::<Vec<_>>();
-    calls.sort_unstable();
-
-    assert_eq!(
-        guards.len(),
-        expected_paths,
-        "{label} must guard every data-dispatch path"
-    );
-    assert_eq!(
-        calls.len(),
-        expected_paths,
-        "{label} handler-dispatch inventory changed; review pre-error ownership"
-    );
-
-    for index in 0..expected_paths {
-        assert!(
-            guards[index] < calls[index],
-            "{label} path {index} invokes the handler before checking pre-error status"
-        );
-        if index > 0 {
-            assert!(
-                calls[index - 1] < guards[index],
-                "{label} path {index} is relying on another path's guard"
-            );
-        }
-    }
-}
-
 fn assert_each_handler_call_has_its_own_following_fatal_branch(
     label: &str,
     source: &str,
@@ -79,7 +47,7 @@ fn assert_each_handler_call_has_its_own_following_fatal_branch(
         .flat_map(|handler_call| positions(source, handler_call))
         .collect::<Vec<_>>();
     calls.sort_unstable();
-    let fatal_branches = positions(source, FATAL_BRANCH);
+    let fatal_branches = positions(source, STAGE_FATAL_RECORD);
 
     assert_eq!(
         calls.len(),
@@ -95,7 +63,7 @@ fn assert_each_handler_call_has_its_own_following_fatal_branch(
     for index in 0..expected_paths {
         assert!(
             calls[index] < fatal_branches[index],
-            "{label} path {index} does not inspect the handler result for Fatal"
+            "{label} path {index} does not record its handler's Fatal as a stage fatal"
         );
         if index + 1 < expected_paths {
             assert!(
@@ -107,34 +75,22 @@ fn assert_each_handler_call_has_its_own_following_fatal_branch(
 }
 
 #[test]
-fn stateful_running_and_draining_guard_before_cloning_the_handler() {
-    assert_each_handler_call_has_an_immediately_preceding_guard(
-        "stateful running",
-        STATEFUL_RUNNING,
-        &["let mut handler = (**ctx.handler.as_ref().expect(\"handler available before cleanup\")).clone()"],
-        1,
-    );
-    assert_each_handler_call_has_an_immediately_preceding_guard(
-        "stateful draining",
-        STATEFUL_DRAINING,
-        &["let mut handler = (**ctx.handler.as_ref().expect(\"handler available before cleanup\")).clone()"],
-        1,
-    );
-}
-
-#[test]
-fn every_join_side_and_lifecycle_path_guards_before_handler_dispatch() {
-    for (label, source, expected_paths) in [
-        ("finite reference hydration", JOIN_HYDRATING, 1),
-        ("finite stream enrichment", JOIN_ENRICHING, 1),
-        ("live reference and stream", JOIN_LIVE, 2),
-        ("draining reference and stream", JOIN_DRAINING, 0),
+fn no_family_supervisor_branches_on_an_error_marked_input() {
+    for (label, source) in [
+        ("transform running", TRANSFORM_RUNNING),
+        ("transform draining", TRANSFORM_DRAINING),
+        ("transform direct facts", TRANSFORM_DIRECT_FACT),
+        ("merge", MERGE_COMMON),
+        ("stateful running", STATEFUL_RUNNING),
+        ("stateful draining", STATEFUL_DRAINING),
+        ("finite reference hydration", JOIN_HYDRATING),
+        ("finite stream enrichment", JOIN_ENRICHING),
+        ("live reference and stream", JOIN_LIVE),
+        ("draining reference and stream", JOIN_DRAINING),
     ] {
-        assert_each_handler_call_has_an_immediately_preceding_guard(
-            label,
-            source,
-            &[".process_reference(", ".process_stream("],
-            expected_paths,
+        assert!(
+            positions(source, PRE_ERROR_GUARD).is_empty(),
+            "{label} must leave an error-marked input to its subscription's refusal"
         );
     }
 }

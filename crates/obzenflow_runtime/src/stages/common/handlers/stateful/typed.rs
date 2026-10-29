@@ -9,6 +9,7 @@ use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use async_trait::async_trait;
 use obzenflow_core::config::LineagePolicy;
+use obzenflow_core::event::provenance::causality_context::CausalInput;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, OneFactStageOutput, TypedPayload, WriterId};
 use std::time::Duration;
@@ -54,22 +55,22 @@ impl TypedStatefulContribution {
     }
 }
 
-/// Opaque ids of one accepted emission's outputs, in emission order.
+/// Opaque identities of one accepted emission's outputs, in emission order.
 ///
 /// Only framework-owned facades can read them. They reach the handler through
 /// a hidden hook so ordinary authored handlers never see an event id.
 #[doc(hidden)]
 pub struct TypedStatefulOutputIds {
-    ids: Vec<EventId>,
+    outputs: Vec<CausalInput>,
 }
 
 impl TypedStatefulOutputIds {
-    pub(crate) fn new(ids: Vec<EventId>) -> Self {
-        Self { ids }
+    pub(crate) fn new(outputs: Vec<CausalInput>) -> Self {
+        Self { outputs }
     }
 
-    pub(crate) fn ids(&self) -> &[EventId] {
-        &self.ids
+    pub(crate) fn outputs(&self) -> &[CausalInput] {
+        &self.outputs
     }
 }
 
@@ -144,7 +145,6 @@ impl<O> TypedStatefulDrainInvocation<O> {
 /// ```compile_fail,E0046
 /// # use obzenflow_core::TypedPayload;
 /// # use serde::{Deserialize, Serialize};
-/// use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// use obzenflow_runtime::stages::stateful::{StatefulEmission, TypedStatefulHandler};
 /// # #[derive(Clone, Debug, Serialize, Deserialize)]
 /// # struct Fact;
@@ -165,8 +165,8 @@ impl<O> TypedStatefulDrainInvocation<O> {
 ///         *total += 1;
 ///     }
 ///
-///     fn emit(&self, _: &u64) -> Result<StatefulEmission<Fact>, HandlerError> {
-///         Ok(StatefulEmission::RetainEpoch { outputs: vec![Fact] })
+///     fn emit(&self, _: &u64) -> StatefulEmission<Fact> {
+///         StatefulEmission::RetainEpoch { outputs: vec![Fact] }
 ///     }
 /// }
 /// ```
@@ -193,7 +193,11 @@ pub trait TypedStatefulHandler: Send + Sync {
         None
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError>;
+    /// Projects the state into outputs and returns no error. A rejected
+    /// aggregate is a named fact in `Output`, and a state not ready to emit
+    /// keeps `should_emit` false. An output that cannot be serialized fails
+    /// the stage.
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output>;
 
     /// Runs once after an accepted emission, as Ptolemy's postfire runs after fire.
     /// It moves the state past that emission.
@@ -204,11 +208,11 @@ pub trait TypedStatefulHandler: Send + Sync {
     /// from it alone. Write an empty body when emission leaves the state as it was.
     fn post_emit(&self, state: &mut Self::State);
 
-    fn drain(&self, state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(match self.emit(state)? {
+    fn drain(&self, state: &Self::State) -> Vec<Self::Output> {
+        match self.emit(state) {
             StatefulEmission::RetainEpoch { outputs }
             | StatefulEmission::ResetEpoch { outputs } => outputs,
-        })
+        }
     }
 
     /// Runtime-only accumulation hook for sealed contribution evidence.
@@ -224,11 +228,8 @@ pub trait TypedStatefulHandler: Send + Sync {
 
     /// Runtime-only emission hook for exact facade contribution partitions.
     #[doc(hidden)]
-    fn emit_invocation(
-        &self,
-        state: &Self::State,
-    ) -> Result<TypedStatefulInvocation<Self::Output>, HandlerError> {
-        self.emit(state).map(TypedStatefulInvocation::facts_only)
+    fn emit_invocation(&self, state: &Self::State) -> TypedStatefulInvocation<Self::Output> {
+        TypedStatefulInvocation::facts_only(self.emit(state))
     }
 
     /// Runtime-only post-emission hook carrying the ids of the accepted outputs.
@@ -239,12 +240,8 @@ pub trait TypedStatefulHandler: Send + Sync {
 
     /// Runtime-only terminal hook for exact facade contribution partitions.
     #[doc(hidden)]
-    fn drain_invocation(
-        &self,
-        state: &Self::State,
-    ) -> Result<TypedStatefulDrainInvocation<Self::Output>, HandlerError> {
-        self.drain(state)
-            .map(TypedStatefulDrainInvocation::facts_only)
+    fn drain_invocation(&self, state: &Self::State) -> TypedStatefulDrainInvocation<Self::Output> {
+        TypedStatefulDrainInvocation::facts_only(self.drain(state))
     }
 }
 
@@ -275,13 +272,13 @@ impl<H> TypedStatefulHandlerAdapter<H> {
         }
     }
 
-    fn writer_id(&self) -> Result<WriterId, HandlerError> {
+    fn writer_id(&self) -> Result<WriterId, StageFatal> {
         self.writer_id.ok_or_else(|| {
-            HandlerError::Fatal(StageFatal::new(
+            StageFatal::new(
                 StageFatalCode::Configuration,
                 StageFatalReason::ConfigurationInvariant,
                 "typed stateful adapter invoked before runtime writer identity installation",
-            ))
+            )
         })
     }
 
@@ -290,14 +287,14 @@ impl<H> TypedStatefulHandlerAdapter<H> {
         outputs: Vec<O>,
         output_traces: Option<Vec<TraceState>>,
         fallback_trace: &TraceState,
-    ) -> Result<Vec<ChainEvent>, HandlerError>
+    ) -> Result<Vec<ChainEvent>, StageFatal>
     where
         O: OneFactStageOutput,
     {
         let writer_id = self.writer_id()?;
         if let Some(traces) = output_traces.as_ref() {
             if traces.len() != outputs.len() {
-                return Err(HandlerError::Fatal(StageFatal::new(
+                return Err(StageFatal::new(
                     StageFatalCode::Protocol,
                     StageFatalReason::ProtocolInputIntegrity,
                     format!(
@@ -305,7 +302,7 @@ impl<H> TypedStatefulHandlerAdapter<H> {
                         outputs.len(),
                         traces.len(),
                     ),
-                )));
+                ));
             }
         }
 
@@ -314,12 +311,14 @@ impl<H> TypedStatefulHandlerAdapter<H> {
             .enumerate()
             .map(|(index, output)| {
                 let mut facts = output.into_facts().map_err(|error| {
-                    HandlerError::Other(format!(
-                        "typed stateful output serialization failed: {error}"
-                    ))
+                    StageFatal::new(
+                        StageFatalCode::Protocol,
+                        StageFatalReason::OutputSerializationFailure,
+                        format!("typed stateful output serialization failed: {error}"),
+                    )
                 })?;
                 if facts.len() != 1 {
-                    return Err(HandlerError::Fatal(StageFatal::new(
+                    return Err(StageFatal::new(
                         StageFatalCode::Protocol,
                         StageFatalReason::ProtocolInputIntegrity,
                         format!(
@@ -327,7 +326,7 @@ impl<H> TypedStatefulHandlerAdapter<H> {
                             std::any::type_name::<O>(),
                             facts.len(),
                         ),
-                    )));
+                    ));
                 }
                 let fact = facts.pop().expect("length checked above");
                 let mut event =
@@ -367,7 +366,7 @@ where
         state: &mut Self::State,
         event: ChainEvent,
     ) -> Result<(), HandlerError> {
-        self.writer_id()?;
+        self.writer_id().map_err(HandlerError::Fatal)?;
         let input = H::Input::try_from_event(&event)
             .map_err(|error| HandlerError::Deserialization(error.to_string()))?;
         state.trace.record_event(&event, self.lineage);
@@ -384,9 +383,9 @@ where
         }
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         self.writer_id()?;
-        let invocation = self.handler.emit_invocation(&state.inner)?;
+        let invocation = self.handler.emit_invocation(&state.inner);
         let (emission, traces) = invocation.into_parts();
         let outputs = match emission {
             StatefulEmission::RetainEpoch { outputs }
@@ -403,27 +402,27 @@ where
         self.handler.should_emit(&state.inner)
     }
 
-    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         self.writer_id()?;
-        let invocation = self.handler.emit_invocation(&state.inner)?;
+        let invocation = self.handler.emit_invocation(&state.inner);
         let (emission, traces) = invocation.into_parts();
         let (outputs, reset_epoch) = match emission {
             StatefulEmission::RetainEpoch { outputs } => (outputs, false),
             StatefulEmission::ResetEpoch { outputs } => (outputs, true),
         };
         let events = self.lower_outputs(outputs, traces, &state.trace)?;
-        let output_ids = events.iter().map(|event| event.id).collect();
+        let outputs = events.iter().map(|event| CausalInput::of(event)).collect();
         self.handler
-            .post_emit_invocation(&mut state.inner, TypedStatefulOutputIds::new(output_ids));
+            .post_emit_invocation(&mut state.inner, TypedStatefulOutputIds::new(outputs));
         if reset_epoch {
             state.trace.reset();
         }
         Ok(events)
     }
 
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         self.writer_id()?;
-        let invocation = self.handler.drain_invocation(&state.inner)?;
+        let invocation = self.handler.drain_invocation(&state.inner);
         let (outputs, traces) = invocation.into_parts();
         self.lower_outputs(outputs, traces, &state.trace)
     }
@@ -475,13 +474,10 @@ mod tests {
             *state += input.value;
         }
 
-        fn emit(
-            &self,
-            state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch {
+        fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::RetainEpoch {
                 outputs: vec![Output { value: *state }],
-            })
+            }
         }
 
         fn post_emit(&self, state: &mut Self::State) {
@@ -528,7 +524,7 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct RecordsOutputIds {
-        received: Arc<Mutex<Vec<Vec<EventId>>>>,
+        received: Arc<Mutex<Vec<Vec<CausalInput>>>>,
     }
 
     impl TypedStatefulHandler for RecordsOutputIds {
@@ -544,13 +540,10 @@ mod tests {
             *state += input.value;
         }
 
-        fn emit(
-            &self,
-            state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch {
+        fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::RetainEpoch {
                 outputs: vec![Output { value: *state }, Output { value: *state + 1 }],
-            })
+            }
         }
 
         fn post_emit(&self, _: &mut Self::State) {}
@@ -563,7 +556,7 @@ mod tests {
             self.received
                 .lock()
                 .expect("recorder lock")
-                .push(output_ids.ids().to_vec());
+                .push(output_ids.outputs().to_vec());
             self.post_emit(state);
         }
     }
@@ -585,7 +578,10 @@ mod tests {
         assert!(received.lock().expect("recorder lock").is_empty());
 
         let outputs = StatefulHandler::emit(&adapter, &mut state).expect("emission lowers");
-        let output_ids: Vec<_> = outputs.iter().map(|output| output.id).collect();
+        let output_ids: Vec<_> = outputs
+            .iter()
+            .map(|output| CausalInput::of(output))
+            .collect();
         assert_eq!(*received.lock().expect("recorder lock"), [output_ids]);
     }
 
@@ -640,13 +636,10 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
         }
 
-        fn emit(
-            &self,
-            _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch {
+        fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::RetainEpoch {
                 outputs: Vec::new(),
-            })
+            }
         }
 
         fn post_emit(&self, _: &mut Self::State) {}
@@ -710,16 +703,13 @@ mod tests {
             *state += input.value;
         }
 
-        fn emit(
-            &self,
-            state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch {
+        fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::RetainEpoch {
                 outputs: vec![DishonestProduct {
                     first: Output { value: *state },
                     second: OtherOutput { value: *state },
                 }],
-            })
+            }
         }
 
         fn post_emit(&self, state: &mut Self::State) {
@@ -737,12 +727,9 @@ mod tests {
             .expect("typed input decodes");
         let before_trace = state.trace.parent_ids();
 
-        let error = StatefulHandler::emit(&adapter, &mut state)
+        let fatal = StatefulHandler::emit(&adapter, &mut state)
             .expect_err("two facts contradict the one-fact marker");
 
-        let HandlerError::Fatal(fatal) = error else {
-            panic!("dishonest one-fact assertion must be fatal")
-        };
         assert_eq!(fatal.code, StageFatalCode::Protocol);
         assert_eq!(fatal.reason, StageFatalReason::ProtocolInputIntegrity);
         assert!(fatal.detail.contains("one_fact_stage_output"));
@@ -784,13 +771,10 @@ mod tests {
             *state += input.value;
         }
 
-        fn emit(
-            &self,
-            _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::ResetEpoch {
+        fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::ResetEpoch {
                 outputs: vec![FailingOutput],
-            })
+            }
         }
 
         fn post_emit(&self, state: &mut Self::State) {
@@ -798,8 +782,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn serialization_failure_preserves_domain_and_contribution_state() {
+    #[tokio::test]
+    async fn an_unserializable_output_is_fatal_and_skips_post_emit() {
         let mut adapter = TypedStatefulHandlerAdapter::new(FailingHandler);
         StatefulHandler::install_writer_id(&mut adapter, WriterId::from(StageId::new()));
         let mut state = StatefulHandler::initial_state(&adapter);
@@ -807,56 +791,18 @@ mod tests {
         StatefulHandler::try_accumulate(&mut adapter, &mut state, parent.clone())
             .expect("typed input decodes");
 
-        let error = StatefulHandler::emit(&adapter, &mut state)
+        let emitted = StatefulHandler::emit(&adapter, &mut state)
             .expect_err("output serialization is deliberately invalid");
+        let drained = StatefulHandler::drain(&adapter, &state)
+            .await
+            .expect_err("a drain lowers the same output");
 
-        assert!(error.to_string().contains("serialization failed"));
+        for fatal in [emitted, drained] {
+            assert_eq!(fatal.code, StageFatalCode::Protocol);
+            assert_eq!(fatal.reason, StageFatalReason::OutputSerializationFailure);
+            assert!(fatal.detail.contains("serialization failed"));
+        }
         assert_eq!(state.inner, 5);
-        assert_eq!(state.trace.parent_ids(), vec![parent.id]);
-    }
-
-    #[derive(Clone, Debug)]
-    struct RejectingHandler;
-
-    impl TypedStatefulHandler for RejectingHandler {
-        type State = u32;
-        type Input = Input;
-        type Output = Output;
-
-        fn initial_state(&self) -> Self::State {
-            0
-        }
-
-        fn accumulate(&self, state: &mut Self::State, input: Self::Input) {
-            *state += input.value;
-        }
-
-        fn emit(
-            &self,
-            _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Err(HandlerError::Domain("emission rejected".to_string()))
-        }
-
-        fn post_emit(&self, state: &mut Self::State) {
-            *state = 99;
-        }
-    }
-
-    #[test]
-    fn handler_error_skips_post_emit_and_keeps_the_trace() {
-        let mut adapter = TypedStatefulHandlerAdapter::new(RejectingHandler);
-        StatefulHandler::install_writer_id(&mut adapter, WriterId::from(StageId::new()));
-        let mut state = StatefulHandler::initial_state(&adapter);
-        let parent = input_event(4);
-        StatefulHandler::try_accumulate(&mut adapter, &mut state, parent.clone())
-            .expect("typed input decodes");
-
-        let error = StatefulHandler::emit(&adapter, &mut state)
-            .expect_err("the handler rejects its emission");
-
-        assert!(matches!(error, HandlerError::Domain(_)));
-        assert_eq!(state.inner, 4);
         assert_eq!(state.trace.parent_ids(), vec![parent.id]);
     }
 
@@ -876,13 +822,10 @@ mod tests {
             *state += input.value;
         }
 
-        fn emit(
-            &self,
-            _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::ResetEpoch {
+        fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::ResetEpoch {
                 outputs: Vec::new(),
-            })
+            }
         }
 
         fn post_emit(&self, state: &mut Self::State) {
@@ -946,19 +889,16 @@ mod tests {
 
         fn accumulate(&self, _state: &mut Self::State, _input: Self::Input) {}
 
-        fn emit(
-            &self,
-            _state: &Self::State,
-        ) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-            Ok(StatefulEmission::RetainEpoch {
+        fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+            StatefulEmission::RetainEpoch {
                 outputs: vec![Output { value: 1 }],
-            })
+            }
         }
 
         fn post_emit(&self, _: &mut Self::State) {}
 
-        fn drain(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-            Ok(vec![Output { value: 2 }])
+        fn drain(&self, _state: &Self::State) -> Vec<Self::Output> {
+            vec![Output { value: 2 }]
         }
     }
 

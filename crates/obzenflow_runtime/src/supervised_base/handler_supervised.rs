@@ -14,9 +14,7 @@ use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use futures::future::BoxFuture;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
 use obzenflow_core::event::provenance::ExecutionAccounting;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::WriterId;
-use obzenflow_core::ChainEvent;
 use obzenflow_fsm::{FsmAction, FsmError};
 use std::collections::VecDeque;
 use std::error::Error;
@@ -144,19 +142,6 @@ pub trait HandlerSupervised: Supervisor + Sync {
     /// failure drives the FSM through an explicit failure path instead
     /// of terminating the task with an opaque error.
     fn event_for_action_error(&self, msg: String) -> Self::Event;
-
-    /// Helper method to run a processing function only if the event doesn't have Error status
-    /// If the event has Error status, it's passed through unchanged
-    fn run_if_not_error<F>(&self, event: ChainEvent, next: F) -> Vec<ChainEvent>
-    where
-        F: FnOnce(ChainEvent) -> Vec<ChainEvent>,
-    {
-        if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-            vec![event] // pass straight through
-        } else {
-            next(event)
-        }
-    }
 }
 
 /// Extension trait to add run functionality to any HandlerSupervised type

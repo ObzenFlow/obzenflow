@@ -169,7 +169,8 @@ fn source_failures(rows: &[JournalRecord<ChainPayload>]) -> Vec<(EventId, &Execu
     rows.iter()
         .filter_map(|row| match &row.payload {
             ChainPayload::Execution(
-                payload @ (ExecutionPayload::SourcePollError(_)
+                payload @ (ExecutionPayload::SourceRecordRejected(_)
+                | ExecutionPayload::SourcePollFailed(_)
                 | ExecutionPayload::SourceOpenFailed(_)),
             ) => Some((row.envelope.provenance.event.id, payload)),
             _ => None,
@@ -202,8 +203,8 @@ async fn assert_terminal_contract(base: &Path) {
     assert!(!journals.data.iter().any(|row| row.is_eof()));
     let failures = source_failures(&journals.errors);
     assert_eq!(failures.len(), 1, "{failures:?}");
-    let (id, ExecutionPayload::SourcePollError(poll)) = failures[0] else {
-        panic!("expected source.poll_error: {failures:?}");
+    let (id, ExecutionPayload::SourcePollFailed(poll)) = failures[0] else {
+        panic!("expected runtime.source.poll_failed: {failures:?}");
     };
     assert_eq!(poll.continuation, SourcePollContinuation::Terminal);
     assert_eq!(failed_cause(&journals.data), Some(Some(id)));

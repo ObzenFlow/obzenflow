@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::context::{event_type, writer_id};
+use super::context::{event_id, event_type, writer_id};
 use super::payload::{abbreviated, compact};
 use super::*;
 use obzenflow::journal::ProcessingStatus;
@@ -50,7 +50,10 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
                 "event": {
                     "id":id(event), "writer_id":{"type":"Stage", "id":id(stage)},
                     "event_kind":"fact", "event_type":event_type, "payload_schema_version":1,
-                    "causality":{"parent_ids":parents.iter().map(|p| id(*p)).collect::<Vec<_>>()},
+                    "causality":{
+                        "parent_ids":parents.iter().map(|p| id(*p)).collect::<Vec<_>>(),
+                        "inputs":parents.iter().map(|p| json!({"id":id(*p), "event_type":"sensor.reading"})).collect::<Vec<_>>()
+                    },
                     "flow_context":{"flow_name":"sensors", "flow_id":id(10), "stage_name":key, "stage_id":id(stage), "stage_type":stage_type},
                     "processing":{"event_time":0, "status":"Success"}, "composite_activations":[]
                 },
@@ -65,6 +68,17 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
             "payload":payload
         }
     })).unwrap()
+}
+
+fn with_inputs(mut record: RunRecord, inputs: &[(u64, &str)]) -> RunRecord {
+    if let RunRecordData::Chain(row) = &mut record.record {
+        row.envelope.provenance.event.causality.inputs = serde_json::from_value(json!(inputs
+            .iter()
+            .map(|(event, event_type)| json!({"id": id(*event), "event_type": event_type}))
+            .collect::<Vec<_>>()))
+        .unwrap();
+    }
+    record
 }
 
 fn renderer() -> Renderer {
@@ -595,7 +609,6 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
             .insert(coordinate(9), 7);
     }
     renderer.record(&mut output, hidden).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let update = String::from_utf8(std::mem::take(&mut output)).unwrap();
     assert!(update.contains(&format!("6 journal_{}", id(9))));
     assert!(
@@ -610,7 +623,6 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
         record.journal.stage.as_mut().unwrap().key = name.into();
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let updates = String::from_utf8(std::mem::take(&mut output)).unwrap();
     assert!(updates.contains("7 a_new_stage"));
     assert!(updates.contains("6 late_stage"));
@@ -639,7 +651,6 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
             .insert(coordinate(4), 1);
     }
     renderer.record(&mut output, forwarded.clone()).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     assert_eq!(record_clock(&renderer, &forwarded), "⟨3:100,5:1⟩");
     let matrix = matrix_text(&renderer, &RunReadProgress::default());
     assert!(matrix.lines().any(|line| {
@@ -827,7 +838,6 @@ fn all_six_effect_occurrences_retain_their_names_and_evidence_in_human_and_jsonl
             let mut renderer = Renderer::new(&view, false, false, [&record.journal].into_iter());
             let mut output = Vec::new();
             renderer.record(&mut output, record.clone()).unwrap();
-            renderer.flush_pending(&mut output).unwrap();
             let output = String::from_utf8(output).unwrap();
             assert!(output.contains(name), "{output}");
             if jsonl {
@@ -904,7 +914,6 @@ fn primary_execution_failures_remain_visible_in_default_human_and_jsonl_views() 
         for record in &records {
             renderer.record(&mut output, record.clone()).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(
             output.contains("obzenflow.stage_fatal_recorded"),
@@ -983,7 +992,6 @@ fn a_departure_reaches_jsonl_and_the_human_view_keeps_its_detail() {
         let mut renderer = Renderer::new(&view, false, false, std::iter::once(&record.journal));
         let mut output = Vec::new();
         renderer.record(&mut output, record.clone()).unwrap();
-        renderer.flush_pending(&mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         if jsonl {
             let row: RunRecord = serde_json::from_str(output.trim_end()).unwrap();
@@ -1032,7 +1040,6 @@ fn human_and_jsonl_select_the_same_records() {
             for record in &records {
                 renderer.record(&mut output, record.clone()).unwrap();
             }
-            renderer.flush_pending(&mut output).unwrap();
             let expected = if include_runtime {
                 vec![100, 102, 103]
             } else {
@@ -1083,11 +1090,13 @@ fn hidden_runtime_records_preserve_parent_resolution_and_separate_fact_groups() 
         fact(2, 101, &[100], json!({"n":1})),
         progress,
         fact(2, 103, &[100], json!({"n":2})),
-        fact(2, 104, &[102], json!({"n":3})),
+        with_inputs(
+            fact(2, 104, &[102], json!({"n":3})),
+            &[(102, &progress_type)],
+        ),
     ] {
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(!text.contains("RUNTIME") && !text.contains("inputs_since_last_report"));
     assert_eq!(
@@ -1146,7 +1155,6 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
             stage.is_effectful = stage.key == "classify";
             renderer.record(&mut output, record).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("\x1b[38;5;217mEFFECT (stage: \x1b[0m\x1b[1;38;5;231mclassify\x1b[0m\x1b[38;5;217m, journal: 2)\x1b[0m\n\x1b[1;38;5;224meffect.execution_failed\x1b[0m\x1b[38;5;217m ← classify(sensor.reading)\x1b[0m"));
         assert!(
@@ -1164,7 +1172,8 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
                 .split("\n\n")
                 .next()
                 .unwrap();
-            assert!(runtime.contains("\x1b[38;5;245m  \"execution_type\":"));
+            assert!(runtime.contains("\x1b[38;5;245m  \"inputs_since_last_report\": 1"));
+            assert!(!runtime.contains("execution_type"));
             assert!(runtime.contains(
                 "(stage: \x1b[0m\x1b[1;38;5;255mclassify\x1b[0m\x1b[38;5;245m, journal: 2)"
             ));
@@ -1192,7 +1201,6 @@ fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
             .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
             .unwrap();
         renderer.record(&mut output, result).unwrap();
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
             "\x1b[1;38;5;{color}m{heading} (stage: \x1b[0m\x1b[1;38;5;{reporter_color}mclassify\x1b[0m\x1b[1;38;5;{color}m, journal: 2)\x1b[0m\n\x1b[1;38;5;{output_color}msensor.classified\x1b[0m\x1b[1;38;5;{color}m ← classify(sensor.reading)\x1b[0m"
@@ -1246,7 +1254,6 @@ fn stage_capability_comes_from_the_manifest_regardless_of_effect_provenance() {
         for record in [fact(1, 100, &[], json!({"celsius":38})), result, derived] {
             renderer.record(&mut output, record).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         let headings: Vec<_> = text
             .split("\n\n")
@@ -1274,7 +1281,10 @@ fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_
         if let RunRecordData::Chain(row) = &mut input.record {
             row.envelope.provenance.event.event_type = "payment.order_validated".into();
         }
-        let mut result = fact(2, 101, &[100], json!({"reason":"unavailable"}));
+        let mut result = with_inputs(
+            fact(2, 101, &[100], json!({"reason":"unavailable"})),
+            &[(100, "payment.order_validated")],
+        );
         let stage = result.journal.stage.as_mut().unwrap();
         stage.key = "authorize_payment".into();
         stage.is_effectful = true;
@@ -1284,7 +1294,6 @@ fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_
         let mut output = Vec::new();
         renderer.record(&mut output, input).unwrap();
         renderer.record(&mut output, result).unwrap();
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert_eq!(
             text.lines().any(|line| line == expression),
@@ -1317,12 +1326,20 @@ fn emphasis_preserves_wrapped_unicode_stage_and_event_names() {
         renderer.width = width;
         let mut plain = Vec::new();
         renderer
-            .render_group(&mut plain, std::slice::from_ref(&record))
+            .terminal()
+            .render(
+                &mut plain,
+                &EventView::from_record(&record, &renderer.context),
+            )
             .unwrap();
         renderer.color = true;
         let mut colored = Vec::new();
         renderer
-            .render_group(&mut colored, std::slice::from_ref(&record))
+            .terminal()
+            .render(
+                &mut colored,
+                &EventView::from_record(&record, &renderer.context),
+            )
             .unwrap();
         let colored = String::from_utf8(colored).unwrap();
         let mut pieces = colored.split("\x1b[");
@@ -1355,7 +1372,7 @@ fn emphasis_preserves_wrapped_unicode_stage_and_event_names() {
 }
 
 #[test]
-fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_parent() {
+fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload() {
     let mut renderer = renderer();
     let mut output = Vec::new();
     let first = fact(2, 101, &[100], json!({"sensor":"A", "reason":"too_hot"}));
@@ -1368,16 +1385,11 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
     if let RunRecordData::Chain(row) = &mut second.record {
         row.envelope.provenance.event.event_type = "sensor.cooling_requested".into();
     }
-    renderer.record(&mut output, first).unwrap();
-    renderer.record(&mut output, second).unwrap();
-    assert!(
-        output.is_empty(),
-        "wait for the actual input, not a guessed type"
-    );
     renderer
         .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
         .unwrap();
-    renderer.flush_pending(&mut output).unwrap();
+    renderer.record(&mut output, first).unwrap();
+    renderer.record(&mut output, second).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains(&format!(
@@ -1419,7 +1431,7 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         .unwrap();
     assert!(
         last_fact < last_clock,
-        "each grouped fact retains its own clock below its typed equation"
+        "each fact retains its own clock below its typed equation"
     );
     assert_eq!(
         text.matches("\"sensor\": \"A\"").count(),
@@ -1442,14 +1454,11 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         let payload: Value = serde_json::from_str(&block[payload_start..]).unwrap();
         assert_eq!(payload, json!({"sensor":"A", "reason":reason}));
     }
-    assert_eq!(
-        renderer.records, 3,
-        "grouped display still counts every record"
-    );
+    assert_eq!(renderer.records, 3, "every record is counted");
 }
 
 #[test]
-fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_facts() {
+fn missing_parents_flush_naming_only_recorded_input_types_without_grouping_unrelated_facts() {
     let mut renderer = renderer();
     let mut output = Vec::new();
     renderer
@@ -1459,9 +1468,11 @@ fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_fac
         .record(&mut output, fact(2, 101, &[98], json!({"n":1})))
         .unwrap();
     renderer
-        .record(&mut output, fact(2, 102, &[99], json!({"n":1})))
+        .record(
+            &mut output,
+            with_inputs(fact(2, 102, &[99], json!({"n":1})), &[]),
+        )
         .unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert_eq!(
         text.matches("TRANSFORM (stage: classify, journal: 2)\nsensor.classified ← ")
@@ -1480,28 +1491,18 @@ fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_fac
         3,
         "matching values do not establish shared parents"
     );
-    assert!(!text.contains("classify(sensor.reading)"));
     assert_eq!(
-        text.matches("sensor.classified ← classify(recorded input (unresolved))")
+        text.matches("sensor.classified ← classify(sensor.reading)")
             .count(),
-        2,
-        "unknown inputs never replace the known output heading"
+        1,
+        "a missing parent's type comes from the record that names it: {text}"
     );
-}
-
-#[test]
-fn continuous_stream_with_missing_parents_has_bounded_pending_rows() {
-    let mut renderer = renderer();
-    let mut output = Vec::new();
-    for n in 100..(100 + MAX_PENDING as u64 * 2) {
-        renderer
-            .record(&mut output, fact(2, n, &[9999], json!({"n":n})))
-            .unwrap();
-        assert!(renderer.pending.len() < MAX_PENDING);
-    }
-    renderer.flush_pending(&mut output).unwrap();
-    assert_eq!(renderer.records, MAX_PENDING as u64 * 2);
-    assert!(renderer.pending.is_empty());
+    assert_eq!(
+        text.matches("sensor.classified ← classify(input not recorded)")
+            .count(),
+        1,
+        "no type is taken from anywhere but the record: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1550,9 +1551,7 @@ async fn explanation_shows_inherited_clock_without_waiting_for_other_journals() 
     renderer.record(&mut output, child).unwrap();
     let first = std::str::from_utf8(&output).unwrap();
     assert!(first.contains("⟨1:1,2:1⟩"), "{first}");
-    assert!(renderer.pending.is_empty());
     renderer.record(&mut output, source).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert_eq!(renderer.records, 2);
     assert!(text.contains("⟨1:1⟩"), "{text}");
@@ -1576,7 +1575,6 @@ fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
     renderer
         .record(&mut output, fact(2, 101, &[], json!({})))
         .unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("⟨1:100,3:12⟩"), "{text}");
     assert!(text.contains(&format!("3 journal_{}", id(3))), "{text}");
@@ -1600,7 +1598,6 @@ fn clocks_name_journals_from_earlier_runs_in_the_lineage() {
     }
     let mut output = Vec::new();
     renderer.record(&mut output, source).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("⟨1:100,3:12⟩"), "{text}");
     assert!(text.contains("3 thermometer (gen 0)"), "{text}");
@@ -1643,7 +1640,6 @@ fn replayed_facts_name_their_original_author_by_the_stage_that_owns_the_journal(
     let mut output = Vec::new();
     renderer.record(&mut output, replayed).unwrap();
     renderer.record(&mut output, unrelated).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     assert_eq!(
         renderer.context.writer_name(&replayed_writer),
         "thermometer [replay]"
@@ -1669,7 +1665,6 @@ fn compact_clock_rows_follow_output_equations_without_truncating_counts() {
         }
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     let lines: Vec<_> = text.lines().collect();
     let clocks: Vec<_> = lines
@@ -1720,7 +1715,6 @@ fn reporting_journal_highlight_uses_identity_and_row_color_instead_of_counter_si
     let mut output = Vec::new();
     renderer.record(&mut output, source).unwrap();
     renderer.record(&mut output, transform).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains("\x1b[1;4;38;5;215m9\x1b[0m"),
@@ -1792,7 +1786,10 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         if let RunRecordData::Chain(row) = &mut catalog.record {
             row.envelope.provenance.event.event_type = "sensor.calibration".into();
         }
-        let mut result = fact(2, 101, &[99, 100], json!({"celsius":40}));
+        let mut result = with_inputs(
+            fact(2, 101, &[99, 100], json!({"celsius":40})),
+            &[(99, "sensor.calibration"), (100, "sensor.reading")],
+        );
         result.journal.stage.as_mut().unwrap().stage_type = stage_type;
         if let RunRecordData::Chain(row) = &mut result.record {
             row.envelope.provenance.event.flow_context.stage_type = stage_type;
@@ -1801,7 +1798,6 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         for record in [catalog, fact(1, 100, &[], json!({"celsius":38})), result] {
             renderer.record(&mut output, record).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
             "\x1b[1;38;5;114m{heading} (stage: \x1b[0m\x1b[1;38;5;194mclassify\x1b[0m\x1b[1;38;5;114m, journal: 2)\x1b[0m\n\x1b[1;38;5;157msensor.classified\x1b[0m\x1b[1;38;5;114m ← classify(sensor.calibration, sensor.reading)\x1b[0m"
@@ -1828,11 +1824,13 @@ fn a_linked_stateful_output_names_its_input_and_its_previous_output() {
         fact(1, 100, &[], json!({"celsius":38})),
         stateful(101, &[100]),
         fact(1, 102, &[], json!({"celsius":40})),
-        stateful(103, &[102, 101]),
+        with_inputs(
+            stateful(103, &[102, 101]),
+            &[(102, "sensor.reading"), (101, "sensor.classified")],
+        ),
     ] {
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains(&format!(
@@ -1894,7 +1892,6 @@ fn failed_processing_remains_distinct_from_a_successfully_produced_fact() {
         .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
         .unwrap();
     renderer.record(&mut output, failed).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("[processing error]"));
     assert!(text.contains("processing error: calibration unavailable"));
@@ -1968,7 +1965,6 @@ fn join_facts_are_headed_with_the_phase_their_join_had_journalled() {
     ] {
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let headings: Vec<String> = String::from_utf8(output)
         .unwrap()
         .lines()
@@ -1984,5 +1980,528 @@ fn join_facts_are_headed_with_the_phase_their_join_had_journalled() {
     assert!(
         headings[2].ends_with(", phase: live since generation 1)"),
         "{headings:?}"
+    );
+}
+
+fn on_stage(mut record: RunRecord, stage: u64, key: &str, stage_type: StageType) -> RunRecord {
+    let stage_id = serde_json::from_value(json!(id(stage))).unwrap();
+    let owner = record.journal.stage.as_mut().unwrap();
+    owner.key = key.into();
+    owner.id = stage_id;
+    owner.stage_type = stage_type;
+    record.journal.id = serde_json::from_value(json!(id(stage))).unwrap();
+    if let RunRecordData::Chain(row) = &mut record.record {
+        row.envelope.provenance.event.writer_id = obzenflow_core::WriterId::from(stage_id);
+        row.envelope.provenance.event.flow_context.stage_name = key.into();
+        row.envelope.provenance.event.flow_context.stage_id = stage_id;
+    }
+    record
+}
+
+fn in_error_journal(mut record: RunRecord, payload: ExecutionPayload) -> RunRecord {
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+    let owner = record.journal.stage.as_ref().unwrap().id;
+    let (message, kind): (String, ErrorKind) = match &payload {
+        ExecutionPayload::StageProcessingFailed(failure) => {
+            (failure.detail.clone(), failure.kind.clone())
+        }
+        ExecutionPayload::SourceRecordRejected(rejected) => {
+            (rejected.detail.clone(), rejected.kind.clone())
+        }
+        ExecutionPayload::SinkOperationFailed(failure) => {
+            (failure.detail.clone(), failure.kind.clone())
+        }
+        _ => unreachable!("error records only"),
+    };
+    record.kind = RunRecordKind::Execution;
+    record.journal.kind = RunJournalKind::Error;
+    record.journal.id =
+        serde_json::from_value(json!(format!("7{}", &owner.as_ulid().to_string()[1..]))).unwrap();
+    if let RunRecordData::Chain(row) = &mut record.record {
+        row.payload = ChainPayload::Execution(payload);
+        row.envelope.provenance.event.event_kind = row.payload.kind();
+        row.envelope.provenance.event.event_type = row
+            .payload
+            .framework_event_type(&row.envelope.provenance.event.flow_context.stage_name)
+            .unwrap()
+            .into();
+        row.envelope.provenance.event.payload_schema_version =
+            row.payload.framework_schema_version().unwrap();
+        row.envelope.provenance.event.processing.status = ProcessingStatus::Error {
+            message,
+            kind: Some(kind),
+        };
+    }
+    record
+}
+
+fn processing_failed(stage: u64, event: u64, input: u64, detail: &str) -> RunRecord {
+    use obzenflow_core::event::payloads::stage_processing_failed_payload::{
+        FailedInput, StageProcessingFailed,
+    };
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+    in_error_journal(
+        fact(stage, event, &[input], json!({})),
+        ExecutionPayload::StageProcessingFailed(StageProcessingFailed {
+            kind: ErrorKind::Validation,
+            detail: detail.into(),
+            input: FailedInput {
+                event_type: obzenflow_core::EventType("sensor.reading".into()),
+                payload_schema_version: std::num::NonZeroU32::MIN,
+                payload: json!({"celsius": null, "id": 2}),
+            },
+        }),
+    )
+}
+
+fn rejected_row(event: u64, index: u64) -> RunRecord {
+    use obzenflow_core::event::payloads::execution_payload::SourceRecordRejectedFact;
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
+    let diagnostic = SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord)
+        .record(index)
+        .position(std::num::NonZeroU32::new(index as u32 + 2).unwrap(), None);
+    in_error_journal(
+        fact(1, event, &[], json!({})),
+        ExecutionPayload::SourceRecordRejected(SourceRecordRejectedFact {
+            kind: ErrorKind::Validation,
+            detail: format!("record {index}: {diagnostic}"),
+            diagnostic,
+        }),
+    )
+}
+
+fn receipt(stage: u64, event: u64, input: &RunRecord, result: Value) -> RunRecord {
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+    let mut record = on_stage(
+        fact(stage, event, &[], json!({})),
+        stage,
+        "written",
+        StageType::Sink,
+    );
+    record.kind = RunRecordKind::Delivery;
+    let input_id = event_id(input);
+    if let RunRecordData::Chain(row) = &mut record.record {
+        let payload: DeliveryPayload = serde_json::from_value(json!({
+            "subject": {
+                "input": {
+                    "run_id": id(10),
+                    "journal_writer_id": id(2),
+                    "sequence": 1,
+                    "event_id": input_id
+                },
+                "event_kind": "fact",
+                "event_type": "sensor.classified",
+                "payload_schema_version": 1
+            },
+            "result": result,
+            "destination": "written",
+            "delivery_method": "noop",
+            "bytes_processed": null,
+            "processed_at": "2026-09-23T00:00:00Z"
+        }))
+        .unwrap();
+        row.envelope.provenance.event.event_type = payload.event_type().into();
+        row.payload = ChainPayload::Delivery(payload);
+        row.envelope.provenance.event.event_kind = row.payload.kind();
+        row.envelope.provenance.event.causality.parent_ids =
+            vec![serde_json::from_value(json!(input_id)).unwrap()];
+    }
+    record
+}
+
+fn manifest_for(records: &[&RunRecord]) -> RunManifest {
+    let stages: serde_json::Map<String, Value> = records
+        .iter()
+        .filter_map(|record| record.journal.stage.as_ref())
+        .map(|stage| {
+            (
+                stage.key.clone(),
+                json!({
+                    "dsl_var": stage.key,
+                    "stage_type": stage.stage_type,
+                    "is_effectful": false,
+                    "stage_id": stage.id.to_string(),
+                    "stage_logic_version": "1",
+                    "data_journal_file": format!("{}.log", stage.key),
+                    "error_journal_file": format!("{}.errors.log", stage.key),
+                    "inbound": [],
+                    "delivery_order": "single_input"
+                }),
+            )
+        })
+        .collect();
+    serde_json::from_value(json!({
+        "journal_schema_version": obzenflow_core::journal::JOURNAL_SCHEMA_VERSION,
+        "obzenflow_version": "test",
+        "flow_id": id(10),
+        "pipeline_writer_id": records[0].run.pipeline_writer_id,
+        "flow_name": "sensors",
+        "created_at": "2026-09-23T00:00:00Z",
+        "stages": stages,
+        "system_journal_file": "system.log",
+        "metrics_journals": null
+    }))
+    .unwrap()
+}
+
+fn rendered_with_summary(renderer: &mut Renderer, records: &[RunRecord]) -> String {
+    let mut output = Vec::new();
+    for record in records {
+        renderer.record(&mut output, record.clone()).unwrap();
+    }
+    String::from_utf8(output).unwrap() + &summary_text(renderer, records)
+}
+
+fn summary_text(renderer: &mut Renderer, records: &[RunRecord]) -> String {
+    let manifest = manifest_for(&records.iter().collect::<Vec<_>>());
+    let mut output = Vec::new();
+    renderer
+        .finish(
+            &mut output,
+            &mut Vec::new(),
+            Observed {
+                run: &records[0].run,
+                manifest: &manifest,
+                progress: &RunReadProgress::default(),
+                lineage: Ok(RunLineage::default()),
+                config_changes: Ok(Vec::new()),
+            },
+            ObservationEnd::Snapshot,
+        )
+        .unwrap();
+    String::from_utf8(output).unwrap()
+}
+
+fn renderer_over(records: &[RunRecord]) -> Renderer {
+    let mut renderer = Renderer::new(
+        &ViewArgs::default(),
+        false,
+        false,
+        records.iter().map(|record| &record.journal),
+    );
+    renderer.width = 90;
+    renderer
+}
+
+#[test]
+fn a_failed_input_displays_whole_under_its_stages_error_heading() {
+    let input = fact(1, 100, &[], json!({"celsius": null, "id": 2}));
+    let failed = processing_failed(2, 102, 100, "reading 2 has no temperature");
+    let records = [input, failed];
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let block = text
+        .split_once("TRANSFORM ERROR (stage: classify, error journal: ")
+        .expect("error heading")
+        .1;
+    let lines: Vec<_> = block.lines().collect();
+    assert_eq!(
+        lines[1],
+        "runtime.stage.processing_failed ← classify(sensor.reading)"
+    );
+    assert_eq!(lines[3], "payload schema version: 1");
+    assert_eq!(
+        lines[4..16].join("\n"),
+        r#"{
+  "kind": "Validation",
+  "detail": "reading 2 has no temperature",
+  "input": {
+    "event_type": "sensor.reading",
+    "payload_schema_version": 1,
+    "payload": {
+      "celsius": null,
+      "id": 2
+    }
+  }
+}"#
+    );
+    assert!(!text.contains("processing error:"));
+    assert!(!text.contains("[processing error]"));
+
+    let mut jsonl = Renderer::new(
+        &ViewArgs {
+            jsonl: true,
+            ..ViewArgs::default()
+        },
+        false,
+        false,
+        records.iter().map(|record| &record.journal),
+    );
+    let mut output = Vec::new();
+    jsonl.record(&mut output, records[1].clone()).unwrap();
+    let line: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        line["record"]["payload"]["execution_type"], "stage_processing_failed",
+        "JSONL keeps the tag the payload block leaves out"
+    );
+    assert!(line.get("repeat_of").is_none());
+}
+
+#[test]
+fn a_refused_catalog_row_displays_as_its_joins_error() {
+    use obzenflow_core::event::payloads::stage_processing_failed_payload::{
+        FailedInput, StageProcessingFailed,
+    };
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+
+    let row = fact(1, 100, &[], json!({"celsius": null, "id": 2}));
+    let refused = in_error_journal(
+        on_stage(
+            fact(3, 103, &[100], json!({})),
+            3,
+            "calibrate",
+            StageType::Join,
+        ),
+        ExecutionPayload::StageProcessingFailed(StageProcessingFailed {
+            kind: ErrorKind::Validation,
+            detail: "reading 2 has no temperature".into(),
+            input: FailedInput {
+                event_type: obzenflow_core::EventType("sensor.reading".into()),
+                payload_schema_version: std::num::NonZeroU32::MIN,
+                payload: json!({"celsius": null, "id": 2}),
+            },
+        }),
+    );
+    let records = [row, refused];
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let block = text
+        .split_once("JOIN ERROR (stage: calibrate, error journal: ")
+        .expect("join error heading")
+        .1;
+    assert_eq!(
+        block.lines().nth(1),
+        Some("runtime.stage.processing_failed ← calibrate(sensor.reading)")
+    );
+    let table = text.split_once("\nJOURNALS\n").unwrap().1;
+    assert!(
+        table
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .any(|line| line == "calibrate 0 1 Validation"),
+        "{table}"
+    );
+}
+
+#[test]
+fn a_rejected_row_reads_as_a_source_error_with_no_inputs() {
+    let rejected = rejected_row(100, 117);
+    let records = [rejected];
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let block = text
+        .split_once("SOURCE ERROR (stage: thermometer, error journal: ")
+        .expect("error heading")
+        .1;
+    let lines: Vec<_> = block.lines().collect();
+    assert_eq!(lines[1], "runtime.source.record_rejected ← thermometer()");
+    assert_eq!(lines[5], r#"  "kind": "Validation","#);
+    assert_eq!(
+        lines[6],
+        r#"  "detail": "record 117: invalid record (line 119)","#
+    );
+    assert!(!block.contains("execution_type"));
+}
+
+#[test]
+fn an_output_printed_before_its_input_names_the_input_type_it_recorded() {
+    let outputs = (100..250).map(|n| fact(2, n + 1000, &[n], json!({ "n": n })));
+    let inputs = (100..250).map(|n| fact(1, n, &[], json!({ "reading": n })));
+    let records: Vec<_> = outputs.chain(inputs).collect();
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let first_output = text.find("TRANSFORM (stage: classify").expect("an output");
+    let first_input = text.find("SOURCE (stage: thermometer").expect("an input");
+    assert!(first_output < first_input, "{text}");
+    assert_eq!(
+        text.matches("sensor.classified ← classify(sensor.reading)")
+            .count(),
+        150,
+        "{text}"
+    );
+    assert!(!text.contains("input not recorded"), "{text}");
+}
+
+#[test]
+fn the_summary_counts_each_record_once_with_errors_by_kind() {
+    use obzenflow_core::event::payloads::effect_payload::EffectRecord;
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::event::{SinkOperationFailed, SinkOperationPhase, SinkWritePhase};
+
+    let first = fact(1, 100, &[], json!({"id": 1}));
+    let second = fact(1, 101, &[], json!({"id": 2}));
+    let third = fact(1, 102, &[], json!({"id": 3}));
+    let classified = fact(2, 103, &[100], json!({"id": 1}));
+    let failed_call: EffectRecord = serde_json::from_value(json!({
+        "cursor": {"recorded_flow_id": id(10), "stage_key": "classify", "input_seq": 3, "effect_ordinal": 0},
+        "descriptor_hash": "fixture",
+        "descriptor": {
+            "effect_type": "sensor.calibrate", "label": "calibrate", "schema_version": 1,
+            "stage_logic_version": "v1", "canonical_input_hash": "fixture", "binding": {"mode": "portless"}
+        },
+        "observation": {"observation": "execution_failed", "authority": "port_return", "external_completion": "unknown"},
+        "outcome": {"outcome": "failed", "error_type": "timeout", "error_message": "calibration unavailable", "retry": "retryable"}
+    }))
+    .unwrap();
+    let effect = execution(104, &[102], ExecutionPayload::EffectRecord(failed_call));
+    let rejected = processing_failed(2, 105, 101, "reading 2 has no temperature");
+    let classified_three = fact(2, 106, &[102], json!({"id": 3}));
+    let buffered = receipt(3, 107, &classified, json!({"result": "buffered"}));
+    let delivered = receipt(3, 108, &classified, json!({"result": "success"}));
+    let failed_receipt = receipt(
+        3,
+        109,
+        &classified_three,
+        json!({"result": "failed", "error_type": "sink_write_current_only_failed", "error_message": "unavailable"}),
+    );
+    let sink_stage: obzenflow_core::StageId = serde_json::from_value(json!(id(3))).unwrap();
+    let operation = in_error_journal(
+        on_stage(
+            fact(3, 110, &[109], json!({})),
+            3,
+            "written",
+            StageType::Sink,
+        ),
+        ExecutionPayload::SinkOperationFailed(SinkOperationFailed {
+            stage_id: sink_stage,
+            stage_key: "written".into(),
+            logical_destination: "written".into(),
+            causal_event_id: Some(serde_json::from_value(json!(id(106))).unwrap()),
+            input_position: Some(2),
+            failed_delivery_event_id: Some(serde_json::from_value(json!(id(109))).unwrap()),
+            operation_subject_event_id: None,
+            phase: SinkOperationPhase::Write(SinkWritePhase::Execute),
+            kind: ErrorKind::Remote,
+            destination_error_code: None,
+            detail: "unavailable".into(),
+        }),
+    );
+    let mut write_failed = processing_failed(3, 111, 106, "unavailable");
+    write_failed = on_stage(write_failed, 3, "written", StageType::Sink);
+    write_failed.journal = operation.journal.clone();
+    if let RunRecordData::Chain(row) = &mut write_failed.record {
+        if let ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) =
+            &mut row.payload
+        {
+            failure.kind = ErrorKind::Remote;
+        }
+        row.envelope.provenance.event.processing.status = ProcessingStatus::Error {
+            message: "unavailable".into(),
+            kind: Some(ErrorKind::Remote),
+        };
+    }
+    let records = [
+        first,
+        second,
+        third,
+        classified,
+        effect,
+        rejected,
+        classified_three,
+        buffered,
+        delivered,
+        failed_receipt,
+        operation,
+        write_failed,
+    ];
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let table = text.split_once("\nJOURNALS\n").unwrap().1;
+    let rows: Vec<_> = table
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("Stage"))
+        .take(4)
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "Stage Data records Error records",
+            "thermometer 3 0",
+            "classify 2 1 Validation",
+            "written 1 1 Remote",
+        ]
+    );
+    assert!(text.contains("\nRecords in an error journal were delivered but not processed.\n"));
+    assert!(!text.contains("Journal counts include every observed entry"));
+    assert!(text.contains("SINK ERROR (stage: written, error journal: "));
+}
+
+#[test]
+fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
+    let mut killed_rejection = rejected_row(100, 164);
+    killed_rejection.run = RunIdentity {
+        flow_id: serde_json::from_value(json!(id(20))).unwrap(),
+        pipeline_writer_id: killed_rejection.run.pipeline_writer_id,
+    };
+    killed_rejection.journal.id = serde_json::from_value(json!(id(35))).unwrap();
+    let repeated = || Listed {
+        record: rejected_row(101, 164),
+        repeat_of: Some(RecordedAt::of(&killed_rejection)),
+    };
+
+    let repeat = rejected_row(101, 164);
+    let records = [repeat.clone()];
+    let mut renderer = renderer_over(&records);
+    renderer.begin(&mut Vec::new(), &repeat.run, false).unwrap();
+    let mut output = Vec::new();
+    renderer
+        .record(&mut output, killed_rejection.clone())
+        .unwrap();
+    renderer.record(&mut output, repeated()).unwrap();
+    let text = String::from_utf8(output).unwrap() + &summary_text(&mut renderer, &records);
+    let killed = format!("flow_{}", id(20));
+    assert_eq!(
+        text.matches("runtime.source.record_rejected ← thermometer()")
+            .count(),
+        2
+    );
+    assert!(
+        text.contains(&format!("\nrecorded by run {killed}\n")),
+        "{text}"
+    );
+    assert!(text.contains(&format!(
+        "\nrejected again, first recorded by run {killed}\n"
+    )));
+    let table = text.split_once("\nJOURNALS\n").unwrap().1;
+    assert!(table.contains("\n  A row rejected again after a crash counts once.\n"));
+    let thermometer = table
+        .lines()
+        .find(|line| line.trim_start().starts_with("thermometer"))
+        .unwrap();
+    assert!(
+        thermometer.trim_end().ends_with("1 Validation"),
+        "{thermometer}"
+    );
+
+    let mut jsonl = Renderer::new(
+        &ViewArgs {
+            jsonl: true,
+            ..ViewArgs::default()
+        },
+        false,
+        false,
+        records.iter().map(|record| &record.journal),
+    );
+    jsonl.begin(&mut Vec::new(), &repeat.run, false).unwrap();
+    let mut output = Vec::new();
+    jsonl.record(&mut output, killed_rejection.clone()).unwrap();
+    jsonl.record(&mut output, repeated()).unwrap();
+    let lines: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["run"]["flow_id"], json!(id(20)));
+    assert!(lines[0].get("repeat_of").is_none());
+    assert_eq!(
+        lines[1]["repeat_of"],
+        json!({
+            "run": lines[0]["run"],
+            "journal": lines[0]["journal"],
+            "position": lines[0]["position"]
+        })
     );
 }

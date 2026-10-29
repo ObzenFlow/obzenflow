@@ -900,21 +900,18 @@ impl OutputCommitter<'_> {
         event: &ChainEvent,
         options: CommitOptions,
     ) -> Result<(), CommitError> {
-        if !options.validate_output_contract || !event.consumes_data_credit() {
-            return Ok(());
-        }
-
-        // Error-marked rows are forwarded provenance, not handler output. An
-        // in-band business error (Validation/Domain) keeps its input event
-        // type as it passes through, so checking it against the stage's
-        // declared output types would kill every type-changing stage that
-        // forwards one, contradicting the error-routing doctrine that
-        // business errors stay in the main pipeline for downstream stages to
-        // observe.
         if matches!(
             event.processing.status,
             obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
         ) {
+            return Err(format!(
+                "data journal refused error-marked `{}`; a rejected record belongs in the error \
+                 journal of the stage that rejected it",
+                event.event_type()
+            )
+            .into());
+        }
+        if !options.validate_output_contract || !event.consumes_data_credit() {
             return Ok(());
         }
 

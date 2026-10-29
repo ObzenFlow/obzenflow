@@ -7,7 +7,7 @@
 
 use super::{Error, ViewArgs};
 use obzenflow::journal::read::*;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeMap;
 use std::io::Write;
 
 #[path = "render/context.rs"]
@@ -20,18 +20,18 @@ mod event_counts;
 mod join_phase;
 #[path = "render/payload.rs"]
 mod payload;
+#[path = "render/record_counts.rs"]
+mod record_counts;
 #[path = "render/summary.rs"]
 mod summary;
 #[path = "render/terminal.rs"]
 mod terminal;
 #[path = "render/view.rs"]
 mod view;
-use context::{event_id, parent_ids, Context};
+use context::Context;
 use payload::{pretty, safe_text, wrap_fields};
 use terminal::{OutputMode, RenderOptions, TerminalRenderer};
-use view::{fact_error, replay_note, stage_heading, Category, EventView};
-
-const MAX_PENDING: usize = 128;
+use view::{stage_heading, Category, EventView};
 
 #[cfg(test)]
 #[path = "render/tests.rs"]
@@ -81,6 +81,21 @@ impl<'a> Observed<'a> {
     }
 }
 
+/// A record as listed, with the first record of the row it rejects again.
+pub(super) struct Listed {
+    pub record: RunRecord,
+    pub repeat_of: Option<RecordedAt>,
+}
+
+impl From<RunRecord> for Listed {
+    fn from(record: RunRecord) -> Self {
+        Self {
+            record,
+            repeat_of: None,
+        }
+    }
+}
+
 pub(super) struct Renderer {
     jsonl: bool,
     full: bool,
@@ -90,7 +105,7 @@ pub(super) struct Renderer {
     explain: bool,
     width: usize,
     context: Context,
-    pending: VecDeque<RunRecord>,
+    run: Option<RunIdentity>,
     records: u64,
     shown_records: u64,
     journals: BTreeMap<String, u64>,
@@ -98,6 +113,7 @@ pub(super) struct Renderer {
     event_types: BTreeMap<String, u64>,
     other_event_types: u64,
     event_counts: event_counts::EventCounts,
+    record_counts: record_counts::RecordCounts,
     continuations: continuation::Continuations,
 }
 
@@ -126,7 +142,7 @@ impl Renderer {
                 .unwrap_or(90)
                 .clamp(40, 90),
             context: Context::new(journals),
-            pending: VecDeque::new(),
+            run: None,
             records: 0,
             shown_records: 0,
             journals: BTreeMap::new(),
@@ -134,6 +150,7 @@ impl Renderer {
             event_types: BTreeMap::new(),
             other_event_types: 0,
             event_counts: event_counts::EventCounts::default(),
+            record_counts: record_counts::RecordCounts::default(),
             continuations: continuation::Continuations::default(),
         }
     }
@@ -151,6 +168,7 @@ impl Renderer {
         run: &RunIdentity,
         follow: bool,
     ) -> Result<(), Error> {
+        self.run = Some(run.clone());
         if !self.jsonl && !self.compact {
             writeln!(
                 output,
@@ -199,8 +217,32 @@ impl Renderer {
     pub(super) fn record(
         &mut self,
         output: &mut impl Write,
-        record: RunRecord,
+        listed: impl Into<Listed>,
     ) -> Result<(), Error> {
+        let Listed { record, repeat_of } = listed.into();
+        let this_run = self.run.as_ref().is_none_or(|run| *run == record.run);
+        self.record_counts.record(&record, repeat_of.is_some());
+        if this_run {
+            self.count(&record)?;
+        }
+        if !self.jsonl {
+            self.context.remember(&record);
+            self.journal_legend(output)?;
+        }
+        if self.visible(&record) {
+            let view = EventView::from_record(&record, &self.context).repeating(repeat_of.as_ref());
+            if this_run {
+                self.terminal().render(output, &view)?;
+            } else {
+                self.terminal()
+                    .render(output, &view.held_by_earlier_run())?;
+            }
+        }
+        output.flush()?;
+        Ok(())
+    }
+
+    fn count(&mut self, record: &RunRecord) -> Result<(), Error> {
         let stage = record
             .journal
             .stage
@@ -209,15 +251,15 @@ impl Renderer {
         let journal = format!("{stage}/{}", journal_label(record.journal.kind));
         self.records += 1;
         *self.journals.entry(journal.clone()).or_default() += 1;
-        self.continuations.record(&record);
-        self.context.join_phases.record(&record);
+        self.continuations.record(record);
+        self.context.join_phases.record(record);
         if !self.jsonl {
-            self.context.register_supervisor(&record)?;
+            self.context.register_supervisor(record)?;
         }
-        if self.visible(&record) {
+        if self.visible(record) {
             self.shown_records += 1;
             *self.shown_journals.entry(journal).or_default() += 1;
-            let descriptor = context::descriptor_label(&record);
+            let descriptor = context::descriptor_label(record);
             if let Some(count) = self.event_types.get_mut(&descriptor) {
                 *count += 1;
             } else if self.event_types.len() < 1024 {
@@ -226,107 +268,8 @@ impl Renderer {
                 self.other_event_types += 1;
             }
             if !self.jsonl {
-                self.event_counts.record(&record);
+                self.event_counts.record(record);
             }
-        }
-        if self.jsonl {
-            if self.visible(&record) {
-                self.terminal()
-                    .render(output, &EventView::from_record(&record, &self.context))?;
-            }
-        } else {
-            // Hidden rows still supply causal context and journal boundaries.
-            // Filtering them before buffering could join non-adjacent facts.
-            self.context.remember(&record);
-            self.journal_legend(output)?;
-            self.pending.push_back(record);
-            self.drain_ready(output, false)?;
-            if self.pending.len() >= MAX_PENDING {
-                // Never let an absent/evicted parent stall a live display.
-                self.render_pending(output, self.group_indices(0).0)?;
-                self.drain_ready(output, false)?;
-            }
-        }
-        output.flush()?;
-        Ok(())
-    }
-
-    pub(super) fn flush_pending(&mut self, output: &mut impl Write) -> Result<(), Error> {
-        self.drain_ready(output, true)?;
-        output.flush()?;
-        Ok(())
-    }
-
-    fn drain_ready(&mut self, output: &mut impl Write, force: bool) -> Result<(), Error> {
-        loop {
-            let mut journals = BTreeSet::new();
-            let pending_ids: BTreeSet<_> = self.pending.iter().map(event_id).collect();
-            let mut ready = None;
-            for (index, record) in self.pending.iter().enumerate() {
-                // Retain each journal's own order even when another journal's
-                // head is waiting for its input to be observed.
-                if !journals.insert(record.journal.id) {
-                    continue;
-                }
-                let (indices, closed) = self.group_indices(index);
-                let parents = parent_ids(record);
-                if (force || closed)
-                    && self.context.parents_available(record)
-                    && parents.iter().all(|parent| !pending_ids.contains(parent))
-                {
-                    ready = Some(indices);
-                    break;
-                }
-            }
-            let indices = match ready {
-                Some(indices) => indices,
-                None if force && !self.pending.is_empty() => self.group_indices(0).0,
-                None => break,
-            };
-            self.render_pending(output, indices)?;
-        }
-        Ok(())
-    }
-
-    fn group_indices(&self, first: usize) -> (Vec<usize>, bool) {
-        let record = &self.pending[first];
-        let mut indices = vec![first];
-        if self.compact || self.full || !branchable(record) {
-            return (indices, true);
-        }
-        for (index, next) in self.pending.iter().enumerate().skip(first + 1) {
-            if next.journal.id != record.journal.id {
-                continue;
-            }
-            if same_branch(record, next) {
-                indices.push(index);
-            } else {
-                return (indices, true);
-            }
-        }
-        (indices, false)
-    }
-
-    fn render_pending(
-        &mut self,
-        output: &mut impl Write,
-        indices: Vec<usize>,
-    ) -> Result<(), Error> {
-        let mut records: Vec<_> = indices
-            .into_iter()
-            .rev()
-            .map(|index| self.pending.remove(index).expect("pending index"))
-            .collect();
-        records.reverse();
-        self.render_group(output, &records)
-    }
-
-    fn render_group(&self, output: &mut impl Write, records: &[RunRecord]) -> Result<(), Error> {
-        let terminal = self.terminal();
-        for record in records.iter().filter(|record| self.visible(record)) {
-            // Resolve the presentation only after pending parents have had a
-            // chance to arrive. The view borrows the unmodified source record.
-            terminal.render(output, &EventView::from_record(record, &self.context))?;
         }
         Ok(())
     }
@@ -352,6 +295,7 @@ impl Renderer {
 
     fn visible(&self, record: &RunRecord) -> bool {
         self.include_runtime
+            || record.journal.kind == RunJournalKind::Error
             || Category::of(record) != Category::Runtime
             || matches!(&record.record, RunRecordData::Chain(row) if matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(_) | ExecutionPayload::SinkOperationFailed(_))))
     }
@@ -372,31 +316,5 @@ fn journal_label(kind: RunJournalKind) -> &'static str {
         RunJournalKind::MetricsExport => "metrics/export",
         RunJournalKind::Data => "data",
         RunJournalKind::Error => "error",
-    }
-}
-
-fn branchable(record: &RunRecord) -> bool {
-    fact_error(record).is_none()
-        && matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Fact(_)) && !row.envelope.provenance.event.causality.parent_ids.is_empty())
-}
-
-fn same_branch(a: &RunRecord, b: &RunRecord) -> bool {
-    if !branchable(b) || parent_ids(a) != parent_ids(b) || replay_note(a) != replay_note(b) {
-        return false;
-    }
-    match (&a.record, &b.record) {
-        (RunRecordData::Chain(a), RunRecordData::Chain(b)) => {
-            // Effect grouping uses the recorded outcome-group identity as well
-            // as parents. A derived fact must not masquerade as an effect fact.
-            match (
-                &a.envelope.provenance.event.effect_provenance,
-                &b.envelope.provenance.event.effect_provenance,
-            ) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a.cursor == b.cursor && a.group_id == b.group_id,
-                _ => false,
-            }
-        }
-        _ => false,
     }
 }

@@ -108,7 +108,7 @@ fn application_json_is_selected_by_descriptor_including_null_and_framework_keys(
         json!(42),
         json!([1, null]),
         Value::Null,
-        json!({"execution_type":"source_poll_error","system_event_type":"stage_lifecycle"}),
+        json!({"execution_type":"source_poll_failed","system_event_type":"stage_lifecycle"}),
     ] {
         let record = chain_record(ChainPayload::Fact(value.clone()), "application.value");
         let json = serde_json::to_value(record).unwrap();
@@ -440,4 +440,85 @@ fn malformed_timing_omits_only_its_family_and_measured_zero_remains_present() {
         .unwrap();
     assert_eq!(runtime.in_flight, Some(0));
     assert!(runtime.timing.is_none());
+}
+
+#[test]
+fn an_error_record_whose_mark_disagrees_with_its_kind_is_refused() {
+    use crate::event::payloads::execution_payload::{
+        SourcePollContinuation, SourcePollFailedFact, SourceRecordRejectedFact,
+    };
+    use crate::event::payloads::stage_processing_failed_payload::{
+        FailedInput, StageProcessingFailed,
+    };
+    use crate::event::status::processing_status::ErrorKind;
+    use crate::event::{ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason};
+
+    let diagnostic = SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord).record(117);
+    let records = [
+        (
+            ExecutionPayload::StageProcessingFailed(StageProcessingFailed {
+                kind: ErrorKind::Validation,
+                detail: "order 2 has no customer".into(),
+                input: FailedInput {
+                    event_type: crate::EventType("probe.order".into()),
+                    payload_schema_version: std::num::NonZeroU32::MIN,
+                    payload: json!({"customer": null, "id": 2}),
+                },
+            }),
+            ErrorKind::Validation,
+        ),
+        (
+            ExecutionPayload::SourceRecordRejected(SourceRecordRejectedFact {
+                kind: ErrorKind::Validation,
+                detail: "record 117: invalid record".into(),
+                diagnostic: diagnostic.clone(),
+            }),
+            ErrorKind::Validation,
+        ),
+        (
+            ExecutionPayload::SourcePollFailed(SourcePollFailedFact {
+                kind: ErrorKind::Timeout,
+                detail: "invalid record".into(),
+                continuation: SourcePollContinuation::Recoverable,
+                diagnostic: diagnostic.clone(),
+            }),
+            ErrorKind::Timeout,
+        ),
+    ];
+    for (payload, kind) in records {
+        let event = ChainEventFactory::execution_event(WriterId::from(StageId::new()), payload);
+        let checked = |status: ProcessingStatus| {
+            let mut event = event.clone();
+            event.processing.status = status;
+            JournalPayload::validate(&event.payload, &event.envelope.provenance.event)
+        };
+        assert!(checked(ProcessingStatus::error_with_kind("failed", Some(kind))).is_ok());
+        assert!(checked(ProcessingStatus::Success).is_err(), "unmarked");
+        assert!(
+            checked(ProcessingStatus::error("failed")).is_err(),
+            "no kind"
+        );
+        assert!(
+            checked(ProcessingStatus::error_with_kind(
+                "failed",
+                Some(ErrorKind::Domain)
+            ))
+            .is_err(),
+            "another kind"
+        );
+    }
+
+    let domain = ChainEventFactory::execution_event(
+        WriterId::from(StageId::new()),
+        ExecutionPayload::SourceRecordRejected(SourceRecordRejectedFact {
+            kind: ErrorKind::Domain,
+            detail: "record 117: invalid record".into(),
+            diagnostic,
+        }),
+    )
+    .mark_as_error("record 117: invalid record", ErrorKind::Domain);
+    assert!(
+        JournalPayload::validate(&domain.payload, &domain.envelope.provenance.event).is_err(),
+        "a rejected row is a Validation error"
+    );
 }

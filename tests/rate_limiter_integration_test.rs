@@ -166,8 +166,8 @@ impl TypedStatefulHandler for PassthroughStateful {
 
     fn accumulate(&self, _state: &mut Self::State, _event: RateLimiterTestEvent) {}
     fn initial_state(&self) -> Self::State {}
-    fn emit(&self, _state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch { outputs: vec![] })
+    fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch { outputs: vec![] }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}

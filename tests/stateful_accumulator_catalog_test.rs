@@ -233,7 +233,7 @@ fn top_n_replacement_and_top_n_by_aggregation_are_distinct_contracts() {
 }
 
 fn emit_and_advance<H: TypedStatefulHandler>(handler: &H, state: &mut H::State) -> Vec<H::Output> {
-    let outputs = match handler.emit(state).expect("emit typed values") {
+    let outputs = match handler.emit(state) {
         StatefulEmission::RetainEpoch { outputs } | StatefulEmission::ResetEpoch { outputs } => {
             outputs
         }
@@ -278,10 +278,7 @@ fn conflate_all_keys_retains_the_latest_value_for_every_key() {
         ]
     );
     assert!(
-        handler
-            .drain(&state)
-            .expect("drain the retained view")
-            .is_empty(),
+        handler.drain(&state).is_empty(),
         "the last emission already published every key"
     );
 }
@@ -317,10 +314,7 @@ fn custom_emission_resets_its_cadence_and_retains_the_fold() {
         }
     }
     assert_eq!(outputs, vec![Count(2), Count(4)]);
-    assert_eq!(
-        handler.drain(&state).expect("flush the partial period"),
-        vec![Count(5)]
-    );
+    assert_eq!(handler.drain(&state), vec![Count(5)]);
 }
 
 #[derive(Clone, Debug)]
@@ -358,10 +352,5 @@ fn custom_accumulator_composes_with_the_public_emission_wrapper() {
         );
         assert!(!handler.should_emit(&state), "OnEOF waits for drain");
     }
-    assert_eq!(
-        handler
-            .drain(&state)
-            .expect("project the custom accumulator"),
-        vec![Count(3)]
-    );
+    assert_eq!(handler.drain(&state), vec![Count(3)]);
 }

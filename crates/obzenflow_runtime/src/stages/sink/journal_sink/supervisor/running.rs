@@ -20,9 +20,10 @@ use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEv
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
+use crate::stages::common::supervision::error_routing::processing_failure_record;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
+use crate::stages::common::supervision::output_committer::commit_error_output;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_sink_delivery_observers;
 use crate::stages::observer::{SinkDeliveryAttemptResult, SinkDeliveryObserverOutcome};
@@ -31,7 +32,7 @@ use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryOutcome, DeliveryResult};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::provenance::causality_context::CausalityContext;
+use obzenflow_core::event::provenance::causality_context::{CausalInput, CausalityContext};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 
@@ -662,15 +663,15 @@ async fn journal_sink_operation_failure<
             ctx.stage_id,
             StageType::Sink,
         ))
-        .with_causality(CausalityContext::with_parent(
-            failed_receipt.envelope.provenance.event.id,
-        ))
+        .with_causality(CausalityContext::with_input(CausalInput::of(
+            &failed_receipt.envelope.provenance.event,
+        )))
         .with_correlation_from(input)
         .with_cycle_state_from(input)
         .mark_as_error(error.detail(), error.kind());
     event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
     event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
-    crate::stages::common::supervision::output_committer::commit_error_output(
+    commit_error_output(
         &ctx.error_journal,
         &ctx.instrumentation,
         event,
@@ -680,7 +681,7 @@ async fn journal_sink_operation_failure<
     .map(Into::into)
 }
 
-async fn journal_fresh_error_route<
+async fn journal_processing_failed<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut JournalSinkResources<H>,
@@ -688,70 +689,34 @@ async fn journal_fresh_error_route<
     causal_parent: &DeliveredRecord<ChainPayload>,
     detail: String,
     kind: ErrorKind,
-    observer_scope: MiddlewareExecutionScope,
 ) -> Result<DeliveredRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
-    if !input.is_typed_input() {
-        return Err("sink error route requires a typed input".into());
-    }
-
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
-    let mut event = obzenflow_core::event::schema::TypedFact::from_event(input)
-        .ok_or("sink error route requires a typed input")?
-        .into_event(writer_id)
-        .with_flow_context(make_flow_context(
-            &ctx.flow_name,
-            &ctx.flow_id.to_string(),
-            &ctx.stage_name,
-            ctx.stage_id,
-            StageType::Sink,
-        ))
-        .with_causality(CausalityContext::with_parent(
-            causal_parent.envelope.provenance.event.id,
-        ))
-        .with_correlation_from(input)
-        .with_cycle_state_from(input)
-        .mark_as_error(detail, kind);
-    event.replay_context = input.replay_context.clone();
-    event.ingress_context = input.ingress_context.clone();
-    event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
-    event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
-
-    if route_to_error_journal(&event) {
-        crate::stages::common::supervision::output_committer::commit_error_output(
-            &ctx.error_journal,
-            &ctx.instrumentation,
-            event,
-            Some(causal_parent),
-        )
-        .await
-        .map(Into::into)
-    } else {
-        use crate::stages::common::supervision::output_committer::{
-            CommitOptions, OutputCommitter,
-        };
-        OutputCommitter {
-            data_journal: &ctx.data_journal,
-            flow_context: None,
-
-            instrumentation: Some(&ctx.instrumentation),
-            heartbeat_state: None,
-            output_contract: None,
-            backpressure_writer: None,
-            observer_scope,
-        }
-        .commit_prebuilt(
-            event,
-            Some(causal_parent),
-            CommitOptions {
-                count_output: true,
-                validate_output_contract: false,
-            },
-        )
-        .await
-        .map(Into::into)
-    }
+    let flow_context = make_flow_context(
+        &ctx.flow_name,
+        &ctx.flow_id.to_string(),
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Sink,
+    );
+    let event = processing_failure_record(
+        writer_id,
+        &flow_context,
+        input,
+        kind,
+        detail,
+        ctx.lineage_policy,
+    )
+    .with_runtime_provenance(ctx.instrumentation.snapshot());
+    commit_error_output(
+        &ctx.error_journal,
+        &ctx.instrumentation,
+        event,
+        Some(causal_parent),
+    )
+    .await
+    .map(Into::into)
 }
 
 async fn journal_policy_evidence<
@@ -775,9 +740,9 @@ async fn journal_policy_evidence<
                 ctx.stage_id,
                 StageType::Sink,
             ))
-            .with_causality(CausalityContext::with_parent(
-                parent.envelope.provenance.event.id,
-            ))
+            .with_causality(CausalityContext::with_input(CausalInput::of(
+                &parent.envelope.provenance.event,
+            )))
             .with_correlation_from(&parent.authored())
             .with_cycle_state_from(&parent.authored());
         event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
@@ -1126,13 +1091,12 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
     match &disposition {
         RetainedAttemptDisposition::HandlerError(error) => {
             ctx.instrumentation.record_error(error.kind());
-            last_chain = journal_fresh_error_route(
+            last_chain = journal_processing_failed(
                 ctx,
                 &envelope.authored(),
                 &current_receipt,
-                error.to_string(),
+                error.message(),
                 error.kind(),
-                scope,
             )
             .await?;
         }
@@ -1147,13 +1111,12 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             )
             .await?;
             ctx.instrumentation.record_error(failure.error().kind());
-            last_chain = journal_fresh_error_route(
+            last_chain = journal_processing_failed(
                 ctx,
                 &envelope.authored(),
                 &operation,
-                failure.error().detail(),
+                failure.error().message(),
                 failure.error().kind(),
-                scope,
             )
             .await?;
             if failure.disposition() == SinkWriteFailureDisposition::Poisoned {
@@ -1307,9 +1270,6 @@ async fn journal_delivery_receipt<
         payload,
     )
     .with_flow_context(flow_context)
-    .with_causality(CausalityContext::with_parent(
-        parent_envelope.envelope.provenance.event.id,
-    ))
     .with_correlation_from(&parent_envelope.authored())
     .with_cycle_state_from(&parent_envelope.authored());
     let delivery_event = delivery_event

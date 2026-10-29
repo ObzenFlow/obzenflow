@@ -10,7 +10,9 @@ use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
+use crate::stages::common::supervision::error_routing::{
+    error_row_in_scope, processing_failed, route_to_error_journal,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -25,6 +27,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::journal::AppendOptions;
+use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 
@@ -241,32 +244,21 @@ async fn dispatch_draining_inner<
                 })
             });
 
-            // FLOWIP-120c H3: per-event scope, same as the running path.
-            let handler_invoked = !matches!(
-                envelope.envelope.provenance.event.processing.status,
-                ProcessingStatus::Error { .. }
+            run_before_handler_observers(
+                &ctx.observers,
+                ctx.flow_id,
+                flow_context,
+                scope,
+                &envelope.authored(),
+                observer_input_position,
             );
-            if handler_invoked {
-                run_before_handler_observers(
-                    &ctx.observers,
-                    ctx.flow_id,
-                    flow_context,
-                    scope,
-                    &envelope.authored(),
-                    observer_input_position,
-                );
-            }
+            let writer_id = WriterId::from(ctx.stage_id);
+            let lineage = ctx.lineage_policy;
+            let error_flow_context = flow_context.clone();
             let transformed_result =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
                     let event = envelope_clone.authored();
                     let event_id = event.id;
-
-                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-                        if let Some(state) = &handler_heartbeat_state {
-                            state.record_last_consumed(event_id);
-                        }
-                        return Ok(vec![event]);
-                    }
 
                     let _processing = handler_heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
@@ -285,9 +277,13 @@ async fn dispatch_draining_inner<
                                     Box::new(err) as Box<dyn std::error::Error + Send + Sync>
                                 );
                             }
-                            let reason = format!("Transform handler error during drain: {err:?}");
-                            let error_event =
-                                envelope_clone.authored().mark_as_error(reason, err.kind());
+                            let error_event = processing_failed(
+                                writer_id,
+                                &error_flow_context,
+                                &envelope_clone.authored(),
+                                &err,
+                                lineage,
+                            );
                             if let Some(state) = &handler_heartbeat_state {
                                 state.record_last_consumed(event_id);
                             }
@@ -335,17 +331,15 @@ async fn dispatch_draining_inner<
                     return Err(error);
                 }
             };
-            if handler_invoked {
-                run_after_handler_observers(
-                    &ctx.observers,
-                    ctx.flow_id,
-                    flow_context,
-                    scope,
-                    &envelope.authored(),
-                    observer_input_position,
-                    transformed_events.as_slice(),
-                );
-            }
+            run_after_handler_observers(
+                &ctx.observers,
+                ctx.flow_id,
+                flow_context,
+                scope,
+                &envelope.authored(),
+                observer_input_position,
+                transformed_events.as_slice(),
+            );
             // Error-journal events are written immediately; stage-journal outputs are gated by backpressure.
             let mut stage_outputs = std::collections::VecDeque::<
                 crate::stages::common::supervision::backpressure_drain::PendingOutput,
@@ -377,6 +371,7 @@ async fn dispatch_draining_inner<
                     let k = kind.clone().unwrap_or(ErrorKind::Unknown);
                     ctx.instrumentation.record_error(k);
                 }
+                let event = error_row_in_scope(event, scope);
 
                 if route_to_error_journal(&event) {
                     tracing::info!(

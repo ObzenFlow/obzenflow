@@ -12,7 +12,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handler_error::StageFatal;
 use obzenflow_runtime::stages::common::handlers::stateful::traits::StatefulHandler;
 use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
 use obzenflow_runtime::stages::stateful::{StatefulBuilder, StatefulConfig, StatefulHandleExt};
@@ -56,7 +56,7 @@ impl StatefulHandler for TimerEmitHandler {
             .is_some_and(|first_seen| first_seen.elapsed() >= self.emit_after)
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
             "test.timer.emit",
@@ -65,14 +65,14 @@ impl StatefulHandler for TimerEmitHandler {
         )])
     }
 
-    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         let events = self.create_events(state)?;
         state.first_seen = None;
         state.buffered = 0;
         Ok(events)
     }
 
-    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         Ok(Vec::new())
     }
 }
@@ -235,7 +235,7 @@ impl StatefulHandler for AlwaysEmitHandler {
         state.buffered > 0
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
             "test.timer.emit",
@@ -244,13 +244,13 @@ impl StatefulHandler for AlwaysEmitHandler {
         )])
     }
 
-    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         let events = self.create_events(state)?;
         state.buffered = 0;
         Ok(events)
     }
 
-    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         Ok(Vec::new())
     }
 }

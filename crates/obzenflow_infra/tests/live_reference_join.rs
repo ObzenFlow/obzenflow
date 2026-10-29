@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainPayload, SystemEvent};
 use obzenflow_core::event::{StageFatalCode, StageFatalReason, StageFatalRecorded};
@@ -384,11 +384,11 @@ impl TypedJoinHandler for EmitOnStreamEofJoin {
         &self,
         _state: &mut Self::State,
         references: &mut JoinReferenceView<'_, u64, RefEvent>,
-    ) -> Result<Vec<StreamObservedRefs>, HandlerError> {
+    ) -> Vec<StreamObservedRefs> {
         let refs_seen = (0..1024u64)
             .filter(|id| references.select(id).is_some())
             .count();
-        Ok(vec![StreamObservedRefs { refs_seen }])
+        vec![StreamObservedRefs { refs_seen }]
     }
 }
 
@@ -437,30 +437,30 @@ impl TypedJoinHandler for TerminalOrderJoin {
         &self,
         _state: &mut Self::State,
         references: &mut JoinReferenceView<'_, u64, RefEvent>,
-    ) -> Result<Vec<TerminalStep>, HandlerError> {
+    ) -> Vec<TerminalStep> {
         self.calls
             .lock()
             .expect("terminal calls lock")
             .push("hook".to_string());
         let _selected = references.select(&0);
-        Ok(vec![TerminalStep {
+        vec![TerminalStep {
             step: "hook".to_string(),
-        }])
+        }]
     }
 
     fn drain(
         &self,
         _state: &Self::State,
         references: &mut JoinReferenceView<'_, u64, RefEvent>,
-    ) -> Result<Vec<TerminalStep>, HandlerError> {
+    ) -> Vec<TerminalStep> {
         self.calls
             .lock()
             .expect("terminal calls lock")
             .push("drain".to_string());
         let _selected = references.select(&0);
-        Ok(vec![TerminalStep {
+        vec![TerminalStep {
             step: "drain".to_string(),
-        }])
+        }]
     }
 }
 
@@ -711,8 +711,6 @@ async fn typed_terminal_hooks_follow_the_mode_and_eof_matrix() {
 enum ErrorPosition {
     AdmitReference,
     ProcessStream,
-    OnStreamEof,
-    Drain,
 }
 
 #[derive(Clone, Debug)]
@@ -767,29 +765,20 @@ impl TypedJoinHandler for ErrorMatrixJoin {
     fn process_stream(
         &self,
         _state: &mut Self::State,
-        _references: &mut JoinReferenceView<'_, u64, RefEvent>,
+        references: &mut JoinReferenceView<'_, u64, RefEvent>,
         _stream: StreamEvent,
     ) -> Result<Vec<TerminalStep>, HandlerError> {
         self.record("process_stream");
-        self.result(ErrorPosition::ProcessStream, Vec::new())
-    }
-
-    fn on_stream_eof(
-        &self,
-        _state: &mut Self::State,
-        _references: &mut JoinReferenceView<'_, u64, RefEvent>,
-    ) -> Result<Vec<TerminalStep>, HandlerError> {
-        self.record("on_stream_eof");
-        self.result(ErrorPosition::OnStreamEof, Vec::new())
-    }
-
-    fn drain(
-        &self,
-        _state: &Self::State,
-        _references: &mut JoinReferenceView<'_, u64, RefEvent>,
-    ) -> Result<Vec<TerminalStep>, HandlerError> {
-        self.record("drain");
-        self.result(ErrorPosition::Drain, Vec::new())
+        let step = match references.select(&0) {
+            Some(_) => "matched",
+            None => "no match",
+        };
+        self.result(
+            ErrorPosition::ProcessStream,
+            vec![TerminalStep {
+                step: step.to_string(),
+            }],
+        )
     }
 }
 
@@ -811,12 +800,12 @@ fn error_matrix_handler(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn typed_join_errors_follow_the_locked_mode_matrix() {
+async fn typed_join_errors_follow_one_rule_in_every_mode() {
     for mode in [JoinReferenceMode::FiniteEof, JoinReferenceMode::Live] {
         let reference_eof = (mode == JoinReferenceMode::FiniteEof).then_some(EofKind::Natural);
 
         let (handler, calls) = error_matrix_handler(mode, ErrorPosition::AdmitReference, false);
-        let (completion, failed, events, _writer) = run_typed_join_case(
+        let (completion, failed, events, writer) = run_typed_join_case(
             mode,
             handler,
             true,
@@ -825,18 +814,8 @@ async fn typed_join_errors_follow_the_locked_mode_matrix() {
             Some(EofKind::Natural),
         )
         .await;
-        match mode {
-            JoinReferenceMode::FiniteEof => {
-                assert!(failed, "finite admission error is terminal")
-            }
-            JoinReferenceMode::Live => {
-                completion.expect("live admission error remains per-record");
-                assert!(!failed, "live admission error remains per-record");
-            }
-            JoinReferenceMode::FiniteThenLive => {
-                unreachable!("this matrix covers the finite and live modes")
-            }
-        }
+        completion.expect("a refused catalog row leaves the join running");
+        assert!(!failed, "{mode:?}: a refused catalog row is a dead letter");
         assert_eq!(
             calls
                 .lock()
@@ -846,16 +825,40 @@ async fn typed_join_errors_follow_the_locked_mode_matrix() {
                 .count(),
             1
         );
+        let refused: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => {
+                    Some((event.writer_id, failure))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refused.len(),
+            1,
+            "{mode:?}: the join records the refused catalog row once"
+        );
+        let (author, failure) = refused[0];
+        assert_eq!(author, writer);
+        assert_eq!(failure.kind, ErrorKind::Domain);
+        assert_eq!(failure.detail, "typed join non-fatal at AdmitReference");
+        assert_eq!(failure.input.event_type.0, RefEvent::event_type_name());
+        assert_eq!(failure.input.payload, serde_json::json!({ "id": 0 }));
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(TerminalStep::from_event)
+                .map(|output| output.step)
+                .collect::<Vec<_>>(),
+            ["no match"],
+            "{mode:?}: the stream row keyed to the refused row finds no match"
+        );
         assert!(events
             .iter()
             .all(|event| StageFatalRecorded::try_from_event(event).is_err()));
 
-        for position in [
-            ErrorPosition::AdmitReference,
-            ErrorPosition::ProcessStream,
-            ErrorPosition::OnStreamEof,
-            ErrorPosition::Drain,
-        ] {
+        for position in [ErrorPosition::AdmitReference, ErrorPosition::ProcessStream] {
             let (handler, _calls) = error_matrix_handler(mode, position, true);
             let (_completion, failed, events, _writer) = run_typed_join_case(
                 mode,
@@ -879,6 +882,126 @@ async fn typed_join_errors_follow_the_locked_mode_matrix() {
             assert_eq!(fatal[0].code, StageFatalCode::Protocol);
             assert_eq!(fatal[0].reason, StageFatalReason::ProtocolInputIntegrity);
             assert!(fatal[0].detail.contains(&format!("{position:?}")));
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UnpublishableStep;
+
+impl Serialize for UnpublishableStep {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom(
+            "a terminal step cannot be published",
+        ))
+    }
+}
+
+impl TypedPayload for UnpublishableStep {
+    const EVENT_TYPE: &'static str = "test.join_unpublishable_step";
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalHook {
+    OnStreamEof,
+    Drain,
+}
+
+#[derive(Clone, Debug)]
+struct UnpublishableTerminalJoin {
+    mode: JoinReferenceMode,
+    hook: TerminalHook,
+}
+
+impl UnpublishableTerminalJoin {
+    fn outputs(&self, hook: TerminalHook) -> Vec<UnpublishableStep> {
+        if self.hook == hook {
+            vec![UnpublishableStep]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl TypedJoinHandler for UnpublishableTerminalJoin {
+    type State = ();
+    type ReferenceKey = u64;
+    type Reference = RefEvent;
+    type Stream = StreamEvent;
+    type Output = UnpublishableStep;
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn reference_mode(&self) -> JoinReferenceMode {
+        self.mode
+    }
+
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<u64, HandlerError> {
+        Ok(reference.id)
+    }
+
+    fn process_stream(
+        &self,
+        _state: &mut Self::State,
+        _references: &mut JoinReferenceView<'_, u64, RefEvent>,
+        _stream: StreamEvent,
+    ) -> Result<Vec<UnpublishableStep>, HandlerError> {
+        Ok(Vec::new())
+    }
+
+    fn on_stream_eof(
+        &self,
+        _state: &mut Self::State,
+        _references: &mut JoinReferenceView<'_, u64, RefEvent>,
+    ) -> Vec<UnpublishableStep> {
+        self.outputs(TerminalHook::OnStreamEof)
+    }
+
+    fn drain(
+        &self,
+        _state: &Self::State,
+        _references: &mut JoinReferenceView<'_, u64, RefEvent>,
+    ) -> Vec<UnpublishableStep> {
+        self.outputs(TerminalHook::Drain)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_output_that_cannot_be_serialized_fails_the_join() {
+    for mode in [JoinReferenceMode::FiniteEof, JoinReferenceMode::Live] {
+        let reference_eof = (mode == JoinReferenceMode::FiniteEof).then_some(EofKind::Natural);
+        for hook in [TerminalHook::OnStreamEof, TerminalHook::Drain] {
+            let (_completion, failed, events, _writer) = run_typed_join_case(
+                mode,
+                UnpublishableTerminalJoin { mode, hook },
+                true,
+                reference_eof,
+                true,
+                Some(EofKind::Natural),
+            )
+            .await;
+            assert!(failed, "{hook:?} must fail a {mode:?} join");
+            let fatal = events
+                .iter()
+                .filter_map(|event| StageFatalRecorded::try_from_event(event).ok())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                fatal.len(),
+                1,
+                "{hook:?} must leave one durable record in {mode:?}"
+            );
+            assert_eq!(fatal[0].code, StageFatalCode::Protocol);
+            assert_eq!(
+                fatal[0].reason,
+                StageFatalReason::OutputSerializationFailure
+            );
+            assert!(
+                fatal[0]
+                    .detail
+                    .contains("a terminal step cannot be published"),
+                "{}",
+                fatal[0].detail
+            );
         }
     }
 }
@@ -1700,8 +1823,12 @@ async fn live_join_reference_errors_are_per_record() {
         .await
         .expect("read join error journal");
     let saw_reference_error = error_events.iter().any(|env| {
-        env.envelope.provenance.event.writer_id == reference_writer
-            && CatalogRow::from_event(&env.authored()).is_some()
+        env.envelope.provenance.event.writer_id == WriterId::from(join_stage)
+            && matches!(
+                &env.payload,
+                ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure))
+                    if failure.input.event_type.0 == CatalogRow::event_type_name()
+            )
             && matches!(
                 env.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
@@ -1709,6 +1836,6 @@ async fn live_join_reference_errors_are_per_record() {
     });
     assert!(
         saw_reference_error,
-        "expected reference error event in error journal"
+        "the join records the failed reference in its error journal"
     );
 }

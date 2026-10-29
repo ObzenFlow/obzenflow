@@ -66,6 +66,22 @@ pub struct RunLineage {
     pub evidence: Vec<EvidenceHolder>,
 }
 
+impl RunLineage {
+    /// Every earlier run that holds part of this run's history, oldest first.
+    /// The runs a resume of this torn head merges follow its evidence holders.
+    pub fn earlier_runs(&self) -> impl Iterator<Item = &Path> {
+        let required: &[PathBuf] = match &self.rebuild {
+            Some(Rebuild::Incomplete { requires, .. }) => requires,
+            _ => &[],
+        };
+        self.evidence
+            .iter()
+            .rev()
+            .map(|holder| holder.run.as_path())
+            .chain(required.iter().rev().map(PathBuf::as_path))
+    }
+}
+
 pub fn read_run_lineage(run_dir: &Path) -> Result<RunLineage, JournalReadError> {
     let run = std::fs::canonicalize(run_dir).map_err(|source| JournalInspectError::Io {
         path: run_dir.to_path_buf(),
@@ -204,9 +220,35 @@ fn link(manifest: &RunManifest) -> Option<(PathBuf, Option<u64>)> {
     }
 }
 
-fn entered_generation(manifest: &RunManifest) -> u64 {
+pub(super) fn entered_generation(manifest: &RunManifest) -> u64 {
     manifest
         .resume
         .as_ref()
         .map_or(0, |resume| resume.resume_generation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_torn_heads_earlier_runs_end_with_the_runs_its_resume_merges() {
+        let holder = |run: &str| EvidenceHolder {
+            run: run.into(),
+            generation: None,
+            missing: false,
+        };
+        let lineage = RunLineage {
+            rebuild: Some(Rebuild::Incomplete {
+                generation: 3,
+                requires: vec!["torn parent".into(), "rebuilt".into()],
+            }),
+            evidence: vec![holder("resumed"), holder("original")],
+            ..RunLineage::default()
+        };
+        assert_eq!(
+            lineage.earlier_runs().collect::<Vec<_>>(),
+            ["original", "resumed", "rebuilt", "torn parent"].map(Path::new)
+        );
+    }
 }

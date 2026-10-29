@@ -12,23 +12,23 @@ use crate::event::payloads::execution_payload::RetryStopReason;
 use crate::event::payloads::execution_payload::{
     CircuitBreakerFact, ExecutionPayload, RecoveryFact,
 };
-use crate::event::provenance::causality_context::CausalityContext;
-use crate::event::types::{EventId, WriterId};
+use crate::event::provenance::causality_context::{CausalInput, CausalityContext};
+use crate::event::types::WriterId;
 
 impl ChainEventFactory {
     fn circuit_breaker_retry_event(
         writer_id: WriterId,
         event: CircuitBreakerFact,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         let mut event = Self::execution_event(writer_id, ExecutionPayload::CircuitBreaker(event));
-        event.causality = CausalityContext::with_parent(cause);
+        event.causality = CausalityContext::with_input(cause);
         event
     }
 
-    fn recovery_event(writer_id: WriterId, fact: RecoveryFact, cause: EventId) -> ChainEvent {
+    fn recovery_event(writer_id: WriterId, fact: RecoveryFact, cause: CausalInput) -> ChainEvent {
         let mut event = Self::execution_event(writer_id, ExecutionPayload::Recovery(fact));
-        event.causality = CausalityContext::with_parent(cause);
+        event.causality = CausalityContext::with_input(cause);
         event
     }
 
@@ -38,7 +38,7 @@ impl ChainEventFactory {
         attempt: u32,
         dependency_elapsed_ms: u64,
         admission_wait_ms: u64,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         Self::recovery_event(
             writer_id,
@@ -57,7 +57,7 @@ impl ChainEventFactory {
         cursor: EffectCursor,
         next_attempt: u32,
         delay_ms: u64,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         Self::recovery_event(
             writer_id,
@@ -73,7 +73,7 @@ impl ChainEventFactory {
     pub fn circuit_breaker_attempt_settled(
         writer_id: WriterId,
         params: CircuitBreakerAttemptSettledEventParams,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         let CircuitBreakerAttemptSettledEventParams {
             unit,
@@ -103,7 +103,7 @@ impl ChainEventFactory {
         writer_id: WriterId,
         cursor: EffectCursor,
         total_attempts: u32,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         Self::recovery_event(
             writer_id,
@@ -120,7 +120,7 @@ impl ChainEventFactory {
         cursor: EffectCursor,
         total_attempts: u32,
         reason: RetryStopReason,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         Self::recovery_event(
             writer_id,
@@ -137,7 +137,7 @@ impl ChainEventFactory {
         writer_id: WriterId,
         cursor: EffectCursor,
         total_attempts: u32,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         Self::recovery_event(
             writer_id,
@@ -152,7 +152,7 @@ impl ChainEventFactory {
     pub fn recovery_completed(
         writer_id: WriterId,
         params: RecoveryCompletedEventParams,
-        cause: EventId,
+        cause: CausalInput,
     ) -> ChainEvent {
         let RecoveryCompletedEventParams {
             cursor,

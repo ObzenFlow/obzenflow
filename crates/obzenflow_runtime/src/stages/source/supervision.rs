@@ -206,28 +206,37 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Normalise a source-owned poll failure into the routable error event after
-/// source policies have observed the typed handler error.
-pub(crate) fn normalise_source_poll_error(
-    writer_id: WriterId,
-    source_type: SourcePollKind,
-    error: &SourceError,
-) -> ChainEvent {
+pub(crate) fn source_poll_error_record(writer_id: WriterId, error: &SourceError) -> ChainEvent {
     use obzenflow_core::event::payloads::execution_payload::{
-        ExecutionPayload, SourcePollErrorFact,
+        ExecutionPayload, SourcePollFailedFact, SourceRecordRejectedFact,
     };
-    let error_type = error.kind();
-    ChainEventFactory::execution_event(
-        writer_id,
-        ExecutionPayload::SourcePollError(SourcePollErrorFact {
-            source_type,
-            error_type,
-            continuation: error.continuation(),
-            diagnostic: error.diagnostic().clone(),
-            timestamp_ms: now_ms(),
-        }),
-    )
-    .mark_as_error(error.safe_summary(), error_type.processing_error_kind())
+    let kind = source_error_kind(error);
+    let diagnostic = error.diagnostic().clone();
+    let (payload, detail) = match error {
+        SourceError::Validation(_) => {
+            let detail = match diagnostic.location().record_index() {
+                Some(index) => format!("record {index}: {diagnostic}"),
+                None => diagnostic.to_string(),
+            };
+            let rejected = SourceRecordRejectedFact {
+                kind: kind.clone(),
+                detail: detail.clone(),
+                diagnostic,
+            };
+            (ExecutionPayload::SourceRecordRejected(rejected), detail)
+        }
+        _ => {
+            let detail = diagnostic.to_string();
+            let failure = SourcePollFailedFact {
+                kind: kind.clone(),
+                detail: detail.clone(),
+                continuation: error.continuation(),
+                diagnostic,
+            };
+            (ExecutionPayload::SourcePollFailed(failure), detail)
+        }
+    };
+    ChainEventFactory::execution_event(writer_id, payload).mark_as_error(detail, kind)
 }
 
 /// A failure selected during a turn. Its staged events drain first; the
@@ -1031,7 +1040,7 @@ mod tests {
     use crate::id_conversions::StageIdExt;
     use crate::supervised_base::ChannelBuilder;
     use async_trait::async_trait;
-    use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, SourcePollKind};
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::types::EventId;
     use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalWriterId, WriterId};
     use obzenflow_core::id::JournalId;
@@ -1217,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn source_poll_errors_normalise_to_typed_error_marked_rows() {
+    fn a_source_records_a_rejected_row_or_a_failed_read() {
         use obzenflow_core::event::payloads::execution_payload::SourcePollContinuation;
         use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
 
@@ -1225,35 +1234,25 @@ mod tests {
         let diagnostic = SourceDiagnostic::new(SourceDiagnosticReason::InvalidValue)
             .within_field("amount_cents")
             .record(4);
-        let cases = [
+        let failed_reads = [
             (
                 SourceError::Timeout(diagnostic.clone()),
                 ErrorKind::Timeout,
-                "source timeout",
                 SourcePollContinuation::Recoverable,
             ),
             (
                 SourceError::Transport(diagnostic.clone()),
                 ErrorKind::Remote,
-                "source transport error",
                 SourcePollContinuation::Recoverable,
             ),
             (
                 SourceError::Deserialization(diagnostic.clone()),
                 ErrorKind::Deserialization,
-                "source deserialization error",
-                SourcePollContinuation::Recoverable,
-            ),
-            (
-                SourceError::Validation(diagnostic.clone()),
-                ErrorKind::Validation,
-                "source validation error",
                 SourcePollContinuation::Recoverable,
             ),
             (
                 SourceError::Other(diagnostic.clone()),
                 ErrorKind::Unknown,
-                "source error",
                 SourcePollContinuation::Recoverable,
             ),
             (
@@ -1262,30 +1261,79 @@ mod tests {
                     diagnostic: diagnostic.clone(),
                 },
                 ErrorKind::Validation,
-                "source validation error",
                 SourcePollContinuation::Terminal,
             ),
         ];
 
-        for (error, expected_kind, expected_message, expected_continuation) in cases {
-            let event = normalise_source_poll_error(writer_id, SourcePollKind::AsyncFinite, &error);
+        for (error, expected_kind, expected_continuation) in failed_reads {
+            let event = source_poll_error_record(writer_id, &error);
+            assert_eq!(event.event_type(), "runtime.source.poll_failed");
+            let expected_detail = diagnostic.to_string();
             assert!(matches!(
                 event.processing.status,
                 ProcessingStatus::Error {
                     ref message,
                     kind: Some(ref kind),
-                } if *kind == expected_kind && message == expected_message
+                } if *kind == expected_kind && *message == expected_detail
             ));
             match event.payload {
-                ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
-                    assert_eq!(failure.source_type, SourcePollKind::AsyncFinite);
-                    assert_eq!(failure.error_type.processing_error_kind(), expected_kind);
+                ChainPayload::Execution(ExecutionPayload::SourcePollFailed(failure)) => {
+                    assert_eq!(failure.kind, expected_kind);
+                    assert_eq!(failure.detail, expected_detail);
                     assert_eq!(failure.continuation, expected_continuation);
                     assert_eq!(failure.diagnostic, diagnostic);
                 }
-                other => panic!("expected source.poll_error lifecycle row, got {other:?}"),
+                other => panic!("expected a failed read, got {other:?}"),
             }
         }
+
+        let event =
+            source_poll_error_record(writer_id, &SourceError::Validation(diagnostic.clone()));
+        assert_eq!(event.event_type(), "runtime.source.record_rejected");
+        let expected_detail = format!("record 4: {diagnostic}");
+        assert!(matches!(
+            event.processing.status,
+            ProcessingStatus::Error {
+                ref message,
+                kind: Some(ErrorKind::Validation),
+            } if *message == expected_detail
+        ));
+        match event.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(rejected)) => {
+                assert_eq!(rejected.kind, ErrorKind::Validation);
+                assert_eq!(rejected.detail, expected_detail);
+                assert_eq!(rejected.diagnostic, diagnostic);
+            }
+            other => panic!("expected a rejected row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rejected_rows_detail_names_its_record_and_position() {
+        use obzenflow_core::event::{SourceDiagnostic, SourceDiagnosticReason};
+        use std::num::NonZeroU32;
+
+        let writer_id = WriterId::from(StageId::new());
+        let line = NonZeroU32::new(119).expect("nonzero line");
+        let rejected = SourceError::Validation(
+            SourceDiagnostic::new(SourceDiagnosticReason::InvalidRecord)
+                .record(117)
+                .position(line, None),
+        );
+        let ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(record)) =
+            source_poll_error_record(writer_id, &rejected).payload
+        else {
+            panic!("expected a rejected row");
+        };
+        assert_eq!(record.detail, "record 117: invalid record (line 119)");
+
+        let unplaced = SourceError::Validation(SourceDiagnosticReason::InvalidRecord.into());
+        let ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(record)) =
+            source_poll_error_record(writer_id, &unplaced).payload
+        else {
+            panic!("expected a rejected row");
+        };
+        assert_eq!(record.detail, "invalid record");
     }
 
     #[test]
@@ -1302,12 +1350,12 @@ mod tests {
         let mut backoff =
             IdleBackoff::exponential_with_cap(Duration::from_millis(1), Duration::from_millis(10));
 
-        let event = normalise_source_poll_error(writer_id, SourcePollKind::Finite, &rejected);
+        let event = source_poll_error_record(writer_id, &rejected);
         assert!(terminal_poll_failure("orders", &rejected, &event).is_none());
         assert_eq!(poll_error_backoff(&rejected, &mut backoff), None);
         assert!(poll_error_backoff(&transport, &mut backoff).is_some());
 
-        let event = normalise_source_poll_error(writer_id, SourcePollKind::Finite, &terminal);
+        let event = source_poll_error_record(writer_id, &terminal);
         let failure = terminal_poll_failure("orders", &terminal, &event).expect("terminal");
         assert_eq!(failure.causal_event_id, Some(event.id));
         assert_eq!(

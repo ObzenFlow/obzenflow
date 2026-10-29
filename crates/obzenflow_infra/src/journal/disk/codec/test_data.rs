@@ -20,6 +20,7 @@ use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryMethod, DeliveryOutcome, DeliveryPayload, DeliveryResult, DeliverySubject,
 };
+use obzenflow_core::event::provenance::causality_context::{CausalInput, CausalityContext};
 use obzenflow_core::event::provenance::{
     EventTypeCountContext, ExecutionAccounting, FlowContext, JournalProvenance, RuntimeProvenance,
     UpstreamEventTypeCountContext,
@@ -29,7 +30,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, CorrelationId};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{
-    EventId, FlowId, JournalId, JournalWriterId, ReaderGeneration, StageId, WriterId,
+    EventId, EventType, FlowId, JournalId, JournalWriterId, ReaderGeneration, StageId, WriterId,
 };
 use serde_json::json;
 use ulid::Ulid;
@@ -173,10 +174,15 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
         stage_id: stage.id(),
         stage_type,
     };
-    event.causality.parent_ids = upstream
-        .map(|stage| stage.event_id(input))
-        .into_iter()
-        .collect();
+    event.causality = CausalityContext::from_inputs(
+        upstream
+            .map(|stage| CausalInput {
+                id: stage.event_id(input),
+                event_type: EventType(stage.descriptor().2.into()),
+            })
+            .into_iter()
+            .collect(),
+    );
     event.correlation = Some(CorrelationContext::single(
         CorrelationId::from(ulid(1024 + input)),
         Some(CorrelationPayload {

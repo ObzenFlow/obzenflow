@@ -189,10 +189,10 @@ impl TypedStatefulHandler for NoopStateful {
 
     fn initial_state(&self) -> Self::State {}
 
-    fn emit(&self, _state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: Vec::new(),
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}

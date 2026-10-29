@@ -463,8 +463,14 @@ async fn poisoned_cause_remains_primary_when_observation_also_panics() {
     let route = errors
         .iter()
         .map(|envelope| envelope.authored())
-        .find(|event| parent(event) == Some(operation.0.id))
-        .expect("fresh error route");
+        .find(|event| {
+            matches!(
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(_))
+            )
+        })
+        .expect("the failed input's record");
+    assert_eq!(parent(&route), operation.1.causal_event_id);
 
     let stage_id = operation.1.stage_id;
     let lifecycle = data

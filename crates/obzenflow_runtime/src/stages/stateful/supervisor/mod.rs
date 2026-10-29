@@ -794,6 +794,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Stateful
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stages::common::handler_error::StageFatal;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
 
@@ -805,7 +806,7 @@ mod tests {
 
         fn accumulate(&mut self, _: &mut (), _: ChainEvent) {}
         fn initial_state(&self) {}
-        fn create_events(&self, _: &()) -> Result<Vec<ChainEvent>, HandlerError> {
+        fn create_events(&self, _: &()) -> Result<Vec<ChainEvent>, StageFatal> {
             Ok(vec![])
         }
     }

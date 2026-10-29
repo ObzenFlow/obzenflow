@@ -6,7 +6,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
@@ -90,9 +89,6 @@ pub(super) async fn flush_pending_outputs(ctx: &mut MergeResources) -> Result<Fl
 }
 
 fn merged_output(ctx: &MergeResources, event: &ChainEvent) -> Result<ChainEvent, BoxError> {
-    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
-        return Ok(event.clone());
-    }
     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
     Ok(match &event.payload {
         ChainPayload::Fact(value) => ChainEventFactory::derived_data_event(

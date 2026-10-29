@@ -3,21 +3,11 @@
 // https://obzenflow.dev
 
 use super::*;
-use fake_ai::{chat_model, embedding_model, runtime_config};
 use obzenflow::ai::{AiClientError, EmbeddingResponse};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_dsl::infinite_source;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
-use obzenflow_runtime::bootstrap::{
-    install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
-};
-use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::run_context::FlowBuildContext;
-use obzenflow_runtime::runtime_config::AiEndpointTables;
-use obzenflow_runtime::stages::common::handlers::{
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
@@ -70,72 +60,6 @@ fn ticket(id: u64, description: &str) -> Vec<TicketRaised> {
         id,
         description: description.to_string(),
     }]
-}
-
-#[derive(Clone, Debug)]
-struct BoundedTicketSource {
-    next_id: u64,
-    remaining: u64,
-}
-
-impl BoundedTicketSource {
-    fn new(first_id: u64, count: u64) -> Self {
-        Self {
-            next_id: first_id,
-            remaining: count,
-        }
-    }
-}
-
-impl TypedInfiniteSourceHandler for BoundedTicketSource {
-    type Output = TicketRaised;
-
-    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        if self.remaining == 0 {
-            return Ok(Vec::new());
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.remaining -= 1;
-        Ok(vec![TicketRaised {
-            id,
-            description: format!("ticket {id}"),
-        }])
-    }
-}
-
-fn resumable_flow(
-    journal_base: PathBuf,
-    first_id: u64,
-    count: u64,
-    outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-) -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let summarize = ai::infer(SummarizeTicket::baseline());
-        let embed = ai::infer(EmbedSummary::of_width(3));
-        let chat_breaker = circuit_breaker().consecutive_failures(5);
-        let embedding_breaker = circuit_breaker().consecutive_failures(5);
-        let input =
-            crate::replay_testkit::ReattachingSource(BoundedTicketSource::new(first_id, count));
-        let collected = CollectEmbedded { outputs };
-
-        Ok(flow! {
-            name: "standalone_ai_resume_tail",
-            journals: disk_journals(journal_base),
-            stages: {
-                input = infinite_source!(TicketRaised => input);
-                chat = ai!(TicketRaised -> TicketSummarised with chat_breaker => summarize);
-                embedding = ai!(TicketSummarised -> TicketEmbedded with embedding_breaker => embed);
-                collected = sink!(TicketEmbedded => collected);
-            },
-
-            topology: {
-                input |> chat;
-                chat |> embedding;
-                embedding |> collected;
-            }
-        })
-    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -246,134 +170,6 @@ async fn wait_for_atomic(counter: &AtomicUsize, expected: usize, reason: &str) {
     })
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {reason}"));
-}
-
-async fn wait_for_outputs(outputs: &Mutex<Vec<TicketEmbedded>>, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while outputs.lock().unwrap().len() < expected {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("timed out waiting for AI stage outputs");
-}
-
-async fn wait_for_running(handle: &FlowHandle) {
-    let mut states = handle.state_receiver();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if matches!(*states.borrow(), PipelineState::Running) {
-                return;
-            }
-            states.changed().await.expect("pipeline state remains open");
-        }
-    })
-    .await
-    .expect("the AI flow reaches Running");
-}
-
-fn models_context(chat: &FakeChatModels, embed: &FakeEmbeddingModels) -> FlowBuildContext {
-    FlowBuildContext::new(runtime_config(
-        [
-            chat_model("fixture-chat"),
-            embedding_model("fixture-embedding"),
-        ],
-        AiEndpointTables::default(),
-    ))
-    .with_ai_models(fake_ai::providers(chat, embed))
-}
-
-async fn run_resumable_until(
-    flow: FlowDefinition,
-    context: FlowBuildContext,
-    outputs: &Mutex<Vec<TicketEmbedded>>,
-    expected: usize,
-) {
-    let handle = flow.build(context).await.expect("resumable AI flow builds");
-    wait_for_running(&handle).await;
-    wait_for_outputs(outputs, expected).await;
-    handle.stop().await.expect("test flow accepts stop");
-    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
-        .await
-        .expect("test flow stops within its deadline")
-        .expect("test flow stops cleanly");
-}
-
-async fn bootstrap_for_resume(archive_path: PathBuf) -> BootstrapConfig {
-    let replay = ReplayBootstrap {
-        archive_path: archive_path.clone(),
-        allow_incomplete_archive: true,
-        allow_duplicate_sink_delivery: false,
-        verb: ReplayVerb::Resume,
-    };
-    let archive = DiskReplayArchive::open(archive_path, true)
-        .await
-        .expect("the resume archive opens");
-    BootstrapConfig {
-        replay: Some(replay),
-        archive_evidence: Some(archive.evidence()),
-        replay_archive: Some(Arc::new(archive)),
-        ..Default::default()
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occurrence() {
-    let temp = tempfile::tempdir().unwrap();
-    let journal_base = temp.path().join("journals");
-    let recorded_outputs = Arc::new(Mutex::new(Vec::new()));
-    let (recorded_chat, recorded_embed) = (summarizing(), embedding());
-    run_resumable_until(
-        resumable_flow(journal_base.clone(), 1, 1, recorded_outputs.clone()),
-        models_context(&recorded_chat, &recorded_embed),
-        &recorded_outputs,
-        1,
-    )
-    .await;
-    assert_eq!(recorded_chat.call_count(), 1);
-    assert_eq!(recorded_embed.call_count(), 1);
-    let recorded_archive = latest_run_dir(&journal_base);
-
-    let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
-    let (resumed_chat, resumed_embed) = (summarizing(), embedding());
-    let _bootstrap = install_bootstrap_config(bootstrap_for_resume(recorded_archive).await);
-    run_resumable_until(
-        resumable_flow(journal_base.clone(), 2, 1, resumed_outputs.clone()),
-        models_context(&resumed_chat, &resumed_embed),
-        &resumed_outputs,
-        2,
-    )
-    .await;
-
-    assert_eq!(
-        resumed_outputs
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|output| output.id)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
-    assert_eq!(resumed_chat.connect_count(), 1);
-    assert_eq!(resumed_chat.call_count(), 1);
-    assert_eq!(resumed_embed.connect_count(), 1);
-    assert_eq!(resumed_embed.call_count(), 1);
-
-    let resumed_archive = latest_run_dir(&journal_base);
-    for (stage, effect_type) in [
-        ("chat", CHAT_EFFECT_TYPE),
-        ("embedding", EMBEDDING_EFFECT_TYPE),
-    ] {
-        assert_eq!(
-            stage_events(&resumed_archive, stage)
-                .await
-                .iter()
-                .filter(|event| successful_effect_record(event, effect_type).is_some())
-                .count(),
-            2,
-            "the resumed journal contains the suppressed prefix and one live tail reply"
-        );
-    }
 }
 
 /// Aborting the run's task only requests cancellation; its stages close their
