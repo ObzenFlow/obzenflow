@@ -23,6 +23,7 @@ use crate::stages::observer::{
     JoinDeliverySnapshot, JoinObserverContext, JoinObserverOccurrence, JoinSide, JoinSignalKind,
     JoinSignalSnapshot,
 };
+use crate::supervised_base::publication;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -218,7 +219,7 @@ pub(super) async fn dead_letter_reference<H: UnifiedJoinHandler>(
         Some(envelope),
     )
     .await?;
-    crate::supervised_base::publication::append(
+    publication::append(
         &ctx.error_journal,
         record,
         AppendOptions::from_record(Some(envelope))?,
@@ -454,7 +455,7 @@ pub(in crate::stages::join) async fn emit_join_heartbeat_if_due<
         ChainEventFactory::execution_event(writer_id, payload).with_flow_context(flow_context);
     let heartbeat = runtime_context.attach_to(heartbeat);
 
-    crate::supervised_base::publication::append(
+    publication::append(
         &ctx.data_journal,
         heartbeat,
         AppendOptions::default()

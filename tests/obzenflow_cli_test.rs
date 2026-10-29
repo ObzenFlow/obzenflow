@@ -819,7 +819,12 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     use gateway_demo::domain::{
         CustomerOrderPlaced, OrderChannel, PaymentMethodState, TrafficPhase,
     };
-    use obzenflow::journal::read::{RunRecord, RunRecordData, RunRecordKind};
+    use obzenflow::journal::read::{
+        DeliveryResult, RunJournalKind, RunRecord, RunRecordData, RunRecordKind, SystemPayload,
+    };
+    use obzenflow::journal::ProcessingStatus;
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    use obzenflow_core::event::ChainPayload;
 
     fn build_gateway(root: PathBuf) -> FlowDefinition {
         let valid = CustomerOrderPlaced {
@@ -1211,15 +1216,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let mut last_clocks = std::collections::BTreeMap::new();
     for row in &rows {
         let name = match (&row.journal.stage, row.journal.kind) {
-            (Some(stage), obzenflow::journal::read::RunJournalKind::Error) => {
+            (Some(stage), RunJournalKind::Error) => {
                 format!("{}/error", stage.key)
             }
             (Some(stage), _) => stage.key.clone(),
-            (_, obzenflow::journal::read::RunJournalKind::System) => "pipeline".into(),
-            (_, obzenflow::journal::read::RunJournalKind::MetricsCoordination) => {
-                "metrics/coordination".into()
-            }
-            (_, obzenflow::journal::read::RunJournalKind::MetricsExport) => "metrics/export".into(),
+            (_, RunJournalKind::System) => "pipeline".into(),
+            (_, RunJournalKind::MetricsCoordination) => "metrics/coordination".into(),
+            (_, RunJournalKind::MetricsExport) => "metrics/export".into(),
             _ => panic!("expected a named journal"),
         };
         let clock = match &row.record {
@@ -1289,7 +1292,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .unwrap();
     let system_count = rows
         .iter()
-        .filter(|row| row.journal.kind == obzenflow::journal::read::RunJournalKind::System)
+        .filter(|row| row.journal.kind == RunJournalKind::System)
         .count();
     assert_eq!(
         system_line.split_whitespace().last().unwrap(),
@@ -1312,29 +1315,28 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                         .is_some_and(|owner| owner.key == *stage)
             })
         };
-        let data = owned(obzenflow::journal::read::RunJournalKind::Data)
+        let data = owned(RunJournalKind::Data)
             .filter(|row| match &row.record {
                 RunRecordData::Chain(record) => match &record.payload {
-                    obzenflow_core::event::ChainPayload::Fact(_) => record
+                    ChainPayload::Fact(_) => record
                         .envelope
                         .provenance
                         .event
                         .processing
                         .status
                         .is_success(),
-                    obzenflow_core::event::ChainPayload::Delivery(delivery) => matches!(
-                        delivery.result,
-                        obzenflow::journal::read::DeliveryResult::Success { .. }
-                    ),
+                    ChainPayload::Delivery(delivery) => {
+                        matches!(delivery.result, DeliveryResult::Success { .. })
+                    }
                     _ => false,
                 },
                 RunRecordData::System(_) => false,
             })
             .count();
         let mut errors = std::collections::BTreeMap::<String, usize>::new();
-        for row in owned(obzenflow::journal::read::RunJournalKind::Error) {
+        for row in owned(RunJournalKind::Error) {
             if let RunRecordData::Chain(record) = &row.record {
-                if let obzenflow::journal::ProcessingStatus::Error { kind, .. } =
+                if let ProcessingStatus::Error { kind, .. } =
                     &record.envelope.provenance.event.processing.status
                 {
                     *errors
@@ -1388,11 +1390,15 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .iter()
         .filter_map(|row| match &row.record {
             RunRecordData::System(record) => match &record.payload {
-                obzenflow::journal::read::SystemPayload::SupervisorRegistered { descriptor } => Some((record.writer_id().to_string(), descriptor.clone())),
+                SystemPayload::SupervisorRegistered { descriptor } => {
+                    Some((record.writer_id().to_string(), descriptor.clone()))
+                }
                 _ => None,
             },
             RunRecordData::Chain(record) => match &record.payload {
-                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some((record.writer_id().to_string(), descriptor.clone())),
+                ChainPayload::Execution(ExecutionPayload::SupervisorRegistered { descriptor }) => {
+                    Some((record.writer_id().to_string(), descriptor.clone()))
+                }
                 _ => None,
             },
         })
@@ -1415,22 +1421,19 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .collect();
     for row in &rows {
         let heading = match row.journal.kind {
-            obzenflow::journal::read::RunJournalKind::System => {
-                manifest["system_journal_file"].as_str().unwrap().to_owned()
-            }
-            obzenflow::journal::read::RunJournalKind::MetricsCoordination => manifest
-                ["metrics_journals"]["coordination_journal_file"]
+            RunJournalKind::System => manifest["system_journal_file"].as_str().unwrap().to_owned(),
+            RunJournalKind::MetricsCoordination => manifest["metrics_journals"]
+                ["coordination_journal_file"]
                 .as_str()
                 .unwrap()
                 .to_owned(),
-            obzenflow::journal::read::RunJournalKind::MetricsExport => manifest["metrics_journals"]
-                ["export_journal_file"]
+            RunJournalKind::MetricsExport => manifest["metrics_journals"]["export_journal_file"]
                 .as_str()
                 .unwrap()
                 .to_owned(),
             kind => {
                 let stage = &row.journal.stage.as_ref().unwrap().key;
-                let field = if kind == obzenflow::journal::read::RunJournalKind::Data {
+                let field = if kind == RunJournalKind::Data {
                     "data_journal_file"
                 } else {
                     "error_journal_file"

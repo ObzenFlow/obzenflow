@@ -11,7 +11,9 @@ use crate::stages::common::handlers::{
     StatefulOutputContext, StatefulTerminationKind, TerminalValidation, UnifiedStatefulHandler,
 };
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, PendingOutput,
+};
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
@@ -24,7 +26,7 @@ use crate::stages::observer::dispatch::{
     run_stateful_before_accumulate_observers,
 };
 use crate::stages::observer::StatefulObserverContext;
-use crate::supervised_base::EventLoopDirective;
+use crate::supervised_base::{publication, EventLoopDirective};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -36,7 +38,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crate::messaging::PollResult;
+use crate::messaging::{DeliveredRecord, PollResult};
 
 use super::super::fsm::{StatefulEvent, StatefulResources, StatefulState};
 use super::StatefulSupervisor;
@@ -351,7 +353,7 @@ pub(super) async fn dispatch_draining<
                             ),
                             scope,
                         );
-                        crate::supervised_base::publication::append(
+                        publication::append(
                             &ctx.error_journal,
                             error_event,
                             AppendOptions::from_record(Some(&envelope))?,
@@ -456,13 +458,11 @@ pub(super) async fn dispatch_draining<
                                         }
 
                                         let scope = observer_scope;
-                                        ctx.pending_outputs.push_back(
-                                            crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                                                causal: crate::supervised_base::publication::capture(),
-                                                event: out,
-                                                scope,
-                                            },
-                                        );
+                                        ctx.pending_outputs.push_back(PendingOutput {
+                                            causal: publication::capture(),
+                                            event: out,
+                                            scope,
+                                        });
                                     }
 
                                     if let Some(upstream) = upstream_stage {
@@ -800,13 +800,11 @@ pub(super) async fn produce_final_output<
                 }
 
                 let scope = observer_scope;
-                ctx.pending_outputs.push_back(
-                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                        causal: crate::supervised_base::publication::capture(),
-                        event,
-                        scope,
-                    },
-                );
+                ctx.pending_outputs.push_back(PendingOutput {
+                    causal: publication::capture(),
+                    event,
+                    scope,
+                });
             }
 
             Ok(EventLoopDirective::Transition(
@@ -829,7 +827,7 @@ pub(super) async fn produce_final_output<
                     stage_id: ctx.stage_id,
                     stage_key: &ctx.stage_name,
                     input_position: None,
-                    parent: parent.map(crate::messaging::DeliveredRecord::record),
+                    parent: parent.map(DeliveredRecord::record),
                     lineage: ctx.lineage_policy,
                 },
             )
@@ -928,6 +926,7 @@ mod tests {
     use crate::stages::resources_builder::SubscriptionFactory;
     use crate::stages::stateful::fsm::{StatefulAction, StatefulContext};
     use crate::supervised_base::HandlerSupervised;
+    use crate::testing::causal_fixture;
     use async_trait::async_trait;
     use obzenflow_core::config::LineagePolicy;
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
@@ -1013,8 +1012,7 @@ mod tests {
         ) -> Result<JournalRecord<ChainPayload>, JournalError> {
             let event = options.capture.prepare(0, event);
             let mut records = self.records.lock().unwrap();
-            let record =
-                crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+            let record = causal_fixture::commit(self.id, event, &options, &records)?;
             records.push(record.clone());
             Ok(record)
         }

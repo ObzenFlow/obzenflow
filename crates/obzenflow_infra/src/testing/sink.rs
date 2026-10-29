@@ -14,7 +14,8 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{
-    ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, StageFatalRecorded,
+    vocabulary, ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase,
+    StageFatalRecorded,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME};
@@ -789,7 +790,7 @@ fn failed_receipt_disposition(event: &ChainEvent) -> Option<SinkWriteFailureDisp
 }
 
 fn records_failed_input(input: &ChainEvent, route: &ChainEvent, kind: &ErrorKind) -> bool {
-    route.event_type() == obzenflow_core::event::vocabulary::stage::PROCESSING_FAILED
+    route.event_type() == vocabulary::stage::PROCESSING_FAILED
         && matches!(
             &route.payload,
             ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure))
@@ -1753,6 +1754,9 @@ mod tests {
     use obzenflow_adapters::sources;
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+    use obzenflow_core::event::payloads::stage_processing_failed_payload::{
+        FailedInput, StageProcessingFailed,
+    };
     use obzenflow_core::event::provenance::causality_context::{CausalInput, CausalityContext};
     use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::{CausalCoordinate, ChainEventFactory};
@@ -1922,16 +1926,11 @@ mod tests {
 
         let route = ChainEventFactory::execution_event(
             WriterId::from(sink_stage),
-            ExecutionPayload::StageProcessingFailed(
-                obzenflow_core::event::payloads::stage_processing_payload::StageProcessingFailed {
-                    kind: ErrorKind::Remote,
-                    detail: "redacted failure".to_string(),
-                    input:
-                        obzenflow_core::event::payloads::stage_processing_payload::FailedInput::of(
-                            &input,
-                        ),
-                },
-            ),
+            ExecutionPayload::StageProcessingFailed(StageProcessingFailed {
+                kind: ErrorKind::Remote,
+                detail: "redacted failure".to_string(),
+                input: FailedInput::of(&input),
+            }),
         )
         .with_flow_context(context("output", sink_stage, StageType::Sink))
         .with_causality(CausalityContext::with_input(CausalInput::of(&input)))

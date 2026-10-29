@@ -10,6 +10,7 @@
 //! so supervisors can map handler failures into stage-level errors when
 //! needed.
 
+use crate::effects::EffectError;
 use crate::stages::common::stage_handle::StageError;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
@@ -204,13 +205,11 @@ impl fmt::Display for HandlerError {
 
 impl std::error::Error for HandlerError {}
 
-impl From<crate::effects::EffectError> for HandlerError {
-    fn from(error: crate::effects::EffectError) -> Self {
+impl From<EffectError> for HandlerError {
+    fn from(error: EffectError) -> Self {
         let retry_after = match &error {
-            crate::effects::EffectError::BindingAuthority { fault } => {
-                return Self::Fatal(fault.stage_fatal())
-            }
-            crate::effects::EffectError::RateLimited { retry_after, .. } => Some(*retry_after),
+            EffectError::BindingAuthority { fault } => return Self::Fatal(fault.stage_fatal()),
+            EffectError::RateLimited { retry_after, .. } => Some(*retry_after),
             _ => None,
         };
         let message = error.semantic_reason().into_owned();

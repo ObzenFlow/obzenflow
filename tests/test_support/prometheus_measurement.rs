@@ -597,7 +597,9 @@ fn retained_measurement_verifies_declared_source_limiter_policy() -> Result<()> 
 
 #[test]
 fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_rows() -> Result<()> {
-    use obzenflow_core::event::payloads::stage_processing_payload::{
+    use obzenflow_core::config::LineagePolicy;
+    use obzenflow_core::event::context::StageType;
+    use obzenflow_core::event::payloads::stage_processing_failed_payload::{
         FailedInput, StageProcessingFailed,
     };
     use obzenflow_core::event::provenance::FlowContext;
@@ -629,7 +631,7 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
             stage: Some(RunStage {
                 key: SOURCE.into(),
                 id: source,
-                stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+                stage_type: StageType::FiniteSource,
                 is_effectful: false,
             }),
         },
@@ -652,7 +654,7 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
             detail: "Simulated processing error".into(),
             input: FailedInput::of(&event),
         }),
-        obzenflow_core::config::LineagePolicy::default(),
+        LineagePolicy::default(),
     )
     .with_flow_context(FlowContext::new(TRANSFORM, transform))
     .mark_as_error("Simulated processing error", ErrorKind::Unknown);
@@ -665,7 +667,7 @@ fn retained_measurement_rejects_duplicate_missing_and_wrong_journal_business_row
             stage: Some(RunStage {
                 key: TRANSFORM.into(),
                 id: transform,
-                stage_type: obzenflow_core::event::context::StageType::Transform,
+                stage_type: StageType::Transform,
                 is_effectful: false,
             }),
         },

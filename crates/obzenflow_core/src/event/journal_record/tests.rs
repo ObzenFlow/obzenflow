@@ -447,7 +447,9 @@ fn an_error_record_whose_mark_disagrees_with_its_kind_is_refused() {
     use crate::event::payloads::execution_payload::{
         SourcePollContinuation, SourcePollFailedFact, SourceRecordRejectedFact,
     };
-    use crate::event::payloads::stage_processing_payload::{FailedInput, StageProcessingFailed};
+    use crate::event::payloads::stage_processing_failed_payload::{
+        FailedInput, StageProcessingFailed,
+    };
     use crate::event::status::processing_status::ErrorKind;
     use crate::event::{ChainEventFactory, SourceDiagnostic, SourceDiagnosticReason};
 

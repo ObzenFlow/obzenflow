@@ -5,6 +5,7 @@
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
 use crate::id_conversions::StageIdExt;
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::observer::{
     EffectObserver, EffectObserverContext, EffectObserverOutcome, ObserverBinding, ObserverTarget,
     StageObserverBindings, StageObserverBundle,
@@ -12,6 +13,7 @@ use crate::stages::observer::{
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::provenance::JournalGroupMember;
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainPayload, EventKind, JournalEvent, JournalRecord};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{ArchiveStatus, JournalError, JournalReader, StatusDerivation};
@@ -786,14 +788,11 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchBinding
         &self,
         input: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         // Build the receipt before the authority fault, then deliberately
         // catch the effect error. Adapter postflight must still make false
         // success impossible.
-        let prebuilt_receipt = fx
-            .complete_empty()
-            .map_err(Into::<crate::stages::common::handler_error::HandlerError>::into)?;
+        let prebuilt_receipt = fx.complete_empty().map_err(Into::<HandlerError>::into)?;
         let _caught = fx
             .perform(ZeroSlotNamedEffect {
                 value: input.value,
@@ -806,19 +805,15 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchBinding
         match self.settlement {
             AdapterSettlement::Success => Ok(prebuilt_receipt),
             AdapterSettlement::Nonfatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Domain(
-                    "caught binding fault".to_string(),
-                ))
+                Err(HandlerError::Domain("caught binding fault".to_string()))
             }
-            AdapterSettlement::Fatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Fatal(
-                    crate::stages::common::handler_error::StageFatal::new(
-                        obzenflow_core::event::StageFatalCode::Protocol,
-                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
-                        "handler fatal must lose to the binding latch",
-                    ),
-                ))
-            }
+            AdapterSettlement::Fatal => Err(HandlerError::Fatal(
+                crate::stages::common::handler_error::StageFatal::new(
+                    obzenflow_core::event::StageFatalCode::Protocol,
+                    obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                    "handler fatal must lose to the binding latch",
+                ),
+            )),
         }
     }
 }
@@ -850,8 +845,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for FoldThenCatch
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.perform(CountingEffect {
             binding: bound(),
             value: input.value,
@@ -859,10 +853,8 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for FoldThenCatch
             calls: self.valid_calls.clone(),
         })
         .await
-        .map_err(crate::stages::common::handler_error::HandlerError::from)?;
-        let prebuilt_receipt = fx
-            .complete()
-            .map_err(crate::stages::common::handler_error::HandlerError::from)?;
+        .map_err(HandlerError::from)?;
+        let prebuilt_receipt = fx.complete().map_err(HandlerError::from)?;
         let _caught = fx
             .perform(ZeroSlotNamedEffect {
                 value: input.value,
@@ -874,33 +866,23 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for FoldThenCatch
 
         match self.settlement {
             AdapterSettlement::Success => Ok(prebuilt_receipt),
-            AdapterSettlement::Nonfatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Domain(
-                    "caught binding fault after a committed fact".to_string(),
-                ))
-            }
-            AdapterSettlement::Fatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Fatal(
-                    crate::stages::common::handler_error::StageFatal::new(
-                        obzenflow_core::event::StageFatalCode::Protocol,
-                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
-                        "handler fatal must lose after the committed fact folds",
-                    ),
-                ))
-            }
+            AdapterSettlement::Nonfatal => Err(HandlerError::Domain(
+                "caught binding fault after a committed fact".to_string(),
+            )),
+            AdapterSettlement::Fatal => Err(HandlerError::Fatal(
+                crate::stages::common::handler_error::StageFatal::new(
+                    obzenflow_core::event::StageFatalCode::Protocol,
+                    obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                    "handler fatal must lose after the committed fact folds",
+                ),
+            )),
         }
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         if self.reject_fold {
-            return Err(crate::stages::common::handler_error::HandlerError::Domain(
-                "injected fold rejection".to_string(),
-            ));
+            return Err(HandlerError::Domain("injected fold rejection".to_string()));
         }
         *state += fact.value;
         Ok(())
@@ -917,8 +899,7 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEf
         &self,
         input: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.perform(CountingEffect {
             binding: bound(),
             value: input.value,
@@ -926,25 +907,19 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEf
             calls: self.calls.clone(),
         })
         .await
-        .map_err(|error| {
-            crate::stages::common::handler_error::HandlerError::Other(error.to_string())
-        })?;
+        .map_err(|error| HandlerError::Other(error.to_string()))?;
         match self.settlement {
             AdapterSettlement::Success => fx.complete().map_err(Into::into),
-            AdapterSettlement::Nonfatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Domain(
-                    "failed between effect cursors".to_string(),
-                ))
-            }
-            AdapterSettlement::Fatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Fatal(
-                    crate::stages::common::handler_error::StageFatal::new(
-                        obzenflow_core::event::StageFatalCode::Protocol,
-                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
-                        "original fatal wins",
-                    ),
-                ))
-            }
+            AdapterSettlement::Nonfatal => Err(HandlerError::Domain(
+                "failed between effect cursors".to_string(),
+            )),
+            AdapterSettlement::Fatal => Err(HandlerError::Fatal(
+                crate::stages::common::handler_error::StageFatal::new(
+                    obzenflow_core::event::StageFatalCode::Protocol,
+                    obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                    "original fatal wins",
+                ),
+            )),
         }
     }
 }
@@ -1001,8 +976,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for RepeatableBou
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.perform(CountingEffect {
             binding: bound(),
             value: input.value,
@@ -1013,11 +987,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for RepeatableBou
         Ok(fx.complete()?)
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         state.push(fact.value);
         Ok(())
     }
@@ -1045,8 +1015,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for AffineBoundar
         _state: &Self::State,
         _input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.perform(AffineCountingEffect {
             binding: bound(),
             calls: self.calls.clone(),
@@ -1055,11 +1024,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for AffineBoundar
         Ok(fx.complete()?)
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         state.push(fact.value);
         Ok(())
     }
@@ -1200,18 +1165,13 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for Transactional
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.call(TransactionalCounting { value: input.value })
             .await?;
         Ok(fx.complete()?)
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         state.push(fact.value);
         Ok(())
     }
@@ -1394,8 +1354,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTransla
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         match fx
             .perform(CountingEffect {
                 binding: bound(),
@@ -1417,11 +1376,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTransla
         }
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         if let PolicyTranslationOutput::Reserved(reserved) = fact {
             state.push(reserved.value);
         }
@@ -1455,19 +1410,14 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for DishonestProd
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.emit(FirstOutput { value: input.value }).await?;
-        Err(crate::stages::common::handler_error::HandlerError::Domain(
+        Err(HandlerError::Domain(
             "failure after dishonest emit".to_string(),
         ))
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        _fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, _fact: Self::Output) -> Result<(), HandlerError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         *state += 1;
         Ok(())
@@ -1494,23 +1444,18 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenError
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.emit(FirstOutput { value: input.value }).await?;
         fx.emit(SecondOutput {
             value: format!("second-{}", input.value),
         })
         .await?;
-        Err(crate::stages::common::handler_error::HandlerError::Domain(
+        Err(HandlerError::Domain(
             "failure after committed facts".to_string(),
         ))
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         match fact {
             OrderedStatefulOutput::First(first) => state.push(format!("first:{}", first.value)),
             OrderedStatefulOutput::Second(second) => state.push(second.value),
@@ -1542,27 +1487,16 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SingleFactErr
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         if self.emit {
             fx.emit(FirstOutput { value: input.value }).await?;
         }
-        Err(crate::stages::common::handler_error::HandlerError::Domain(
-            "decide failed".to_string(),
-        ))
+        Err(HandlerError::Domain("decide failed".to_string()))
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         if self.fail_apply {
-            return Err(
-                crate::stages::common::handler_error::HandlerError::Validation(
-                    "apply failed".to_string(),
-                ),
-            );
+            return Err(HandlerError::Validation("apply failed".to_string()));
         }
         state.push(fact.value);
         Ok(())
@@ -1589,8 +1523,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SecondFactApp
         _state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.emit(FirstOutput { value: input.value }).await?;
         fx.emit(SecondOutput {
             value: format!("second-{}", input.value),
@@ -1599,21 +1532,15 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SecondFactApp
         Ok(fx.complete()?)
     }
 
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        fact: Self::Output,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         match fact {
             OrderedStatefulOutput::First(first) => {
                 state.push(format!("first:{}", first.value));
                 Ok(())
             }
-            OrderedStatefulOutput::Second(_) => Err(
-                crate::stages::common::handler_error::HandlerError::Validation(
-                    "second apply failed".to_string(),
-                ),
-            ),
+            OrderedStatefulOutput::Second(_) => {
+                Err(HandlerError::Validation("second apply failed".to_string()))
+            }
         }
     }
 }
@@ -3081,10 +3008,8 @@ async fn typed_emit_remains_durable_when_handler_later_errors() {
     let mut effects = Effects::<FirstOutput, crate::effect_set![]>::new(ctx);
 
     effects.emit(FirstOutput { value: 9 }).await.unwrap();
-    let handler_result: Result<(), crate::stages::common::handler_error::HandlerError> =
-        Err(crate::stages::common::handler_error::HandlerError::Domain(
-            "failure after emit".to_string(),
-        ));
+    let handler_result: Result<(), HandlerError> =
+        Err(HandlerError::Domain("failure after emit".to_string()));
     assert!(handler_result.is_err());
     drop(effects);
 
@@ -3134,7 +3059,7 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
     assert!(
         matches!(
             &error,
-            crate::stages::common::handler_error::HandlerError::Domain(message)
+            HandlerError::Domain(message)
                 if message == "failure after committed facts"
         ),
         "unexpected adapter error: {error:?}"
@@ -3200,7 +3125,7 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
     assert!(
         matches!(
             error,
-            crate::stages::common::handler_error::HandlerError::Domain(ref message)
+            HandlerError::Domain(ref message)
                 if message == "decide failed"
         ),
         "{error:?}"
@@ -3521,8 +3446,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         .expect_err("the domain-fact append failure leaves the input unsettled");
     assert!(matches!(
         error,
-        crate::stages::common::handler_error::HandlerError::PermanentFailure(_)
-            | crate::stages::common::handler_error::HandlerError::Fatal(_)
+        HandlerError::PermanentFailure(_) | HandlerError::Fatal(_)
     ));
     assert_eq!(live_consults.load(Ordering::SeqCst), 1);
     assert_eq!(live_effect_calls.load(Ordering::SeqCst), 0);
@@ -3638,7 +3562,7 @@ async fn effectful_stateful_apply_error_takes_precedence() {
     let committed_fact = &events[0].authored();
     assert!(matches!(
         error,
-        crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
+        HandlerError::ContractViolation(ref message)
             if message.contains("effectful_stateful_apply")
                 && message.contains(&committed_fact.id.to_string())
                 && message.contains(&FirstOutput::event_type_name())
@@ -3700,7 +3624,7 @@ async fn effectful_stateful_second_apply_error_names_the_second_committed_fact()
     );
     assert!(matches!(
         error,
-        crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
+        HandlerError::ContractViolation(ref message)
             if message.contains("effectful_stateful_apply")
                 && message.contains(&events[1].envelope.provenance.event.id.to_string())
                 && message.contains(&SecondOutput::event_type_name())
@@ -4198,7 +4122,7 @@ async fn run_consume_one_adapter(
     history: Arc<EffectHistory>,
     settlement: AdapterSettlement,
     calls: Arc<AtomicUsize>,
-) -> Result<Vec<ChainEvent>, crate::stages::common::handler_error::HandlerError> {
+) -> Result<Vec<ChainEvent>, HandlerError> {
     use crate::stages::common::handlers::{
         EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
     };
@@ -4222,7 +4146,7 @@ async fn run_consume_one_adapter(
 async fn run_caught_binding_fault_adapter(
     settlement: AdapterSettlement,
 ) -> (
-    Result<Vec<ChainEvent>, crate::stages::common::handler_error::HandlerError>,
+    Result<Vec<ChainEvent>, HandlerError>,
     Arc<AtomicUsize>,
     Arc<MemoryJournal<ChainEvent>>,
 ) {
@@ -4281,7 +4205,7 @@ async fn transform_adapter_binding_latch_supersedes_every_handler_settlement() {
         let error = result.expect_err("a caught binding fault must remain invocation-terminal");
         assert!(matches!(
             error,
-            crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            HandlerError::Fatal(ref fatal)
                 if fatal.code == obzenflow_core::event::StageFatalCode::Configuration
                     && fatal.reason
                         == obzenflow_core::event::StageFatalReason::EffectPortBindingMismatch
@@ -4295,7 +4219,7 @@ async fn run_stateful_binding_fault_adapter(
     settlement: AdapterSettlement,
     reject_fold: bool,
 ) -> (
-    Result<(), crate::stages::common::handler_error::HandlerError>,
+    Result<(), HandlerError>,
     u64,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
@@ -4373,7 +4297,7 @@ async fn stateful_adapter_folds_once_then_applies_binding_fatal_precedence() {
         let error = result.expect_err("the binding latch wins after the committed fact folds");
         assert!(matches!(
             error,
-            crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            HandlerError::Fatal(ref fatal)
                 if fatal.code == obzenflow_core::event::StageFatalCode::Configuration
                     && fatal.reason
                         == obzenflow_core::event::StageFatalReason::EffectPortBindingMismatch
@@ -4393,7 +4317,7 @@ async fn stateful_fold_rejection_precedes_binding_latch() {
     let error = result.expect_err("rejection of an already committed fact is priority one");
     assert!(matches!(
         error,
-        crate::stages::common::handler_error::HandlerError::ContractViolation(ref detail)
+        HandlerError::ContractViolation(ref detail)
             if detail.contains("injected fold rejection")
     ));
     assert_eq!(valid_calls.load(Ordering::SeqCst), 1);
@@ -4420,7 +4344,7 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
     .expect_err("the fixture settles with a nonfatal error");
     assert!(matches!(
         miss,
-        crate::stages::common::handler_error::HandlerError::Domain(ref message)
+        HandlerError::Domain(ref message)
             if message == "failed between effect cursors"
     ));
 
@@ -4435,7 +4359,7 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
     .expect_err("unused history must replace the nonfatal error");
     assert!(matches!(
         hit,
-        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+        HandlerError::Fatal(ref fatal)
             if fatal.code == obzenflow_core::event::StageFatalCode::Replay
                 && fatal.reason == obzenflow_core::event::StageFatalReason::UnusedEffectHistory
                 && fatal.detail.contains("skipped the recorded effect")
@@ -4447,7 +4371,7 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
             .expect_err("the fixture settles with its original fatal error");
     assert!(matches!(
         fatal,
-        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+        HandlerError::Fatal(ref fatal)
             if fatal.code == obzenflow_core::event::StageFatalCode::Protocol
                 && fatal.reason
                     == obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity
@@ -4485,7 +4409,7 @@ async fn effectful_transform_success_checks_the_next_unused_cursor() {
     .expect_err("successful settlement cannot abandon archived history");
     assert!(matches!(
         divergence,
-        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+        HandlerError::Fatal(ref fatal)
             if fatal.code == obzenflow_core::event::StageFatalCode::Replay
                 && fatal.reason == obzenflow_core::event::StageFatalReason::UnusedEffectHistory
                 && fatal.detail.contains("skipped the recorded effect")
@@ -6464,11 +6388,8 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchRefusal
         &self,
         input: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
-    {
-        let prebuilt_receipt = fx
-            .complete_empty()
-            .map_err(Into::<crate::stages::common::handler_error::HandlerError>::into)?;
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        let prebuilt_receipt = fx.complete_empty().map_err(Into::<HandlerError>::into)?;
         let _caught = fx
             .perform(CountingEffect {
                 binding: bound(),
@@ -6481,20 +6402,14 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchRefusal
 
         match self.settlement {
             AdapterSettlement::Success => Ok(prebuilt_receipt),
-            AdapterSettlement::Nonfatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Domain(
-                    "caught refusal".to_string(),
-                ))
-            }
-            AdapterSettlement::Fatal => {
-                Err(crate::stages::common::handler_error::HandlerError::Fatal(
-                    crate::stages::common::handler_error::StageFatal::new(
-                        obzenflow_core::event::StageFatalCode::Protocol,
-                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
-                        "handler fatal must lose to the refusal latch",
-                    ),
-                ))
-            }
+            AdapterSettlement::Nonfatal => Err(HandlerError::Domain("caught refusal".to_string())),
+            AdapterSettlement::Fatal => Err(HandlerError::Fatal(
+                crate::stages::common::handler_error::StageFatal::new(
+                    obzenflow_core::event::StageFatalCode::Protocol,
+                    obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                    "handler fatal must lose to the refusal latch",
+                ),
+            )),
         }
     }
 }
@@ -6538,7 +6453,7 @@ async fn transform_adapter_reconstruction_refusal_supersedes_every_handler_settl
             assert!(
                 matches!(
                     result,
-                    Err(crate::stages::common::handler_error::HandlerError::Fatal(ref fatal))
+                    Err(HandlerError::Fatal(ref fatal))
                         if fatal.code == obzenflow_core::event::StageFatalCode::Replay
                             && fatal.reason == reason
                 ),
@@ -8104,7 +8019,7 @@ async fn local_preparation_failure_is_distinct_and_capture_failure_has_no_termin
         assert_eq!(events[0].event_type(), "effect.outcome_preparation_failed");
         assert!(matches!(
             events[0].envelope.provenance.event.processing.status,
-            obzenflow_core::event::status::processing_status::ProcessingStatus::Success
+            ProcessingStatus::Success
         ));
     }
 }

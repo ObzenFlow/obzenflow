@@ -19,6 +19,7 @@ use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectPro
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
@@ -5127,10 +5128,8 @@ async fn a_decision_row_that_fails_to_append_delivers_nothing() {
 }
 
 fn rejected_row(writer: StageId) -> ChainEvent {
-    merge_data(writer, "probe.order").mark_as_error(
-        "order 2 has no customer",
-        obzenflow_core::event::status::processing_status::ErrorKind::Validation,
-    )
+    merge_data(writer, "probe.order")
+        .mark_as_error("order 2 has no customer", ErrorKind::Validation)
 }
 
 async fn first_poll_error(subscription: &mut UpstreamSubscription<ChainEvent>) -> String {

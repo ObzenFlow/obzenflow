@@ -2036,7 +2036,7 @@ fn in_error_journal(mut record: RunRecord, payload: ExecutionPayload) -> RunReco
 }
 
 fn processing_failed(stage: u64, event: u64, input: u64, detail: &str) -> RunRecord {
-    use obzenflow_core::event::payloads::stage_processing_payload::{
+    use obzenflow_core::event::payloads::stage_processing_failed_payload::{
         FailedInput, StageProcessingFailed,
     };
     use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -2072,6 +2072,7 @@ fn rejected_row(event: u64, index: u64) -> RunRecord {
 }
 
 fn receipt(stage: u64, event: u64, input: &RunRecord, result: Value) -> RunRecord {
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
     let mut record = on_stage(
         fact(stage, event, &[], json!({})),
         stage,
@@ -2081,26 +2082,25 @@ fn receipt(stage: u64, event: u64, input: &RunRecord, result: Value) -> RunRecor
     record.kind = RunRecordKind::Delivery;
     let input_id = event_id(input);
     if let RunRecordData::Chain(row) = &mut record.record {
-        let payload: obzenflow_core::event::payloads::delivery_payload::DeliveryPayload =
-            serde_json::from_value(json!({
-                "subject": {
-                    "input": {
-                        "run_id": id(10),
-                        "journal_writer_id": id(2),
-                        "sequence": 1,
-                        "event_id": input_id
-                    },
-                    "event_kind": "fact",
-                    "event_type": "sensor.classified",
-                    "payload_schema_version": 1
+        let payload: DeliveryPayload = serde_json::from_value(json!({
+            "subject": {
+                "input": {
+                    "run_id": id(10),
+                    "journal_writer_id": id(2),
+                    "sequence": 1,
+                    "event_id": input_id
                 },
-                "result": result,
-                "destination": "written",
-                "delivery_method": "noop",
-                "bytes_processed": null,
-                "processed_at": "2026-09-23T00:00:00Z"
-            }))
-            .unwrap();
+                "event_kind": "fact",
+                "event_type": "sensor.classified",
+                "payload_schema_version": 1
+            },
+            "result": result,
+            "destination": "written",
+            "delivery_method": "noop",
+            "bytes_processed": null,
+            "processed_at": "2026-09-23T00:00:00Z"
+        }))
+        .unwrap();
         row.envelope.provenance.event.event_type = payload.event_type().into();
         row.payload = ChainPayload::Delivery(payload);
         row.envelope.provenance.event.event_kind = row.payload.kind();
@@ -2240,7 +2240,7 @@ fn a_failed_input_displays_whole_under_its_stages_error_heading() {
 
 #[test]
 fn a_refused_catalog_row_displays_as_its_joins_error() {
-    use obzenflow_core::event::payloads::stage_processing_payload::{
+    use obzenflow_core::event::payloads::stage_processing_failed_payload::{
         FailedInput, StageProcessingFailed,
     };
     use obzenflow_core::event::status::processing_status::ErrorKind;

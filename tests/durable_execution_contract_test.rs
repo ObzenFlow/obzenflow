@@ -40,7 +40,7 @@ use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, Ing
 use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
 use obzenflow::effects::simulated::CallLog;
 use obzenflow::effects::{
-    CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
+    self, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
     StageCompletion,
 };
 use obzenflow::error::HandlerError;
@@ -399,7 +399,7 @@ type AuthorizePayment = obzenflow::effects::Call<AuthorizationRequest>;
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct Authorize {
     #[system]
-    gateway: obzenflow::effects::System<Gateway>,
+    gateway: effects::System<Gateway>,
 }
 
 type Authorization = obzenflow::schema::stage_fact_set![PaymentAuthorized, PaymentDeclined];
@@ -527,7 +527,7 @@ fn build_flow(scenario: &Scenario, hold: Option<Hold>, web: WebOrders) -> FlowDe
         release: scenario.release(),
     };
     let authorize = Authorize {
-        gateway: obzenflow::effects::System::eager("payment-gateway", std::sync::Arc::new(gateway))
+        gateway: effects::System::eager("payment-gateway", std::sync::Arc::new(gateway))
             .expect("a valid system name"),
     };
     let receipt_file = ReceiptFile {
@@ -2864,7 +2864,7 @@ mod then_live {
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Vet {
         #[system]
-        ledger: obzenflow::effects::System<AuditLedger>,
+        ledger: effects::System<AuditLedger>,
     }
 
     #[async_trait]
@@ -2909,7 +2909,7 @@ mod then_live {
             path: audit_ledger(scenario),
         };
         let vet = Vet {
-            ledger: obzenflow::effects::System::eager("audit-ledger", std::sync::Arc::new(audit))
+            ledger: effects::System::eager("audit-ledger", std::sync::Arc::new(audit))
                 .expect("a valid system name"),
         };
         FlowDefinition::materialize(move |_runtime_config| {
@@ -4187,7 +4187,7 @@ mod two_effects {
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Charge {
         #[system]
-        ledger: obzenflow::effects::System<ChargeLedger>,
+        ledger: effects::System<ChargeLedger>,
         hold: Option<String>,
         release: PathBuf,
         fix: bool,
@@ -4242,11 +4242,8 @@ mod two_effects {
             path: ledger(scenario),
         };
         let charge = Charge {
-            ledger: obzenflow::effects::System::eager(
-                "charge-ledger",
-                std::sync::Arc::new(charge_ledger),
-            )
-            .expect("a valid system name"),
+            ledger: effects::System::eager("charge-ledger", std::sync::Arc::new(charge_ledger))
+                .expect("a valid system name"),
             hold: match hold {
                 Some(Hold::BetweenEffects(order)) => Some(order),
                 _ => None,
@@ -4667,7 +4664,7 @@ mod rejected_call {
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Quote {
         #[system]
-        desk: obzenflow::effects::System<QuoteDesk>,
+        desk: effects::System<QuoteDesk>,
     }
 
     #[async_trait]
@@ -4701,7 +4698,7 @@ mod rejected_call {
             .build()
             .expect("the order channel is configured");
         let quote = Quote {
-            desk: obzenflow::effects::System::eager(
+            desk: effects::System::eager(
                 "quote-desk",
                 std::sync::Arc::new(QuoteDesk {
                     path: desk_log(scenario),

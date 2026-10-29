@@ -14,7 +14,7 @@
 
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::stage_processing_payload::StageProcessingFailed;
+use obzenflow_core::event::payloads::stage_processing_failed_payload::StageProcessingFailed;
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
 use obzenflow_core::id::StageId;

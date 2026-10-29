@@ -6,10 +6,12 @@ use crate::messaging::DeliveredRecord;
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, PendingOutput,
+};
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
-use crate::supervised_base::EventLoopDirective;
+use crate::supervised_base::{publication, EventLoopDirective};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
@@ -564,7 +566,7 @@ async fn handle_stream_envelope<
                     )
                     .await?;
 
-                    crate::supervised_base::publication::append(
+                    publication::append(
                         &ctx.error_journal,
                         error_event,
                         AppendOptions::from_record(Some(&merged_parent))?,
@@ -955,8 +957,7 @@ async fn append_join_selection<H: UnifiedJoinHandler>(
         ctx.stage_id,
         StageType::Join,
     ));
-    crate::supervised_base::publication::append(&ctx.data_journal, event, Default::default())
-        .await?;
+    publication::append(&ctx.data_journal, event, Default::default()).await?;
     Ok(())
 }
 
@@ -1292,17 +1293,13 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         subscription.last_delivered_stage_input_position(),
         subscription.last_delivered_generation(),
     );
-    let mut outputs: VecDeque<
-        crate::stages::common::supervision::backpressure_drain::PendingOutput,
-    > = outputs
+    let mut outputs: VecDeque<PendingOutput> = outputs
         .into_iter()
-        .map(
-            |event| crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                causal: crate::supervised_base::publication::capture(),
-                event,
-                scope,
-            },
-        )
+        .map(|event| PendingOutput {
+            causal: publication::capture(),
+            event,
+            scope,
+        })
         .collect();
 
     while let Some(event) = outputs.pop_front() {

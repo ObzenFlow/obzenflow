@@ -10,7 +10,7 @@
 use crate::stages::common::handler_error::HandlerError;
 use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::payloads::stage_processing_payload::{
+use obzenflow_core::event::payloads::stage_processing_failed_payload::{
     FailedInput, StageProcessingFailed,
 };
 use obzenflow_core::event::provenance::FlowContext;

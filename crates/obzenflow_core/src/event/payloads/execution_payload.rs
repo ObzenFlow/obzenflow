@@ -103,7 +103,7 @@ pub enum ExecutionPayload {
     JoinPhase(JoinPhaseFact),
     SinkAudit(super::delivery_payload::SinkAuditPayload),
     StageFatalRecorded(super::stage_fatal_payload::StageFatalRecorded),
-    StageProcessingFailed(super::stage_processing_payload::StageProcessingFailed),
+    StageProcessingFailed(super::stage_processing_failed_payload::StageProcessingFailed),
     SinkOperationFailed(super::sink_operation_payload::SinkOperationFailed),
     EffectRecord(EffectRecord),
     EffectAttemptStarted(EffectAttemptStarted),

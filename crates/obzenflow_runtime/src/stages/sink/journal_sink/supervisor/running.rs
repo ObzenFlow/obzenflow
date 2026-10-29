@@ -23,6 +23,7 @@ use crate::stages::common::supervision::control_resolution::{
 use crate::stages::common::supervision::error_routing::processing_failure_record;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
+use crate::stages::common::supervision::output_committer::commit_error_output;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_sink_delivery_observers;
 use crate::stages::observer::{SinkDeliveryAttemptResult, SinkDeliveryObserverOutcome};
@@ -670,7 +671,7 @@ async fn journal_sink_operation_failure<
         .mark_as_error(error.detail(), error.kind());
     event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
     event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
-    crate::stages::common::supervision::output_committer::commit_error_output(
+    commit_error_output(
         &ctx.error_journal,
         &ctx.instrumentation,
         event,
@@ -708,7 +709,7 @@ async fn journal_processing_failed<
         ctx.lineage_policy,
     )
     .with_runtime_provenance(ctx.instrumentation.snapshot());
-    crate::stages::common::supervision::output_committer::commit_error_output(
+    commit_error_output(
         &ctx.error_journal,
         &ctx.instrumentation,
         event,

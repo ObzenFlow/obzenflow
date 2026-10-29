@@ -9,7 +9,9 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, PendingOutput,
+};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
@@ -26,7 +28,7 @@ use crate::stages::observer::dispatch::{
     run_stateful_before_accumulate_observers,
 };
 use crate::stages::observer::StatefulObserverContext;
-use crate::supervised_base::EventLoopDirective;
+use crate::supervised_base::{publication, EventLoopDirective};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -462,7 +464,7 @@ pub(super) async fn dispatch_accumulating<
                             ),
                             scope,
                         );
-                        crate::supervised_base::publication::append(
+                        publication::append(
                             &ctx.error_journal,
                             error_event,
                             AppendOptions::from_record(Some(&envelope))?,
@@ -834,13 +836,11 @@ pub(super) async fn dispatch_emitting<
                 }
 
                 let scope = observer_scope;
-                ctx.pending_outputs.push_back(
-                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                        causal: crate::supervised_base::publication::capture(),
-                        event,
-                        scope,
-                    },
-                );
+                ctx.pending_outputs.push_back(PendingOutput {
+                    causal: publication::capture(),
+                    event,
+                    scope,
+                });
             }
 
             ctx.pending_transition = Some(PendingTransition::EmitComplete);

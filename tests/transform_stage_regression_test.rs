@@ -13,12 +13,13 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::stage_processing_payload::StageProcessingFailed;
+use obzenflow_core::event::payloads::stage_processing_failed_payload::StageProcessingFailed;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{JournalRecord, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, TypedFiniteSourceHandler, TypedTransformHandler,
@@ -221,7 +222,7 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -360,7 +361,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create typed try-map flow: {error:?}"))?;
 
@@ -475,7 +476,7 @@ async fn transform_applies_stage_middleware() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -627,7 +628,7 @@ async fn a_sink_behind_a_same_type_validator_writes_only_valid_records() -> Resu
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
     handle.run().await?;
@@ -663,7 +664,7 @@ async fn a_type_changing_validator_keeps_its_rejection_out_of_its_data() -> Resu
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
     handle.run().await?;
@@ -707,7 +708,7 @@ async fn a_validator_feeding_two_sinks_records_each_rejection_once() -> Result<(
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|error| anyhow::anyhow!("Failed to create flow: {error:?}"))?;
     handle.run().await?;
