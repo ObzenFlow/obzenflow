@@ -4443,7 +4443,6 @@ macro_rules! source {
 /// through `emit_interval_hint()`; the row takes no interval clause.
 ///
 /// ```
-/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::{StatefulEmission, TypedStatefulHandler};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
@@ -4456,8 +4455,8 @@ macro_rules! source {
 /// #     type Output = Fact;
 /// #     fn accumulate(&self, _: &mut (), _: Fact) {}
 /// #     fn initial_state(&self) {}
-/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<Fact>, HandlerError> {
-/// #         Ok(StatefulEmission::RetainEpoch { outputs: Vec::new() })
+/// #     fn emit(&self, _: &()) -> StatefulEmission<Fact> {
+/// #         StatefulEmission::RetainEpoch { outputs: Vec::new() }
 /// #     }
 /// #     fn post_emit(&self, _: &mut ()) {}
 /// # }
@@ -4466,7 +4465,6 @@ macro_rules! source {
 /// ```
 ///
 /// ```compile_fail
-/// # use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// # use obzenflow_runtime::stages::common::handlers::{StatefulEmission, TypedStatefulHandler};
 /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// # struct Fact;
@@ -4479,8 +4477,8 @@ macro_rules! source {
 /// #     type Output = Fact;
 /// #     fn accumulate(&self, _: &mut (), _: Fact) {}
 /// #     fn initial_state(&self) {}
-/// #     fn emit(&self, _: &()) -> Result<StatefulEmission<Fact>, HandlerError> {
-/// #         Ok(StatefulEmission::RetainEpoch { outputs: Vec::new() })
+/// #     fn emit(&self, _: &()) -> StatefulEmission<Fact> {
+/// #         StatefulEmission::RetainEpoch { outputs: Vec::new() }
 /// #     }
 /// #     fn post_emit(&self, _: &mut ()) {}
 /// # }

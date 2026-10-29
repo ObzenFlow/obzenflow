@@ -8,7 +8,6 @@
 //! evolution lives in [`WrapperState`], alongside the accumulator's domain state.
 
 use super::trace::TraceState;
-use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::stateful::{
     StatefulEmission, TypedStatefulContribution, TypedStatefulDrainInvocation,
     TypedStatefulHandler, TypedStatefulInvocation, TypedStatefulOutputIds,
@@ -309,8 +308,8 @@ where
         self.emission.emit_interval_hint()
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(self.transition(state).0)
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        self.transition(state).0
     }
 
     fn post_emit(&self, state: &mut Self::State) {
@@ -321,30 +320,24 @@ where
         self.advance(state, output_ids);
     }
 
-    fn emit_invocation(
-        &self,
-        state: &Self::State,
-    ) -> Result<TypedStatefulInvocation<Self::Output>, HandlerError> {
+    fn emit_invocation(&self, state: &Self::State) -> TypedStatefulInvocation<Self::Output> {
         let (emission, traces) = self.transition(state);
-        Ok(match traces {
+        match traces {
             Some(traces) => TypedStatefulInvocation::with_output_traces(emission, traces),
             None => TypedStatefulInvocation::facts_only(emission),
-        })
+        }
     }
 
-    fn drain(&self, state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(self.drained_outputs(state).0)
+    fn drain(&self, state: &Self::State) -> Vec<Self::Output> {
+        self.drained_outputs(state).0
     }
 
-    fn drain_invocation(
-        &self,
-        state: &Self::State,
-    ) -> Result<TypedStatefulDrainInvocation<Self::Output>, HandlerError> {
+    fn drain_invocation(&self, state: &Self::State) -> TypedStatefulDrainInvocation<Self::Output> {
         let (outputs, traces) = self.drained_outputs(state);
-        Ok(match traces {
+        match traces {
             Some(traces) => TypedStatefulDrainInvocation::with_output_traces(outputs, traces),
             None => TypedStatefulDrainInvocation::facts_only(outputs),
-        })
+        }
     }
 }
 
@@ -393,7 +386,7 @@ mod tests {
         retaining.accumulate(&mut state, Tick);
         assert!(matches!(
             retaining.emit(&state),
-            Ok(StatefulEmission::RetainEpoch { .. })
+            StatefulEmission::RetainEpoch { .. }
         ));
         retaining.post_emit(&mut state);
         assert_eq!(state.inner, 2);
@@ -405,7 +398,7 @@ mod tests {
         resetting.accumulate(&mut state, Tick);
         assert!(matches!(
             resetting.emit(&state),
-            Ok(StatefulEmission::ResetEpoch { .. })
+            StatefulEmission::ResetEpoch { .. }
         ));
         resetting.post_emit(&mut state);
         assert_eq!(state.inner, 0);
@@ -481,28 +474,28 @@ mod tests {
     fn end_of_input_emits_again_only_after_new_inputs_unless_it_is_the_only_emission() {
         let always = StatefulWithEmission::new(Ticks, EmitAlways);
         let mut state = always.initial_state();
-        assert!(always.drain(&state).expect("drain projects").is_empty());
+        assert!(always.drain(&state).is_empty());
         always.accumulate(&mut state, Tick);
         always.post_emit(&mut state);
         assert!(
-            always.drain(&state).expect("drain projects").is_empty(),
+            always.drain(&state).is_empty(),
             "the last emission already covered every input"
         );
 
         let every_two = StatefulWithEmission::new(Ticks, EveryN::new(2));
         let mut state = every_two.initial_state();
         every_two.accumulate(&mut state, Tick);
-        assert_eq!(every_two.drain(&state).expect("drain projects").len(), 1);
+        assert_eq!(every_two.drain(&state).len(), 1);
 
         let resetting = StatefulWithEmission::new(Ticks, TimeWindow::new(Duration::ZERO));
         let mut state = resetting.initial_state();
         resetting.accumulate(&mut state, Tick);
         resetting.post_emit(&mut state);
-        assert!(resetting.drain(&state).expect("drain projects").is_empty());
+        assert!(resetting.drain(&state).is_empty());
 
         let at_end = StatefulWithEmission::new(Ticks, OnEOF::new());
         let state = at_end.initial_state();
-        assert_eq!(at_end.drain(&state).expect("drain projects").len(), 1);
+        assert_eq!(at_end.drain(&state).len(), 1);
     }
 
     #[test]

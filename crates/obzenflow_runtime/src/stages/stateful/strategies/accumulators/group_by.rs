@@ -520,7 +520,7 @@ mod tests {
                 },
             );
             assert!(handler.should_emit(&state));
-            let Ok(StatefulEmission::RetainEpoch { outputs }) = handler.emit(&state) else {
+            let StatefulEmission::RetainEpoch { outputs } = handler.emit(&state) else {
                 panic!("an update emission keeps the state");
             };
             handler.post_emit(&mut state);
@@ -535,7 +535,7 @@ mod tests {
                 vec![total("a", 7)]
             ]
         );
-        assert!(handler.drain(&state).expect("drain projects").is_empty());
+        assert!(handler.drain(&state).is_empty());
     }
 
     #[test]

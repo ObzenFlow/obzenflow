@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::context::{event_type, writer_id};
+use super::context::{event_id, event_type, writer_id};
 use super::payload::{abbreviated, compact};
 use super::*;
 use obzenflow::journal::ProcessingStatus;
@@ -609,7 +609,6 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
             .insert(coordinate(9), 7);
     }
     renderer.record(&mut output, hidden).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let update = String::from_utf8(std::mem::take(&mut output)).unwrap();
     assert!(update.contains(&format!("6 journal_{}", id(9))));
     assert!(
@@ -624,7 +623,6 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
         record.journal.stage.as_mut().unwrap().key = name.into();
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let updates = String::from_utf8(std::mem::take(&mut output)).unwrap();
     assert!(updates.contains("7 a_new_stage"));
     assert!(updates.contains("6 late_stage"));
@@ -653,7 +651,6 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
             .insert(coordinate(4), 1);
     }
     renderer.record(&mut output, forwarded.clone()).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     assert_eq!(record_clock(&renderer, &forwarded), "⟨3:100,5:1⟩");
     let matrix = matrix_text(&renderer, &RunReadProgress::default());
     assert!(matrix.lines().any(|line| {
@@ -841,7 +838,6 @@ fn all_six_effect_occurrences_retain_their_names_and_evidence_in_human_and_jsonl
             let mut renderer = Renderer::new(&view, false, false, [&record.journal].into_iter());
             let mut output = Vec::new();
             renderer.record(&mut output, record.clone()).unwrap();
-            renderer.flush_pending(&mut output).unwrap();
             let output = String::from_utf8(output).unwrap();
             assert!(output.contains(name), "{output}");
             if jsonl {
@@ -918,7 +914,6 @@ fn primary_execution_failures_remain_visible_in_default_human_and_jsonl_views() 
         for record in &records {
             renderer.record(&mut output, record.clone()).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(
             output.contains("obzenflow.stage_fatal_recorded"),
@@ -997,7 +992,6 @@ fn a_departure_reaches_jsonl_and_the_human_view_keeps_its_detail() {
         let mut renderer = Renderer::new(&view, false, false, std::iter::once(&record.journal));
         let mut output = Vec::new();
         renderer.record(&mut output, record.clone()).unwrap();
-        renderer.flush_pending(&mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         if jsonl {
             let row: RunRecord = serde_json::from_str(output.trim_end()).unwrap();
@@ -1046,7 +1040,6 @@ fn human_and_jsonl_select_the_same_records() {
             for record in &records {
                 renderer.record(&mut output, record.clone()).unwrap();
             }
-            renderer.flush_pending(&mut output).unwrap();
             let expected = if include_runtime {
                 vec![100, 102, 103]
             } else {
@@ -1104,7 +1097,6 @@ fn hidden_runtime_records_preserve_parent_resolution_and_separate_fact_groups() 
     ] {
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(!text.contains("RUNTIME") && !text.contains("inputs_since_last_report"));
     assert_eq!(
@@ -1163,7 +1155,6 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
             stage.is_effectful = stage.key == "classify";
             renderer.record(&mut output, record).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("\x1b[38;5;217mEFFECT (stage: \x1b[0m\x1b[1;38;5;231mclassify\x1b[0m\x1b[38;5;217m, journal: 2)\x1b[0m\n\x1b[1;38;5;224meffect.execution_failed\x1b[0m\x1b[38;5;217m ← classify(sensor.reading)\x1b[0m"));
         assert!(
@@ -1210,7 +1201,6 @@ fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
             .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
             .unwrap();
         renderer.record(&mut output, result).unwrap();
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
             "\x1b[1;38;5;{color}m{heading} (stage: \x1b[0m\x1b[1;38;5;{reporter_color}mclassify\x1b[0m\x1b[1;38;5;{color}m, journal: 2)\x1b[0m\n\x1b[1;38;5;{output_color}msensor.classified\x1b[0m\x1b[1;38;5;{color}m ← classify(sensor.reading)\x1b[0m"
@@ -1264,7 +1254,6 @@ fn stage_capability_comes_from_the_manifest_regardless_of_effect_provenance() {
         for record in [fact(1, 100, &[], json!({"celsius":38})), result, derived] {
             renderer.record(&mut output, record).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         let headings: Vec<_> = text
             .split("\n\n")
@@ -1305,7 +1294,6 @@ fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_
         let mut output = Vec::new();
         renderer.record(&mut output, input).unwrap();
         renderer.record(&mut output, result).unwrap();
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert_eq!(
             text.lines().any(|line| line == expression),
@@ -1338,12 +1326,20 @@ fn emphasis_preserves_wrapped_unicode_stage_and_event_names() {
         renderer.width = width;
         let mut plain = Vec::new();
         renderer
-            .render_group(&mut plain, std::slice::from_ref(&record))
+            .terminal()
+            .render(
+                &mut plain,
+                &EventView::from_record(&record, &renderer.context),
+            )
             .unwrap();
         renderer.color = true;
         let mut colored = Vec::new();
         renderer
-            .render_group(&mut colored, std::slice::from_ref(&record))
+            .terminal()
+            .render(
+                &mut colored,
+                &EventView::from_record(&record, &renderer.context),
+            )
             .unwrap();
         let colored = String::from_utf8(colored).unwrap();
         let mut pieces = colored.split("\x1b[");
@@ -1376,7 +1372,7 @@ fn emphasis_preserves_wrapped_unicode_stage_and_event_names() {
 }
 
 #[test]
-fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_parent() {
+fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload() {
     let mut renderer = renderer();
     let mut output = Vec::new();
     let first = fact(2, 101, &[100], json!({"sensor":"A", "reason":"too_hot"}));
@@ -1389,16 +1385,11 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
     if let RunRecordData::Chain(row) = &mut second.record {
         row.envelope.provenance.event.event_type = "sensor.cooling_requested".into();
     }
-    renderer.record(&mut output, first).unwrap();
-    renderer.record(&mut output, second).unwrap();
-    assert!(
-        output.is_empty(),
-        "wait for the actual input, not a guessed type"
-    );
     renderer
         .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
         .unwrap();
-    renderer.flush_pending(&mut output).unwrap();
+    renderer.record(&mut output, first).unwrap();
+    renderer.record(&mut output, second).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains(&format!(
@@ -1440,7 +1431,7 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         .unwrap();
     assert!(
         last_fact < last_clock,
-        "each grouped fact retains its own clock below its typed equation"
+        "each fact retains its own clock below its typed equation"
     );
     assert_eq!(
         text.matches("\"sensor\": \"A\"").count(),
@@ -1463,10 +1454,7 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         let payload: Value = serde_json::from_str(&block[payload_start..]).unwrap();
         assert_eq!(payload, json!({"sensor":"A", "reason":reason}));
     }
-    assert_eq!(
-        renderer.records, 3,
-        "grouped display still counts every record"
-    );
+    assert_eq!(renderer.records, 3, "every record is counted");
 }
 
 #[test]
@@ -1485,7 +1473,6 @@ fn missing_parents_flush_naming_only_recorded_input_types_without_grouping_unrel
             with_inputs(fact(2, 102, &[99], json!({"n":1})), &[]),
         )
         .unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert_eq!(
         text.matches("TRANSFORM (stage: classify, journal: 2)\nsensor.classified ← ")
@@ -1516,21 +1503,6 @@ fn missing_parents_flush_naming_only_recorded_input_types_without_grouping_unrel
         1,
         "no type is taken from anywhere but the record: {text}"
     );
-}
-
-#[test]
-fn continuous_stream_with_missing_parents_has_bounded_pending_rows() {
-    let mut renderer = renderer();
-    let mut output = Vec::new();
-    for n in 100..(100 + MAX_PENDING as u64 * 2) {
-        renderer
-            .record(&mut output, fact(2, n, &[9999], json!({"n":n})))
-            .unwrap();
-        assert!(renderer.pending.len() < MAX_PENDING);
-    }
-    renderer.flush_pending(&mut output).unwrap();
-    assert_eq!(renderer.records, MAX_PENDING as u64 * 2);
-    assert!(renderer.pending.is_empty());
 }
 
 #[tokio::test]
@@ -1579,9 +1551,7 @@ async fn explanation_shows_inherited_clock_without_waiting_for_other_journals() 
     renderer.record(&mut output, child).unwrap();
     let first = std::str::from_utf8(&output).unwrap();
     assert!(first.contains("⟨1:1,2:1⟩"), "{first}");
-    assert!(renderer.pending.is_empty());
     renderer.record(&mut output, source).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert_eq!(renderer.records, 2);
     assert!(text.contains("⟨1:1⟩"), "{text}");
@@ -1605,7 +1575,6 @@ fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
     renderer
         .record(&mut output, fact(2, 101, &[], json!({})))
         .unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("⟨1:100,3:12⟩"), "{text}");
     assert!(text.contains(&format!("3 journal_{}", id(3))), "{text}");
@@ -1629,7 +1598,6 @@ fn clocks_name_journals_from_earlier_runs_in_the_lineage() {
     }
     let mut output = Vec::new();
     renderer.record(&mut output, source).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("⟨1:100,3:12⟩"), "{text}");
     assert!(text.contains("3 thermometer (gen 0)"), "{text}");
@@ -1672,7 +1640,6 @@ fn replayed_facts_name_their_original_author_by_the_stage_that_owns_the_journal(
     let mut output = Vec::new();
     renderer.record(&mut output, replayed).unwrap();
     renderer.record(&mut output, unrelated).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     assert_eq!(
         renderer.context.writer_name(&replayed_writer),
         "thermometer [replay]"
@@ -1698,7 +1665,6 @@ fn compact_clock_rows_follow_output_equations_without_truncating_counts() {
         }
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     let lines: Vec<_> = text.lines().collect();
     let clocks: Vec<_> = lines
@@ -1749,7 +1715,6 @@ fn reporting_journal_highlight_uses_identity_and_row_color_instead_of_counter_si
     let mut output = Vec::new();
     renderer.record(&mut output, source).unwrap();
     renderer.record(&mut output, transform).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains("\x1b[1;4;38;5;215m9\x1b[0m"),
@@ -1833,7 +1798,6 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         for record in [catalog, fact(1, 100, &[], json!({"celsius":38})), result] {
             renderer.record(&mut output, record).unwrap();
         }
-        renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
             "\x1b[1;38;5;114m{heading} (stage: \x1b[0m\x1b[1;38;5;194mclassify\x1b[0m\x1b[1;38;5;114m, journal: 2)\x1b[0m\n\x1b[1;38;5;157msensor.classified\x1b[0m\x1b[1;38;5;114m ← classify(sensor.calibration, sensor.reading)\x1b[0m"
@@ -1867,7 +1831,6 @@ fn a_linked_stateful_output_names_its_input_and_its_previous_output() {
     ] {
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains(&format!(
@@ -1929,7 +1892,6 @@ fn failed_processing_remains_distinct_from_a_successfully_produced_fact() {
         .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
         .unwrap();
     renderer.record(&mut output, failed).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("[processing error]"));
     assert!(text.contains("processing error: calibration unavailable"));
@@ -2003,7 +1965,6 @@ fn join_facts_are_headed_with_the_phase_their_join_had_journalled() {
     ] {
         renderer.record(&mut output, record).unwrap();
     }
-    renderer.flush_pending(&mut output).unwrap();
     let headings: Vec<String> = String::from_utf8(output)
         .unwrap()
         .lines()
@@ -2293,84 +2254,6 @@ fn a_rejected_row_reads_as_a_source_error_with_no_inputs() {
 }
 
 #[test]
-fn a_source_error_prints_after_the_data_records_its_clock_counts() {
-    let readings = (100..=103).map(|n| fact(1, n, &[], json!({ "reading": n })));
-    let mut rejected = rejected_row(110, 7);
-    let mut beyond_snapshot = rejected_row(111, 8);
-    assert_ne!(rejected.journal.id, fact(1, 100, &[], json!({})).journal.id);
-    for (record, count) in [(&mut rejected, 102), (&mut beyond_snapshot, 200)] {
-        let RunRecordData::Chain(row) = &mut record.record else {
-            unreachable!()
-        };
-        row.envelope
-            .provenance
-            .journal
-            .vector_clock
-            .clocks
-            .insert(coordinate(1), count);
-    }
-    let records: Vec<_> = [rejected, beyond_snapshot]
-        .into_iter()
-        .chain(readings)
-        .collect();
-    let mut renderer = renderer_over(&records);
-    let text = rendered_with_summary(&mut renderer, &records);
-    let at = |needle: &str| {
-        text.find(needle)
-            .unwrap_or_else(|| panic!("{needle} missing from\n{text}"))
-    };
-    let errors: Vec<_> = text
-        .match_indices("SOURCE ERROR (stage: thermometer, error journal: ")
-        .map(|(index, _)| index)
-        .collect();
-    assert_eq!(errors.len(), 2, "{text}");
-    assert!(at(r#""reading": 102"#) < errors[0], "{text}");
-    assert!(errors[0] < at(r#""reading": 103"#), "{text}");
-    assert!(at(r#""reading": 103"#) < errors[1], "{text}");
-    assert!(renderer.held_errors.is_empty());
-}
-
-#[test]
-fn a_stage_error_prints_right_after_its_input_however_far_ahead_it_was_read() {
-    let inputs = (100..250).map(|n| fact(1, n, &[], json!({ "reading": n })));
-    let errors = (100..250).map(|n| {
-        let mut failed = processing_failed(2, n + 1000, n, "rejected");
-        let RunRecordData::Chain(row) = &mut failed.record else {
-            unreachable!()
-        };
-        let clock = &mut row.envelope.provenance.journal.vector_clock.clocks;
-        clock.clear();
-        clock.insert(coordinate(1), n);
-        failed
-    });
-    let records: Vec<_> = errors.chain(inputs).collect();
-    let mut renderer = renderer_over(&records);
-    let text = rendered_with_summary(&mut renderer, &records);
-    assert_eq!(
-        text.matches("runtime.stage.processing_failed ← classify(sensor.reading)")
-            .count(),
-        150,
-        "{text}"
-    );
-    for n in [100, 180, 249] {
-        let input = text
-            .find(&format!("\"reading\": {n}\n"))
-            .unwrap_or_else(|| panic!("reading {n} missing from\n{text}"));
-        let after = &text[input..];
-        let error = after
-            .find("TRANSFORM ERROR (stage: classify")
-            .unwrap_or_else(|| panic!("no error after reading {n} in\n{text}"));
-        assert!(
-            after
-                .find("SOURCE (stage: thermometer")
-                .is_none_or(|next| error < next),
-            "{text}"
-        );
-    }
-    assert!(renderer.held_errors.is_empty());
-}
-
-#[test]
 fn an_output_printed_before_its_input_names_the_input_type_it_recorded() {
     let outputs = (100..250).map(|n| fact(2, n + 1000, &[n], json!({ "n": n })));
     let inputs = (100..250).map(|n| fact(1, n, &[], json!({ "reading": n })));
@@ -2516,6 +2399,7 @@ fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
     };
     killed_pin.run = killed_run.clone();
     killed_rejection.run = killed_run.clone();
+    killed_rejection.journal.id = serde_json::from_value(json!(id(35))).unwrap();
     let killed_records = [killed_pin, killed_rejection.clone()];
     let mut rejections = LineageRejections::default();
     rejections.fold_run(&killed_records);
@@ -2523,9 +2407,11 @@ fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
     let repeat = rejected_row(101, 164);
     let records = [repeat.clone()];
     let mut renderer = renderer_over(&records);
+    renderer.begin(&mut Vec::new(), &repeat.run, false).unwrap();
+    renderer.lineage(rejections);
     let mut output = Vec::new();
     renderer
-        .lineage(&mut output, vec![killed_rejection.clone()], rejections)
+        .record(&mut output, killed_rejection.clone())
         .unwrap();
     let text = String::from_utf8(output).unwrap() + &rendered_with_summary(&mut renderer, &records);
     let killed = format!("flow_{}", id(20));
@@ -2563,10 +2449,10 @@ fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
     );
     let mut rejections = LineageRejections::default();
     rejections.fold_run(&killed_records);
+    jsonl.begin(&mut Vec::new(), &repeat.run, false).unwrap();
+    jsonl.lineage(rejections);
     let mut output = Vec::new();
-    jsonl
-        .lineage(&mut output, vec![killed_rejection.clone()], rejections)
-        .unwrap();
+    jsonl.record(&mut output, killed_rejection.clone()).unwrap();
     jsonl.record(&mut output, repeat).unwrap();
     let lines: Vec<Value> = String::from_utf8(output)
         .unwrap()

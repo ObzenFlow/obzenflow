@@ -335,7 +335,7 @@ mod tests {
         for (sensor, value) in [("a", 1), ("b", 2), ("a", 3), ("a", 4)] {
             handler.accumulate(&mut state, reading(sensor, value));
             if handler.should_emit(&state) {
-                let Ok(StatefulEmission::RetainEpoch { outputs }) = handler.emit(&state) else {
+                let StatefulEmission::RetainEpoch { outputs } = handler.emit(&state) else {
                     panic!("a conflation emission keeps the state");
                 };
                 handler.post_emit(&mut state);
@@ -350,6 +350,6 @@ mod tests {
                 vec![reading("a", 4)]
             ]
         );
-        assert!(handler.drain(&state).expect("drain projects").is_empty());
+        assert!(handler.drain(&state).is_empty());
     }
 }

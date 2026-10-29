@@ -91,14 +91,14 @@ fn placeholder_stateful_emits_nothing_and_drains() {
     let handler = PlaceholderStateful::<PlaceholderInput, PlaceholderOutput>::new(None);
 
     TypedStatefulHandler::accumulate(&handler, &mut (), PlaceholderInput);
-    let emission = TypedStatefulHandler::emit(&handler, &()).expect("stateful emit");
+    let emission = TypedStatefulHandler::emit(&handler, &());
     let outputs = match emission {
         obzenflow_runtime::stages::stateful::StatefulEmission::RetainEpoch { outputs }
         | obzenflow_runtime::stages::stateful::StatefulEmission::ResetEpoch { outputs } => outputs,
     };
     assert!(outputs.is_empty());
 
-    let drained = TypedStatefulHandler::drain(&handler, &()).expect("stateful drain");
+    let drained = TypedStatefulHandler::drain(&handler, &());
     assert!(drained.is_empty());
 }
 

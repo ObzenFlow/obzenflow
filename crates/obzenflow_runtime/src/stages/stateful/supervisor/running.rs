@@ -31,6 +31,7 @@ use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::WriterId;
@@ -785,10 +786,7 @@ pub(super) async fn dispatch_emitting<
     let emit_result = process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
         handler
             .emit_with_context(&mut *current_state, output_context)
-            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
-                instrumentation.record_error(err.kind());
-                err.into()
-            })
+            .inspect_err(|_| instrumentation.record_error(ErrorKind::Unknown))
     })
     .await;
 
@@ -894,47 +892,33 @@ pub(super) async fn dispatch_emitting<
             }
             Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete))
         }
-        Err(e) => {
-            if let Some(handler_error) =
-                e.downcast_ref::<crate::stages::common::handler_error::HandlerError>()
-            {
-                if let Some(fatal) = handler_error.as_fatal() {
-                    let writer_id = ctx.writer_id.ok_or_else(|| {
-                        "fatal stateful emission has no stage writer id".to_string()
-                    })?;
-                    let parent = ctx.last_consumed_envelope.as_ref().ok_or_else(|| {
-                        "fatal stateful emission has no causal input envelope".to_string()
-                    })?;
-                    record_stage_fatal(
-                        fatal,
-                        StageFatalCommit {
-                            error_journal: &ctx.error_journal,
-                            writer_id,
-                            stage_id: ctx.stage_id,
-                            stage_key: &ctx.stage_name,
-                            input_position: ctx.last_input_position,
-                            parent: Some(parent),
-                            lineage: ctx.lineage_policy,
-                        },
-                    )
-                    .await?;
-                    if let Some(upstream) = ctx.pending_ack_upstream.take() {
-                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                            reader.ack_consumed(1);
-                        }
-                    }
-                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                        fatal.detail.clone(),
-                    )));
+        Err(fatal) => {
+            let writer_id = ctx
+                .writer_id
+                .ok_or_else(|| "fatal stateful emission has no stage writer id".to_string())?;
+            let parent = ctx.last_consumed_envelope.as_ref().ok_or_else(|| {
+                "fatal stateful emission has no causal input envelope".to_string()
+            })?;
+            record_stage_fatal(
+                &fatal,
+                StageFatalCommit {
+                    error_journal: &ctx.error_journal,
+                    writer_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: &ctx.stage_name,
+                    input_position: ctx.last_input_position,
+                    parent: Some(parent),
+                    lineage: ctx.lineage_policy,
+                },
+            )
+            .await?;
+            if let Some(upstream) = ctx.pending_ack_upstream.take() {
+                if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                    reader.ack_consumed(1);
                 }
             }
-            tracing::error!(
-                stage_name = %ctx.stage_name,
-                error = ?e,
-                "Failed to emit aggregated event, transitioning to Failed"
-            );
             Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                format!("Emit error: {e}"),
+                fatal.detail,
             )))
         }
     }

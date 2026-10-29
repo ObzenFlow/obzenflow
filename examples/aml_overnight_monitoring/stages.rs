@@ -157,10 +157,10 @@ impl TypedStatefulHandler for DailyProfile {
             .insert(transaction.payer());
     }
 
-    fn emit(&self, accounts: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, accounts: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: self.alerts(accounts),
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}
@@ -335,7 +335,7 @@ mod tests {
             profile.accumulate(&mut accounts, payment(n as u64, day, from, to));
         }
 
-        let alerts = profile.drain(&accounts).expect("the profile drains");
+        let alerts = profile.drain(&accounts);
         assert_eq!(
             alerted(&alerts),
             [
@@ -367,16 +367,13 @@ mod tests {
         {
             profile.accumulate(&mut accounts, payment(n as u64, timestamp, "split", to));
         }
-        assert!(profile
-            .drain(&accounts)
-            .expect("the profile drains")
-            .is_empty());
+        assert!(profile.drain(&accounts).is_empty());
 
         profile.accumulate(
             &mut accounts,
             payment(9, "2022/09/05 00:03", "split", "p-4"),
         );
-        let alerts = profile.drain(&accounts).expect("the profile drains");
+        let alerts = profile.drain(&accounts);
         assert_eq!(
             alerts
                 .iter()

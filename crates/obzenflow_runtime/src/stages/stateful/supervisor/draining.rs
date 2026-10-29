@@ -29,6 +29,7 @@ use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{StageId, WriterId};
@@ -495,71 +496,32 @@ pub(super) async fn dispatch_draining<
                                     }
                                 }
                             }
-                            Err(err) => {
-                                if let Some(fatal) = err.as_fatal() {
-                                    let writer_id = ctx.writer_id.ok_or_else(|| {
-                                        "fatal stateful drain emission has no stage writer id"
-                                            .to_string()
-                                    })?;
-                                    record_stage_fatal(
-                                        fatal,
-                                        StageFatalCommit {
-                                            error_journal: &ctx.error_journal,
-                                            writer_id,
-                                            stage_id: ctx.stage_id,
-                                            stage_key: &ctx.stage_name,
-                                            input_position: stage_input_position,
-                                            parent: Some(&envelope),
-                                            lineage: ctx.lineage_policy,
-                                        },
-                                    )
-                                    .await?;
-                                    ctx.pending_ack_upstream = None;
-                                    acknowledge_consumed_drain_input(
-                                        &ctx.backpressure_readers,
-                                        upstream_stage,
-                                    );
-                                    return Ok(EventLoopDirective::Transition(
-                                        StatefulEvent::Error(fatal.detail.clone()),
-                                    ));
-                                }
-                                tracing::error!(
-                                    stage_name = %ctx.stage_name,
-                                    error = ?err,
-                                    "Failed to emit aggregated events during draining; mapping to error-marked event"
-                                );
-
-                                let error_event = error_row_in_scope(
-                                    processing_failed(
-                                        WriterId::from(ctx.stage_id),
-                                        &flow_context,
-                                        &envelope.authored(),
-                                        &err,
-                                        ctx.lineage_policy,
-                                    ),
-                                    observer_scope,
-                                );
-                                ctx.instrumentation.record_error(err.kind());
-                                tracing::info!(
-                                    stage_name = %ctx.stage_name,
-                                    event_id = %error_event.id,
-                                    "Writing stateful drain error event to error journal"
-                                );
-                                if let Some(subscription) = sup.subscription.as_mut() {
-                                    subscription.track_output_event();
-                                }
-                                crate::stages::common::supervision::output_committer::commit_error_output(
-                                    &ctx.error_journal,
-                                    &ctx.instrumentation,
-                                    error_event,
-                                    Some(&envelope),
-                                )
-                                .await
-                                .map_err(|e| {
-                                    format!("Failed to write stateful drain error event: {e}")
+                            Err(fatal) => {
+                                let writer_id = ctx.writer_id.ok_or_else(|| {
+                                    "fatal stateful drain emission has no stage writer id"
+                                        .to_string()
                                 })?;
-
-                                // Keep draining; do not transition to Failed on per-record handler errors.
+                                record_stage_fatal(
+                                    &fatal,
+                                    StageFatalCommit {
+                                        error_journal: &ctx.error_journal,
+                                        writer_id,
+                                        stage_id: ctx.stage_id,
+                                        stage_key: &ctx.stage_name,
+                                        input_position: stage_input_position,
+                                        parent: Some(&envelope),
+                                        lineage: ctx.lineage_policy,
+                                    },
+                                )
+                                .await?;
+                                ctx.pending_ack_upstream = None;
+                                acknowledge_consumed_drain_input(
+                                    &ctx.backpressure_readers,
+                                    upstream_stage,
+                                );
+                                return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                                    fatal.detail,
+                                )));
                             }
                         }
                     }
@@ -812,10 +774,7 @@ pub(super) async fn produce_final_output<
         handler
             .drain_with_context(final_state, output_context)
             .await
-            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
-                instrumentation.record_error(err.kind());
-                err.into()
-            })
+            .inspect_err(|_| instrumentation.record_error(ErrorKind::Unknown))
     })
     .await;
 
@@ -903,43 +862,29 @@ pub(super) async fn produce_final_output<
                 StatefulEvent::FinalOutputsPrepared,
             ))
         }
-        Err(e) => {
-            if let Some(handler_error) =
-                e.downcast_ref::<crate::stages::common::handler_error::HandlerError>()
-            {
-                if let Some(fatal) = handler_error.as_fatal() {
-                    let writer_id = ctx
-                        .writer_id
-                        .ok_or_else(|| "fatal stateful drain has no stage writer id".to_string())?;
-                    let parent = ctx
-                        .terminal_envelope
-                        .as_ref()
-                        .or(ctx.last_consumed_envelope.as_ref());
-                    record_stage_fatal(
-                        fatal,
-                        StageFatalCommit {
-                            error_journal: &ctx.error_journal,
-                            writer_id,
-                            stage_id: ctx.stage_id,
-                            stage_key: &ctx.stage_name,
-                            input_position: None,
-                            parent: parent.map(crate::messaging::DeliveredRecord::record),
-                            lineage: ctx.lineage_policy,
-                        },
-                    )
-                    .await?;
-                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                        fatal.detail.clone(),
-                    )));
-                }
-            }
-            tracing::error!(
-                stage_name = %ctx.stage_name,
-                error = ?e,
-                "Drain error"
-            );
+        Err(fatal) => {
+            let writer_id = ctx
+                .writer_id
+                .ok_or_else(|| "fatal stateful drain has no stage writer id".to_string())?;
+            let parent = ctx
+                .terminal_envelope
+                .as_ref()
+                .or(ctx.last_consumed_envelope.as_ref());
+            record_stage_fatal(
+                &fatal,
+                StageFatalCommit {
+                    error_journal: &ctx.error_journal,
+                    writer_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: &ctx.stage_name,
+                    input_position: None,
+                    parent: parent.map(crate::messaging::DeliveredRecord::record),
+                    lineage: ctx.lineage_policy,
+                },
+            )
+            .await?;
             Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                format!("Drain error: {e}"),
+                fatal.detail,
             )))
         }
     }
@@ -1015,10 +960,45 @@ pub(super) async fn drain_final_output<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+    use crate::backpressure::{BackpressurePlan, BackpressureRegistry, BackpressureWriter};
+    use crate::effects::{CurrentRunHistory, EffectPortRegistry};
+    use crate::execution::{RuntimeExecution, RuntimeMode};
+    use crate::feed_plan::StageOutputContract;
     use crate::id_conversions::StageIdExt;
+    use crate::message_bus::FsmMessageBus;
+    use crate::metrics::instrumentation::StageInstrumentation;
+    use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+    use crate::stages::common::control_strategies::{JonestownSignalStrategy, ProcessingContext};
+    use crate::stages::common::handlers::{
+        StatefulEmission, TypedStatefulHandler, TypedStatefulHandlerAdapter,
+    };
+    use crate::stages::common::supervision::catch_up::CatchUpHandle;
+    use crate::stages::observer::StageObserverBundle;
+    use crate::stages::resources_builder::SubscriptionFactory;
+    use crate::stages::stateful::fsm::{StatefulAction, StatefulContext};
+    use crate::supervised_base::HandlerSupervised;
+    use async_trait::async_trait;
+    use obzenflow_core::config::LineagePolicy;
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    use obzenflow_core::event::provenance::causality_context::CausalInput;
+    use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::event::{StageFatalCode, StageFatalReason};
+    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::journal::{
+        Journal, JournalError, JournalReader, JournalStorage, JournalStorageReader,
+    };
+    use obzenflow_core::{ChainEvent, EventId, FlowId, JournalId, JournalRecord, TypedPayload};
+    use obzenflow_fsm::FsmAction;
     use obzenflow_topology::TopologyBuilder;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{json, Value};
+    use std::collections::VecDeque;
+    use std::marker::PhantomData;
     use std::num::NonZeroU64;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn ordinary_accumulate_error_acknowledges_one_consumed_drain_input() {
@@ -1047,5 +1027,527 @@ mod tests {
         assert_eq!(snapshot.stage_writer_seq.get(&upstream), Some(&1));
         assert_eq!(snapshot.stage_min_reader_seq.get(&upstream), Some(&1));
         assert_eq!(snapshot.edge_in_flight.get(&(upstream, stateful)), Some(&0));
+    }
+
+    struct TestJournal {
+        id: JournalId,
+        owner: JournalOwner,
+        records: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
+    }
+
+    impl TestJournal {
+        fn owned_by(stage: StageId) -> Arc<dyn Journal<ChainEvent>> {
+            Arc::new(Self {
+                id: JournalId::new(),
+                owner: JournalOwner::stage(stage),
+                records: Arc::default(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl JournalStorage<ChainEvent> for TestJournal {
+        fn storage_id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn storage_owner(&self) -> Option<&JournalOwner> {
+            Some(&self.owner)
+        }
+
+        async fn storage_append(
+            &self,
+            event: ChainEvent,
+            mut options: AppendOptions<ChainEvent>,
+        ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+            let event = options.capture.prepare(0, event);
+            let mut records = self.records.lock().unwrap();
+            let record =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+            records.push(record.clone());
+            Ok(record)
+        }
+
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+            Ok(self.records.lock().unwrap().clone())
+        }
+
+        async fn storage_read_event(
+            &self,
+            event_id: &EventId,
+        ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|record| record.envelope.provenance.event.id == *event_id)
+                .cloned())
+        }
+
+        async fn storage_reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+            Ok(Box::new(TestJournalReader {
+                records: self.records.clone(),
+                position: position as usize,
+            }))
+        }
+
+        async fn storage_read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .take(count)
+                .cloned()
+                .collect())
+        }
+    }
+
+    struct TestJournalReader {
+        records: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
+        position: usize,
+    }
+
+    #[async_trait]
+    impl JournalStorageReader<ChainEvent> for TestJournalReader {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
+            let record = self.records.lock().unwrap().get(self.position).cloned();
+            if record.is_some() {
+                self.position += 1;
+            }
+            Ok(record)
+        }
+
+        fn storage_position(&self) -> u64 {
+            self.position as u64
+        }
+
+        fn storage_is_at_end(&self) -> bool {
+            self.position >= self.records.lock().unwrap().len()
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct Reading {
+        value: u64,
+    }
+
+    impl TypedPayload for Reading {
+        const EVENT_TYPE: &'static str = "stateful_drain.reading";
+    }
+
+    #[derive(Clone, Debug, Deserialize)]
+    struct Unpublishable;
+
+    impl Serialize for Unpublishable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("a total cannot be published"))
+        }
+    }
+
+    impl TypedPayload for Unpublishable {
+        const EVENT_TYPE: &'static str = "stateful_drain.unpublishable";
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct UnpublishableTotal {
+        ready: Arc<AtomicBool>,
+    }
+
+    impl TypedStatefulHandler for UnpublishableTotal {
+        type State = u64;
+        type Input = Reading;
+        type Output = Unpublishable;
+
+        fn initial_state(&self) -> u64 {
+            0
+        }
+
+        fn accumulate(&self, total: &mut u64, reading: Reading) {
+            *total += reading.value;
+        }
+
+        fn should_emit(&self, total: &u64) -> bool {
+            self.ready.load(Ordering::SeqCst) && *total > 0
+        }
+
+        fn emit(&self, _: &u64) -> StatefulEmission<Unpublishable> {
+            StatefulEmission::RetainEpoch {
+                outputs: vec![Unpublishable],
+            }
+        }
+
+        fn post_emit(&self, _: &mut u64) {}
+    }
+
+    type Total = TypedStatefulHandlerAdapter<UnpublishableTotal>;
+
+    struct DrainingTotal {
+        supervisor: StatefulSupervisor<Total>,
+        context: StatefulContext<Total>,
+        ready: Arc<AtomicBool>,
+        registry: BackpressureRegistry,
+        upstream_writer: BackpressureWriter,
+        upstream: StageId,
+        stage: StageId,
+        downstream: StageId,
+        upstream_journal: Arc<dyn Journal<ChainEvent>>,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        error_journal: Arc<dyn Journal<ChainEvent>>,
+    }
+
+    async fn draining_total() -> DrainingTotal {
+        let mut builder = TopologyBuilder::new();
+        let upstream_topology_id = builder.add_stage(Some("upstream".to_string()));
+        let stage_topology_id = builder.add_stage(Some("total".to_string()));
+        let downstream_topology_id = builder.add_stage(Some("downstream".to_string()));
+        let topology = builder.build_unchecked().expect("topology");
+        let upstream = StageId::from_topology_id(upstream_topology_id);
+        let stage = StageId::from_topology_id(stage_topology_id);
+        let downstream = StageId::from_topology_id(downstream_topology_id);
+        let window = NonZeroU64::new(1).expect("window");
+        let plan = BackpressurePlan::disabled()
+            .with_stage_enforced(upstream, window, Duration::from_secs(30))
+            .with_stage_enforced(stage, window, Duration::from_secs(30));
+        let registry = BackpressureRegistry::new(&topology, &plan);
+
+        let upstream_journal = TestJournal::owned_by(upstream);
+        let data_journal = TestJournal::owned_by(stage);
+        let error_journal = TestJournal::owned_by(stage);
+        let mut upstream_subscription_factory = SubscriptionFactory::new(HashMap::from([
+            (upstream, "upstream".to_string()),
+            (stage, "total".to_string()),
+            (downstream, "downstream".to_string()),
+        ]))
+        .bind(&[(upstream, upstream_journal.clone())]);
+        upstream_subscription_factory.owner_label = "total".to_string();
+
+        let total = UnpublishableTotal::default();
+        let ready = total.ready.clone();
+        let mut handler = TypedStatefulHandlerAdapter::new(total);
+        handler.install_writer_id(WriterId::from(stage));
+        let current_state = handler.initial_state();
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let runtime_execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        let flow_id = FlowId::new();
+        let catch_up = CatchUpHandle::producing(
+            make_flow_context(
+                "drain_flow",
+                &flow_id.to_string(),
+                "total",
+                stage,
+                StageType::Stateful,
+            ),
+            data_journal.clone(),
+            instrumentation.clone(),
+            runtime_execution.clone(),
+        );
+        let mut context = StatefulContext::new(StatefulResources {
+            handler: Some(Arc::new(handler)),
+            stage_id: stage,
+            stage_name: "total".to_string(),
+            observers: StageObserverBundle::default(),
+            flow_name: "drain_flow".to_string(),
+            flow_id,
+            current_state,
+            data_journal: data_journal.clone(),
+            effect_history: None,
+            current_run_history: CurrentRunHistory::new(data_journal.clone()),
+            runtime_execution,
+            effect_ports: EffectPortRegistry::new(),
+            effect_declarations: Vec::new(),
+            last_input_position: None,
+            error_journal: error_journal.clone(),
+            bus: Arc::new(FsmMessageBus::new()),
+            writer_id: None,
+            lineage_policy: LineagePolicy::default(),
+            subscription: None,
+            contract_state: Vec::new(),
+            last_contract_check: None,
+            control_strategy: Arc::new(JonestownSignalStrategy),
+            processing_context: ProcessingContext::default(),
+            buffered_eof: None,
+            terminal_envelope: None,
+            terminal_eof_kind: None,
+            last_consumed_envelope: None,
+            instrumentation,
+            upstream_subscription_factory,
+            events_since_last_heartbeat: 0,
+            heartbeat_interval: 0,
+            last_data_event_time: None,
+            emit_interval: None,
+            backpressure_writer: registry.writer(stage),
+            output_contract: StageOutputContract::empty(),
+            backpressure_readers: HashMap::from([(upstream, registry.reader(upstream, stage))]),
+            pending_outputs: VecDeque::new(),
+            pending_transition: None,
+            pending_ack_upstream: None,
+            backpressure_pulse: BackpressureActivityPulse::new(),
+            backpressure_stall: Default::default(),
+            heartbeat: None,
+            catch_up,
+        });
+        StatefulAction::AllocateResources
+            .execute(&mut context)
+            .await
+            .expect("allocate resources");
+
+        DrainingTotal {
+            supervisor: StatefulSupervisor {
+                name: "total".to_string(),
+                stage_id: stage,
+                subscription: None,
+                _marker: PhantomData,
+            },
+            context,
+            ready,
+            upstream_writer: registry.writer(upstream),
+            registry,
+            upstream,
+            stage,
+            downstream,
+            upstream_journal,
+            data_journal,
+            error_journal,
+        }
+    }
+
+    impl DrainingTotal {
+        async fn append(&mut self, payload: Value) -> ChainEvent {
+            self.upstream_writer
+                .reserve(1)
+                .expect("upstream credit")
+                .commit(1);
+            self.upstream_journal
+                .append(
+                    ChainEventFactory::data_event(
+                        WriterId::from(self.upstream),
+                        Reading::event_type_name(),
+                        Reading::payload_schema_version(),
+                        payload,
+                    ),
+                    AppendOptions::default(),
+                )
+                .await
+                .expect("append the reading")
+                .authored()
+        }
+
+        async fn dispatch(
+            &mut self,
+            state: StatefulState<Total>,
+        ) -> EventLoopDirective<StatefulEvent<Total>> {
+            self.supervisor
+                .dispatch_state(&state, &mut self.context)
+                .await
+                .expect("dispatch the stage")
+        }
+
+        async fn drain(&mut self, payload: Value) -> ChainEvent {
+            let input = self.append(payload).await;
+            let directive = self.dispatch(StatefulState::Draining).await;
+            assert!(
+                matches!(directive, EventLoopDirective::Continue),
+                "the input leaves the stage draining: {directive:?}"
+            );
+            input
+        }
+
+        async fn assert_failed_on(
+            &self,
+            input: &ChainEvent,
+            directive: EventLoopDirective<StatefulEvent<Total>>,
+        ) {
+            let EventLoopDirective::Transition(StatefulEvent::Error(detail)) = directive else {
+                panic!("the emission fails the stage: {directive:?}");
+            };
+            assert!(detail.contains("a total cannot be published"), "{detail}");
+            let errors = self
+                .error_journal
+                .read_causally_ordered()
+                .await
+                .expect("read the error journal");
+            let [record] = errors.as_slice() else {
+                panic!("the stage records one error: {errors:?}");
+            };
+            let ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(fatal)) =
+                &record.payload
+            else {
+                panic!("the error is a stage-fatal record: {:?}", record.payload);
+            };
+            assert_eq!(fatal.code, StageFatalCode::Protocol);
+            assert_eq!(fatal.reason, StageFatalReason::OutputSerializationFailure);
+            assert_eq!(fatal.detail, detail);
+            assert_eq!(record.authored().causality.parent_ids, vec![input.id]);
+            assert!(
+                self.data_journal
+                    .read_causally_ordered()
+                    .await
+                    .expect("read the data journal")
+                    .iter()
+                    .all(|record| !record.consumes_data_credit()),
+                "the emission publishes nothing"
+            );
+            assert_eq!(
+                self.registry.edge_in_flight(self.stage, self.downstream),
+                Some(0),
+                "nothing goes downstream"
+            );
+        }
+
+        async fn assert_recorded(
+            &self,
+            input: &ChainEvent,
+            kind: ErrorKind,
+            detail: &str,
+            payload: Value,
+        ) {
+            let errors = self
+                .error_journal
+                .read_causally_ordered()
+                .await
+                .expect("read the error journal");
+            let [record] = errors.as_slice() else {
+                panic!("the stage records one error: {errors:?}");
+            };
+            let ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) =
+                &record.payload
+            else {
+                panic!("the error is a processing failure: {:?}", record.payload);
+            };
+            assert_eq!(failure.kind, kind);
+            assert_eq!(failure.detail, detail);
+            assert_eq!(failure.input.payload, payload);
+
+            let event = record.authored();
+            assert_eq!(event.event_type(), "runtime.stage.processing_failed");
+            assert_eq!(event.writer_id, WriterId::from(self.stage));
+            assert_eq!(event.flow_context.stage_id, self.stage);
+            assert_eq!(event.causality.parent_ids, vec![input.id]);
+            assert_eq!(event.causality.inputs, vec![CausalInput::of(input)]);
+            assert!(
+                matches!(
+                    &event.processing.status,
+                    ProcessingStatus::Error { kind: Some(mark), message, .. }
+                        if *mark == kind && message == detail
+                ),
+                "the record's mark matches its kind: {:?}",
+                event.processing.status
+            );
+
+            assert!(
+                self.data_journal
+                    .read_causally_ordered()
+                    .await
+                    .expect("read the data journal")
+                    .iter()
+                    .all(|record| !record.consumes_data_credit()),
+                "the failed input reaches no data record"
+            );
+            assert_eq!(
+                self.registry.edge_in_flight(self.stage, self.downstream),
+                Some(0),
+                "nothing goes downstream"
+            );
+            assert_eq!(
+                self.upstream_writer.min_downstream_credit(),
+                1,
+                "the failed input is acknowledged"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_draining_stage_records_the_input_it_cannot_accumulate() {
+        let mut total = draining_total().await;
+        let unreadable = json!({ "value": "seven" });
+        let input = total.drain(unreadable.clone()).await;
+        let decode_error = Reading::try_from_event(&input)
+            .expect_err("the reading does not decode")
+            .to_string();
+        total
+            .assert_recorded(
+                &input,
+                ErrorKind::Deserialization,
+                &decode_error,
+                unreadable,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_emission_an_input_triggers_fails_the_stage_when_its_output_cannot_serialize() {
+        let mut total = draining_total().await;
+        total.ready.store(true, Ordering::SeqCst);
+        let input = total.append(json!({ "value": 7 })).await;
+        let directive = total.dispatch(StatefulState::Accumulating).await;
+        assert!(
+            matches!(
+                directive,
+                EventLoopDirective::Transition(StatefulEvent::ShouldEmit)
+            ),
+            "{directive:?}"
+        );
+        let directive = total.dispatch(StatefulState::Emitting).await;
+        total.assert_failed_on(&input, directive).await;
+    }
+
+    #[tokio::test]
+    async fn an_emission_the_timer_triggers_fails_the_stage_when_its_output_cannot_serialize() {
+        let mut total = draining_total().await;
+        total
+            .context
+            .resources_mut()
+            .expect("resources")
+            .emit_interval = Some(Duration::ZERO);
+        let input = total.append(json!({ "value": 7 })).await;
+        let directive = total.dispatch(StatefulState::Accumulating).await;
+        assert!(
+            matches!(directive, EventLoopDirective::Continue),
+            "{directive:?}"
+        );
+        total.ready.store(true, Ordering::SeqCst);
+        let directive = total.dispatch(StatefulState::Accumulating).await;
+        assert!(
+            matches!(
+                directive,
+                EventLoopDirective::Transition(StatefulEvent::ShouldEmit)
+            ),
+            "the idle tick triggers the emission: {directive:?}"
+        );
+        let directive = total.dispatch(StatefulState::Emitting).await;
+        total.assert_failed_on(&input, directive).await;
+    }
+
+    #[tokio::test]
+    async fn an_emission_while_draining_fails_the_stage_when_its_output_cannot_serialize() {
+        let mut total = draining_total().await;
+        total.ready.store(true, Ordering::SeqCst);
+        let input = total.append(json!({ "value": 7 })).await;
+        let directive = total.dispatch(StatefulState::Draining).await;
+        total.assert_failed_on(&input, directive).await;
+    }
+
+    #[tokio::test]
+    async fn the_end_of_input_emission_fails_the_stage_when_its_output_cannot_serialize() {
+        let mut total = draining_total().await;
+        let input = total.drain(json!({ "value": 7 })).await;
+        let directive =
+            produce_final_output(total.context.resources_mut().expect("resources"), false)
+                .await
+                .expect("produce the final output");
+        total.assert_failed_on(&input, directive).await;
     }
 }

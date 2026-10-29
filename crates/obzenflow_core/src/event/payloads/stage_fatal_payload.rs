@@ -31,6 +31,8 @@ pub enum StageFatalCode {
 #[serde(rename_all = "snake_case")]
 pub enum StageFatalReason {
     ProtocolInputIntegrity,
+    /// A stage's output could not be serialized into its fact.
+    OutputSerializationFailure,
     ReplayDivergence,
     /// A replay reached a cursor its recording holds no outcome for; only a
     /// resume finishes that work (FLOWIP-134i B13).

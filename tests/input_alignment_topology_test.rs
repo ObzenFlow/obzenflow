@@ -24,7 +24,6 @@ use obzenflow_dsl::dsl::stage_descriptor::StageDescriptor;
 use obzenflow_dsl::dsl::typing::{validate_edge_typing, validate_stage_typing_metadata, TypeHint};
 use obzenflow_dsl::{sink, source, stateful, transform};
 use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedFiniteSourceHandler,
@@ -126,10 +125,10 @@ impl TypedStatefulHandler for IngestAggregator {
     fn initial_state(&self) -> Self::State {
         IngestSummary::default()
     }
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: vec![state.clone()],
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}

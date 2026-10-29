@@ -105,23 +105,23 @@ pub struct AiCollectorState {
     ready: Vec<(KeyId, WindowOrdinal)>,
     handed: Vec<(KeyId, WindowOrdinal)>,
     retained_bytes: usize,
-    failure: Option<HandlerError>,
+    failure: Option<StageFatal>,
 }
 
-fn protocol_fatal(detail: impl Into<String>) -> HandlerError {
-    HandlerError::Fatal(StageFatal::new(
+fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
+    StageFatal::new(
         StageFatalCode::Protocol,
         StageFatalReason::ProtocolInputIntegrity,
         detail,
-    ))
+    )
 }
 
-fn resource_fatal(detail: impl Into<String>) -> HandlerError {
-    HandlerError::Fatal(StageFatal::new(
+fn resource_fatal(detail: impl Into<String>) -> StageFatal {
+    StageFatal::new(
         StageFatalCode::Resource,
         StageFatalReason::ResourceExhaustion,
         detail,
-    ))
+    )
 }
 
 fn key_id(key: &Option<Value>) -> KeyId {
@@ -135,7 +135,7 @@ fn shown_key(key: &Option<Value>) -> String {
 }
 
 impl AiCollector {
-    fn writer_id(&self) -> Result<WriterId, HandlerError> {
+    fn writer_id(&self) -> Result<WriterId, StageFatal> {
         self.writer_id.ok_or_else(|| {
             protocol_fatal("ai collector ran before its writer identity was installed")
         })
@@ -165,7 +165,7 @@ impl AiCollector {
         state: &'a mut AiCollectorState,
         key: &Option<Value>,
         window: WindowOrdinal,
-    ) -> Result<&'a mut Window, HandlerError> {
+    ) -> Result<&'a mut Window, StageFatal> {
         let id = (key_id(key), window);
         if !state.windows.contains_key(&id) {
             if Self::open_window_count(state) >= self.max_open_windows.get() {
@@ -220,7 +220,7 @@ impl AiCollector {
         group: GroupOrdinal,
         canonical: Vec<u8>,
         slot: Slot,
-    ) -> Result<(), HandlerError> {
+    ) -> Result<(), StageFatal> {
         let (window, slot_index) = self.trigger.place(group);
         if slot_index >= MAX_SLOTS_PER_WINDOW {
             return Err(resource_fatal(format!(
@@ -288,7 +288,7 @@ impl AiCollector {
         &self,
         state: &mut AiCollectorState,
         ended: AiMapReduceGroupingEnded,
-    ) -> Result<(), HandlerError> {
+    ) -> Result<(), StageFatal> {
         let id = key_id(&ended.key);
         let progress = state.keys.entry(id.clone()).or_default();
         match progress.group_count {
@@ -331,7 +331,7 @@ impl AiCollector {
         Ok(())
     }
 
-    fn admit(&self, state: &mut AiCollectorState, event: ChainEvent) -> Result<(), HandlerError> {
+    fn admit(&self, state: &mut AiCollectorState, event: ChainEvent) -> Result<(), StageFatal> {
         if !matches!(event.payload, ChainPayload::CompositeData(_)) {
             return Err(protocol_fatal(
                 "ai collector requires composite protocol data",
@@ -393,7 +393,7 @@ impl AiCollector {
         &self,
         id: &(KeyId, WindowOrdinal),
         window: &Window,
-    ) -> Result<ChainEvent, HandlerError> {
+    ) -> Result<ChainEvent, StageFatal> {
         let failures: Vec<_> = window
             .slots
             .iter()
@@ -463,16 +463,16 @@ impl StatefulHandler for AiCollector {
         event: ChainEvent,
     ) -> Result<(), HandlerError> {
         if let Some(failure) = state.failure.as_ref() {
-            return Err(failure.clone());
+            return Err(HandlerError::Fatal(failure.clone()));
         }
-        self.admit(state, event)
+        self.admit(state, event).map_err(HandlerError::Fatal)
     }
 
     fn initial_state(&self) -> Self::State {
         AiCollectorState::default()
     }
 
-    fn create_events(&self, _: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, _: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         Ok(Vec::new())
     }
 
@@ -480,7 +480,7 @@ impl StatefulHandler for AiCollector {
         state.failure.is_some() || (state.handed.is_empty() && !state.ready.is_empty())
     }
 
-    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         if let Some(failure) = state.failure.take() {
             return Err(failure);
         }
@@ -540,7 +540,7 @@ impl StatefulHandler for AiCollector {
         ))
     }
 
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, StageFatal> {
         if let Some(failure) = state.failure.as_ref() {
             return Err(failure.clone());
         }

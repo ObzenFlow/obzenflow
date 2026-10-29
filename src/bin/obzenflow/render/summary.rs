@@ -35,7 +35,7 @@ impl Renderer {
             lineage,
             config_changes,
         } = observed;
-        self.flush_pending(output)?;
+        output.flush()?;
         if self.jsonl {
             writeln!(
                 diagnostics,

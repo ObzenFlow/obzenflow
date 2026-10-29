@@ -867,13 +867,13 @@ where
 ///
 /// Use this for work that is stage-internal (e.g. emitting aggregated results)
 /// and should not count as processing an additional input event.
-pub async fn process_with_instrumentation_no_count<T, F, Fut>(
+pub async fn process_with_instrumentation_no_count<T, E, F, Fut>(
     instrumentation: &Arc<StageInstrumentation>,
     f: F,
-) -> Result<T, Box<dyn Error + Send + Sync>>
+) -> Result<T, E>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<T, Box<dyn Error + Send + Sync>>>,
+    Fut: Future<Output = Result<T, E>>,
 {
     // Track in-flight
     instrumentation

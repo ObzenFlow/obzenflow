@@ -18,6 +18,7 @@ struct Run {
     manifest: RunManifest,
     system: DiskJournal<SystemEvent>,
     data: DiskJournal<ChainEvent>,
+    error: DiskJournal<ChainEvent>,
     factory: SystemEventFactory,
     stage: StageId,
 }
@@ -40,7 +41,7 @@ impl Run {
             run_id,
         )
         .unwrap();
-        let _error = DiskJournal::<ChainEvent>::with_owner_in_run(
+        let error = DiskJournal::<ChainEvent>::with_owner_in_run(
             dir.path().join("error.log"),
             JournalOwner::stage(stage),
             run_id,
@@ -84,6 +85,7 @@ impl Run {
             manifest,
             system,
             data,
+            error,
             factory: SystemEventFactory::new(pipeline),
             stage,
         };
@@ -467,4 +469,121 @@ async fn admitted_run_cannot_silently_retarget_a_replaced_journal() {
     std::fs::rename(&path, run.dir.path().join("original.log")).unwrap();
     std::fs::write(&path, []).unwrap();
     assert!(tail.read_next().await.is_err());
+}
+
+#[tokio::test]
+async fn an_earlier_runs_rejection_follows_the_row_this_run_re_admitted() {
+    use obzenflow_core::journal::AppendOptions;
+
+    let earlier = Run::new();
+    let first = earlier
+        .data
+        .append(earlier.event(0), Default::default())
+        .await
+        .unwrap();
+    let rejection = earlier
+        .error
+        .append(
+            earlier.event(1),
+            AppendOptions::from_record(Some(&first)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let next = earlier
+        .data
+        .append(
+            earlier.event(2),
+            AppendOptions::from_record(Some(&rejection)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let shown = Run::new();
+    for (index, re_admitted) in [(0, &first), (2, &next)] {
+        shown
+            .data
+            .append(
+                shown.event(index),
+                AppendOptions::from_record(Some(re_admitted)).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let (earlier_run, journals, errors) = source_errors(&earlier).await;
+    let mut snapshot = shown.open().await;
+    snapshot.merge_earlier_run(&journals, errors);
+    let mut order = Vec::new();
+    while let Some(record) = snapshot.next().await.unwrap() {
+        order.push((
+            record.run == earlier_run,
+            record.journal.kind,
+            record.position.0,
+        ));
+    }
+    assert_eq!(
+        order,
+        [
+            (false, RunJournalKind::Data, 0),
+            (true, RunJournalKind::Error, 0),
+            (false, RunJournalKind::Data, 1),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_tail_lists_causally_and_hands_over_an_unreached_record_on_detach() {
+    use obzenflow_core::journal::AppendOptions;
+
+    let run = Run::new();
+    let first = run
+        .data
+        .append(run.event(0), Default::default())
+        .await
+        .unwrap();
+    run.error
+        .append(
+            run.event(1),
+            AppendOptions::from_record(Some(&first)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let earlier = Run::new();
+    let row = earlier
+        .data
+        .append(earlier.event(0), Default::default())
+        .await
+        .unwrap();
+    earlier
+        .error
+        .append(
+            earlier.event(1),
+            AppendOptions::from_record(Some(&row)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let (earlier_run, journals, errors) = source_errors(&earlier).await;
+    let mut snapshot = run.open().await;
+    snapshot.merge_earlier_run(&journals, errors);
+    let mut tail = snapshot.into_tail();
+    let listed: Vec<_> = available(&mut tail)
+        .await
+        .into_iter()
+        .map(|record| record.journal.kind)
+        .collect();
+    assert_eq!(listed, [RunJournalKind::Data, RunJournalKind::Error]);
+    let held = tail.take_held();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].run, earlier_run);
+}
+
+async fn source_errors(run: &Run) -> (RunIdentity, Vec<RunJournal>, Vec<RunRecord>) {
+    let mut snapshot = run.open().await;
+    let journals = snapshot.journals().cloned().collect();
+    let mut errors = Vec::new();
+    while let Some(record) = snapshot.next().await.unwrap() {
+        if record.journal.kind == RunJournalKind::Error {
+            errors.push(record);
+        }
+    }
+    (snapshot.identity().clone(), journals, errors)
 }

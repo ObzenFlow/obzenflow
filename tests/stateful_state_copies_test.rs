@@ -161,10 +161,10 @@ impl TypedStatefulHandler for Pairs {
         state.count >= 2
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::ResetEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::ResetEpoch {
             outputs: state.total().into_iter().collect(),
-        })
+        }
     }
 
     fn post_emit(&self, state: &mut Self::State) {

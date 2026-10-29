@@ -7,17 +7,20 @@
 
 use super::disk::{inspect::load_manifest, reader::DiskJournalReader};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
-    ChainEvent, ChainPayload, PipelineLifecycleEvent, SystemEvent, SystemPayload,
+    CausalCoordinate, ChainEvent, ChainPayload, PipelineLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::id::{FlowId, JournalId, StageId};
 use obzenflow_core::journal::read::*;
 use obzenflow_core::journal::{JournalError, JournalReader, RunManifest};
+use obzenflow_core::{EventId, JournalWriterId};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 mod config_changes;
 mod lineage;
+mod merge;
 mod rejections;
 pub use config_changes::{
     compare_with_runs, read_config_changes, read_configuration_refusals,
@@ -100,7 +103,8 @@ struct ReadState {
     identity: RunIdentity,
     manifest: RunManifest,
     journals: Vec<SelectedJournal>,
-    next_journal: usize,
+    merge: merge::CausalMerge<RunRecord>,
+    earlier: merge::EarlierRuns<RunRecord>,
     progress: RunReadProgress,
     settled_ends: BTreeMap<JournalId, JournalPosition>,
     failure: Option<String>,
@@ -212,13 +216,15 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
             reader,
         });
     }
+    let merge = merge::CausalMerge::new(journals.iter().map(|selected| selected.journal.id));
     Ok(RunSnapshot {
         state: ReadState {
             run_dir: path.to_path_buf(),
             identity,
             manifest,
             journals,
-            next_journal: 0,
+            merge,
+            earlier: merge::EarlierRuns::default(),
             progress: RunReadProgress::default(),
             settled_ends: BTreeMap::new(),
             failure: None,
@@ -242,8 +248,19 @@ impl RunSnapshot {
     pub fn lineage(&self) -> Result<RunLineage, JournalReadError> {
         read_run_lineage(&self.state.run_dir)
     }
+    /// Returns records in causal order, lowest causal rank first with ties broken
+    /// by event ID, so every record follows each record its clock counts.
     pub async fn next(&mut self) -> Result<Option<RunRecord>, JournalReadError> {
         self.state.next(true).await
+    }
+    /// Adds an earlier run's source error records before reading. Each one
+    /// follows the record of this run that re-admitted the row it followed.
+    pub fn merge_earlier_run<'a>(
+        &mut self,
+        journals: impl IntoIterator<Item = &'a RunJournal>,
+        records: Vec<RunRecord>,
+    ) {
+        self.state.merge_earlier_run(journals, records);
     }
     pub fn into_tail(self) -> RunTail {
         RunTail { state: self.state }
@@ -273,11 +290,20 @@ impl RunTail {
     pub fn config_changes(&self) -> Result<Vec<RunConfigChanges>, JournalReadError> {
         read_config_changes(&self.state.run_dir)
     }
+    /// The lowest-ranked record whose clock's journals have been returned up to
+    /// their counts, or `Pending`. At settlement every held record is returned.
     pub async fn read_next(&mut self) -> Result<TailRead, JournalReadError> {
         Ok(match self.state.next(false).await? {
             Some(record) => TailRead::Record(record),
             None => TailRead::Pending,
         })
+    }
+    /// Every record still held, in rank order, then any earlier-run record this
+    /// run never re-admitted a row for.
+    pub fn take_held(&mut self) -> Vec<RunRecord> {
+        let mut held = self.state.merge.drain();
+        held.extend(std::iter::from_fn(|| self.state.earlier.take_unreached()));
+        held
     }
 }
 
@@ -286,13 +312,11 @@ impl ReadState {
         if let Some(error) = &self.failure {
             return Err(JournalReadError::Integrity(error.clone()));
         }
-        for _ in 0..self.journals.len() {
-            let index = self.next_journal;
-            // A cancelled poll resumes at this journal. A successful poll advances
-            // synchronously with the underlying cursor and returned record.
+        for index in 0..self.journals.len() {
             let selected = &mut self.journals[index];
-            if snapshot && selected.reader.initial_prefix_complete()? {
-                self.next_journal = (index + 1) % self.journals.len();
+            if self.merge.holds(&selected.journal.id)
+                || (snapshot && selected.reader.initial_prefix_complete()?)
+            {
                 continue;
             }
             let position = JournalPosition(selected.reader.position());
@@ -305,7 +329,6 @@ impl ReadState {
             };
             let at_end = selected.reader.is_at_end();
             let journal = selected.journal.clone();
-            self.next_journal = (index + 1) % self.journals.len();
             match next {
                 Some(record) => {
                     if let RunRecordData::System(system) = &record {
@@ -316,16 +339,15 @@ impl ReadState {
                             return Err(error);
                         }
                     }
-                    self.refresh_settlement();
                     let kind = classify(&journal, &record);
-                    return Ok(Some(RunRecord {
+                    self.hold(RunRecord {
                         version: RUN_RECORD_VERSION,
                         run: self.identity.clone(),
                         journal,
                         position,
                         kind,
                         record,
-                    }));
+                    });
                 }
                 None if !snapshot
                     && at_end
@@ -333,16 +355,87 @@ impl ReadState {
                     && journal.kind != RunJournalKind::System =>
                 {
                     self.settled_ends.entry(journal.id).or_insert(position);
-                    self.refresh_settlement();
                 }
                 None => {}
             }
         }
-        Ok(None)
+        let next = if snapshot || self.every_end_observed() {
+            self.merge
+                .lowest()
+                .or_else(|| self.earlier.take_unreached())
+        } else {
+            self.merge.lowest_ready()
+        };
+        self.refresh_settlement();
+        Ok(next)
+    }
+
+    fn hold(&mut self, record: RunRecord) {
+        if let Some(source) = source_data_stage(&record.journal).map(str::to_owned) {
+            let clock = clock_of(&record.record);
+            for (journal, earlier) in self.earlier.reached(&source, clock) {
+                let mut order = clock.clone();
+                order
+                    .clocks
+                    .insert(coordinate_of(journal), sequence_of(&earlier.record));
+                let event = event_of(&earlier.record);
+                self.merge
+                    .push(journal, sequence_of(&earlier.record), order, event, earlier);
+            }
+        }
+        self.merge.push(
+            record.journal.id,
+            sequence_of(&record.record),
+            clock_of(&record.record).clone(),
+            event_of(&record.record),
+            record,
+        );
+    }
+
+    fn merge_earlier_run<'a>(
+        &mut self,
+        journals: impl IntoIterator<Item = &'a RunJournal>,
+        records: Vec<RunRecord>,
+    ) {
+        let sources: BTreeMap<String, JournalId> = journals
+            .into_iter()
+            .filter_map(|journal| {
+                source_data_stage(journal).map(|key| (key.to_owned(), journal.id))
+            })
+            .collect();
+        for record in records {
+            let source = record
+                .journal
+                .stage
+                .as_ref()
+                .filter(|stage| stage.stage_type.is_source())
+                .and_then(|stage| {
+                    sources
+                        .get(&stage.key)
+                        .map(|anchor| (stage.key.clone(), coordinate_of(*anchor)))
+                });
+            match source {
+                Some((source, anchor)) => {
+                    let count = clock_of(&record.record).get(&anchor);
+                    self.earlier
+                        .wait(record.journal.id, source, anchor, count, record);
+                }
+                None => self.earlier.unplaced(record),
+            }
+        }
+    }
+
+    fn every_end_observed(&self) -> bool {
+        self.progress.outcome.is_some()
+            && self.progress.drained_event_id.is_some()
+            && self.settled_ends.len() == self.journals.len()
     }
 
     fn refresh_settlement(&mut self) {
-        if self.progress.settled_prefix.is_none() && self.settled_ends.len() == self.journals.len()
+        if self.progress.settled_prefix.is_none()
+            && self.settled_ends.len() == self.journals.len()
+            && self.merge.is_empty()
+            && self.earlier.is_empty()
         {
             if let (Some(outcome), Some(drained)) =
                 (&self.progress.outcome, self.progress.drained_event_id)
@@ -404,6 +497,39 @@ impl ReadState {
             });
         }
         Ok(())
+    }
+}
+
+fn source_data_stage(journal: &RunJournal) -> Option<&str> {
+    journal
+        .stage
+        .as_ref()
+        .filter(|stage| journal.kind == RunJournalKind::Data && stage.stage_type.is_source())
+        .map(|stage| stage.key.as_str())
+}
+
+fn coordinate_of(journal: JournalId) -> CausalCoordinate {
+    CausalCoordinate::new(JournalWriterId::from(journal))
+}
+
+fn clock_of(record: &RunRecordData) -> &VectorClock {
+    match record {
+        RunRecordData::Chain(row) => &row.envelope.provenance.journal.vector_clock,
+        RunRecordData::System(row) => &row.envelope.provenance.journal.vector_clock,
+    }
+}
+
+fn event_of(record: &RunRecordData) -> EventId {
+    match record {
+        RunRecordData::Chain(row) => *row.id(),
+        RunRecordData::System(row) => *row.id(),
+    }
+}
+
+fn sequence_of(record: &RunRecordData) -> u64 {
+    match record {
+        RunRecordData::Chain(row) => row.local_sequence(),
+        RunRecordData::System(row) => row.local_sequence(),
     }
 }
 

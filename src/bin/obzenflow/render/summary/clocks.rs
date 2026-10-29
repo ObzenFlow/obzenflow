@@ -7,6 +7,7 @@
 use super::*;
 use obzenflow_core::event::{CausalCoordinate, JournalWriterId};
 use obzenflow_core::JournalId;
+use std::collections::BTreeSet;
 
 const DEFAULT_MATRIX_LIMIT: usize = 16;
 const DIAGONAL: &str = "1;4;38;5;252";

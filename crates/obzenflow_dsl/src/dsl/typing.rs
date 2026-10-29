@@ -1522,19 +1522,19 @@ where
 
     fn initial_state(&self) -> Self::State {}
 
-    fn emit(&self, _state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, _state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: Vec::new(),
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}
 
-    fn drain(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
+    fn drain(&self, _state: &Self::State) -> Vec<Self::Output> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("stateful", self.message));
         }
-        Ok(Vec::new())
+        Vec::new()
     }
 }
 

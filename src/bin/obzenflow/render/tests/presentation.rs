@@ -93,7 +93,6 @@ fn progress_renderer() -> Renderer {
 fn render_record(renderer: &mut Renderer, record: &RunRecord) -> String {
     let mut output = Vec::new();
     renderer.record(&mut output, record.clone()).unwrap();
-    renderer.flush_pending(&mut output).unwrap();
     String::from_utf8(output).unwrap()
 }
 
@@ -390,7 +389,6 @@ fn jsonl_uses_the_common_view_without_requiring_human_context_or_parent_resoluti
             text,
             format!("{}\n", serde_json::to_string(&record).unwrap())
         );
-        assert!(renderer.pending.is_empty());
     }
 }
 

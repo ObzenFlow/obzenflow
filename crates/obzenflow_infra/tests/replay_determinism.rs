@@ -17,7 +17,7 @@ use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handler_error::StageFatal;
 use obzenflow_runtime::stages::common::handlers::stateful::traits::StatefulHandler;
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig, StrictJoinBuilder};
@@ -382,7 +382,7 @@ impl StatefulHandler for SupervisorCountingHandler {
     fn create_events(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal> {
         if *state == 0 {
             Ok(Vec::new())
         } else {

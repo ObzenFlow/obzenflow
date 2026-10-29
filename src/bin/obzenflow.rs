@@ -366,10 +366,10 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         std::env::var_os("NO_COLOR").is_some(),
         snapshot.journals(),
     );
-    let lineage = read_lineage(&snapshot).await?;
+    let lineage = read_lineage(&mut snapshot).await?;
     renderer.name_ancestor_journals(lineage.journals);
     renderer.begin(&mut output, snapshot.identity(), view.follow)?;
-    renderer.lineage(&mut output, lineage.source_errors, lineage.rejections)?;
+    renderer.lineage(lineage.rejections);
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     if !view.follow {
@@ -377,17 +377,9 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
             let record = tokio::select! { biased;
                 result = &mut interrupt => {
                     result?;
-                    let tail = snapshot.into_tail();
-                    renderer.finish(&mut output, &mut diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
-                    return Ok(0);
+                    return detach(&mut snapshot.into_tail(), &mut renderer, &mut output, &mut diagnostics);
                 }
-                record = snapshot.next() => match record {
-                    Ok(record) => record,
-                    Err(error) => {
-                        renderer.flush_pending(&mut output)?;
-                        return Err(error.into());
-                    }
-                },
+                record = snapshot.next() => record?,
             };
             let Some(record) = record else {
                 break;
@@ -417,11 +409,10 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
 #[derive(Default)]
 struct Lineage {
     journals: Vec<(RunJournal, String)>,
-    source_errors: Vec<RunRecord>,
     rejections: LineageRejections,
 }
 
-async fn read_lineage(snapshot: &RunSnapshot) -> Result<Lineage, Error> {
+async fn read_lineage(snapshot: &mut RunSnapshot) -> Result<Lineage, Error> {
     let Ok(lineage) = snapshot.lineage() else {
         return Ok(Lineage::default());
     };
@@ -439,24 +430,28 @@ async fn read_lineage(snapshot: &RunSnapshot) -> Result<Lineage, Error> {
             || run.identity().flow_id.to_string(),
             |generation| format!("gen {generation}"),
         );
-        read.journals.extend(
-            run.journals()
-                .map(|journal| (journal.clone(), label.clone())),
-        );
+        let journals: Vec<RunJournal> = run.journals().cloned().collect();
         let mut records = Vec::new();
         while let Some(record) = run.next().await? {
             records.push(record);
         }
         read.rejections.fold_run(&records);
-        read.source_errors
-            .extend(records.into_iter().filter(|record| {
-                record.journal.kind == RunJournalKind::Error
-                    && record
-                        .journal
-                        .stage
-                        .as_ref()
-                        .is_some_and(|stage| stage.stage_type.is_source())
-            }));
+        snapshot.merge_earlier_run(
+            &journals,
+            records
+                .into_iter()
+                .filter(|record| {
+                    record.journal.kind == RunJournalKind::Error
+                        && record
+                            .journal
+                            .stage
+                            .as_ref()
+                            .is_some_and(|stage| stage.stage_type.is_source())
+                })
+                .collect(),
+        );
+        read.journals
+            .extend(journals.into_iter().map(|journal| (journal, label.clone())));
     }
     Ok(read)
 }
@@ -480,21 +475,13 @@ where
         let next = tokio::select! { biased;
             result = &mut interrupt => {
                 result?;
-                renderer.finish(output, diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
-                return Ok(0);
+                return detach(&mut tail, renderer, output, diagnostics);
             }
-            next = tail.read_next() => match next {
-                Ok(next) => next,
-                Err(error) => {
-                    renderer.flush_pending(output)?;
-                    return Err(error.into());
-                }
-            },
+            next = tail.read_next() => next?,
         };
         let pending = matches!(next, TailRead::Pending);
-        match next {
-            TailRead::Record(record) => renderer.record(output, record)?,
-            TailRead::Pending => renderer.flush_pending(output)?,
+        if let TailRead::Record(record) = next {
+            renderer.record(output, record)?;
         }
         if tail.progress().settled_prefix.is_some() {
             if view.jsonl {
@@ -515,11 +502,28 @@ where
             tokio::select! { biased;
                 result = &mut interrupt => {
                     result?;
-                    renderer.finish(output, diagnostics, Observed::of(&tail), ObservationEnd::Detached)?;
-                    return Ok(0);
+                    return detach(&mut tail, renderer, output, diagnostics);
                 }
                 _ = pending_wait() => {}
             }
         }
     }
+}
+
+fn detach(
+    tail: &mut RunTail,
+    renderer: &mut Renderer,
+    output: &mut impl Write,
+    diagnostics: &mut impl Write,
+) -> Result<u8, Error> {
+    for record in tail.take_held() {
+        renderer.record(output, record)?;
+    }
+    renderer.finish(
+        output,
+        diagnostics,
+        Observed::of(tail),
+        ObservationEnd::Detached,
+    )?;
+    Ok(0)
 }

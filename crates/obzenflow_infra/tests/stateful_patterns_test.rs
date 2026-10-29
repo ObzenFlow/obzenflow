@@ -12,7 +12,6 @@ use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteFailure, StatefulEmission, TypedFiniteSourceHandler,
     TypedStatefulHandler,
@@ -187,12 +186,12 @@ impl TypedStatefulHandler for CounterHandler {
         CounterState::default()
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: vec![CountResult {
                 total_count: state.count,
             }],
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}
@@ -220,14 +219,14 @@ impl TypedStatefulHandler for AccumulatorHandler {
         Vec::new()
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: state
                 .iter()
                 .copied()
                 .map(|value| CollectedValue { value })
                 .collect(),
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}
@@ -255,10 +254,10 @@ impl TypedStatefulHandler for SumHandler {
         0
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: vec![SumResult { total_sum: *state }],
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}
@@ -300,12 +299,12 @@ impl TypedStatefulHandler for ImmediateEmitter {
         *state > 0
     }
 
-    fn emit(&self, state: &Self::State) -> Result<StatefulEmission<Self::Output>, HandlerError> {
-        Ok(StatefulEmission::RetainEpoch {
+    fn emit(&self, state: &Self::State) -> StatefulEmission<Self::Output> {
+        StatefulEmission::RetainEpoch {
             outputs: vec![ProgressUpdate {
                 current_count: *state,
             }],
-        })
+        }
     }
 
     fn post_emit(&self, _: &mut Self::State) {}
@@ -314,8 +313,8 @@ impl TypedStatefulHandler for ImmediateEmitter {
         0
     }
 
-    fn drain(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(Vec::new())
+    fn drain(&self, _state: &Self::State) -> Vec<Self::Output> {
+        Vec::new()
     }
 }
 
