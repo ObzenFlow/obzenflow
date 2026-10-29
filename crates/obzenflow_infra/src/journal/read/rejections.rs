@@ -46,22 +46,18 @@ pub struct LineageRejections {
 }
 
 impl LineageRejections {
-    /// Folds one run's records, after those of every run before it.
-    pub fn fold_run(&mut self, records: &[RunRecord]) {
-        for record in records {
-            if let Some((source, digest)) = pinned_input(record) {
-                self.inputs
-                    .entry(source.to_owned())
-                    .or_default()
-                    .insert(digest);
-            }
+    /// Folds one record, after every record of the runs before its own.
+    pub fn fold(&mut self, record: &RunRecord) {
+        if let Some((source, digest)) = pinned_input(record) {
+            self.inputs
+                .entry(source.to_owned())
+                .or_default()
+                .insert(digest);
         }
-        for record in records {
-            if let Some(row) = rejected_row(record) {
-                self.first
-                    .entry(row)
-                    .or_insert_with(|| RecordedAt::of(record));
-            }
+        if let Some(row) = rejected_row(record) {
+            self.first
+                .entry(row)
+                .or_insert_with(|| RecordedAt::of(record));
         }
     }
 
@@ -248,6 +244,14 @@ mod tests {
         }
     }
 
+    fn folded(runs: &[&Run]) -> LineageRejections {
+        let mut lineage = LineageRejections::default();
+        for record in runs.iter().flat_map(|run| &run.records) {
+            lineage.fold(record);
+        }
+        lineage
+    }
+
     #[test]
     fn a_row_rejected_again_after_a_resume_repeats_the_first_record() {
         let mut killed = Run::new();
@@ -259,9 +263,7 @@ mod tests {
         let again = resumed.reject(164);
         let new = resumed.reject(201);
 
-        let mut lineage = LineageRejections::default();
-        lineage.fold_run(&killed.records);
-        lineage.fold_run(&resumed.records);
+        let lineage = folded(&[&killed, &resumed]);
 
         assert!(lineage.repeat_of(&first).is_none());
         assert!(lineage.repeat_of(&other).is_none());
@@ -279,8 +281,7 @@ mod tests {
         let mut resumed = Run::new();
         let again = resumed.reject(164);
 
-        let mut lineage = LineageRejections::default();
-        lineage.fold_run(&killed.records);
+        let lineage = folded(&[&killed]);
 
         let repeated = lineage.repeat_of(&again).expect("a repeat");
         assert!(repeated.holds(&first));
@@ -292,9 +293,7 @@ mod tests {
         unpinned.reject(164);
         let mut resumed = Run::new();
         let again = resumed.reject(164);
-        let mut lineage = LineageRejections::default();
-        lineage.fold_run(&unpinned.records);
-        lineage.fold_run(&resumed.records);
+        let lineage = folded(&[&unpinned, &resumed]);
         assert!(
             lineage.repeat_of(&again).is_none(),
             "no pin names the input"
@@ -306,9 +305,7 @@ mod tests {
         let mut second = Run::new();
         second.positioned("tuesday.csv");
         let again = second.reject(164);
-        let mut lineage = LineageRejections::default();
-        lineage.fold_run(&first.records);
-        lineage.fold_run(&second.records);
+        let lineage = folded(&[&first, &second]);
         assert!(lineage.repeat_of(&again).is_none(), "two inputs");
     }
 
@@ -326,9 +323,7 @@ mod tests {
         killed.push(RunJournalKind::Error, unplaced());
         let mut resumed = Run::new();
         let again = resumed.push(RunJournalKind::Error, unplaced()).clone();
-        let mut lineage = LineageRejections::default();
-        lineage.fold_run(&killed.records);
-        lineage.fold_run(&resumed.records);
+        let lineage = folded(&[&killed, &resumed]);
         assert!(lineage.repeat_of(&again).is_none());
     }
 }

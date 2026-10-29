@@ -417,39 +417,26 @@ async fn read_lineage(snapshot: &mut RunSnapshot) -> Result<Lineage, Error> {
         return Ok(Lineage::default());
     };
     let mut read = Lineage::default();
-    for holder in lineage
-        .evidence
-        .iter()
-        .rev()
-        .filter(|holder| !holder.missing)
-    {
-        let Ok(mut run) = open_disk_run(&holder.run).await else {
+    for earlier in lineage.earlier_runs() {
+        let Ok(mut run) = open_disk_run(earlier).await else {
             continue;
         };
-        let label = holder.generation.map_or_else(
-            || run.identity().flow_id.to_string(),
-            |generation| format!("gen {generation}"),
-        );
+        let label = format!("gen {}", run.generation());
         let journals: Vec<RunJournal> = run.journals().cloned().collect();
-        let mut records = Vec::new();
+        let mut source_errors = Vec::new();
         while let Some(record) = run.next().await? {
-            records.push(record);
+            read.rejections.fold(&record);
+            if record.journal.kind == RunJournalKind::Error
+                && record
+                    .journal
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| stage.stage_type.is_source())
+            {
+                source_errors.push(record);
+            }
         }
-        read.rejections.fold_run(&records);
-        snapshot.merge_earlier_run(
-            &journals,
-            records
-                .into_iter()
-                .filter(|record| {
-                    record.journal.kind == RunJournalKind::Error
-                        && record
-                            .journal
-                            .stage
-                            .as_ref()
-                            .is_some_and(|stage| stage.stage_type.is_source())
-                })
-                .collect(),
-        );
+        snapshot.merge_earlier_run(&journals, source_errors);
         read.journals
             .extend(journals.into_iter().map(|journal| (journal, label.clone())));
     }

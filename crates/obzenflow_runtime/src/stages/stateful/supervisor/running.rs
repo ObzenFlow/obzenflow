@@ -14,9 +14,7 @@ use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEv
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
-use crate::stages::common::supervision::error_routing::{
-    error_row_in_scope, processing_failed, route_to_error_journal,
-};
+use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -835,38 +833,14 @@ pub(super) async fn dispatch_emitting<
                     continue;
                 }
 
-                if route_to_error_journal(&event) {
-                    tracing::info!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %event.id,
-                        "Writing stateful emitted error event to error journal (FLOWIP-082h)"
-                    );
-
-                    // Error events are still data for output accounting.
-                    if event.consumes_data_credit() {
-                        if let Some(subscription) = sup.subscription.as_mut() {
-                            subscription.track_output_event();
-                        }
-                    }
-
-                    crate::stages::common::supervision::output_committer::commit_error_output(
-                        &ctx.error_journal,
-                        &ctx.instrumentation,
+                let scope = observer_scope;
+                ctx.pending_outputs.push_back(
+                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                         event,
-                        ctx.last_consumed_envelope.as_ref(),
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to write stateful error event: {e}"))?;
-                } else {
-                    let scope = observer_scope;
-                    ctx.pending_outputs.push_back(
-                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                            causal: crate::supervised_base::publication::capture(),
-                            event,
-                            scope,
-                        },
-                    );
-                }
+                        scope,
+                    },
+                );
             }
 
             ctx.pending_transition = Some(PendingTransition::EmitComplete);

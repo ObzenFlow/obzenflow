@@ -5,7 +5,9 @@
 //! Point-in-time joins against a versioned catalog.
 
 use super::traits::{sealed, ErasedJoinInvocation, JoinBinding, UnifiedJoinHandler};
-use super::typed::{installed_writer_id, lower_join_outputs, ReferenceProjectionEntry};
+use super::typed::{
+    installed_writer_id, lower_join_outputs, terminal_output_failure, ReferenceProjectionEntry,
+};
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::join::config::{
     JoinCatalogKind, JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP,
@@ -150,6 +152,7 @@ pub trait TypedAsOfJoinHandler: Send + Sync {
         stream: Self::Stream,
     ) -> Result<Vec<Self::Output>, HandlerError>;
 
+    /// Returns the facts for the stream's final end of input, and no error.
     fn on_stream_eof(
         &self,
         _state: &mut Self::State,
@@ -159,10 +162,11 @@ pub trait TypedAsOfJoinHandler: Send + Sync {
             Self::EffectiveTime,
             Self::Reference,
         >,
-    ) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(Vec::new())
+    ) -> Vec<Self::Output> {
+        Vec::new()
     }
 
+    /// Returns the facts the join publishes as it drains, and no error.
     fn drain(
         &self,
         _state: &Self::State,
@@ -172,8 +176,8 @@ pub trait TypedAsOfJoinHandler: Send + Sync {
             Self::EffectiveTime,
             Self::Reference,
         >,
-    ) -> Result<Vec<Self::Output>, HandlerError> {
-        Ok(Vec::new())
+    ) -> Vec<Self::Output> {
+        Vec::new()
     }
 }
 
@@ -377,12 +381,12 @@ where
         event: ChainEvent,
         _source_id: StageId,
         _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        let writer_id = installed_writer_id(self.writer_id)?;
+    ) -> Result<Vec<ChainEvent>, StageFatal> {
+        let writer_id = installed_writer_id(self.writer_id).map_err(terminal_output_failure)?;
         let mut references = AsOfReferenceView::new(&state.projection);
         let outputs = self
             .handler
-            .on_stream_eof(&mut state.inner, &mut references)?;
+            .on_stream_eof(&mut state.inner, &mut references);
         let selected = references.into_selected_activations();
         let (events, _) = lower_join_outputs(
             writer_id,
@@ -391,7 +395,8 @@ where
             Some(&event),
             selected,
             None,
-        )?
+        )
+        .map_err(terminal_output_failure)?
         .into_parts();
         Ok(events)
     }
@@ -400,13 +405,14 @@ where
         &self,
         state: &Self::State,
         parent: Option<&ChainEvent>,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        let writer_id = installed_writer_id(self.writer_id)?;
+    ) -> Result<Vec<ChainEvent>, StageFatal> {
+        let writer_id = installed_writer_id(self.writer_id).map_err(terminal_output_failure)?;
         let mut references = AsOfReferenceView::new(&state.projection);
-        let outputs = self.handler.drain(&state.inner, &mut references)?;
+        let outputs = self.handler.drain(&state.inner, &mut references);
         let selected = references.into_selected_activations();
         let (events, _) =
-            lower_join_outputs(writer_id, self.lineage, outputs, parent, selected, None)?
+            lower_join_outputs(writer_id, self.lineage, outputs, parent, selected, None)
+                .map_err(terminal_output_failure)?
                 .into_parts();
         Ok(events)
     }

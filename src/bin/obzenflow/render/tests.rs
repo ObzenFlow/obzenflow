@@ -2234,6 +2234,52 @@ fn a_failed_input_displays_whole_under_its_stages_error_heading() {
 }
 
 #[test]
+fn a_refused_catalog_row_displays_as_its_joins_error() {
+    use obzenflow_core::event::payloads::stage_processing_payload::{
+        FailedInput, StageProcessingFailed,
+    };
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+
+    let row = fact(1, 100, &[], json!({"celsius": null, "id": 2}));
+    let refused = in_error_journal(
+        on_stage(
+            fact(3, 103, &[100], json!({})),
+            3,
+            "calibrate",
+            StageType::Join,
+        ),
+        ExecutionPayload::StageProcessingFailed(StageProcessingFailed {
+            kind: ErrorKind::Validation,
+            detail: "reading 2 has no temperature".into(),
+            input: FailedInput {
+                event_type: obzenflow_core::EventType("sensor.reading".into()),
+                payload_schema_version: std::num::NonZeroU32::MIN,
+                payload: json!({"celsius": null, "id": 2}),
+            },
+        }),
+    );
+    let records = [row, refused];
+    let mut renderer = renderer_over(&records);
+    let text = rendered_with_summary(&mut renderer, &records);
+    let block = text
+        .split_once("JOIN ERROR (stage: calibrate, error journal: ")
+        .expect("join error heading")
+        .1;
+    assert_eq!(
+        block.lines().nth(1),
+        Some("runtime.stage.processing_failed ← calibrate(sensor.reading)")
+    );
+    let table = text.split_once("\nJOURNALS\n").unwrap().1;
+    assert!(
+        table
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .any(|line| line == "calibrate 0 1 Validation"),
+        "{table}"
+    );
+}
+
+#[test]
 fn a_rejected_row_reads_as_a_source_error_with_no_inputs() {
     let rejected = rejected_row(100, 117);
     let records = [rejected];
@@ -2402,7 +2448,9 @@ fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
     killed_rejection.journal.id = serde_json::from_value(json!(id(35))).unwrap();
     let killed_records = [killed_pin, killed_rejection.clone()];
     let mut rejections = LineageRejections::default();
-    rejections.fold_run(&killed_records);
+    for record in &killed_records {
+        rejections.fold(record);
+    }
 
     let repeat = rejected_row(101, 164);
     let records = [repeat.clone()];
@@ -2448,7 +2496,9 @@ fn an_earlier_runs_rejection_and_its_repeat_are_listed_and_counted_once() {
         records.iter().map(|record| &record.journal),
     );
     let mut rejections = LineageRejections::default();
-    rejections.fold_run(&killed_records);
+    for record in &killed_records {
+        rejections.fold(record);
+    }
     jsonl.begin(&mut Vec::new(), &repeat.run, false).unwrap();
     jsonl.lineage(rejections);
     let mut output = Vec::new();

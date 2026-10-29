@@ -203,29 +203,24 @@ pub(super) async fn dispatch_hydrating<
                                     subscription.last_delivered_stage_input_position(),
                                 )
                                 .await?;
-                            } else {
-                                common::observe_join_outputs(
-                                    ctx,
-                                    scope,
-                                    Some(&event),
-                                    delivery_snapshot.as_ref(),
-                                    None,
-                                    &[],
-                                    Some(&envelope),
-                                )
-                                .await?;
+                                tracing::error!(
+                                    stage_name = %ctx.stage_name,
+                                    error = ?err,
+                                    "Join handler error during reference hydration"
+                                );
+                                ctx.instrumentation.record_error(err.kind());
+                                return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                    fatal.detail.clone(),
+                                )));
                             }
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                error = ?err,
-                                "Join handler error during reference hydration"
-                            );
-                            ctx.instrumentation.record_error(err.kind());
-                            let message = match err.as_fatal() {
-                                Some(fatal) => fatal.detail.clone(),
-                                None => format!("Join handler hydration error: {err:?}"),
-                            };
-                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(message)));
+                            common::dead_letter_reference(
+                                ctx,
+                                scope,
+                                &envelope,
+                                delivery_snapshot.as_ref(),
+                                &err,
+                            )
+                            .await?;
                         }
                     }
 

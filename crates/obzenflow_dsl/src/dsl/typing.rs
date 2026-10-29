@@ -1665,22 +1665,22 @@ where
         &self,
         _state: &mut Self::State,
         _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
-    ) -> Result<Vec<Self::Output>, HandlerError> {
+    ) -> Vec<Self::Output> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("join", self.message));
         }
-        Ok(Vec::new())
+        Vec::new()
     }
 
     fn drain(
         &self,
         _state: &Self::State,
         _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
-    ) -> Result<Vec<Self::Output>, HandlerError> {
+    ) -> Vec<Self::Output> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("join", self.message));
         }
-        Ok(Vec::new())
+        Vec::new()
     }
 }
 

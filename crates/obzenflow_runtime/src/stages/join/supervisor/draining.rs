@@ -7,6 +7,7 @@ use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::PendingOutput;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
 use std::sync::atomic::Ordering;
 
@@ -92,31 +93,25 @@ async fn finalize<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync 
         writer_id,
     ) {
         Ok(events) => events,
-        Err(err) => {
+        Err(fatal) => {
             ctx.handler_state = final_state;
-            ctx.instrumentation.record_error(err.kind());
-            let detail = if let Some(fatal) = err.as_fatal() {
-                common::record_join_stage_fatal(ctx, fatal, Some(final_eof), None).await?;
-                fatal.detail.clone()
-            } else {
-                err.to_string()
-            };
-            return Ok(EventLoopDirective::Transition(JoinEvent::Error(detail)));
+            ctx.instrumentation.record_error(ErrorKind::Unknown);
+            common::record_join_stage_fatal(ctx, &fatal, Some(final_eof), None).await?;
+            return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                fatal.detail,
+            )));
         }
     };
     let parent = final_eof.authored();
     match handler.drain(&final_state, Some(&parent)).await {
         Ok(drained) => events.extend(drained),
-        Err(err) => {
+        Err(fatal) => {
             ctx.handler_state = final_state;
-            ctx.instrumentation.record_error(err.kind());
-            let detail = if let Some(fatal) = err.as_fatal() {
-                common::record_join_stage_fatal(ctx, fatal, Some(final_eof), None).await?;
-                fatal.detail.clone()
-            } else {
-                err.to_string()
-            };
-            return Ok(EventLoopDirective::Transition(JoinEvent::Error(detail)));
+            ctx.instrumentation.record_error(ErrorKind::Unknown);
+            common::record_join_stage_fatal(ctx, &fatal, Some(final_eof), None).await?;
+            return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                fatal.detail,
+            )));
         }
     }
     ctx.handler_state = final_state;

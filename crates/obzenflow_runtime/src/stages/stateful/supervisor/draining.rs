@@ -12,9 +12,7 @@ use crate::stages::common::handlers::{
 };
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::error_routing::{
-    error_row_in_scope, processing_failed, route_to_error_journal,
-};
+use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
@@ -457,38 +455,14 @@ pub(super) async fn dispatch_draining<
                                             continue;
                                         }
 
-                                        if route_to_error_journal(&out) {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_id = %out.id,
-                                                "Writing stateful drain emitted error event to error journal (FLOWIP-082h)"
-                                            );
-
-                                            if out.consumes_data_credit() {
-                                                if let Some(subscription) =
-                                                    sup.subscription.as_mut()
-                                                {
-                                                    subscription.track_output_event();
-                                                }
-                                            }
-
-                                            crate::stages::common::supervision::output_committer::commit_error_output(&ctx.error_journal, &ctx.instrumentation, out, ctx.last_consumed_envelope.as_ref())
-                                                .await
-                                                .map_err(|e| {
-                                                    format!(
-                                                        "Failed to write stateful drain error event: {e}"
-                                                    )
-                                                })?;
-                                        } else {
-                                            let scope = observer_scope;
-                                            ctx.pending_outputs.push_back(
-                                                crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                        causal: crate::supervised_base::publication::capture(),
-                                                    event: out,
-                                                    scope,
-                                                },
-                                            );
-                                        }
+                                        let scope = observer_scope;
+                                        ctx.pending_outputs.push_back(
+                                            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                                causal: crate::supervised_base::publication::capture(),
+                                                event: out,
+                                                scope,
+                                            },
+                                        );
                                     }
 
                                     if let Some(upstream) = upstream_stage {
@@ -825,37 +799,14 @@ pub(super) async fn produce_final_output<
                     continue;
                 }
 
-                if route_to_error_journal(&event) {
-                    tracing::info!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %event.id,
-                        "Writing stateful drain() error event to error journal (FLOWIP-082h)"
-                    );
-
-                    if event.consumes_data_credit() {
-                        if let Some(subscription) = ctx.subscription.as_mut() {
-                            subscription.track_output_event();
-                        }
-                    }
-
-                    crate::stages::common::supervision::output_committer::commit_error_output(
-                        &ctx.error_journal,
-                        &ctx.instrumentation,
+                let scope = observer_scope;
+                ctx.pending_outputs.push_back(
+                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                         event,
-                        ctx.last_consumed_envelope.as_ref(),
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to write stateful drain() error event: {e}"))?;
-                } else {
-                    let scope = observer_scope;
-                    ctx.pending_outputs.push_back(
-                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
-                            causal: crate::supervised_base::publication::capture(),
-                            event,
-                            scope,
-                        },
-                    );
-                }
+                        scope,
+                    },
+                );
             }
 
             Ok(EventLoopDirective::Transition(

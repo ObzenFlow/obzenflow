@@ -4,7 +4,7 @@
 
 //! Sealed erased join interface used only by the stage supervisor.
 
-use crate::stages::common::handler_error::HandlerError;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::join::config::{
     JoinCatalogKind, JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP,
 };
@@ -105,13 +105,13 @@ pub trait UnifiedJoinHandler: sealed::Sealed + Send + Sync {
         event: ChainEvent,
         source_id: StageId,
         writer_id: WriterId,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal>;
 
     async fn drain(
         &self,
         state: &Self::State,
         parent: Option<&ChainEvent>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+    ) -> std::result::Result<Vec<ChainEvent>, StageFatal>;
 }
 
 /// A handler that `join!` accepts, with the facts its arrow must witness.

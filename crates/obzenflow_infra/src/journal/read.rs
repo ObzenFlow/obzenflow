@@ -240,6 +240,10 @@ impl RunSnapshot {
     pub fn manifest(&self) -> &RunManifest {
         &self.state.manifest
     }
+    /// The generation this run entered, 0 for a run that resumed nothing.
+    pub fn generation(&self) -> u64 {
+        lineage::entered_generation(&self.state.manifest)
+    }
     /// Manifest-selected journal identities, available before reading any rows.
     pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {
         self.state.journals.iter().map(|selected| &selected.journal)

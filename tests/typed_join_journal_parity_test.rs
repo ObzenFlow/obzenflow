@@ -296,34 +296,34 @@ impl TypedJoinHandler for ExactJoin {
         &self,
         _state: &mut Self::State,
         references: &mut JoinReferenceView<'_, String, ReferenceItem>,
-    ) -> Result<Vec<JoinedFact>, HandlerError> {
+    ) -> Vec<JoinedFact> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let reference = references
             .select(&"k2".to_string())
             .expect("terminal reference exists");
-        Ok(vec![JoinedFact {
+        vec![JoinedFact {
             phase: "hook".to_string(),
             key: "k2".to_string(),
             reference_version: reference.version,
             ordinal: 0,
-        }])
+        }]
     }
 
     fn drain(
         &self,
         _state: &Self::State,
         references: &mut JoinReferenceView<'_, String, ReferenceItem>,
-    ) -> Result<Vec<JoinedFact>, HandlerError> {
+    ) -> Vec<JoinedFact> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let reference = references
             .select(&"k1".to_string())
             .expect("drain reference exists");
-        Ok(vec![JoinedFact {
+        vec![JoinedFact {
             phase: "drain".to_string(),
             key: "k1".to_string(),
             reference_version: reference.version,
             ordinal: 0,
-        }])
+        }]
     }
 }
 
@@ -1108,18 +1108,18 @@ impl TypedJoinHandler for HookCounts {
         &self,
         _state: &mut Self::State,
         _references: &mut JoinReferenceView<'_, String, ReferenceItem>,
-    ) -> Result<Vec<JoinedFact>, HandlerError> {
+    ) -> Vec<JoinedFact> {
         self.stream_eofs.fetch_add(1, Ordering::SeqCst);
-        Ok(vec![hook_fact("hook", 0)])
+        vec![hook_fact("hook", 0)]
     }
 
     fn drain(
         &self,
         _state: &Self::State,
         _references: &mut JoinReferenceView<'_, String, ReferenceItem>,
-    ) -> Result<Vec<JoinedFact>, HandlerError> {
+    ) -> Vec<JoinedFact> {
         self.drains.fetch_add(1, Ordering::SeqCst);
-        Ok((0..3).map(|ordinal| hook_fact("drain", ordinal)).collect())
+        (0..3).map(|ordinal| hook_fact("drain", ordinal)).collect()
     }
 }
 

@@ -298,41 +298,14 @@ async fn handle_reference_envelope<
                             fatal.detail.clone(),
                         ))));
                     }
-                    let mut error_event = error_row_in_scope(
-                        processing_failed(
-                            WriterId::from(ctx.stage_id),
-                            &make_flow_context(
-                                &ctx.flow_name,
-                                &ctx.flow_id.to_string(),
-                                &ctx.stage_name,
-                                ctx.stage_id,
-                                StageType::Join,
-                            ),
-                            &envelope.authored(),
-                            &err,
-                            ctx.lineage_policy,
-                        ),
-                        scope,
-                    );
-                    ctx.instrumentation.record_error(err.kind());
-                    common::observe_join_outputs(
+                    common::dead_letter_reference(
                         ctx,
                         scope,
-                        Some(&event),
+                        &envelope,
                         delivery_snapshot.as_ref(),
-                        None,
-                        std::slice::from_mut(&mut error_event),
-                        Some(&envelope),
+                        &err,
                     )
                     .await?;
-
-                    crate::supervised_base::publication::append(
-                        &ctx.error_journal,
-                        error_event,
-                        AppendOptions::from_record(Some(&envelope))?,
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to write join error event: {e}"))?;
                     if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
                         reader.ack_consumed(1);
                     }
