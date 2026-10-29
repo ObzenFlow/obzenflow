@@ -18,7 +18,7 @@ const JOIN_LIVE: &str = include_str!("../src/stages/join/supervisor/live.rs");
 const JOIN_DRAINING: &str = include_str!("../src/stages/join/supervisor/draining.rs");
 
 const PRE_ERROR_GUARD: &str = "if matches!(event.processing.status, ProcessingStatus::Error";
-const FATAL_BRANCH: &str = "if let Some(fatal) = err.as_fatal()";
+const STAGE_FATAL_RECORD: &str = "common::record_join_stage_fatal(";
 
 fn positions(source: &str, needle: &str) -> Vec<usize> {
     // Resource ownership can introduce multiline handler access. Compare the
@@ -47,7 +47,7 @@ fn assert_each_handler_call_has_its_own_following_fatal_branch(
         .flat_map(|handler_call| positions(source, handler_call))
         .collect::<Vec<_>>();
     calls.sort_unstable();
-    let fatal_branches = positions(source, FATAL_BRANCH);
+    let fatal_branches = positions(source, STAGE_FATAL_RECORD);
 
     assert_eq!(
         calls.len(),
@@ -63,7 +63,7 @@ fn assert_each_handler_call_has_its_own_following_fatal_branch(
     for index in 0..expected_paths {
         assert!(
             calls[index] < fatal_branches[index],
-            "{label} path {index} does not inspect the handler result for Fatal"
+            "{label} path {index} does not record its handler's Fatal as a stage fatal"
         );
         if index + 1 < expected_paths {
             assert!(
