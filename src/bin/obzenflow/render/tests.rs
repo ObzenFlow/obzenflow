@@ -1271,6 +1271,49 @@ fn stage_capability_comes_from_the_manifest_regardless_of_effect_provenance() {
 }
 
 #[test]
+fn a_keyed_call_shows_its_escaped_key_above_the_payload_schema_version() {
+    for (key, shown) in [
+        (
+            "payment-authorize:store-4475",
+            "payment-authorize:store-4475",
+        ),
+        (
+            "payment-authorize:\u{1b}[31m",
+            "payment-authorize:\\u{1b}[31m",
+        ),
+    ] {
+        let mut renderer = renderer();
+        let mut outcome = fact(2, 101, &[100], json!({"authorization_id":"AUTH-DEMO-1234"}));
+        outcome.journal.stage.as_mut().unwrap().is_effectful = true;
+        if let RunRecordData::Chain(row) = &mut outcome.record {
+            row.envelope.provenance.event.effect_provenance = Some(serde_json::from_value(json!({
+                "cursor":{"recorded_flow_id":id(10), "stage_key":"classify", "input_seq":1, "effect_ordinal":0},
+                "descriptor_hash":"fixture",
+                "descriptor":{
+                    "effect_type":"payment.authorize", "label":"payment.authorize", "schema_version":1,
+                    "stage_logic_version":"v1", "canonical_input_hash":"fixture", "binding":{"mode":"portless"}
+                },
+                "outcome_fact_ordinal":0, "outcome_fact_count":1,
+                "idempotency_key":key
+            })).unwrap());
+        }
+        let mut output = Vec::new();
+        for record in [fact(1, 100, &[], json!({"celsius":38})), outcome] {
+            renderer.record(&mut output, record).unwrap();
+        }
+        let text = String::from_utf8(output).unwrap();
+        let blocks: Vec<Vec<_>> = text
+            .split("\n\n")
+            .map(|block| block.lines().collect())
+            .collect();
+        assert_eq!(blocks[0][3], "payload schema version: 1", "{text}");
+        assert_eq!(blocks[1][3], format!("idempotency key: {shown}"), "{text}");
+        assert_eq!(blocks[1][4], "payload schema version: 1", "{text}");
+        assert_eq!(text.matches("idempotency key:").count(), 1, "{text}");
+    }
+}
+
+#[test]
 fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_wrap() {
     let expression =
         "payment.authorization_unavailable ← authorize_payment(payment.order_validated)";
