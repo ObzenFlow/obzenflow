@@ -12,10 +12,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    StageCompletion, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, System};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -140,7 +137,6 @@ impl TypedFiniteSourceHandler for OrderSource {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 struct ShippingDesk {
     calls: Arc<AtomicUsize>,
 }
@@ -150,33 +146,20 @@ struct AuthoriseShippingRequest {
     order_id: u64,
 }
 
-#[async_trait]
-impl CallRequest for AuthoriseShippingRequest {
-    const EFFECT_TYPE: &'static str = "shipping.authorise";
-    type Safety = RequiresKey;
-    type Port = ShippingDesk;
-    type Outcome = ShippingAuthorised;
-
-    async fn call(
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+impl ShippingDesk {
+    #[effect(type = "shipping.authorise", exactly_once)]
+    fn authorise(
         &self,
-        desk: &ShippingDesk,
-        _ctx: &mut EffectContext,
+        request: &AuthoriseShippingRequest,
     ) -> Result<ShippingAuthorised, EffectError> {
-        desk.calls.fetch_add(1, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ShippingAuthorised {
-            order_id: self.order_id,
-            authorisation_id: format!("shipping-auth-{}", self.order_id),
+            order_id: request.order_id,
+            authorisation_id: format!("shipping-auth-{}", request.order_id),
         })
     }
 }
-
-impl Keyed for AuthoriseShippingRequest {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("shipping:{}", self.order_id))
-    }
-}
-
-type AuthoriseShippingEffect = Call<AuthoriseShippingRequest>;
 
 #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
 #[effect_handler(effects = obzenflow_runtime::effects)]
@@ -189,7 +172,7 @@ struct AuthoriseShipping {
 impl EffectfulTransformHandler for AuthoriseShipping {
     type Input = OrderAccepted;
     type Output = obzenflow_core::stage_fact_set![ShippingAuthorised, ShippingReady];
-    type AllowedEffects = obzenflow_runtime::effect_set![AuthoriseShippingEffect];
+    type AllowedEffects = AuthoriseShippingRequest;
 
     async fn process(
         &self,
@@ -239,7 +222,7 @@ struct EffectProbeObserver {
 
 impl EffectObserver for EffectProbeObserver {
     fn after_effect(&self, ctx: &EffectObserverContext<'_>) {
-        assert_eq!(ctx.effect_type(), AuthoriseShippingRequest::EFFECT_TYPE);
+        assert_eq!(ctx.effect_type(), "shipping.authorise");
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
 }

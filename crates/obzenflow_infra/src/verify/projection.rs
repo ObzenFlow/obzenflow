@@ -290,6 +290,7 @@ mod tests {
             fact_owner: Default::default(),
             origin: None,
             attempt: None,
+            idempotency_key: None,
         };
         let event = ChainEventFactory::data_event(
             writer(),
@@ -319,6 +320,7 @@ mod tests {
                 fact_owner: Default::default(),
                 origin: None,
                 attempt: None,
+                idempotency_key: None,
             };
             ChainEventFactory::data_event(
                 writer(),

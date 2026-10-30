@@ -8,8 +8,7 @@
 pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
 pub use obzenflow_runtime::effect_set;
 pub use obzenflow_runtime::effects::{
-    port, AtLeastOnce, Call, CallRequest, CallSafety, EffectHandler, Idempotent, Keyed,
-    RequiresKey, StageSystem, System, SystemError, Transactional,
+    port, EffectHandler, Keyed, StageSystem, System, SystemError,
 };
 pub use obzenflow_runtime::effects::{
     BindingAuthorityFault, BindingMismatchKind, EffectAttemptOrdinal, EffectCursor,
@@ -24,7 +23,10 @@ pub use obzenflow_runtime::effects::{
 };
 
 #[doc(hidden)]
-pub use obzenflow_runtime::effects::{assert_port_answer, PortAnswer, PortImpl, ServesPort};
+pub use obzenflow_runtime::effects::{
+    __async_trait, assert_port_answer, AtLeastOnce, Call, CallRequest, CallSafety, Idempotent,
+    KeyRule, PortAnswer, PortImpl, RequiresKey, ServesPort, Transactional,
+};
 
 /// Building blocks for simulated outside systems: a call log that answers a
 /// repeated idempotency key with its first decided response and records every

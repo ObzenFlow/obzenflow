@@ -4,7 +4,7 @@
 
 use crate::effects::{
     BoundEffect, ConfiguredEffect, EffectBinding, EffectBindingBuildError, EffectBindingUse,
-    RecordedReply,
+    EffectName, RecordedReply,
 };
 use obzenflow_core::ai::{
     AiEndpoint, AiModelProviderError, AiModelSpec, AiProvider, ChatModelProvider,
@@ -36,9 +36,9 @@ impl AiProviderPort for dyn EmbeddingModelProvider {
 /// at the stage's point or from the run's archive on reconstruction.
 pub trait AiEffect:
     ConfiguredEffect<
-    OutcomeSemantics = RecordedReply,
-    Outcome: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
->
+        OutcomeSemantics = RecordedReply,
+        Outcome: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    > + EffectName<Effect = Self, Name = Self>
 {
     /// What a role prepares for one call.
     type Request: Clone + Send + Sync + 'static;

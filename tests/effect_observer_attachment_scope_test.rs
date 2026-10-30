@@ -15,9 +15,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, Idempotent, StageCompletion, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, System};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -58,54 +56,33 @@ impl TypedPayload for EffectReply {
     const EVENT_TYPE: &'static str = "effect_observer_scope.reply";
 }
 
-#[obzenflow::port]
+const EFFECT_A: &str = "effect_observer_scope.a";
+const EFFECT_B: &str = "effect_observer_scope.b";
+
 struct ScopeService;
 
 #[derive(Clone, Debug, Serialize)]
 struct RequestA;
 
-#[async_trait]
-impl CallRequest for RequestA {
-    const EFFECT_TYPE: &'static str = "effect_observer_scope.a";
-    type Safety = Idempotent;
-    type Port = ScopeService;
-    type Outcome = EffectReply;
-
-    async fn call(
-        &self,
-        _service: &ScopeService,
-        _ctx: &mut EffectContext,
-    ) -> Result<EffectReply, EffectError> {
-        Ok(EffectReply {
-            subject: Self::EFFECT_TYPE.to_string(),
-        })
-    }
-}
-
-type EffectA = Call<RequestA>;
-
 #[derive(Clone, Debug, Serialize)]
 struct RequestB;
 
-#[async_trait]
-impl CallRequest for RequestB {
-    const EFFECT_TYPE: &'static str = "effect_observer_scope.b";
-    type Safety = Idempotent;
-    type Port = ScopeService;
-    type Outcome = EffectReply;
-
-    async fn call(
-        &self,
-        _service: &ScopeService,
-        _ctx: &mut EffectContext,
-    ) -> Result<EffectReply, EffectError> {
+#[obzenflow::port]
+impl ScopeService {
+    #[effect(type = "effect_observer_scope.a", exactly_once)]
+    fn a(&self, _: &RequestA) -> Result<EffectReply, EffectError> {
         Ok(EffectReply {
-            subject: Self::EFFECT_TYPE.to_string(),
+            subject: EFFECT_A.to_string(),
+        })
+    }
+
+    #[effect(type = "effect_observer_scope.b", exactly_once)]
+    fn b(&self, _: &RequestB) -> Result<EffectReply, EffectError> {
+        Ok(EffectReply {
+            subject: EFFECT_B.to_string(),
         })
     }
 }
-
-type EffectB = Call<RequestB>;
 
 #[derive(Clone, Debug)]
 struct OneInputSource {
@@ -145,7 +122,7 @@ impl PerformsBothEffects {
 impl EffectfulTransformHandler for PerformsBothEffects {
     type Input = Input;
     type Output = obzenflow_core::stage_fact_set![EffectFact, EffectReply];
-    type AllowedEffects = obzenflow_runtime::effect_set![EffectA, EffectB];
+    type AllowedEffects = obzenflow_runtime::effect_set![RequestA, RequestB];
 
     async fn process(
         &self,
@@ -195,7 +172,7 @@ impl EffectObserver for PanicsOnEffectA {
             .lock()
             .expect("panicking observer call lock")
             .push(ctx.effect_type().to_string());
-        if ctx.effect_type() == RequestA::EFFECT_TYPE {
+        if ctx.effect_type() == EFFECT_A {
             panic!("intentional effect observer panic");
         }
     }
@@ -270,14 +247,14 @@ async fn public_effect_observer_path_keys_dispatch_and_shares_declaration_quaran
         *panicking_calls
             .lock()
             .expect("panicking observer assertion lock"),
-        [RequestA::EFFECT_TYPE],
+        [EFFECT_A],
         "a panic on A must quarantine the declaration before B"
     );
     assert_eq!(
         *sibling_calls
             .lock()
             .expect("recording observer assertion lock"),
-        [RequestA::EFFECT_TYPE, RequestB::EFFECT_TYPE],
+        [EFFECT_A, EFFECT_B],
         "one declaration must receive exactly one callback for each matching effect"
     );
     assert_eq!(
@@ -298,7 +275,7 @@ impl EffectObserver for ScopedRecorder {
             .lock()
             .expect("scoped observer call lock")
             .push(ctx.effect_type().to_string());
-        if self.panic_on_a && ctx.effect_type() == RequestA::EFFECT_TYPE {
+        if self.panic_on_a && ctx.effect_type() == EFFECT_A {
             panic!("intentional scoped effect observer panic");
         }
     }
@@ -330,7 +307,7 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                     panic_on_a: !implementation_panics,
                 },
             )
-            .for_effect::<EffectA>();
+            .for_effect::<RequestA>();
             let implementation_sibling = effect_observer(
                 "implementation-sibling",
                 ScopedRecorder {
@@ -345,7 +322,7 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                     panic_on_a: false,
                 },
             )
-            .for_effect::<EffectA>();
+            .for_effect::<RequestA>();
             let (implementation_first, implementation_second, named_first, named_second) =
                 if reverse_group {
                     (implementation_sibling, implementation, named_sibling, named)
@@ -393,7 +370,7 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                     attachment.label == "shared-label"
                         && attachment.operation
                             == MiddlewareOperation::Effect {
-                                effect_type: RequestA::EFFECT_TYPE.to_string(),
+                                effect_type: EFFECT_A.to_string(),
                             }
                 })
                 .collect::<Vec<_>>();
@@ -408,7 +385,7 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
             ));
             assert!(matching.iter().any(|attachment| attachment.authored_site
                 == MiddlewareAuthoredSite::Effect {
-                    effect_type: RequestA::EFFECT_TYPE.to_string(),
+                    effect_type: EFFECT_A.to_string(),
                 }));
             let mut keys = attachments
                 .iter()
@@ -428,17 +405,12 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                 .run()
                 .await
                 .expect("observer quarantine preserves flow completion");
-            let every_effect = vec![
-                RequestA::EFFECT_TYPE,
-                RequestB::EFFECT_TYPE,
-                RequestA::EFFECT_TYPE,
-                RequestB::EFFECT_TYPE,
-            ];
-            let named_effect = vec![RequestA::EFFECT_TYPE, RequestA::EFFECT_TYPE];
+            let every_effect = vec![EFFECT_A, EFFECT_B, EFFECT_A, EFFECT_B];
+            let named_effect = vec![EFFECT_A, EFFECT_A];
             assert_eq!(
                 *implementation_calls.lock().unwrap(),
                 if implementation_panics {
-                    vec![RequestA::EFFECT_TYPE]
+                    vec![EFFECT_A]
                 } else {
                     every_effect.clone()
                 },
@@ -449,7 +421,7 @@ async fn same_label_at_implementation_and_effect_sites_has_independent_quarantin
                 if implementation_panics {
                     named_effect.clone()
                 } else {
-                    vec![RequestA::EFFECT_TYPE]
+                    vec![EFFECT_A]
                 },
                 "implementation quarantine must not suppress the named attachment"
             );
@@ -565,7 +537,7 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
                 calls: named_calls.clone(),
             },
         )
-        .for_effect::<EffectA>();
+        .for_effect::<RequestA>();
         let deliveries_for_flow = deliveries.clone();
         let handle = FlowDefinition::materialize(move |_runtime_config| {
             let input_source = OneInputSource { emitted: false };
@@ -607,7 +579,7 @@ async fn one_authored_observer_shares_quarantine_across_handler_effect_and_lifec
             "a failure on {fail_at} must suppress every later callback across all materialized surfaces: {calls:?}");
         assert_eq!(
             *named_calls.lock().unwrap(),
-            [RequestA::EFFECT_TYPE, RequestA::EFFECT_TYPE],
+            [EFFECT_A, EFFECT_A],
             "the named observer with the same label is a separate attachment"
         );
         assert_eq!(deliveries.load(Ordering::SeqCst), 1);

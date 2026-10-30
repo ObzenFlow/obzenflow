@@ -23,9 +23,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectCommitHandle, EffectContext, EffectCursor, EffectError,
-    EffectOutcomePayload, EffectRecord, Effects, IdempotencyKey, Idempotent, Keyed, RequiresKey,
-    SinkRedeliverySafety, System, Transactional,
+    EffectCommitHandle, EffectContext, EffectCursor, EffectError, EffectOutcomePayload,
+    EffectRecord, Effects, IdempotencyKey, Keyed, SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -163,41 +162,84 @@ impl TypedTransformHandler for FanOutTransform {
     }
 }
 
+type KeyLog = Arc<Mutex<Vec<IdempotencyKey>>>;
+
 /// The in-process system the counting, failing, reserving and product
 /// requests call. The test keeps its own `Arc` to the count and reads it.
-#[obzenflow::port]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
+    keys: KeyLog,
     offset: u64,
 }
 
+#[obzenflow::port]
+impl CallCounter {
+    #[effect(type = "effect_replay.counting", exactly_once)]
+    fn count(
+        &self,
+        request: &Counting,
+        key: &IdempotencyKey,
+    ) -> Result<ReplayEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.keys.lock().expect("key log").push(key.clone());
+        Ok(ReplayEffectValue {
+            effect_value: request.value + self.offset,
+        })
+    }
+
+    #[effect(type = "effect_replay.always_failing", exactly_once)]
+    fn fail(
+        &self,
+        _: &AlwaysFailing,
+        key: &IdempotencyKey,
+    ) -> Result<ReplayEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.keys.lock().expect("key log").push(key.clone());
+        Err(EffectError::Execution("simulated_gateway_down".to_string()))
+    }
+
+    #[effect(type = "effect_replay.slow_reserve", exactly_once)]
+    async fn reserve(&self, request: &SlowReserve) -> Result<PolicyReserved, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        Ok(PolicyReserved {
+            request_id: request.request_id,
+        })
+    }
+
+    #[effect(type = "effect_replay.product", exactly_once)]
+    fn product(&self, request: &Product) -> Result<ProductOutcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ProductOutcome {
+            first: ProductFirst {
+                value: request.value + 100,
+            },
+            second: ProductSecond {
+                value: request.value + 200,
+            },
+        })
+    }
+}
+
 fn call_counter(calls: Arc<AtomicUsize>) -> System<CallCounter> {
-    System::eager("call-counter", Arc::new(CallCounter { calls, offset: 100 }))
-        .expect("a valid system name")
+    recording_call_counter(calls, KeyLog::default())
+}
+
+fn recording_call_counter(calls: Arc<AtomicUsize>, keys: KeyLog) -> System<CallCounter> {
+    System::eager(
+        "call-counter",
+        Arc::new(CallCounter {
+            calls,
+            keys,
+            offset: 100,
+        }),
+    )
+    .expect("a valid system name")
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct Counting {
     value: u64,
-}
-
-#[async_trait]
-impl CallRequest for Counting {
-    const EFFECT_TYPE: &'static str = "effect_replay.counting";
-    type Safety = RequiresKey;
-    type Port = CallCounter;
-    type Outcome = ReplayEffectValue;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<ReplayEffectValue, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ReplayEffectValue {
-            effect_value: self.value + counter.offset,
-        })
-    }
 }
 
 impl Keyed for Counting {
@@ -206,9 +248,6 @@ impl Keyed for Counting {
     }
 }
 
-type CountingEffect = Call<Counting>;
-
-#[obzenflow::port]
 struct BlockingGate {
     calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
@@ -242,39 +281,36 @@ impl Drop for PendingEffectGuard {
     }
 }
 
-#[async_trait]
-impl CallRequest for Blocking {
-    const EFFECT_TYPE: &'static str = "effect_replay.blocking";
-    type Safety = RequiresKey;
-    type Port = BlockingGate;
-    type Outcome = ReplayEffectValue;
-
-    async fn call(
+#[obzenflow::port]
+impl BlockingGate {
+    #[effect(type = "effect_replay.blocking", exactly_once)]
+    async fn block(
         &self,
-        gate: &BlockingGate,
-        ctx: &mut EffectContext,
+        request: &Blocking,
+        key: &IdempotencyKey,
+        ctx: &EffectContext,
     ) -> Result<ReplayEffectValue, EffectError> {
-        gate.calls.fetch_add(1, Ordering::SeqCst);
-        gate.invocations
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.invocations
             .lock()
             .expect("blocking invocation lock poisoned")
             .push(BlockingInvocation {
                 runtime_flow_id: ctx.flow_id().to_string(),
                 stage_key: ctx.stage_key().to_string(),
                 input_seq: ctx.now(),
-                idempotency_key: format!("blocking:{}", self.value),
+                idempotency_key: key.0.clone(),
             });
         let mut pending = PendingEffectGuard {
-            cancelled_futures: gate.cancelled_futures.clone(),
+            cancelled_futures: self.cancelled_futures.clone(),
             completed: false,
         };
-        let permit = gate.release.acquire().await;
+        let permit = self.release.acquire().await;
         pending.completed = true;
         let permit =
             permit.map_err(|_| EffectError::Execution("blocking gate closed".to_string()))?;
         drop(permit);
         Ok(ReplayEffectValue {
-            effect_value: self.value + 100,
+            effect_value: request.value + 100,
         })
     }
 }
@@ -284,8 +320,6 @@ impl Keyed for Blocking {
         IdempotencyKey(format!("blocking:{}", self.value))
     }
 }
-
-type BlockingEffect = Call<Blocking>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ReplayTransform {
@@ -297,7 +331,7 @@ struct ReplayTransform {
 impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     async fn process(
         &self,
@@ -333,7 +367,7 @@ struct BlockingTransform {
 impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![BlockingEffect];
+    type AllowedEffects = Blocking;
 
     async fn process(
         &self,
@@ -374,7 +408,7 @@ struct PostPerformBlockingTransform {
 impl EffectfulTransformHandler for PostPerformBlockingTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     async fn process(
         &self,
@@ -413,30 +447,11 @@ struct AlwaysFailing {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for AlwaysFailing {
-    const EFFECT_TYPE: &'static str = "effect_replay.always_failing";
-    type Safety = RequiresKey;
-    type Port = CallCounter;
-    type Outcome = ReplayEffectValue;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<ReplayEffectValue, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
-        Err(EffectError::Execution("simulated_gateway_down".to_string()))
-    }
-}
-
 impl Keyed for AlwaysFailing {
     fn idempotency_key(&self) -> IdempotencyKey {
         IdempotencyKey(format!("always-failing:{}", self.value))
     }
 }
-
-type AlwaysFailingEffect = Call<AlwaysFailing>;
 
 #[derive(Clone, Debug, Default)]
 struct ReplayStatefulState {
@@ -463,7 +478,7 @@ impl EffectfulStatefulHandler for ReplayStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
     type Output = ReplayStatefulFact;
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -523,28 +538,6 @@ struct SlowReserve {
     request_id: u64,
 }
 
-#[async_trait]
-impl CallRequest for SlowReserve {
-    const EFFECT_TYPE: &'static str = "effect_replay.slow_reserve";
-    type Safety = Idempotent;
-    type Port = CallCounter;
-    type Outcome = PolicyReserved;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<PolicyReserved, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        Ok(PolicyReserved {
-            request_id: self.request_id,
-        })
-    }
-}
-
-type SlowReserveEffect = Call<SlowReserve>;
-
 #[derive(Clone, Debug, Default)]
 struct PolicyStatefulState {
     allocated: Vec<u64>,
@@ -574,7 +567,7 @@ impl EffectfulStatefulHandler for PolicyStateful {
     type State = PolicyStatefulState;
     type Input = ReplayInput;
     type Output = PolicyStatefulFact;
-    type AllowedEffects = obzenflow_runtime::effect_set![SlowReserveEffect];
+    type AllowedEffects = SlowReserve;
 
     fn initial_state(&self) -> Self::State {
         PolicyStatefulState::default()
@@ -664,7 +657,7 @@ impl EffectfulStatefulHandler for DishonestOneFactStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
     type Output = DishonestReplayStatefulOutput;
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -721,7 +714,7 @@ impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
     type State = ErrorAfterCommitState;
     type Input = ReplayInput;
     type Output = ReplayStatefulFact;
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ErrorAfterCommitState::default()
@@ -796,7 +789,7 @@ impl EffectfulStatefulHandler for ApplyRejectingStateful {
     type State = ApplyRejectionState;
     type Input = ReplayInput;
     type Output = ReplayStatefulFact;
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ApplyRejectionState::default()
@@ -886,32 +879,6 @@ struct Product {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for Product {
-    const EFFECT_TYPE: &'static str = "effect_replay.product";
-    type Safety = Idempotent;
-    type Port = CallCounter;
-    type Outcome = ProductOutcome;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<ProductOutcome, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ProductOutcome {
-            first: ProductFirst {
-                value: self.value + 100,
-            },
-            second: ProductSecond {
-                value: self.value + 200,
-            },
-        })
-    }
-}
-
-type ProductEffect = Call<Product>;
-
 /// The stage's per-fact `Output` enum: the carrier never reaches `apply`;
 /// each committed member fact folds individually, in ordinal order.
 #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
@@ -936,7 +903,7 @@ impl EffectfulStatefulHandler for ProductStateful {
     type State = ProductStatefulState;
     type Input = ReplayInput;
     type Output = ProductStatefulFact;
-    type AllowedEffects = obzenflow_runtime::effect_set![ProductEffect];
+    type AllowedEffects = Product;
 
     fn initial_state(&self) -> Self::State {
         ProductStatefulState
@@ -1007,10 +974,19 @@ fn build_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
+    build_flow_recording_keys(journal_base, calls, KeyLog::default(), outputs)
+}
+
+fn build_flow_recording_keys(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    keys: KeyLog,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let inputs_handler = ReplaySource::new();
         let effectful_handler = ReplayTransform {
-            counter: call_counter(calls),
+            counter: recording_call_counter(calls, keys),
         };
         let collector_handler = CollectSink { outputs };
 
@@ -1280,6 +1256,7 @@ impl SiblingSystems {
             "eager-counter",
             Arc::new(CallCounter {
                 calls: self.eager_calls.clone(),
+                keys: KeyLog::default(),
                 offset: 100,
             }),
         )
@@ -1293,6 +1270,7 @@ impl SiblingSystems {
             resolutions.fetch_add(1, Ordering::SeqCst);
             Ok(Arc::new(CallCounter {
                 calls: calls.clone(),
+                keys: KeyLog::default(),
                 offset: 200,
             }))
         })
@@ -2008,18 +1986,27 @@ async fn effectful_transform_replay_suppresses_effect_execution() {
     let journal_base = temp.path().join("journals");
 
     let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_keys = KeyLog::default();
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow(
+        .run_async(build_flow_recording_keys(
             journal_base.clone(),
             live_calls.clone(),
+            live_keys.clone(),
             live_outputs.clone(),
         ))
         .await
         .expect("live flow should complete");
 
     assert_eq!(live_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *live_keys.lock().expect("key log"),
+        ["counting:1", "counting:2", "counting:3"]
+            .map(|key| IdempotencyKey(key.to_string()))
+            .to_vec(),
+        "each live call sends its request's key"
+    );
     let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
     assert_eq!(
         live_domain_outputs,
@@ -2041,6 +2028,7 @@ async fn effectful_transform_replay_suppresses_effect_execution() {
 
     let archive_dir = latest_run_dir(&journal_base);
     let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_keys = KeyLog::default();
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(vec![
@@ -2048,9 +2036,10 @@ async fn effectful_transform_replay_suppresses_effect_execution() {
             OsString::from("--replay-from"),
             archive_dir.as_os_str().to_os_string(),
         ])
-        .run_async(build_flow(
+        .run_async(build_flow_recording_keys(
             journal_base,
             replay_calls.clone(),
+            replay_keys.clone(),
             replay_outputs.clone(),
         ))
         .await
@@ -2060,6 +2049,10 @@ async fn effectful_transform_replay_suppresses_effect_execution() {
         replay_calls.load(Ordering::SeqCst),
         0,
         "replay must return recorded effect results without executing"
+    );
+    assert!(
+        replay_keys.lock().expect("key log").is_empty(),
+        "a replay sends no key, since it makes no call"
     );
     assert_eq!(
         replay_outputs
@@ -3913,6 +3906,7 @@ async fn incomplete_replay_stops_at_the_end_of_its_recording() {
 /// A host-provided port that the greeting request calls.
 #[obzenflow::port]
 trait GreetingPort: Send + Sync {
+    #[effect(type = "effect_port_supply.ported", exactly_once)]
     fn greet(&self, request: &Greet) -> Result<ReplayEffectValue, EffectError>;
 }
 
@@ -3935,24 +3929,6 @@ struct Greet {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for Greet {
-    const EFFECT_TYPE: &'static str = "effect_port_supply.ported";
-    type Safety = Idempotent;
-    type Port = dyn GreetingPort;
-    type Outcome = ReplayEffectValue;
-
-    async fn call(
-        &self,
-        greeter: &dyn GreetingPort,
-        _ctx: &mut EffectContext,
-    ) -> Result<ReplayEffectValue, EffectError> {
-        greeter.greet(self)
-    }
-}
-
-type PortedEffect = Call<Greet>;
-
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PortedTransform {
     #[system]
@@ -3963,7 +3939,7 @@ struct PortedTransform {
 impl EffectfulTransformHandler for PortedTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![PortedEffect];
+    type AllowedEffects = Greet;
 
     async fn process(
         &self,
@@ -4167,13 +4143,14 @@ async fn a_system_reused_by_a_second_flow_registers_its_port_again() {
 // --- Transactional request whose port commits through the handle it is given
 
 /// The ledger a transactional request posts to. It commits the outcome
-/// through the handle `ctx.transaction(self)` returns.
+/// through the handle it is given.
 #[obzenflow::port]
 #[async_trait]
 trait LedgerPort: Send + Sync {
+    #[effect(type = "effect_port_supply.ledger", exactly_once)]
     async fn post(
         &self,
-        value: u64,
+        request: &LedgerPost,
         tx: EffectCommitHandle<ReplayEffectValue>,
     ) -> Result<ReplayEffectValue, EffectError>;
 }
@@ -4183,25 +4160,6 @@ struct LedgerPost {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for LedgerPost {
-    const EFFECT_TYPE: &'static str = "effect_port_supply.ledger";
-    type Safety = Transactional;
-    type Port = dyn LedgerPort;
-    type Outcome = ReplayEffectValue;
-
-    async fn call(
-        &self,
-        ledger: &dyn LedgerPort,
-        ctx: &mut EffectContext,
-    ) -> Result<ReplayEffectValue, EffectError> {
-        let tx = ctx.transaction(self)?;
-        ledger.post(self.value, tx).await
-    }
-}
-
-type LedgerEffect = Call<LedgerPost>;
-
 struct CountingLedger {
     calls: Arc<AtomicUsize>,
 }
@@ -4210,12 +4168,12 @@ struct CountingLedger {
 impl LedgerPort for CountingLedger {
     async fn post(
         &self,
-        value: u64,
+        request: &LedgerPost,
         tx: EffectCommitHandle<ReplayEffectValue>,
     ) -> Result<ReplayEffectValue, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let output = ReplayEffectValue {
-            effect_value: value + 1_000,
+            effect_value: request.value + 1_000,
         };
         tx.commit_success(&output).await?;
         Ok(output)
@@ -4236,7 +4194,7 @@ struct LedgerTransform {
 impl EffectfulTransformHandler for LedgerTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![LedgerEffect];
+    type AllowedEffects = LedgerPost;
 
     async fn process(
         &self,
@@ -4279,7 +4237,7 @@ fn build_transactional_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => ledger_handler.transactional::<LedgerEffect>()
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } with resilience => ledger_handler
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4443,7 +4401,7 @@ struct FailFastTransform {
 impl EffectfulTransformHandler for FailFastTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailingEffect];
+    type AllowedEffects = AlwaysFailing;
 
     async fn process(
         &self,
@@ -4491,7 +4449,7 @@ struct MultiEffectFailFastTransform {
 impl EffectfulTransformHandler for MultiEffectFailFastTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailingEffect, CountingEffect];
+    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailing, Counting];
 
     async fn process(
         &self,
@@ -4564,7 +4522,7 @@ fn build_multi_effect_per_effect_breaker_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let resilience = circuit_breaker()
             .consecutive_failures(1)
-            .for_effect::<AlwaysFailingEffect>();
+            .for_effect::<AlwaysFailing>();
         let inputs_handler = ReplaySource::new();
         let effectful_handler = MultiEffectFailFastTransform {
             counter: call_counter(calls),
@@ -4727,7 +4685,7 @@ async fn per_effect_breaker_builds_on_multi_effect_stages() {
         .collect();
     let opened_for_failing = effect_breakers
         .iter()
-        .find(|(effect, _)| effect == AlwaysFailing::EFFECT_TYPE)
+        .find(|(effect, _)| effect == "effect_replay.always_failing")
         .map(|(_, opened)| *opened)
         .unwrap_or(0);
     assert!(
@@ -4737,7 +4695,7 @@ async fn per_effect_breaker_builds_on_multi_effect_stages() {
     assert!(
         !effect_breakers
             .iter()
-            .any(|(effect, _)| effect == Counting::EFFECT_TYPE),
+            .any(|(effect, _)| effect == "effect_replay.counting"),
         "the unprotected effect must carry no breaker instance, got {effect_breakers:?}"
     );
 }

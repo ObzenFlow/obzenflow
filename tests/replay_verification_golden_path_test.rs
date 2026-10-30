@@ -26,10 +26,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, RefusalReason, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, System};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler,
@@ -171,7 +168,6 @@ impl EffectfulTransformHandler for ValidateOrder {
     }
 }
 
-#[obzenflow::port]
 struct Gateway {
     calls: Arc<AtomicUsize>,
 }
@@ -182,38 +178,22 @@ struct AuthorizeRequest {
     amount: u64,
 }
 
-#[async_trait]
-impl CallRequest for AuthorizeRequest {
-    const EFFECT_TYPE: &'static str = "replay_verification.authorize";
-    type Safety = RequiresKey;
-    type Port = Gateway;
-    type Outcome = AuthGrant;
-
-    async fn call(
-        &self,
-        gateway: &Gateway,
-        _ctx: &mut EffectContext,
-    ) -> Result<AuthGrant, EffectError> {
-        gateway.calls.fetch_add(1, Ordering::SeqCst);
-        if self.order_id.is_multiple_of(2) {
+#[obzenflow::port]
+impl Gateway {
+    #[effect(type = "replay_verification.authorize", exactly_once)]
+    fn authorize(&self, request: &AuthorizeRequest) -> Result<AuthGrant, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if request.order_id.is_multiple_of(2) {
             return Err(EffectError::Execution(
                 "gateway_timeout_simulated".to_string(),
             ));
         }
         Ok(AuthGrant {
-            order_id: self.order_id,
-            auth_code: self.order_id + 9000,
+            order_id: request.order_id,
+            auth_code: request.order_id + 9000,
         })
     }
 }
-
-impl Keyed for AuthorizeRequest {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("authorize:{}", self.order_id))
-    }
-}
-
-type AuthorizeEffect = Call<AuthorizeRequest>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct AuthorizePayment {
@@ -239,7 +219,7 @@ impl EffectfulTransformHandler for AuthorizePayment {
         OrderCancelled,
         AuthGrant
     ];
-    type AllowedEffects = obzenflow_runtime::effect_set![AuthorizeEffect];
+    type AllowedEffects = AuthorizeRequest;
 
     async fn process(
         &self,

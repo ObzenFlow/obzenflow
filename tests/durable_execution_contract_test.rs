@@ -7,7 +7,7 @@
 //! A flow with a real external effect ends naturally, stops on SIGTERM or dies
 //! on SIGKILL, and the supported verb reproduces the uninterrupted outcome
 //! without repeating a committed effect. The test has Jepsen's shape: a
-//! workload (two YAML order channels into `AuthorizePayment`), an
+//! workload (two YAML order channels into `payment.authorize`), an
 //! independently recorded external history (the gateway's ledger), a fault
 //! injector (signals sent only once a journal predicate holds) and a checker
 //! (I1 to I10, over every archive and the lineage it belongs to). Each
@@ -40,8 +40,7 @@ use obzenflow::application::ingress::{IngestionConfig, IngressRefusalReason, Ing
 use obzenflow::application::{verify_call_logs, CallLogCheck, CallLogVerdict, FlowApplication};
 use obzenflow::effects::simulated::CallLog;
 use obzenflow::effects::{
-    self, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    StageCompletion,
+    self, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, StageCompletion,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::flow::{
@@ -53,7 +52,7 @@ use obzenflow::journal::read::{
     RunJournalKind, RunOutcome, RunRecord, RunRecordData, SystemPayload,
 };
 use obzenflow::journal::JournalRecord;
-use obzenflow::schema::{FlowId, TypedPayload};
+use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::{
     DeliveryMethod, DeliveryResult, DiscardSink, InlineSink, SinkDescription, SinkOperationError,
     SinkRedeliverySafety, SinkWriteFailure, SinkWritePhase,
@@ -288,23 +287,25 @@ async fn hold_until(release: &Path) {
 
 /// Keeps every physical call in a call log, whose lines survive SIGKILL. Holds
 /// `hold` after recording its call until `release` exists.
-#[obzenflow::port]
 struct Gateway {
     calls: CallLog<GatewayResponse>,
     hold: Option<String>,
     release: PathBuf,
 }
 
+#[obzenflow::port]
 impl Gateway {
+    #[effect(type = "payment.authorize", exactly_once)]
     async fn authorize(
         &self,
-        order: &CustomerOrderPlaced,
-        flow_id: FlowId,
+        request: &AuthorizationRequest,
+        key: &IdempotencyKey,
+        ctx: &EffectContext,
     ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        let key = IdempotencyKey(idempotency_key(&order.order_id));
+        let order = &request.order;
         let response = self
             .calls
-            .answer(&key, flow_id, |_| decide(order))
+            .answer(key, ctx.flow_id(), |_| decide(order))
             .map_err(|error| EffectError::Transport(error.to_string()))?;
         if self.hold.as_deref() == Some(order.order_id.as_str()) {
             hold_until(&self.release).await;
@@ -372,29 +373,11 @@ struct AuthorizationRequest {
     order: CustomerOrderPlaced,
 }
 
-#[async_trait]
-impl CallRequest for AuthorizationRequest {
-    const EFFECT_TYPE: &'static str = "payment.authorize";
-    type Safety = RequiresKey;
-    type Port = Gateway;
-    type Outcome = AuthorizePaymentOutcome;
-
-    async fn call(
-        &self,
-        gateway: &Gateway,
-        ctx: &mut EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        gateway.authorize(&self.order, ctx.flow_id()).await
-    }
-}
-
 impl Keyed for AuthorizationRequest {
     fn idempotency_key(&self) -> IdempotencyKey {
         IdempotencyKey(idempotency_key(&self.order.order_id))
     }
 }
-
-type AuthorizePayment = obzenflow::effects::Call<AuthorizationRequest>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct Authorize {
@@ -403,13 +386,12 @@ struct Authorize {
 }
 
 type Authorization = obzenflow::schema::stage_fact_set![PaymentAuthorized, PaymentDeclined];
-type AuthorizeEffects = obzenflow::effects::effect_set![AuthorizePayment];
 
 #[async_trait]
 impl EffectfulTransformHandler for Authorize {
     type Input = CustomerOrderPlaced;
     type Output = Authorization;
-    type AllowedEffects = AuthorizeEffects;
+    type AllowedEffects = AuthorizationRequest;
 
     async fn process(
         &self,
@@ -2825,7 +2807,7 @@ mod then_live {
         scenario.root.join("audit-ledger.jsonl")
     }
 
-    #[obzenflow::port]
+    /// Records the key of each audit it performs.
     struct AuditLedger {
         path: PathBuf,
     }
@@ -2835,21 +2817,13 @@ mod then_live {
         entry: Entry,
     }
 
-    #[async_trait]
-    impl CallRequest for AuditEntry {
-        const EFFECT_TYPE: &'static str = "durable_contract.then_live.audit";
-        type Safety = RequiresKey;
-        type Port = AuditLedger;
-        type Outcome = Entry;
-
-        async fn call(
-            &self,
-            ledger: &AuditLedger,
-            _: &mut EffectContext,
-        ) -> Result<Entry, EffectError> {
-            append_line(&ledger.path, &self.entry.note)
+    #[obzenflow::port]
+    impl AuditLedger {
+        #[effect(type = "durable_contract.then_live.audit", exactly_once)]
+        fn audit(&self, request: &AuditEntry, key: &IdempotencyKey) -> Result<Entry, EffectError> {
+            append_line(&self.path, &key.0)
                 .map_err(|error| EffectError::Transport(error.to_string()))?;
-            Ok(self.entry.clone())
+            Ok(request.entry.clone())
         }
     }
 
@@ -2858,8 +2832,6 @@ mod then_live {
             IdempotencyKey(format!("audit:{}", self.entry.note))
         }
     }
-
-    type Audit = obzenflow::effects::Call<AuditEntry>;
 
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Vet {
@@ -2871,7 +2843,7 @@ mod then_live {
     impl EffectfulTransformHandler for Vet {
         type Input = Entry;
         type Output = Entry;
-        type AllowedEffects = obzenflow::effects::effect_set![Audit];
+        type AllowedEffects = AuditEntry;
 
         async fn process(
             &self,
@@ -3142,8 +3114,8 @@ mod then_live {
         if graph == Graph::ThenLiveEffect {
             assert_eq!(
                 read_lines::<String>(&audit_ledger(&scenario)),
-                AUDITED,
-                "{name}: each audit runs once"
+                AUDITED.map(|note| format!("audit:{note}")),
+                "{name}: each audit runs once, sending its key"
             );
             assert_lineage_at_crossing(&archive, "vet", name);
         }
@@ -4065,6 +4037,7 @@ mod two_effects {
         order_id: String,
         call: String,
         amount_cents: u64,
+        key: String,
     }
 
     fn ledger(scenario: &Scenario) -> PathBuf {
@@ -4099,7 +4072,6 @@ mod two_effects {
     }
 
     /// The ledger both requests write to, one system answering both.
-    #[obzenflow::port]
     struct ChargeLedger {
         path: PathBuf,
     }
@@ -4109,28 +4081,52 @@ mod two_effects {
         order_id: String,
     }
 
-    #[async_trait]
-    impl CallRequest for AuthorizeCharge {
-        const EFFECT_TYPE: &'static str = "durable_contract.two_effects.authorize";
-        type Safety = RequiresKey;
-        type Port = ChargeLedger;
-        type Outcome = Authorized;
+    #[derive(Clone, Debug, Serialize)]
+    struct CaptureCharge {
+        order_id: String,
+        amount_cents: u64,
+    }
 
-        async fn call(
+    #[obzenflow::port]
+    impl ChargeLedger {
+        #[effect(type = "durable_contract.two_effects.authorize", exactly_once)]
+        fn authorize(
             &self,
-            ledger: &ChargeLedger,
-            _: &mut EffectContext,
+            request: &AuthorizeCharge,
+            key: &IdempotencyKey,
         ) -> Result<Authorized, EffectError> {
             record_call(
-                &ledger.path,
+                &self.path,
                 LedgerCall {
-                    order_id: self.order_id.clone(),
+                    order_id: request.order_id.clone(),
                     call: "authorize".into(),
                     amount_cents: 0,
+                    key: key.0.clone(),
                 },
             )?;
             Ok(Authorized {
-                order_id: self.order_id.clone(),
+                order_id: request.order_id.clone(),
+            })
+        }
+
+        #[effect(type = "durable_contract.two_effects.capture", exactly_once)]
+        fn capture(
+            &self,
+            request: &CaptureCharge,
+            key: &IdempotencyKey,
+        ) -> Result<Captured, EffectError> {
+            record_call(
+                &self.path,
+                LedgerCall {
+                    order_id: request.order_id.clone(),
+                    call: "capture".into(),
+                    amount_cents: request.amount_cents,
+                    key: key.0.clone(),
+                },
+            )?;
+            Ok(Captured {
+                order_id: request.order_id.clone(),
+                amount_cents: request.amount_cents,
             })
         }
     }
@@ -4141,48 +4137,11 @@ mod two_effects {
         }
     }
 
-    type AuthorizeOrder = obzenflow::effects::Call<AuthorizeCharge>;
-
-    #[derive(Clone, Debug, Serialize)]
-    struct CaptureCharge {
-        order_id: String,
-        amount_cents: u64,
-    }
-
-    #[async_trait]
-    impl CallRequest for CaptureCharge {
-        const EFFECT_TYPE: &'static str = "durable_contract.two_effects.capture";
-        type Safety = RequiresKey;
-        type Port = ChargeLedger;
-        type Outcome = Captured;
-
-        async fn call(
-            &self,
-            ledger: &ChargeLedger,
-            _: &mut EffectContext,
-        ) -> Result<Captured, EffectError> {
-            record_call(
-                &ledger.path,
-                LedgerCall {
-                    order_id: self.order_id.clone(),
-                    call: "capture".into(),
-                    amount_cents: self.amount_cents,
-                },
-            )?;
-            Ok(Captured {
-                order_id: self.order_id.clone(),
-                amount_cents: self.amount_cents,
-            })
-        }
-    }
-
     impl Keyed for CaptureCharge {
         fn idempotency_key(&self) -> IdempotencyKey {
             IdempotencyKey(format!("capture:{}", self.order_id))
         }
     }
-
-    type CaptureOrder = obzenflow::effects::Call<CaptureCharge>;
 
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Charge {
@@ -4197,7 +4156,7 @@ mod two_effects {
     impl EffectfulTransformHandler for Charge {
         type Input = ChargeOrder;
         type Output = obzenflow::schema::stage_fact_set![Authorized, Captured];
-        type AllowedEffects = obzenflow::effects::effect_set![AuthorizeOrder, CaptureOrder];
+        type AllowedEffects = obzenflow::effects::effect_set![AuthorizeCharge, CaptureCharge];
 
         async fn process(
             &self,
@@ -4309,9 +4268,10 @@ mod two_effects {
                     calls
                         .iter()
                         .filter(|recorded| recorded.order_id == order && recorded.call == call)
-                        .count(),
-                    1,
-                    "{name}: {order}'s {call} runs once"
+                        .map(|recorded| recorded.key.as_str())
+                        .collect::<Vec<_>>(),
+                    [format!("{call}:{order}")],
+                    "{name}: {order}'s {call} runs once, sending its key"
                 );
             }
         }
@@ -4618,7 +4578,7 @@ mod rejected_call {
         }
     }
 
-    #[obzenflow::port]
+    /// Logs the key of each quote request that reaches it.
     struct QuoteDesk {
         path: PathBuf,
     }
@@ -4628,27 +4588,23 @@ mod rejected_call {
         order_id: String,
     }
 
-    #[async_trait]
-    impl CallRequest for RequestQuote {
-        const EFFECT_TYPE: &'static str = "durable_contract.rejected_call.quote";
-        type Safety = RequiresKey;
-        type Port = QuoteDesk;
-        type Outcome = Quoted;
-
-        async fn call(
+    #[obzenflow::port]
+    impl QuoteDesk {
+        #[effect(type = "durable_contract.rejected_call.quote", exactly_once)]
+        fn quote(
             &self,
-            desk: &QuoteDesk,
-            _: &mut EffectContext,
+            request: &RequestQuote,
+            key: &IdempotencyKey,
         ) -> Result<Quoted, EffectError> {
-            append_line(&desk.path, &self.order_id)
+            append_line(&self.path, &key.0)
                 .map_err(|error| EffectError::Transport(error.to_string()))?;
-            if self.order_id == UNREACHABLE {
+            if request.order_id == UNREACHABLE {
                 return Err(EffectError::Transport(
                     "the quote desk refused the connection".into(),
                 ));
             }
             Ok(Quoted {
-                order_id: self.order_id.clone(),
+                order_id: request.order_id.clone(),
             })
         }
     }
@@ -4658,8 +4614,6 @@ mod rejected_call {
             IdempotencyKey(format!("quote:{}", self.order_id))
         }
     }
-
-    type QuoteCall = obzenflow::effects::Call<RequestQuote>;
 
     #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
     struct Quote {
@@ -4671,7 +4625,7 @@ mod rejected_call {
     impl EffectfulTransformHandler for Quote {
         type Input = QuoteOrder;
         type Output = Quoted;
-        type AllowedEffects = obzenflow::effects::effect_set![QuoteCall];
+        type AllowedEffects = RequestQuote;
 
         async fn process(
             &self,
@@ -4748,7 +4702,8 @@ mod rejected_call {
         let name = "rejected_call";
         let scenario = fresh(name);
         let run = Child::spawn(&scenario, Vec::new(), None).completed().await;
-        assert_eq!(read_lines::<String>(&desk_log(&scenario)), ORDERS);
+        let keys = ORDERS.map(|order| format!("quote:{order}"));
+        assert_eq!(read_lines::<String>(&desk_log(&scenario)), keys);
         let live = Archive::read(&run).await;
         let recorded = rejections(&live);
         assert_eq!(
@@ -4778,7 +4733,7 @@ mod rejected_call {
             .await;
         assert_eq!(
             read_lines::<String>(&desk_log(&scenario)),
-            ORDERS,
+            keys,
             "{name}: the replay calls nothing"
         );
         let (code, report) = verify_exit(&run, &replayed);

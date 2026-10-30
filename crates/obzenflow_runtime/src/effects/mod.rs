@@ -119,8 +119,11 @@ pub use declaration::{
 };
 // FLOWIP-120z effect capability sets; the list traits are doc(hidden)
 // plumbing that must stay reachable for the public `DeclaredEffectSet` impl.
+#[doc(hidden)]
+pub use async_trait::async_trait as __async_trait;
 pub use effect_set::{
-    assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectSet, EffectTypeDisjoint,
+    assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectName, EffectSet,
+    EffectTypeDisjoint,
 };
 pub use error::{DescriptorComponent, DescriptorDrift, DriftBinding, EffectError};
 pub use fault::{BindingAuthorityFault, BindingMismatchKind};
@@ -147,7 +150,10 @@ pub(crate) use runtime::EffectsCore;
 // membership and containment proofs.
 pub use typed::Effects;
 #[doc(hidden)]
-pub use typed::{AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, OutputAllowsFact};
+pub use typed::{
+    AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, OutputAllowsFact, RequestAllowed,
+    RequestOutcomeFits,
+};
 
 use commit::{
     append_domain_effect_success_facts, append_effect_record, build_domain_effect_success_facts,

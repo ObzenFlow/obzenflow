@@ -3598,7 +3598,7 @@ mod tests {
         .expect_err("a bare paid effect must be rejected");
         assert_eq!(
             error,
-            "Effectful stage 'standalone_chat' performs paid non-idempotent effect \
+            "Effectful stage 'standalone_chat' performs at-least-once effect \
              'obzenflow.ai.chat_completion' without acknowledging it; add \
              `.at_least_once::<BarePaidEffect>()` after the handler"
         );
@@ -3615,34 +3615,23 @@ mod tests {
             (
                 EffectDeclaration::named_at_least_once(&idempotent),
                 EffectSafety::Idempotent,
-                "as at-least-once, but its safety is Idempotent",
+                "acknowledges `test.safety.idempotent` as at-least-once, but its effect method is `exactly_once`",
             ),
             (
                 EffectDeclaration::named_at_least_once(&requires_key),
                 EffectSafety::NonIdempotentRequiresKey,
-                "as at-least-once, but its safety is NonIdempotentRequiresKey",
+                "acknowledges `test.safety.requires_key` as at-least-once, but its effect method is `exactly_once`",
             ),
             (
                 EffectDeclaration::named_at_least_once(&transactional),
                 EffectSafety::Transactional,
-                "as at-least-once, but its safety is Transactional",
-            ),
-            (
-                EffectDeclaration::transactional(&idempotent),
-                EffectSafety::Idempotent,
-                "as transactional, but its safety is Idempotent",
-            ),
-            (
-                EffectDeclaration::transactional(&requires_key),
-                EffectSafety::NonIdempotentRequiresKey,
-                "as transactional, but its safety is NonIdempotentRequiresKey",
-            ),
-            (
-                EffectDeclaration::transactional(&at_least_once),
-                EffectSafety::NonIdempotentAtLeastOnce,
-                "as transactional, but its safety is NonIdempotentAtLeastOnce",
+                "acknowledges `test.safety.transactional` as at-least-once, but its effect method is `exactly_once`",
             ),
         ];
+        assert_eq!(
+            EffectDeclaration::named(&at_least_once).safety(),
+            EffectSafety::NonIdempotentAtLeastOnce
+        );
 
         for (declaration, authoritative_safety, expected) in mismatches {
             assert_eq!(
@@ -3666,25 +3655,17 @@ mod tests {
         let at_least_once = safety_binding::<2>();
         let transactional = safety_binding::<3>();
 
-        for (declaration, expected) in [
-            (
-                EffectDeclaration::named(&at_least_once),
-                "add `.at_least_once::<NamedSafetyEffect<2>>()` after the handler",
-            ),
-            (
-                EffectDeclaration::named(&transactional),
-                "add `.transactional::<NamedSafetyEffect<3>>()` after the handler",
-            ),
-        ] {
-            let error = validate_effect_declarations(
-                "missing_safety_wrapper",
-                &[declaration],
-                &EffectPortRegistry::new(),
-                obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
-            )
-            .expect_err("a required safety wrapper must not be optional");
-            assert!(error.contains(expected), "unexpected diagnostic: {error}");
-        }
+        let error = validate_effect_declarations(
+            "missing_safety_wrapper",
+            &[EffectDeclaration::named(&at_least_once)],
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
+        )
+        .expect_err("an at-least-once effect must be acknowledged");
+        assert!(
+            error.contains("add `.at_least_once::<NamedSafetyEffect<2>>()` after the handler"),
+            "unexpected diagnostic: {error}"
+        );
 
         let acknowledged = EffectDeclaration::named_at_least_once(&at_least_once);
         assert_eq!(
@@ -3703,15 +3684,15 @@ mod tests {
         )
         .expect("the matching at_least_once wrapper is valid");
 
-        let transactional = EffectDeclaration::transactional(&transactional);
+        let transactional = EffectDeclaration::named(&transactional);
         assert_eq!(transactional.safety(), EffectSafety::Transactional);
         validate_effect_declarations(
-            "matching_transactional",
+            "unacknowledged_transactional",
             &[transactional],
             &EffectPortRegistry::new(),
             obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
         )
-        .expect("the matching transactional wrapper is valid");
+        .expect("a transactional effect is exactly once and needs no acknowledgement");
     }
 
     #[derive(Clone, Debug)]

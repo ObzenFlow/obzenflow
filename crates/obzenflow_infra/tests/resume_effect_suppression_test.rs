@@ -33,10 +33,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    SinkRedeliverySafety, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -113,7 +110,6 @@ impl TypedInfiniteSourceHandler for BoundedReader {
 
 /// Counts real executions via the shared counter; a suppressed catch-up
 /// replay never reaches the counter.
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -123,32 +119,16 @@ struct Counting {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for Counting {
-    const EFFECT_TYPE: &'static str = "resume_effects.counting";
-    type Safety = RequiresKey;
-    type Port = CallCounter;
-    type Outcome = EffectValue;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<EffectValue, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+impl CallCounter {
+    #[effect(type = "resume_effects.counting", exactly_once)]
+    fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EffectValue {
-            effect_value: self.value + 100,
+            effect_value: request.value + 100,
         })
     }
 }
-
-impl Keyed for Counting {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("resume-effects:{}", self.value))
-    }
-}
-
-type CountingEffect = Call<Counting>;
 
 #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
 #[effect_handler(effects = obzenflow_runtime::effects)]
@@ -161,7 +141,7 @@ struct EnrichTransform {
 impl EffectfulTransformHandler for EnrichTransform {
     type Input = Reading;
     type Output = obzenflow_core::stage_fact_set![Enriched, EffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     async fn process(
         &self,

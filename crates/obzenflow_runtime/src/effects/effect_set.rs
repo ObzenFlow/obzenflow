@@ -4,17 +4,44 @@
 
 //! Effect capability sets (FLOWIP-120z).
 //!
-//! An effect set is the exhaustive, compiler-visible set of effect request
-//! types one handler may pass to `perform`. Membership is proved directly
-//! against the concrete `Effect` type; there is no second associated effect
-//! identity, and the stable runtime and archive identity remains
-//! `EFFECT_TYPE`. Sets are zero-sized declarations, never persisted.
+//! An effect set is the exhaustive, compiler-visible set of effects one
+//! handler may perform. Its members are the names written in it, a request
+//! type or an effect type, and [`EffectName`] maps each to its effect; the
+//! stable runtime and archive identity remains `EFFECT_TYPE`. Sets are
+//! zero-sized declarations, never persisted.
 
+use super::call::{Call, CallRequest};
 use super::declaration::Effect;
 use obzenflow_core::event::schema::{
     const_str_eq, require_distinct, EmptySet, MemberList, WithMember,
 };
 use std::marker::PhantomData;
+
+/// A name written where an effect is named: a request type, which names the
+/// effect that performs it, or an effect type, which names itself.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a declared request",
+    label = "no `#[effect]` port method takes `{Self}`",
+    note = "declare it with `#[effect(type = \"...\", exactly_once)]` or `at_least_once` on the port method that takes it"
+)]
+pub trait EffectName: 'static {
+    type Effect: Effect;
+
+    /// The name itself. `effect_set!` writes each member through it, so a
+    /// member that names no effect is reported where it is written.
+    type Name;
+}
+
+impl<R: CallRequest> EffectName for R {
+    type Effect = Call<R>;
+    type Name = R;
+}
+
+impl<R: CallRequest> EffectName for Call<R> {
+    type Effect = Call<R>;
+    type Name = Call<R>;
+}
 
 /// Capability authority for one handler's permitted effect identities.
 ///
@@ -23,8 +50,8 @@ use std::marker::PhantomData;
 /// manifest equality assertions consume.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an effect capability set",
-    note = "declare the handler's permitted effects as `effect_set![EffectA, EffectB]`; a \
-            deliberately effect-free handler declares `effect_set![]` (FLOWIP-120z)"
+    note = "name one request declared with `#[effect]`, `effect_set![RequestA, RequestB]` for \
+            several, or `effect_set![]` for none"
 )]
 pub trait EffectSet: Send + Sync + 'static {
     /// Hidden type-level member projection; proof machinery, not public
@@ -58,9 +85,18 @@ impl<L: EffectList> EffectSet for DeclaredEffectSet<L> {
     const MEMBERS_DISTINCT: () = L::DISTINCT_EFFECT_TYPES;
 }
 
-/// A member list whose heads are effect request types, with a const
-/// duplicate guard over `EFFECT_TYPE` and a value-level identity
-/// projection.
+/// One request is a set whose only member is that request.
+#[diagnostic::do_not_recommend]
+impl<R: CallRequest> EffectSet for R {
+    type Members = WithMember<R, EmptySet>;
+
+    fn effect_types() -> Vec<&'static str> {
+        vec![R::EFFECT_TYPE]
+    }
+}
+
+/// A member list whose heads are effect names, with a const duplicate guard
+/// over their `EFFECT_TYPE` and a value-level identity projection.
 #[doc(hidden)]
 pub trait EffectList: MemberList {
     const DISTINCT_EFFECT_TYPES: ();
@@ -75,7 +111,7 @@ impl EffectList for EmptySet {
 
 impl<Head, Rest> EffectList for WithMember<Head, Rest>
 where
-    Head: Effect,
+    Head: EffectName,
     Rest: EffectList + EffectTypeDisjoint<Head>,
 {
     const DISTINCT_EFFECT_TYPES: () = require_distinct(
@@ -84,12 +120,12 @@ where
     );
 
     fn append_effect_types(out: &mut Vec<&'static str>) {
-        out.push(Head::EFFECT_TYPE);
+        out.push(<Head::Effect as Effect>::EFFECT_TYPE);
         Rest::append_effect_types(out);
     }
 }
 
-/// Pairwise `EFFECT_TYPE` disjointness between one effect type and every
+/// Pairwise `EFFECT_TYPE` disjointness between one effect name and every
 /// member of the list.
 #[doc(hidden)]
 pub trait EffectTypeDisjoint<X> {
@@ -102,13 +138,16 @@ impl<X> EffectTypeDisjoint<X> for EmptySet {
 
 impl<X, Head, Rest> EffectTypeDisjoint<X> for WithMember<Head, Rest>
 where
-    X: Effect,
-    Head: Effect,
+    X: EffectName,
+    Head: EffectName,
     Rest: EffectTypeDisjoint<X>,
 {
     const OK: () = {
         assert!(
-            !const_str_eq(X::EFFECT_TYPE, Head::EFFECT_TYPE),
+            !const_str_eq(
+                <X::Effect as Effect>::EFFECT_TYPE,
+                <Head::Effect as Effect>::EFFECT_TYPE
+            ),
             "duplicate member in a declared effect capability set: two members share an \
              effect type; each effect appears exactly once (FLOWIP-120z)"
         );
@@ -126,12 +165,14 @@ pub const fn assert_distinct_effect_set<S: EffectSet>() {
 /// Declare an effect capability set in type position (FLOWIP-120z):
 ///
 /// ```ignore
-/// type AllowedEffects = effect_set![AuthorizePayment];
+/// type AllowedEffects = effect_set![StockReservation, StockRelease];
 /// type NoEffects = effect_set![];
 /// ```
 ///
-/// Duplicate members are compile errors (a const-eval panic when the set is
-/// used). Set equality elsewhere is semantic, not order-sensitive.
+/// A handler with one effect names its request alone, as
+/// `type AllowedEffects = AuthorizeRequest;`. Duplicate members are compile
+/// errors (a const-eval panic when the set is used). Set equality elsewhere
+/// is semantic, not order-sensitive.
 #[macro_export]
 macro_rules! effect_set {
     [$($member:ty),* $(,)?] => {
@@ -142,7 +183,7 @@ macro_rules! effect_set {
     (@list) => { $crate::__private::EmptySet };
     (@list $head:ty $(, $rest:ty)*) => {
         $crate::__private::WithMember<
-            $head,
+            <$head as $crate::effects::EffectName>::Name,
             $crate::effect_set!(@list $($rest),*)
         >
     };
@@ -151,7 +192,7 @@ macro_rules! effect_set {
 #[cfg(test)]
 mod tests {
     use super::super::error::EffectError;
-    use super::super::{Call, CallRequest, EffectContext, Idempotent};
+    use super::super::{EffectContext, Idempotent};
     use super::*;
     use async_trait::async_trait;
     use obzenflow_core::event::schema::Member;
@@ -182,8 +223,6 @@ mod tests {
         }
     }
 
-    type Ping = Call<PingRequest>;
-
     #[derive(Debug, Clone, Serialize)]
     struct PongRequest;
 
@@ -199,8 +238,6 @@ mod tests {
         }
     }
 
-    type Pong = Call<PongRequest>;
-
     fn member_holds<Set, E, Index>()
     where
         Set: EffectSet,
@@ -210,11 +247,20 @@ mod tests {
 
     #[test]
     fn declared_effect_set_projects_identities_in_declared_order() {
-        type Allowed = crate::effect_set![Ping, Pong];
+        type Allowed = crate::effect_set![PingRequest, PongRequest];
         assert_eq!(
             <Allowed as EffectSet>::effect_types(),
             vec!["effect_set.ping", "effect_set.pong"]
         );
+    }
+
+    #[test]
+    fn one_request_is_a_set_of_one() {
+        assert_eq!(
+            <PingRequest as EffectSet>::effect_types(),
+            vec!["effect_set.ping"]
+        );
+        member_holds::<PingRequest, PingRequest, _>();
     }
 
     #[test]
@@ -224,15 +270,16 @@ mod tests {
     }
 
     #[test]
-    fn membership_witnesses_resolve_against_concrete_effects() {
-        type Allowed = crate::effect_set![Ping, Pong];
-        member_holds::<Allowed, Ping, _>();
-        member_holds::<Allowed, Pong, _>();
+    fn membership_witnesses_resolve_against_written_names() {
+        type Allowed = crate::effect_set![PingRequest, PongRequest];
+        member_holds::<Allowed, PingRequest, _>();
+        member_holds::<Allowed, PongRequest, _>();
     }
 
     #[test]
     fn distinct_member_guard_evaluates_for_distinct_sets() {
-        const _: () = assert_distinct_effect_set::<crate::effect_set![Ping, Pong]>();
+        const _: () = assert_distinct_effect_set::<crate::effect_set![PingRequest, PongRequest]>();
+        const _: () = assert_distinct_effect_set::<PingRequest>();
         const _: () = assert_distinct_effect_set::<crate::effect_set![]>();
     }
 }

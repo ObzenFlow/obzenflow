@@ -24,10 +24,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    SinkRedeliverySafety, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -151,7 +148,6 @@ impl TypedFiniteSourceHandler for StreamSource {
     }
 }
 
-#[obzenflow::port]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -161,32 +157,16 @@ struct Counting {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for Counting {
-    const EFFECT_TYPE: &'static str = "join_replay.counting";
-    type Safety = RequiresKey;
-    type Port = CallCounter;
-    type Outcome = JoinEffectValue;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<JoinEffectValue, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
+#[obzenflow::port]
+impl CallCounter {
+    #[effect(type = "join_replay.counting", exactly_once)]
+    fn count(&self, request: &Counting) -> Result<JoinEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(JoinEffectValue {
-            effect_value: self.value + 100,
+            effect_value: request.value + 100,
         })
     }
 }
-
-impl Keyed for Counting {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("join-replay:{}", self.value))
-    }
-}
-
-type CountingEffect = Call<Counting>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct EffectfulTail {
@@ -207,7 +187,7 @@ impl EffectfulTail {
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = JoinedItem;
     type Output = obzenflow_core::stage_fact_set![FinalOutput, JoinEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     async fn process(
         &self,

@@ -45,8 +45,8 @@ pub use payloads::effect_payload::{
     EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureDetail, EffectFailureKind,
     EffectFailureSource, EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId,
     EffectOutcomePayload, EffectProvenance, EffectRecord, EffectRecoveryAbandoned,
-    EffectSchemaVersion, EffectStageKey, EffectType, OutcomeFactOrdinal, RecordedFlowId,
-    RetryDisposition, StageLogicVersion,
+    EffectSchemaVersion, EffectStageKey, EffectType, IdempotencyKey, OutcomeFactOrdinal,
+    RecordedFlowId, RetryDisposition, StageLogicVersion,
 };
 pub use payloads::sink_operation_payload::{
     SinkDestinationErrorCode, SinkDestinationErrorCodeError, SinkOperationFailed,

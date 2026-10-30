@@ -566,6 +566,11 @@ macro_rules! fixture_effect {
                 &fixtures.$field
             }
         }
+
+        impl EffectName for $effect {
+            type Effect = Self;
+            type Name = Self;
+        }
     };
 }
 
@@ -1154,7 +1159,7 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for Transactional
     type State = Vec<u64>;
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = crate::effect_set![TransactionalCountingEffect];
+    type AllowedEffects = TransactionalCounting;
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1249,6 +1254,11 @@ struct ZeroSlotNamedEffect {
     value: u64,
     calls: Arc<AtomicUsize>,
     binding: EffectBindingUse<Self>,
+}
+
+impl EffectName for ZeroSlotNamedEffect {
+    type Effect = Self;
+    type Name = Self;
 }
 
 #[async_trait]
@@ -1907,8 +1917,7 @@ fn transactional_invocation_context_with_mode(
 
 fn transactional_declaration(ledger: &System<dyn TransactionalLedger>) -> EffectDeclaration {
     <System<dyn TransactionalLedger> as AnswersEffect<TransactionalCountingEffect>>::declaration(
-        ledger,
-        Some(AcknowledgedSafety::Transactional),
+        ledger, None,
     )
     .unwrap()
 }

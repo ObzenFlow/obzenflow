@@ -19,10 +19,7 @@ use obzenflow_core::{event::ChainPayload, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    SinkRedeliverySafety, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkWriteFailure,
@@ -99,7 +96,6 @@ impl TypedFiniteSourceHandler for ChannelSource {
     }
 }
 
-#[obzenflow::port]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -110,32 +106,16 @@ struct Counting {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for Counting {
-    const EFFECT_TYPE: &'static str = "envelope.counting";
-    type Safety = RequiresKey;
-    type Port = CallCounter;
-    type Outcome = EnvelopeEffectValue;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<EnvelopeEffectValue, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
+#[obzenflow::port]
+impl CallCounter {
+    #[effect(type = "envelope.counting", exactly_once)]
+    fn count(&self, request: &Counting) -> Result<EnvelopeEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EnvelopeEffectValue {
-            effect_value: self.value + 100,
+            effect_value: request.value + 100,
         })
     }
 }
-
-impl Keyed for Counting {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("envelope:{}:{}", self.channel, self.value))
-    }
-}
-
-type CountingEffect = Call<Counting>;
 
 /// The effectful stage is itself the multi-inbound fan-in, so its effect
 /// cursors key directly on canonical-merge delivered positions.
@@ -158,7 +138,7 @@ impl EffectfulMerge {
 impl EffectfulTransformHandler for EffectfulMerge {
     type Input = EnvelopeInput;
     type Output = obzenflow_core::stage_fact_set![EnvelopeOutput, EnvelopeEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+    type AllowedEffects = Counting;
 
     async fn process(
         &self,

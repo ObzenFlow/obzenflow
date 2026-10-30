@@ -536,6 +536,7 @@ mod tests {
             fact_owner: Default::default(),
             origin: None,
             attempt: None,
+            idempotency_key: None,
         };
         data("payment.authorized", payload).with_effect_provenance(provenance)
     }

@@ -7,7 +7,7 @@ use super::call::{call_port_slot, Call, CallRequest};
 use super::declaration::EffectDeclarationSyntax;
 use super::ports::SystemPort;
 use super::{
-    Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError,
+    Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError, EffectName,
     EffectPortResolutionError, EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName,
     NamedEffect,
 };
@@ -62,13 +62,26 @@ impl<P: ?Sized + Send + Sync + 'static> System<P> {
     /// # }
     /// ```
     ///
-    /// A struct marked `#[obzenflow::port]` serves as its own port:
+    /// A struct whose inherent `impl` block carries `#[obzenflow::port]` serves
+    /// as its own port:
     ///
     /// ```
-    /// # use obzenflow_runtime::effects::{System, SystemError};
+    /// # use obzenflow_runtime::effects::{EffectError, System, SystemError};
     /// # use std::sync::Arc;
-    /// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # #[derive(Clone, Debug, serde::Serialize)]
+    /// # struct AuditEntry;
+    /// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    /// # struct AuditAppended;
+    /// # impl obzenflow_core::TypedPayload for AuditAppended { const EVENT_TYPE: &'static str = "docs.audit.appended"; }
     /// struct AuditLedger;
+    ///
+    /// #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// impl AuditLedger {
+    ///     #[effect(type = "docs.audit.append", exactly_once)]
+    ///     fn append(&self, _: &AuditEntry) -> Result<AuditAppended, EffectError> {
+    ///         Ok(AuditAppended)
+    ///     }
+    /// }
     /// # fn main() -> Result<(), SystemError> {
     /// let ledger = System::eager("audit-ledger", Arc::new(AuditLedger))?;
     /// # let system: System<AuditLedger> = ledger;
@@ -170,7 +183,7 @@ pub struct PortImpl<T: ?Sized>(PhantomData<fn() -> Arc<T>>);
 #[diagnostic::on_unimplemented(
     message = "this port implements no trait marked `#[obzenflow::port]`",
     label = "the port this system is built from",
-    note = "mark the port trait it implements, or a struct that serves as its own port, with `#[obzenflow::port]`"
+    note = "mark the port trait it implements, or the `impl` block of a struct that serves as its own port, with `#[obzenflow::port]`"
 )]
 pub trait ServesPort<P: ?Sized, T: ?Sized> {
     fn coerce(port: Arc<T>) -> Arc<P>;
@@ -236,9 +249,13 @@ pub trait ServesPort<P: ?Sized, T: ?Sized> {
     label = "`{Self}` is not `Result<Outcome, EffectError>`",
     note = "keep a system's own answer behind the port and turn it into the outcome there"
 )]
-pub trait PortAnswer {}
+pub trait PortAnswer {
+    type Outcome;
+}
 
-impl<O: EffectOutcomeFacts> PortAnswer for Result<O, EffectError> {}
+impl<O: EffectOutcomeFacts> PortAnswer for Result<O, EffectError> {
+    type Outcome = O;
+}
 
 #[doc(hidden)]
 pub fn assert_port_answer<T: PortAnswer>() {}
@@ -361,15 +378,14 @@ pub trait EffectHandler {
     fn systems(&self) -> Self::Systems;
 }
 
-/// How a stage row acknowledges a paid at-least-once or transactional effect.
+/// How a stage row acknowledges an at-least-once effect.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcknowledgedSafety {
     AtLeastOnce,
-    Transactional,
 }
 
-/// One `.at_least_once::<E>()` or `.transactional::<E>()` decoration.
+/// One `.at_least_once::<R>()` decoration.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub struct EffectAcknowledgement {
@@ -398,8 +414,11 @@ pub trait HandlerPerformableEffects {}
 
 impl HandlerPerformableEffects for EmptySet {}
 
-impl<E: NamedEffect, Rest: HandlerPerformableEffects> HandlerPerformableEffects
-    for WithMember<E, Rest>
+impl<N, Rest> HandlerPerformableEffects for WithMember<N, Rest>
+where
+    N: EffectName,
+    N::Effect: NamedEffect,
+    Rest: HandlerPerformableEffects,
 {
 }
 
@@ -420,26 +439,21 @@ where
 }
 
 impl EffectAcknowledgement {
-    pub fn at_least_once<E: RowAcknowledgedEffect>(written: &'static str) -> Self {
+    pub fn at_least_once<N>(written: &'static str) -> Self
+    where
+        N: EffectName,
+        N::Effect: RowAcknowledgedEffect,
+    {
         Self {
-            effect_type: E::EFFECT_TYPE,
+            effect_type: <N::Effect as Effect>::EFFECT_TYPE,
             written,
             safety: AcknowledgedSafety::AtLeastOnce,
-        }
-    }
-
-    pub fn transactional<E: RowAcknowledgedEffect>(written: &'static str) -> Self {
-        Self {
-            effect_type: E::EFFECT_TYPE,
-            written,
-            safety: AcknowledgedSafety::Transactional,
         }
     }
 
     fn decoration(&self) -> String {
         match self.safety {
             AcknowledgedSafety::AtLeastOnce => format!(".at_least_once::<{}>()", self.written),
-            AcknowledgedSafety::Transactional => format!(".transactional::<{}>()", self.written),
         }
     }
 }
@@ -448,7 +462,6 @@ fn declaration_syntax(acknowledged: Option<AcknowledgedSafety>) -> EffectDeclara
     match acknowledged {
         None => EffectDeclarationSyntax::Bare,
         Some(AcknowledgedSafety::AtLeastOnce) => EffectDeclarationSyntax::AtLeastOnce,
-        Some(AcknowledgedSafety::Transactional) => EffectDeclarationSyntax::Transactional,
     }
 }
 
@@ -545,14 +558,15 @@ pub struct SystemFound;
 #[doc(hidden)]
 pub struct SystemAfter<Index>(PhantomData<fn() -> Index>);
 
-/// Proof that exactly one of the handler's systems answers `E`.
+/// Proof that exactly one of the handler's systems answers the effect named
+/// `N`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "this handler performs `{E}`, which needs a system",
-    label = "no `#[system]` field of the handler answers `{E}`",
+    message = "this handler performs `{N}`, which needs a system",
+    label = "no `#[system]` field of the handler answers `{N}`",
     note = "add a `#[system]` field whose port the request names"
 )]
-pub trait FindSystem<E: Effect, Index> {
+pub trait FindSystem<N: EffectName, Index> {
     #[doc(hidden)]
     fn found_declaration(
         &self,
@@ -560,7 +574,7 @@ pub trait FindSystem<E: Effect, Index> {
     ) -> Result<EffectDeclaration, StageEffectsError>;
 }
 
-impl<E: Effect, S: AnswersEffect<E>, Rest> FindSystem<E, SystemFound> for (S, Rest) {
+impl<N: EffectName, S: AnswersEffect<N::Effect>, Rest> FindSystem<N, SystemFound> for (S, Rest) {
     fn found_declaration(
         &self,
         acknowledged: Option<AcknowledgedSafety>,
@@ -570,7 +584,7 @@ impl<E: Effect, S: AnswersEffect<E>, Rest> FindSystem<E, SystemFound> for (S, Re
 }
 
 #[diagnostic::do_not_recommend]
-impl<E: Effect, S, Rest: FindSystem<E, Index>, Index> FindSystem<E, SystemAfter<Index>>
+impl<N: EffectName, S, Rest: FindSystem<N, Index>, Index> FindSystem<N, SystemAfter<Index>>
     for (S, Rest)
 {
     fn found_declaration(
@@ -673,11 +687,11 @@ impl<Systems, Mask> DeclareEffects<Systems, Mask, ()> for EmptySet {
     }
 }
 
-impl<E, Rest, Systems, Mask, Index, RestIndex> DeclareEffects<Systems, Mask, (Index, RestIndex)>
-    for WithMember<E, Rest>
+impl<N, Rest, Systems, Mask, Index, RestIndex> DeclareEffects<Systems, Mask, (Index, RestIndex)>
+    for WithMember<N, Rest>
 where
-    E: Effect,
-    Systems: FindSystem<E, Index>,
+    N: EffectName,
+    Systems: FindSystem<N, Index>,
     Mask: MarkSystemUsed<Index>,
     Rest: DeclareEffects<Systems, Mask::Marked, RestIndex>,
 {
@@ -690,9 +704,11 @@ where
     ) -> Result<(), StageEffectsError> {
         let acknowledged = acknowledgements
             .iter()
-            .find(|acknowledgement| acknowledgement.effect_type == E::EFFECT_TYPE)
+            .find(|acknowledgement| {
+                acknowledgement.effect_type == <N::Effect as Effect>::EFFECT_TYPE
+            })
             .map(|acknowledgement| acknowledgement.safety);
-        out.push(systems.found_declaration(acknowledged)?);
+        out.push(systems.found_declaration(acknowledged)?.written_as::<N>());
         Rest::declarations(systems, acknowledgements, out)
     }
 }

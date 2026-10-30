@@ -18,9 +18,7 @@ use obzenflow_core::event::SourceDiagnosticReason;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_infinite_source, effectful_stateful, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, Idempotent, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, System};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -143,7 +141,6 @@ impl EffectPolicy for BoundaryProbePolicy {
     fn observe(&self, _attempt: &EffectAttemptOutcome<'_>, _ctx: &mut MiddlewareContext) {}
 }
 
-#[obzenflow::port]
 #[derive(Debug)]
 struct EffectGate {
     starts: Semaphore,
@@ -161,7 +158,25 @@ impl Default for EffectGate {
     }
 }
 
+#[obzenflow::port]
 impl EffectGate {
+    #[effect(type = "effectful_stateful_boundary.probe", exactly_once)]
+    async fn probe(
+        &self,
+        request: &BoundaryProbeRequest,
+    ) -> Result<BoundaryProbeFact, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.starts.add_permits(1);
+        self.releases
+            .acquire()
+            .await
+            .expect("effect-release semaphore remains open")
+            .forget();
+        Ok(BoundaryProbeFact {
+            value: request.value,
+        })
+    }
+
     async fn wait_for_start(&self) {
         self.starts
             .acquire()
@@ -184,31 +199,6 @@ struct BoundaryProbeRequest {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for BoundaryProbeRequest {
-    const EFFECT_TYPE: &'static str = "effectful_stateful_boundary.probe";
-    type Safety = Idempotent;
-    type Port = EffectGate;
-    type Outcome = BoundaryProbeFact;
-
-    async fn call(
-        &self,
-        gate: &EffectGate,
-        _ctx: &mut EffectContext,
-    ) -> Result<BoundaryProbeFact, EffectError> {
-        gate.calls.fetch_add(1, Ordering::SeqCst);
-        gate.starts.add_permits(1);
-        gate.releases
-            .acquire()
-            .await
-            .expect("effect-release semaphore remains open")
-            .forget();
-        Ok(BoundaryProbeFact { value: self.value })
-    }
-}
-
-type BoundaryProbeEffect = Call<BoundaryProbeRequest>;
-
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct BoundaryProbeHandler {
     #[system]
@@ -228,7 +218,7 @@ impl EffectfulStatefulHandler for BoundaryProbeHandler {
     type State = Vec<u64>;
     type Input = BoundaryProbeInput;
     type Output = BoundaryProbeFact;
-    type AllowedEffects = obzenflow_runtime::effect_set![BoundaryProbeEffect];
+    type AllowedEffects = BoundaryProbeRequest;
 
     fn initial_state(&self) -> Self::State {
         Vec::new()

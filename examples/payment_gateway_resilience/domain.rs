@@ -50,7 +50,7 @@ impl OrderChannel {
 ///
 /// This is deliberately not called a command. The flow reacts to a fact that
 /// already happened upstream, then decides whether to issue the outbound
-/// `AuthorizePayment` effect command to the gateway.
+/// `payment.authorize` effect command to the gateway.
 ///
 /// `payment_method_state` is a demo fixture knob: `InvalidNumber` fails local
 /// validation, while `InsufficientFunds` and `AddressMismatch` are valid enough

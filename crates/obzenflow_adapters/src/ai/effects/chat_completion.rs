@@ -15,9 +15,9 @@ use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::ai::{AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError};
 use obzenflow_runtime::effects::{
     BoundEffect, Configured, Effect, EffectBindingEvidence, EffectBindingUse, EffectContext,
-    EffectError, EffectPortMetadataContext, EffectPortResolverWithMetadata, EffectPortSlot,
-    EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, LogicalEffectBindingName,
-    RecordedReply, ResolvedEffectPort,
+    EffectError, EffectName, EffectPortMetadataContext, EffectPortResolverWithMetadata,
+    EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety,
+    LogicalEffectBindingName, RecordedReply, ResolvedEffectPort,
 };
 use std::sync::Arc;
 
@@ -240,6 +240,11 @@ impl BoundEffect for ChatCompletion {
     fn required_slots() -> EffectPortSlotSet {
         EffectPortSlotSet::single(CHAT_CLIENT)
     }
+}
+
+impl EffectName for ChatCompletion {
+    type Effect = Self;
+    type Name = Self;
 }
 
 impl AiEffect for ChatCompletion {

@@ -834,7 +834,18 @@ pub struct EffectProvenance {
     /// reserved framework rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<EffectFactOrigin>,
+    /// The key the call sent for its system to deduplicate by, on a call
+    /// whose port method takes one. Excluded from descriptor identity, since
+    /// the request it derives from already is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<IdempotencyKey>,
 }
+
+/// The key a system deduplicates a repeated call by, derived from the
+/// request's business identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IdempotencyKey(pub String);
 
 impl EffectProvenance {
     pub fn from_record(record: &EffectRecord, fact_owner: EffectFactOwner) -> Self {
@@ -848,6 +859,7 @@ impl EffectProvenance {
             group_id: Some(effect_outcome_group_id(&record.cursor)),
             fact_owner,
             origin: record.origin.clone(),
+            idempotency_key: None,
         }
     }
 }

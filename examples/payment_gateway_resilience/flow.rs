@@ -24,7 +24,7 @@
 //! contract `CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder,
 //! CancelledOrder }`. Its handler-side `ValidationOutcome` carrier is proven
 //! leaf-equal and never journalled; the `authorize_payment` stage performs the
-//! `AuthorizePayment` effect (see
+//! `payment.authorize` effect (see
 //! `gateway.rs`). On a live run the configured resilience policy may make up
 //! to three breaker-governed physical calls before the runtime journals one
 //! terminal result; on replay the runtime returns that recorded gateway
@@ -182,7 +182,7 @@ pub fn assemble_flow(
                 );
 
                 // Payment authorization: the only stage that touches the outside
-                // world, expressed as the `AuthorizePayment` effect. The runtime
+                // world, expressed as the `payment.authorize` effect. The runtime
                 // runs it once, records the result, and suppresses it on replay.
                 // This is the authorization (hold) leg of authorize-then-capture;
                 // capture after fulfilment belongs to the checkout saga capstone.

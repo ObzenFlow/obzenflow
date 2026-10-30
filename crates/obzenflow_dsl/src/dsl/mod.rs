@@ -45,12 +45,12 @@
 //!
 //! ## Effects come from the handler's effect set
 //!
-//! An effectful handler's `type AllowedEffects = effect_set![...]` declares the
-//! effects its stage performs, and the row never restates them. A handler
-//! whose effect set is empty is written `In -> Out => handler`. A named effect
-//! is answered by a system the handler holds in a `#[system]` field, and a
-//! paid at-least-once or transactional effect is acknowledged after the
-//! handler with `.at_least_once::<E>()` or `.transactional::<E>()`.
+//! An effectful handler's `type AllowedEffects` declares the effects its stage
+//! performs, as one request type or `effect_set![...]`, and the row never
+//! restates them. A handler whose effect set is empty is written
+//! `In -> Out => handler`. Each effect is answered by a system the handler
+//! holds in a `#[system]` field, and an `at_least_once` effect is acknowledged
+//! after the handler with `.at_least_once::<R>()`.
 //!
 //! ```
 //! use async_trait::async_trait;

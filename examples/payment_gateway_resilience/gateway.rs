@@ -23,8 +23,7 @@ use super::domain::{
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
 use obzenflow::effects::{
-    Call, CallRequest, EffectContext, EffectError, EffectHandler, Effects, IdempotencyKey, Keyed,
-    RequiresKey, System,
+    EffectContext, EffectError, EffectHandler, Effects, IdempotencyKey, Keyed, System,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::schema::EffectOutcomeFacts;
@@ -39,9 +38,11 @@ use std::time::Duration;
 #[obzenflow::port]
 #[async_trait]
 pub trait PaymentGatewayPort: Send + Sync {
+    #[effect(type = "payment.authorize", exactly_once)]
     async fn authorize(
         &self,
         request: &AuthorizeRequest,
+        key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<AuthorizePaymentOutcome, EffectError>;
 }
@@ -93,6 +94,7 @@ impl PaymentGatewayPort for ScriptedGateway {
     async fn authorize(
         &self,
         request: &AuthorizeRequest,
+        key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<AuthorizePaymentOutcome, EffectError> {
         // Latency comes from the deterministic, seeded RNG on the effect context
@@ -109,9 +111,7 @@ impl PaymentGatewayPort for ScriptedGateway {
         }
         let response = self
             .calls
-            .try_answer(&request.idempotency_key(), ctx.flow_id(), |_| {
-                decide(request)
-            })
+            .try_answer(key, ctx.flow_id(), |_| decide(request))
             .map_err(|error| {
                 EffectError::unavailable("payment_gateway", "ledger_write_failed", error)
             })??;
@@ -191,9 +191,6 @@ impl AuthorizeRequest {
     }
 }
 
-/// The gateway authorization effect, which the stage's effect set names.
-pub type AuthorizePayment = Call<AuthorizeRequest>;
-
 /// Closed set of successful gateway authorization outcomes (FLOWIP-120m).
 ///
 /// The variants are the facts the journal records (`payment.authorized`,
@@ -205,24 +202,6 @@ pub type AuthorizePayment = Call<AuthorizeRequest>;
 pub enum AuthorizePaymentOutcome {
     Authorized(PaymentAuthorized),
     Declined(PaymentDeclined),
-}
-
-#[async_trait]
-impl CallRequest for AuthorizeRequest {
-    const EFFECT_TYPE: &'static str = "payment.authorize";
-    // A charge is never idempotent on its own, so the request must carry a key
-    // the gateway can dedupe on. It does not compile without its `Keyed` impl.
-    type Safety = RequiresKey;
-    type Port = dyn PaymentGatewayPort;
-    type Outcome = AuthorizePaymentOutcome;
-
-    async fn call(
-        &self,
-        gateway: &dyn PaymentGatewayPort,
-        ctx: &mut EffectContext,
-    ) -> Result<AuthorizePaymentOutcome, EffectError> {
-        gateway.authorize(self, ctx).await
-    }
 }
 
 impl Keyed for AuthorizeRequest {
@@ -251,7 +230,6 @@ type GatewayOutput = obzenflow::schema::stage_fact_set![
     PaymentDeclined,
     PaymentAuthorizationUnavailable
 ];
-type GatewayAllowedEffects = obzenflow::effects::effect_set![AuthorizePayment];
 
 impl GatewayTransform {
     /// A gateway transform whose authorizations `gateway` answers.
@@ -297,7 +275,7 @@ impl GatewayTransform {
 impl EffectfulTransformHandler for GatewayTransform {
     type Input = ValidatedOrder;
     type Output = GatewayOutput;
-    type AllowedEffects = GatewayAllowedEffects;
+    type AllowedEffects = AuthorizeRequest;
 
     async fn process(
         &self,
@@ -367,7 +345,7 @@ fn authorization_unavailable_reason(err: EffectError) -> String {
 async fn emit_authorization_unavailable(
     order: ValidatedOrder,
     reason: String,
-    fx: &mut Effects<GatewayOutput, GatewayAllowedEffects>,
+    fx: &mut Effects<GatewayOutput, AuthorizeRequest>,
 ) -> Result<(), HandlerError> {
     fx.emit(PaymentAuthorizationUnavailable {
         order_id: order.order_id,

@@ -38,8 +38,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefi
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectCursor, EffectError, Effects, IdempotencyKey, Keyed,
-    RequiresKey, SinkRedeliverySafety, System,
+    EffectCursor, EffectError, Effects, SinkRedeliverySafety, System,
 };
 use obzenflow_runtime::runtime_config::RETRY_MAX_ATTEMPTS_KEY;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -144,7 +143,6 @@ impl TypedTransformHandler for FanOutTransform {
 /// Each derived logical effect fails once with a typed, retryable timeout and
 /// then succeeds. Calls are counted by canonical input so the proof verifies
 /// that every fan-out sibling owns an independent recovery session.
-#[obzenflow::port]
 struct FlakyService {
     calls: Arc<Mutex<BTreeMap<u64, usize>>>,
 }
@@ -154,44 +152,28 @@ struct RetryOnce {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for RetryOnce {
-    const EFFECT_TYPE: &'static str = "cb_composition.retry_once";
-    type Safety = RequiresKey;
-    type Port = FlakyService;
-    type Outcome = CompEffectValue;
-
-    async fn call(
-        &self,
-        service: &FlakyService,
-        _ctx: &mut EffectContext,
-    ) -> Result<CompEffectValue, EffectError> {
+#[obzenflow::port]
+impl FlakyService {
+    #[effect(type = "cb_composition.retry_once", exactly_once)]
+    fn retry_once(&self, request: &RetryOnce) -> Result<CompEffectValue, EffectError> {
         let call = {
-            let mut calls = service.calls.lock().expect("calls lock poisoned");
-            let call = calls.entry(self.value).or_default();
+            let mut calls = self.calls.lock().expect("calls lock poisoned");
+            let call = calls.entry(request.value).or_default();
             *call += 1;
             *call
         };
         if call == 1 {
             Err(EffectError::Timeout(format!(
                 "simulated timeout for {}",
-                self.value
+                request.value
             )))
         } else {
             Ok(CompEffectValue {
-                effect_value: self.value + 900,
+                effect_value: request.value + 900,
             })
         }
     }
 }
-
-impl Keyed for RetryOnce {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("retry-once:{}", self.value))
-    }
-}
-
-type RetryOnceEffect = Call<RetryOnce>;
 
 /// Performs the retry-once effect and emits the recovered outcome.
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
@@ -213,7 +195,7 @@ impl RetryTransform {
 impl EffectfulTransformHandler for RetryTransform {
     type Input = CompInput;
     type Output = obzenflow_core::stage_fact_set![CompOutput, CompEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![RetryOnceEffect];
+    type AllowedEffects = RetryOnce;
 
     async fn process(
         &self,

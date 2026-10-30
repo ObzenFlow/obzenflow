@@ -283,7 +283,7 @@ mod tests {
     async fn allocator_propagates_non_policy_failures_live_and_replay() {
         let temp = tempfile::tempdir().expect("tempdir");
 
-        for (label, config, live_fragment) in [
+        for (label, config, reason) in [
             (
                 "dependency",
                 WarehouseConfig {
@@ -318,7 +318,7 @@ mod tests {
                     reserve_test_fault: Some(WarehouseTestFault::Provenance),
                     ..WarehouseConfig::default()
                 },
-                "effect provenance mismatch",
+                "injected warehouse provenance failure",
             ),
             (
                 "journal",
@@ -327,7 +327,7 @@ mod tests {
                     reserve_test_fault: Some(WarehouseTestFault::Journal),
                     ..WarehouseConfig::default()
                 },
-                "effect journal write failed",
+                "injected warehouse journal failure",
             ),
         ] {
             let journal_root = temp.path().join(label);
@@ -345,7 +345,7 @@ mod tests {
             assert_eq!(live_stats.reserve_calls(), 1);
 
             let baseline = latest_run_dir(&journal_root);
-            assert_propagated_without_reservation_failure(&baseline, live_fragment).await;
+            assert_propagated_without_reservation_failure(&baseline, reason).await;
 
             let replay_stats = Arc::new(warehouse::WarehouseStats::default());
             run_with_config(
@@ -366,7 +366,7 @@ mod tests {
 
             let replay = latest_run_dir(&journal_root);
             assert_ne!(replay, baseline);
-            assert_propagated_without_reservation_failure(&replay, "recorded effect failure").await;
+            assert_propagated_without_reservation_failure(&replay, reason).await;
         }
     }
 

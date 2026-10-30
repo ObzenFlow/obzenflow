@@ -33,10 +33,7 @@ use obzenflow_infra::journal::read::{
     open_disk_run, read_config_changes, read_configuration_refusals, ConfigChanges,
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    SinkRedeliverySafety, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{AppTable, ResolvedRuntimeConfig};
@@ -173,7 +170,6 @@ impl TypedInfiniteSourceHandler for BoundedReader {
 
 type Executed = Arc<Mutex<Vec<u64>>>;
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 struct Scorer {
     executed: Executed,
 }
@@ -184,31 +180,18 @@ struct ScoreRequest {
     threshold: u64,
 }
 
-#[async_trait]
-impl CallRequest for ScoreRequest {
-    const EFFECT_TYPE: &'static str = "app_identity.score";
-    type Safety = RequiresKey;
-    type Port = Scorer;
-    type Outcome = Score;
-
-    async fn call(&self, scorer: &Scorer, _ctx: &mut EffectContext) -> Result<Score, EffectError> {
-        scorer.executed.lock().unwrap().push(self.value);
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+impl Scorer {
+    #[effect(type = "app_identity.score", exactly_once)]
+    fn score(&self, request: &ScoreRequest) -> Result<Score, EffectError> {
+        self.executed.lock().unwrap().push(request.value);
         Ok(Score {
-            score: self.value * self.threshold,
+            score: request.value * request.threshold,
         })
     }
 }
 
-impl Keyed for ScoreRequest {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("app-identity:{}", self.value))
-    }
-}
-
-type ScoreEffect = Call<ScoreRequest>;
-
 type ScoreOutput = obzenflow_core::stage_fact_set![Scored, Score, Unscored, Noted, Capped];
-type ScoreEffects = obzenflow_runtime::effect_set![ScoreEffect];
 
 const RESCORE_OFFSET: u64 = 1_000;
 
@@ -231,7 +214,7 @@ impl ScoreTransform {
     async fn score(
         &self,
         value: u64,
-        fx: &mut Effects<ScoreOutput, ScoreEffects>,
+        fx: &mut Effects<ScoreOutput, ScoreRequest>,
     ) -> Result<Score, EffectError> {
         let score = fx.call(self.request(value)).await?;
         if self.app.rescore {
@@ -245,7 +228,7 @@ impl ScoreTransform {
 impl EffectfulTransformHandler for ScoreTransform {
     type Input = Reading;
     type Output = ScoreOutput;
-    type AllowedEffects = ScoreEffects;
+    type AllowedEffects = ScoreRequest;
 
     async fn process(
         &self,
@@ -510,7 +493,7 @@ async fn assert_refused(run_dir: &Path, reason: StageFatalReason) -> Result<Stag
 
 fn score_effect(input: u64, ordinal: u32) -> DepartureAction {
     DepartureAction::Effect {
-        effect_type: EffectType::from(ScoreRequest::EFFECT_TYPE),
+        effect_type: EffectType::from("app_identity.score"),
         input_position: EffectInputPosition::new(input),
         effect_ordinal: EffectOrdinal::new(ordinal),
     }
