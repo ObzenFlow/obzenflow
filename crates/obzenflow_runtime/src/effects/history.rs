@@ -480,9 +480,11 @@ impl EffectHistory {
                     .as_ref();
                 let attempt = provenance.and_then(|provenance| provenance.attempt);
                 if let Some(key) =
-                    provenance.and_then(|provenance| provenance.idempotency_key.clone())
+                    provenance.and_then(|provenance| provenance.idempotency_key.as_ref())
                 {
-                    idempotency_keys.insert(record.cursor.clone(), key);
+                    idempotency_keys
+                        .entry(record.cursor.clone())
+                        .or_insert_with(|| key.clone());
                 }
                 match terminal_attempts.entry(record.cursor.clone()) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
@@ -925,10 +927,9 @@ pub(crate) async fn current_cursor_history(
                     .effect_provenance
                     .as_ref();
                 let attempt = provenance.and_then(|provenance| provenance.attempt);
-                if let Some(key) =
-                    provenance.and_then(|provenance| provenance.idempotency_key.clone())
-                {
-                    history.idempotency_key = Some(key);
+                if history.idempotency_key.is_none() {
+                    history.idempotency_key =
+                        provenance.and_then(|provenance| provenance.idempotency_key.clone());
                 }
                 if history
                     .terminal_attempt
@@ -991,10 +992,7 @@ pub(crate) fn merge_cursor_histories(
     archived: EffectCursorHistory,
     current: EffectCursorHistory,
 ) -> Result<EffectCursorHistory, EffectError> {
-    let idempotency_key = current
-        .idempotency_key
-        .clone()
-        .or_else(|| archived.idempotency_key.clone());
+    let idempotency_key = current.idempotency_key.or(archived.idempotency_key);
     let mut causal = archived.causal;
     causal
         .merge(&current.causal)

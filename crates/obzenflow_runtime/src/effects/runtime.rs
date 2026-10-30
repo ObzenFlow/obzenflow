@@ -76,15 +76,17 @@ fn restore_archived_effect_identity(
         .map_err(|error| EffectError::Serialization(error.to_string()))?;
     let archived_content = serde_json::to_value(&archived.payload)
         .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let without_key = |event: &ChainEvent| {
-        event.effect_provenance.clone().map(|mut provenance| {
-            provenance.idempotency_key = None;
-            provenance
-        })
-    };
+    if let (Some(rebuilt_provenance), Some(archived_provenance)) = (
+        rebuilt.effect_provenance.as_mut(),
+        archived.effect_provenance.as_ref(),
+    ) {
+        rebuilt_provenance
+            .idempotency_key
+            .clone_from(&archived_provenance.idempotency_key);
+    }
     if rebuilt.id != archived.id
         || rebuilt_content != archived_content
-        || without_key(rebuilt) != without_key(archived)
+        || rebuilt.effect_provenance != archived.effect_provenance
     {
         return Err(EffectError::EffectProvenanceMismatch(format!(
             "rematerialised effect event {} disagrees with its archived durable identity",
@@ -92,7 +94,6 @@ fn restore_archived_effect_identity(
         )));
     }
     rebuilt.processing.event_time = archived.processing.event_time;
-    rebuilt.effect_provenance = archived.effect_provenance.clone();
     Ok(())
 }
 
