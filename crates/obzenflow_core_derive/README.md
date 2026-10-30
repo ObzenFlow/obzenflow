@@ -10,7 +10,7 @@ crate.
 | `EffectOutcomeFacts` | Declares the typed facts an effect outcome can contain. |
 | `StageOutputFacts` | Declares a stage output carrier and its fact-set projections. |
 | `EffectHandler` | Declares the systems an effectful handler calls, each in a `#[system]` field. |
-| `#[obzenflow::port]` | Marks a trait as a port, or a struct as its own port, so a `System` takes its port type from the value it is built from. Its methods answer with their request's outcome. |
+| `#[obzenflow::port]` | Marks a port trait, or the `impl` block of a struct that serves as its own port, so a `System` takes its port type from the value it is built from. Each method marked `#[effect(type = "...", exactly_once)]` or `at_least_once` declares the effect its request names. |
 
 ## Application use
 
