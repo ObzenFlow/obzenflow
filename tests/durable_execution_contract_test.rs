@@ -391,7 +391,6 @@ type Authorization = obzenflow::schema::stage_fact_set![PaymentAuthorized, Payme
 impl EffectfulTransformHandler for Authorize {
     type Input = CustomerOrderPlaced;
     type Output = Authorization;
-    type AllowedEffects = AuthorizationRequest;
 
     async fn process(
         &self,
@@ -2843,7 +2842,6 @@ mod then_live {
     impl EffectfulTransformHandler for Vet {
         type Input = Entry;
         type Output = Entry;
-        type AllowedEffects = AuditEntry;
 
         async fn process(
             &self,
@@ -4156,7 +4154,6 @@ mod two_effects {
     impl EffectfulTransformHandler for Charge {
         type Input = ChargeOrder;
         type Output = obzenflow::schema::stage_fact_set![Authorized, Captured];
-        type AllowedEffects = obzenflow::effects::effect_set![AuthorizeCharge, CaptureCharge];
 
         async fn process(
             &self,
@@ -4367,7 +4364,6 @@ mod emit_only {
     impl EffectfulTransformHandler for Stamp {
         type Input = Tick;
         type Output = Stamped;
-        type AllowedEffects = obzenflow::effects::effect_set![];
 
         async fn process(
             &self,
@@ -4625,7 +4621,6 @@ mod rejected_call {
     impl EffectfulTransformHandler for Quote {
         type Input = QuoteOrder;
         type Output = Quoted;
-        type AllowedEffects = RequestQuote;
 
         async fn process(
             &self,

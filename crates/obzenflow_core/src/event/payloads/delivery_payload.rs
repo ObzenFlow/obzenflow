@@ -43,7 +43,7 @@ impl DeliverySubject {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeliveryPayload {
     pub subject: DeliverySubject,
     #[serde(flatten)]
@@ -76,7 +76,7 @@ impl DeliveryPayload {
 }
 
 /// A lifecycle audit describes an operation, without any input settlement authority.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SinkAuditPayload {
     pub operation: SinkLifecycleOperation,
     #[serde(flatten)]
@@ -117,7 +117,7 @@ impl SinkAuditPayload {
 // ────────────────────────────────────────────────────────────────────────────
 // Core payload
 // ────────────────────────────────────────────────────────────────────────────
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeliveryOutcome {
     /// Delivery outcome
     pub result: DeliveryResult,
@@ -165,7 +165,7 @@ pub enum DeliveryMethod {
 // ────────────────────────────────────────────────────────────────────────────
 // Outcome variants
 // ────────────────────────────────────────────────────────────────────────────
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum DeliveryResult {
     Buffered {},

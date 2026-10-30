@@ -141,7 +141,6 @@ struct EnrichTransform {
 impl EffectfulTransformHandler for EnrichTransform {
     type Input = Reading;
     type Output = obzenflow_core::stage_fact_set![Enriched, EffectValue];
-    type AllowedEffects = Counting;
 
     async fn process(
         &self,

@@ -233,7 +233,6 @@ struct EffectfulTail {
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = Merged;
     type Output = obzenflow_core::stage_fact_set![MixedOutput, EffectValue];
-    type AllowedEffects = Counting;
 
     async fn process(
         &self,

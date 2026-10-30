@@ -72,10 +72,6 @@ fn restore_archived_effect_identity(
     rebuilt: &mut ChainEvent,
     archived: &ChainEvent,
 ) -> Result<(), EffectError> {
-    let rebuilt_content = serde_json::to_value(&rebuilt.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let archived_content = serde_json::to_value(&archived.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
     if let (Some(rebuilt_provenance), Some(archived_provenance)) = (
         rebuilt.effect_provenance.as_mut(),
         archived.effect_provenance.as_ref(),
@@ -85,7 +81,7 @@ fn restore_archived_effect_identity(
             .clone_from(&archived_provenance.idempotency_key);
     }
     if rebuilt.id != archived.id
-        || rebuilt_content != archived_content
+        || rebuilt.payload != archived.payload
         || rebuilt.effect_provenance != archived.effect_provenance
     {
         return Err(EffectError::EffectProvenanceMismatch(format!(

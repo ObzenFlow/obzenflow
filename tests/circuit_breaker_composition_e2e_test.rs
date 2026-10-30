@@ -195,7 +195,6 @@ impl RetryTransform {
 impl EffectfulTransformHandler for RetryTransform {
     type Input = CompInput;
     type Output = obzenflow_core::stage_fact_set![CompOutput, CompEffectValue];
-    type AllowedEffects = RetryOnce;
 
     async fn process(
         &self,

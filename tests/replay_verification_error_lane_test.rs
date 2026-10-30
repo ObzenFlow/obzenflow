@@ -86,7 +86,6 @@ struct RejectOdd;
 impl EffectfulTransformHandler for RejectOdd {
     type Input = Input;
     type Output = Accepted;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,

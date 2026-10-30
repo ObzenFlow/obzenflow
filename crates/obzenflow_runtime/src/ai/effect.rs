@@ -38,7 +38,7 @@ pub trait AiEffect:
     ConfiguredEffect<
         OutcomeSemantics = RecordedReply,
         Outcome: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
-    > + EffectName<Effect = Self, Name = Self>
+    > + EffectName<Effect = Self>
 {
     /// What a role prepares for one call.
     type Request: Clone + Send + Sync + 'static;

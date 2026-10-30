@@ -341,7 +341,6 @@ mod tests {
     impl EffectfulTransformHandler for EffectfulExactTransform {
         type Input = OutputEvent;
         type Output = OutputEvent;
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         async fn process(
             &self,
@@ -363,7 +362,6 @@ mod tests {
     impl EffectfulTransformHandler for EffectfulMultiOutputTransform {
         type Input = OutputEvent;
         type Output = obzenflow_core::stage_fact_set![OutputEvent, AlternateEvent];
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         async fn process(
             &self,
@@ -437,7 +435,6 @@ mod tests {
         type State = ();
         type Input = InputEvent;
         type Output = EffectfulStatefulOutput;
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -470,7 +467,6 @@ mod tests {
         type State = ();
         type Input = InputEvent;
         type Output = OutputEvent;
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         fn initial_state(&self) -> Self::State {}
 

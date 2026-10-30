@@ -152,6 +152,7 @@ pub struct EffectDeclaration {
     safety: EffectSafety,
     idempotency_key_policy: IdempotencyKeyPolicy,
     syntax: EffectDeclarationSyntax,
+    allowance: EffectAllowance,
     pub(crate) binding: EffectDeclarationBinding,
     recorded: Vec<EffectDeclarationBinding>,
     /// Event-sourcing meaning selected by the effect type.
@@ -168,6 +169,12 @@ pub struct EffectDeclaration {
 pub(super) enum EffectDeclarationSyntax {
     Bare,
     AtLeastOnce,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectAllowance {
+    Binding,
+    SystemField(Option<&'static str>),
 }
 
 impl EffectDeclaration {
@@ -220,6 +227,7 @@ impl EffectDeclaration {
             safety: E::SAFETY,
             idempotency_key_policy,
             syntax,
+            allowance: EffectAllowance::Binding,
             binding,
             recorded: Vec::new(),
             outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
@@ -260,14 +268,26 @@ impl EffectDeclaration {
     #[doc(hidden)]
     pub fn validate_safety_syntax(&self) -> Result<(), String> {
         match (self.syntax, self.safety) {
-            (
-                EffectDeclarationSyntax::Bare,
-                EffectSafety::NonIdempotentAtLeastOnce,
-            ) => Err(format!(
-                "performs at-least-once effect '{}' without acknowledging it; add `.at_least_once::<{}>()` after the handler",
-                self.effect_type,
-                self.short_rust_type()
-            )),
+            (EffectDeclarationSyntax::Bare, EffectSafety::NonIdempotentAtLeastOnce) => {
+                Err(match self.allowance {
+                    EffectAllowance::Binding => format!(
+                        "performs at-least-once effect '{}' without acknowledging it; add `.at_least_once::<{}>()` after the handler",
+                        self.effect_type,
+                        self.short_rust_type()
+                    ),
+                    EffectAllowance::SystemField(field) => {
+                        let holder = match field {
+                            Some(field) => format!("its `#[system]` field `{field}`"),
+                            None => "a `#[system]` field".to_string(),
+                        };
+                        format!(
+                            "performs at-least-once effect '{}', which {holder} allows; acknowledge it with `.at_least_once::<{}>()` after the handler, or narrow the field with `#[system(...)]`",
+                            self.effect_type,
+                            self.short_rust_type()
+                        )
+                    }
+                })
+            }
             (
                 EffectDeclarationSyntax::AtLeastOnce,
                 EffectSafety::Idempotent
@@ -288,6 +308,18 @@ impl EffectDeclaration {
     /// Name the effect in diagnostics as the stage's handler wrote it.
     pub(super) fn written_as<N: ?Sized + 'static>(mut self) -> Self {
         self.rust_type = std::any::type_name::<N>();
+        self
+    }
+
+    pub(super) fn allowed_by_system_field(mut self) -> Self {
+        self.allowance = EffectAllowance::SystemField(None);
+        self
+    }
+
+    pub(super) fn held_in_field(mut self, field: Option<&'static str>) -> Self {
+        if let EffectAllowance::SystemField(named) = &mut self.allowance {
+            *named = field;
+        }
         self
     }
 

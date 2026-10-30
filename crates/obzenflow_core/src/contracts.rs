@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Result of contract verification for a single contract on an edge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", content = "evidence", rename_all = "snake_case")]
 pub enum ContractResult {
     /// Contract passed and produced evidence suitable for audit trail.
@@ -68,7 +68,7 @@ impl ContractResult {
 }
 
 /// Observations retained by a contract evaluation, independently of its outcome.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContractEvidence {
     pub contract_name: ContractName,
     pub upstream_stage: StageId,
@@ -78,7 +78,7 @@ pub struct ContractEvidence {
 }
 
 /// Details of a contract violation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContractViolation {
     pub contract_name: ContractName,
     pub upstream_stage: StageId,
@@ -89,7 +89,7 @@ pub struct ContractViolation {
 }
 
 /// Well-known categories of contract violations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ViolationCause {
     /// Writer/read counts diverged on a transport edge.
     SeqDivergence {
@@ -139,7 +139,7 @@ impl ViolationCause {
 }
 
 /// A single hash mismatch between write/read sides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HashMismatch {
     pub index: JournalIndex,
     pub writer_event_id: Option<EventId>,

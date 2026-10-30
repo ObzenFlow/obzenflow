@@ -2,13 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Effect capability sets (FLOWIP-120z).
+//! Effect capability sets.
 //!
 //! An effect set is the exhaustive, compiler-visible set of effects one
-//! handler may perform. Its members are the names written in it, a request
-//! type or an effect type, and [`EffectName`] maps each to its effect; the
-//! stable runtime and archive identity remains `EFFECT_TYPE`. Sets are
-//! zero-sized declarations, never persisted.
+//! handler may perform. `#[derive(EffectHandler)]` builds it from the
+//! handler's `#[system]` fields: each field allows every effect its port
+//! declares, or the requests its `#[system(...)]` lists. [`EffectName`] maps
+//! each member to its effect; the stable runtime and archive identity remains
+//! `EFFECT_TYPE`. Sets are zero-sized declarations, never persisted.
 
 use super::call::{Call, CallRequest};
 use super::declaration::Effect;
@@ -27,31 +28,25 @@ use std::marker::PhantomData;
 )]
 pub trait EffectName: 'static {
     type Effect: Effect;
-
-    /// The name itself. `effect_set!` writes each member through it, so a
-    /// member that names no effect is reported where it is written.
-    type Name;
 }
 
 impl<R: CallRequest> EffectName for R {
     type Effect = Call<R>;
-    type Name = R;
 }
 
 impl<R: CallRequest> EffectName for Call<R> {
     type Effect = Call<R>;
-    type Name = Call<R>;
 }
 
 /// Capability authority for one handler's permitted effect identities.
 ///
-/// A deliberately effect-free handler declares `effect_set![]`; the hidden
-/// `Members` projection is what `Effects::perform` bounds and the DSL
-/// manifest equality assertions consume.
+/// A handler with no `#[system]` field allows no effect. The hidden `Members`
+/// projection is what `Effects::perform` bounds and the DSL manifest equality
+/// assertions consume.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an effect capability set",
-    note = "name one request declared with `#[effect]`, `effect_set![RequestA, RequestB]` for \
-            several, or `effect_set![]` for none"
+    note = "a handler's effects come from its `#[system]` fields; derive `EffectHandler` and \
+            mark each field that holds a system `#[system]`"
 )]
 pub trait EffectSet: Send + Sync + 'static {
     /// Hidden type-level member projection; proof machinery, not public
@@ -69,8 +64,10 @@ pub trait EffectSet: Send + Sync + 'static {
     const MEMBERS_DISTINCT: () = ();
 }
 
-/// Zero-sized expansion target of `effect_set![...]`. Never constructed and
-/// never persisted; it exists only as a type-level declaration.
+/// The zero-sized set of the members `L` lists, which `#[derive(EffectHandler)]`
+/// and the framework's own handlers name. Never constructed and never
+/// persisted; it exists only as a type-level declaration.
+#[doc(hidden)]
 pub struct DeclaredEffectSet<L>(PhantomData<fn() -> L>);
 
 impl<L: EffectList> EffectSet for DeclaredEffectSet<L> {
@@ -85,14 +82,18 @@ impl<L: EffectList> EffectSet for DeclaredEffectSet<L> {
     const MEMBERS_DISTINCT: () = L::DISTINCT_EFFECT_TYPES;
 }
 
-/// One request is a set whose only member is that request.
-#[diagnostic::do_not_recommend]
-impl<R: CallRequest> EffectSet for R {
-    type Members = WithMember<R, EmptySet>;
+/// Names written as nested pairs, `(A, (B, ()))`, read as set members.
+#[doc(hidden)]
+pub trait RequestList {
+    type Members;
+}
 
-    fn effect_types() -> Vec<&'static str> {
-        vec![R::EFFECT_TYPE]
-    }
+impl RequestList for () {
+    type Members = EmptySet;
+}
+
+impl<Head, Rest: RequestList> RequestList for (Head, Rest) {
+    type Members = WithMember<Head, Rest::Members>;
 }
 
 /// A member list whose heads are effect names, with a const duplicate guard
@@ -148,8 +149,8 @@ where
                 <X::Effect as Effect>::EFFECT_TYPE,
                 <Head::Effect as Effect>::EFFECT_TYPE
             ),
-            "duplicate member in a declared effect capability set: two members share an \
-             effect type; each effect appears exactly once (FLOWIP-120z)"
+            "two effects this handler allows share an effect type; each effect type is \
+             allowed once"
         );
         Rest::OK
     };
@@ -160,33 +161,6 @@ where
 #[doc(hidden)]
 pub const fn assert_distinct_effect_set<S: EffectSet>() {
     S::MEMBERS_DISTINCT
-}
-
-/// Declare an effect capability set in type position (FLOWIP-120z):
-///
-/// ```ignore
-/// type AllowedEffects = effect_set![StockReservation, StockRelease];
-/// type NoEffects = effect_set![];
-/// ```
-///
-/// A handler with one effect names its request alone, as
-/// `type AllowedEffects = AuthorizeRequest;`. Duplicate members are compile
-/// errors (a const-eval panic when the set is used). Set equality elsewhere
-/// is semantic, not order-sensitive.
-#[macro_export]
-macro_rules! effect_set {
-    [$($member:ty),* $(,)?] => {
-        $crate::effects::DeclaredEffectSet<
-            $crate::effect_set!(@list $($member),*)
-        >
-    };
-    (@list) => { $crate::__private::EmptySet };
-    (@list $head:ty $(, $rest:ty)*) => {
-        $crate::__private::WithMember<
-            <$head as $crate::effects::EffectName>::Name,
-            $crate::effect_set!(@list $($rest),*)
-        >
-    };
 }
 
 #[cfg(test)]
@@ -238,6 +212,9 @@ mod tests {
         }
     }
 
+    type PingPong = DeclaredEffectSet<<(PingRequest, (PongRequest, ())) as RequestList>::Members>;
+    type NoEffects = DeclaredEffectSet<<() as RequestList>::Members>;
+
     fn member_holds<Set, E, Index>()
     where
         Set: EffectSet,
@@ -247,39 +224,26 @@ mod tests {
 
     #[test]
     fn declared_effect_set_projects_identities_in_declared_order() {
-        type Allowed = crate::effect_set![PingRequest, PongRequest];
         assert_eq!(
-            <Allowed as EffectSet>::effect_types(),
+            <PingPong as EffectSet>::effect_types(),
             vec!["effect_set.ping", "effect_set.pong"]
         );
     }
 
     #[test]
-    fn one_request_is_a_set_of_one() {
-        assert_eq!(
-            <PingRequest as EffectSet>::effect_types(),
-            vec!["effect_set.ping"]
-        );
-        member_holds::<PingRequest, PingRequest, _>();
-    }
-
-    #[test]
     fn empty_effect_set_is_a_valid_declaration() {
-        type NoEffects = crate::effect_set![];
         assert!(<NoEffects as EffectSet>::effect_types().is_empty());
     }
 
     #[test]
     fn membership_witnesses_resolve_against_written_names() {
-        type Allowed = crate::effect_set![PingRequest, PongRequest];
-        member_holds::<Allowed, PingRequest, _>();
-        member_holds::<Allowed, PongRequest, _>();
+        member_holds::<PingPong, PingRequest, _>();
+        member_holds::<PingPong, PongRequest, _>();
     }
 
     #[test]
     fn distinct_member_guard_evaluates_for_distinct_sets() {
-        const _: () = assert_distinct_effect_set::<crate::effect_set![PingRequest, PongRequest]>();
-        const _: () = assert_distinct_effect_set::<PingRequest>();
-        const _: () = assert_distinct_effect_set::<crate::effect_set![]>();
+        const _: () = assert_distinct_effect_set::<PingPong>();
+        const _: () = assert_distinct_effect_set::<NoEffects>();
     }
 }

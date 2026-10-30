@@ -43,12 +43,12 @@ where
 /// handler's declared capability set.
 ///
 /// Its blanket implementation preserves the existing [`Member`] proof while
-/// keeping effect permission errors in the vocabulary of `AllowedEffects`.
+/// keeping effect permission errors in the vocabulary of `#[system]` fields.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "effect `{Self}` is not declared in this handler's `AllowedEffects` set",
+    message = "effect `{Self}` is not allowed by this handler's `#[system]` fields",
     label = "`{Self}` cannot be performed by this handler",
-    note = "add `{Self}` to the handler's `AllowedEffects`, or remove this call"
+    note = "hold a `#[system]` field that answers `{Self}`, or remove this call"
 )]
 pub trait AllowedEffectsAllowEffect<AllowedEffects, At> {}
 
@@ -92,9 +92,10 @@ where
 /// reports this message rather than a type mismatch.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "effect `{Self}` is not declared in this handler's `AllowedEffects` set",
+    message = "`{Self}` is not allowed by this handler's `#[system]` fields",
     label = "`{Self}` cannot be performed by this handler",
-    note = "add `{Self}` to the handler's `AllowedEffects`, or remove this call"
+    note = "hold a `#[system]` field whose port declares `{Self}`, add `{Self}` to that field's \
+            `#[system(...)]` list, or remove this call"
 )]
 pub trait RequestAllowed<AllowedEffects, At> {}
 
@@ -248,7 +249,6 @@ where
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
     ///     type Output = obzenflow_core::stage_fact_set![Charged];
-    ///     type AllowedEffects = ChargeCardRequest;
     ///
     ///     async fn process(
     ///         &self,
@@ -261,7 +261,7 @@ where
     /// }
     /// ```
     ///
-    /// A request the handler's effect set does not declare does not compile:
+    /// A request no `#[system]` field allows does not compile:
     ///
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
@@ -290,7 +290,6 @@ where
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
     ///     type Output = obzenflow_core::stage_fact_set![Charged];
-    ///     type AllowedEffects = obzenflow_runtime::effect_set![];
     ///
     ///     async fn process(
     ///         &self,
@@ -303,7 +302,7 @@ where
     /// }
     /// ```
     ///
-    /// Nor does one through a set of one, listed:
+    /// Nor does one the field's `#[system(...)]` list leaves out:
     ///
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
@@ -331,12 +330,11 @@ where
     /// # }
     /// # #[derive(Clone, Debug, EffectHandler)]
     /// # #[effect_handler(effects = obzenflow_runtime::effects)]
-    /// # struct Checkout { #[system] card: System<dyn CardPort> }
+    /// # struct Checkout { #[system(RefundRequest)] card: System<dyn CardPort> }
     /// #[async_trait]
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
     ///     type Output = obzenflow_core::stage_fact_set![Charged];
-    ///     type AllowedEffects = obzenflow_runtime::effect_set![RefundRequest];
     ///
     ///     async fn process(
     ///         &self,
@@ -349,7 +347,7 @@ where
     /// }
     /// ```
     ///
-    /// or named alone:
+    /// or one another port declares:
     ///
     /// ```compile_fail,E0277
     /// # use async_trait::async_trait;
@@ -372,6 +370,9 @@ where
     /// # trait CardPort: Send + Sync {
     /// #     #[effect(type = "docs.call.charge_card", exactly_once)]
     /// #     fn charge(&self, request: &ChargeCardRequest) -> Result<Charged, EffectError>;
+    /// # }
+    /// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    /// # trait RefundPort: Send + Sync {
     /// #     #[effect(type = "docs.call.refund", exactly_once)]
     /// #     fn refund(&self, request: &RefundRequest) -> Result<Charged, EffectError>;
     /// # }
@@ -382,14 +383,13 @@ where
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
     ///     type Output = obzenflow_core::stage_fact_set![Charged];
-    ///     type AllowedEffects = RefundRequest;
     ///
     ///     async fn process(
     ///         &self,
     ///         _: Order,
     ///         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ///     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-    ///         fx.call(ChargeCardRequest).await?;
+    ///         fx.call(RefundRequest).await?;
     ///         Ok(fx.complete()?)
     ///     }
     /// }
@@ -427,7 +427,6 @@ where
     /// impl EffectfulTransformHandler for Checkout {
     ///     type Input = Order;
     ///     type Output = obzenflow_core::stage_fact_set![Shipped];
-    ///     type AllowedEffects = ChargeCardRequest;
     ///
     ///     async fn process(
     ///         &self,
@@ -459,7 +458,6 @@ where
     /// impl EffectfulTransformHandler for Stamper {
     ///     type Input = Order;
     ///     type Output = Order;
-    ///     type AllowedEffects = obzenflow_runtime::effect_set![];
     ///
     ///     async fn process(
     ///         &self,

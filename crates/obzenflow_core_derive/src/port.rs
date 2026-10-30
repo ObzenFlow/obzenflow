@@ -582,6 +582,7 @@ fn generated_requests(
 ) -> Vec<TokenStream> {
     let mut requests: Vec<(String, &Ident)> = Vec::new();
     let mut effect_types: Vec<(String, &Ident)> = Vec::new();
+    let mut members = Vec::new();
     let mut generated = Vec::new();
     for method in &declared {
         let request = method.request.to_token_stream().to_string();
@@ -609,8 +610,18 @@ fn generated_requests(
         }
         requests.push((request, &method.signature.ident));
         effect_types.push((effect_type, &method.signature.ident));
+        members.push(method.request);
         generated.push(generated_request(effects, port, owner, method));
     }
+    let mut list = quote!(());
+    for request in members.iter().rev() {
+        list = quote!((#request, #list));
+    }
+    generated.push(quote! {
+        impl #effects::PortEffects for #port {
+            type Members = <#list as #effects::RequestList>::Members;
+        }
+    });
     generated
 }
 
@@ -994,6 +1005,52 @@ mod tests {
             "{expanded}"
         );
         assert!(!expanded.contains("# [effect"), "{expanded}");
+    }
+
+    #[test]
+    fn each_port_lists_its_requests_in_method_order() {
+        let on_trait = expanded(syn::parse_quote! {
+            trait WarehousePort: Send + Sync {
+                #[effect(type = "allocation.reserve_stock", exactly_once)]
+                fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError>;
+                fn audit(&self) -> Result<Audited, EffectError>;
+                #[effect(type = "allocation.release_stock", exactly_once)]
+                fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError>;
+            }
+        });
+        let on_struct = expanded(syn::parse_quote! {
+            impl CallCounter {
+                #[effect(type = "effect_replay.counting", exactly_once)]
+                fn count(&self, request: &Counting) -> Result<Counted, EffectError> {
+                    Ok(Counted)
+                }
+            }
+        });
+        let effect_free = expanded(syn::parse_quote! {
+            trait LedgerPort: Send + Sync {}
+        });
+
+        assert!(
+            on_trait.contains(
+                "impl :: obzenflow :: effects :: PortEffects for dyn WarehousePort { type Members = \
+                 < (StockReservation , (StockRelease , ())) as"
+            ),
+            "{on_trait}"
+        );
+        assert!(
+            on_struct.contains(
+                "impl :: obzenflow :: effects :: PortEffects for CallCounter { type Members = \
+                 < (Counting , ()) as"
+            ),
+            "{on_struct}"
+        );
+        assert!(
+            effect_free.contains(
+                "impl :: obzenflow :: effects :: PortEffects for dyn LedgerPort { type Members = \
+                 < () as"
+            ),
+            "{effect_free}"
+        );
     }
 
     #[test]

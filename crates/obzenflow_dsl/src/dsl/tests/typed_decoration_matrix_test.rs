@@ -150,7 +150,6 @@ mod tests {
     impl EffectfulTransformHandler for FxTr {
         type Input = In;
         type Output = Out;
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         async fn process(
             &self,
@@ -175,7 +174,6 @@ mod tests {
     impl EffectfulTransformHandler for TxFxTr {
         type Input = In;
         type Output = Out;
-        type AllowedEffects = TxRequest;
 
         async fn process(
             &self,
@@ -211,7 +209,6 @@ mod tests {
         type State = ();
         type Input = In;
         type Output = Out;
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -264,7 +261,6 @@ mod tests {
         type State = ();
         type Input = In;
         type Output = Out;
-        type AllowedEffects = PolicyRequest;
 
         fn initial_state(&self) -> Self::State {}
 

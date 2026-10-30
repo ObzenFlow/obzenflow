@@ -1031,6 +1031,88 @@ mod tests {
     }
 
     #[test]
+    fn effect_payloads_compare_as_their_recorded_form() {
+        use crate::event::payloads::execution_payload::ExecutionPayload;
+
+        let cursor = EffectCursor::new("flow", "stage", 1, 0);
+        let mut failed = effect_record(cursor.clone());
+        failed.observation = EffectObservation::returned_failure();
+        failed.outcome = EffectOutcomePayload::Failed {
+            error_type: "remote".into(),
+            error_message: "try again".to_string(),
+            retry: RetryDisposition::Retryable,
+            cause: Some(EffectFailureCause {
+                source: EffectFailureSource::new("dependency"),
+                code: EffectFailureCode::new("timeout"),
+            }),
+            detail: None,
+        };
+        let started = EffectAttemptStarted {
+            cursor: cursor.clone(),
+            descriptor_hash: "hash".into(),
+            effect_type: EffectType::new("test.effect"),
+            attempt: EffectAttemptOrdinal::new(1),
+            outcome_group_id: effect_outcome_group_id(&cursor),
+            causal_input_id: EventId::new(),
+        };
+        let abandoned = EffectRecoveryAbandoned {
+            cursor: cursor.clone(),
+            descriptor_hash: "hash".into(),
+            effect_type: EffectType::new("test.effect"),
+            outcome_group_id: effect_outcome_group_id(&cursor),
+            highest_started_attempt: EffectAttemptOrdinal::new(2),
+            causal_input_id: EventId::new(),
+            cause: EffectFailureCause {
+                source: EffectFailureSource::new("recovery"),
+                code: EffectFailureCode::new("abandoned"),
+            },
+            message: "recovery stopped".to_string(),
+            retry: RetryDisposition::NotRetryable,
+        };
+        for (payload, event_type) in [
+            (
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect_record(
+                    cursor.clone(),
+                ))),
+                EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+            ),
+            (
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(failed)),
+                "effect.execution_failed",
+            ),
+            (
+                ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(started)),
+                EFFECT_ATTEMPT_STARTED_EVENT_TYPE,
+            ),
+            (
+                ChainPayload::Execution(ExecutionPayload::EffectRecoveryAbandoned(abandoned)),
+                EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
+            ),
+            (
+                ChainPayload::Fact(json!({"id": 7, "label": "fact", "ratio": 0.25})),
+                "test.fact",
+            ),
+        ] {
+            let recorded = serde_json::to_value(&payload).expect("the payload serializes");
+            let version = payload
+                .framework_schema_version()
+                .unwrap_or(std::num::NonZeroU32::MIN);
+            let decoded =
+                ChainPayload::decode(payload.kind(), event_type, version, recorded.clone())
+                    .expect("the recorded form decodes");
+            assert_eq!(
+                decoded, payload,
+                "{event_type} decodes to the value it recorded"
+            );
+            assert_eq!(
+                serde_json::to_value(&decoded).expect("the payload serializes"),
+                recorded,
+                "{event_type} records the same form again"
+            );
+        }
+    }
+
+    #[test]
     fn effect_outcome_group_id_is_derived_from_cursor() {
         let cursor = EffectCursor::new("flow:with:colons", "stage", 7, 2);
         let record = effect_record(cursor.clone());

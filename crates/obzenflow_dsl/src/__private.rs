@@ -11,7 +11,6 @@ pub use obzenflow_adapters::middleware::{capture_middleware, MiddlewareFactory};
 pub use obzenflow_core::assert_distinct_stage_fact_set;
 pub use obzenflow_core::stage_fact_set;
 pub use obzenflow_core::StageFactSet;
-pub use obzenflow_runtime::effect_set;
 pub use obzenflow_runtime::effects::assert_handler_performs_no_ai_effect;
 pub use obzenflow_runtime::effects::assert_stateful_handler_performs_no_ai_effect;
 pub use obzenflow_runtime::effects::effectful_stateful_effects;

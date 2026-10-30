@@ -156,7 +156,6 @@ impl PaymentEffectsHandler {
 impl EffectfulTransformHandler for PaymentEffectsHandler {
     type Input = Item;
     type Output = obzenflow_core::stage_fact_set![PaymentEffectFact];
-    type AllowedEffects = obzenflow_runtime::effect_set![Authorize, Refund];
 
     async fn process(
         &self,

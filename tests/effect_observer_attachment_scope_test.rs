@@ -122,7 +122,6 @@ impl PerformsBothEffects {
 impl EffectfulTransformHandler for PerformsBothEffects {
     type Input = Input;
     type Output = obzenflow_core::stage_fact_set![EffectFact, EffectReply];
-    type AllowedEffects = obzenflow_runtime::effect_set![RequestA, RequestB];
 
     async fn process(
         &self,

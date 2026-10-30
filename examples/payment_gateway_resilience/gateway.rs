@@ -23,7 +23,7 @@ use super::domain::{
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
 use obzenflow::effects::{
-    EffectContext, EffectError, EffectHandler, Effects, IdempotencyKey, Keyed, System,
+    EffectContext, EffectError, EffectHandler, EffectSet, Effects, IdempotencyKey, Keyed, System,
 };
 use obzenflow::error::HandlerError;
 use obzenflow::schema::EffectOutcomeFacts;
@@ -275,7 +275,6 @@ impl GatewayTransform {
 impl EffectfulTransformHandler for GatewayTransform {
     type Input = ValidatedOrder;
     type Output = GatewayOutput;
-    type AllowedEffects = AuthorizeRequest;
 
     async fn process(
         &self,
@@ -342,10 +341,10 @@ fn authorization_unavailable_reason(err: EffectError) -> String {
 /// reached, and manufacturing one out of a gateway outage would be a fake
 /// outcome (the FLOWIP-120m non-performance doctrine). These orders go to
 /// manual review.
-async fn emit_authorization_unavailable(
+async fn emit_authorization_unavailable<Allowed: EffectSet>(
     order: ValidatedOrder,
     reason: String,
-    fx: &mut Effects<GatewayOutput, AuthorizeRequest>,
+    fx: &mut Effects<GatewayOutput, Allowed>,
 ) -> Result<(), HandlerError> {
     fx.emit(PaymentAuthorizationUnavailable {
         order_id: order.order_id,

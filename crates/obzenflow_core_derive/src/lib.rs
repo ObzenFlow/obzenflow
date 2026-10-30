@@ -101,9 +101,11 @@ pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
 }
 
 /// Declare the systems an effectful handler calls. Each field marked
-/// `#[system]` holds a `System` or a typed binding, and the build matches each
-/// named effect the handler performs to one of them. A handler that calls no
-/// system derives it with no such field.
+/// `#[system]` holds a `System` or a typed binding, and the handler may perform
+/// every effect the field's port declares. A field written
+/// `#[system(RequestA, RequestB)]` allows only the requests it lists, each of
+/// which its port must declare. A handler that calls no system derives it with
+/// no such field.
 ///
 /// Generated code resolves `::obzenflow::effects`; code that depends on the
 /// runtime crate directly names its effects module with

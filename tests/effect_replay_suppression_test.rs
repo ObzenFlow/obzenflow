@@ -323,7 +323,7 @@ impl Keyed for Blocking {
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ReplayTransform {
-    #[system]
+    #[system(Counting)]
     counter: System<CallCounter>,
 }
 
@@ -331,7 +331,6 @@ struct ReplayTransform {
 impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = Counting;
 
     async fn process(
         &self,
@@ -367,7 +366,6 @@ struct BlockingTransform {
 impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = Blocking;
 
     async fn process(
         &self,
@@ -398,7 +396,7 @@ impl EffectfulTransformHandler for BlockingTransform {
 /// must already be durable before cancellation can reach this second gate.
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PostPerformBlockingTransform {
-    #[system]
+    #[system(Counting)]
     counter: System<CallCounter>,
     performed: Arc<Semaphore>,
     handler_release: Arc<Semaphore>,
@@ -408,7 +406,6 @@ struct PostPerformBlockingTransform {
 impl EffectfulTransformHandler for PostPerformBlockingTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = Counting;
 
     async fn process(
         &self,
@@ -460,7 +457,7 @@ struct ReplayStatefulState {
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ReplayStateful {
-    #[system]
+    #[system(Counting)]
     counter: System<CallCounter>,
 }
 
@@ -478,7 +475,6 @@ impl EffectfulStatefulHandler for ReplayStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
     type Output = ReplayStatefulFact;
-    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -551,7 +547,7 @@ enum PolicyStatefulFact {
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PolicyStateful {
-    #[system]
+    #[system(SlowReserve)]
     counter: System<CallCounter>,
 }
 
@@ -567,7 +563,6 @@ impl EffectfulStatefulHandler for PolicyStateful {
     type State = PolicyStatefulState;
     type Input = ReplayInput;
     type Output = PolicyStatefulFact;
-    type AllowedEffects = SlowReserve;
 
     fn initial_state(&self) -> Self::State {
         PolicyStatefulState::default()
@@ -646,7 +641,7 @@ impl obzenflow_core::OneFactStageOutput for DishonestReplayStatefulOutput {}
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct DishonestOneFactStateful {
-    #[system]
+    #[system(Counting)]
     counter: System<CallCounter>,
     decide_inputs: Arc<Mutex<Vec<u64>>>,
     apply_calls: Arc<AtomicUsize>,
@@ -657,7 +652,6 @@ impl EffectfulStatefulHandler for DishonestOneFactStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
     type Output = DishonestReplayStatefulOutput;
-    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -703,7 +697,7 @@ struct ErrorAfterCommitState {
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ErrorAfterCommitStateful {
-    #[system]
+    #[system(Counting)]
     counter: System<CallCounter>,
     observed_fact_counts: Arc<Mutex<Vec<usize>>>,
     applied: Arc<Mutex<Vec<String>>>,
@@ -714,7 +708,6 @@ impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
     type State = ErrorAfterCommitState;
     type Input = ReplayInput;
     type Output = ReplayStatefulFact;
-    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ErrorAfterCommitState::default()
@@ -777,7 +770,7 @@ struct ApplyRejectionState {
 /// deliberate `apply` rejection so it can provide a sealed effect history.
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ApplyRejectingStateful {
-    #[system]
+    #[system(Counting)]
     counter: System<CallCounter>,
     decide_inputs: Arc<Mutex<Vec<u64>>>,
     apply_attempts: Arc<Mutex<Vec<String>>>,
@@ -789,7 +782,6 @@ impl EffectfulStatefulHandler for ApplyRejectingStateful {
     type State = ApplyRejectionState;
     type Input = ReplayInput;
     type Output = ReplayStatefulFact;
-    type AllowedEffects = Counting;
 
     fn initial_state(&self) -> Self::State {
         ApplyRejectionState::default()
@@ -893,7 +885,7 @@ struct ProductStatefulState;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct ProductStateful {
-    #[system]
+    #[system(Product)]
     counter: System<CallCounter>,
     applied: Arc<Mutex<Vec<String>>>,
 }
@@ -903,7 +895,6 @@ impl EffectfulStatefulHandler for ProductStateful {
     type State = ProductStatefulState;
     type Input = ReplayInput;
     type Output = ProductStatefulFact;
-    type AllowedEffects = Product;
 
     fn initial_state(&self) -> Self::State {
         ProductStatefulState
@@ -3939,7 +3930,6 @@ struct PortedTransform {
 impl EffectfulTransformHandler for PortedTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = Greet;
 
     async fn process(
         &self,
@@ -4194,7 +4184,6 @@ struct LedgerTransform {
 impl EffectfulTransformHandler for LedgerTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = LedgerPost;
 
     async fn process(
         &self,
@@ -4393,7 +4382,7 @@ fn is_breaker_rejection(err: &EffectError) -> bool {
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct FailFastTransform {
-    #[system]
+    #[system(AlwaysFailing)]
     counter: System<CallCounter>,
 }
 
@@ -4401,7 +4390,6 @@ struct FailFastTransform {
 impl EffectfulTransformHandler for FailFastTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = AlwaysFailing;
 
     async fn process(
         &self,
@@ -4441,7 +4429,7 @@ impl EffectfulTransformHandler for FailFastTransform {
 /// capability set honest for each stage declaration.
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct MultiEffectFailFastTransform {
-    #[system]
+    #[system(AlwaysFailing, Counting)]
     counter: System<CallCounter>,
 }
 
@@ -4449,7 +4437,6 @@ struct MultiEffectFailFastTransform {
 impl EffectfulTransformHandler for MultiEffectFailFastTransform {
     type Input = ReplayInput;
     type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailing, Counting];
 
     async fn process(
         &self,

@@ -218,7 +218,6 @@ impl EffectfulStatefulHandler for BoundaryProbeHandler {
     type State = Vec<u64>;
     type Input = BoundaryProbeInput;
     type Output = BoundaryProbeFact;
-    type AllowedEffects = BoundaryProbeRequest;
 
     fn initial_state(&self) -> Self::State {
         Vec::new()

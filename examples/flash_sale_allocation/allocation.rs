@@ -94,7 +94,6 @@ impl EffectfulStatefulHandler for Allocator {
     type State = AllocationState;
     type Input = AllocationInput;
     type Output = AllocationOutput;
-    type AllowedEffects = obzenflow::effects::effect_set![StockReservation, StockRelease];
 
     fn initial_state(&self) -> Self::State {
         AllocationState::default()

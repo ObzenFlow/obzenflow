@@ -88,7 +88,7 @@ enum EffectSum {
 }
 
 type Facts = of::schema::stage_fact_set![Fact];
-type NoEffects = of::effects::effect_set![];
+type NoEffects = <Pure as of::effects::EffectHandler>::AllowedEffects;
 
 #[derive(Clone, Debug, of::effects::EffectHandler)]
 #[effect_handler(effects = of::effects)]
@@ -216,7 +216,6 @@ impl sinks::InlineSink for Pure {
 impl transforms::EffectfulTransformHandler for Pure {
     type Input = Fact;
     type Output = Fact;
-    type AllowedEffects = NoEffects;
 
     async fn process(
         &self,
@@ -233,7 +232,6 @@ impl stateful::EffectfulStatefulHandler for Pure {
     type State = u64;
     type Input = Fact;
     type Output = Fact;
-    type AllowedEffects = NoEffects;
 
     fn initial_state(&self) -> u64 {
         0

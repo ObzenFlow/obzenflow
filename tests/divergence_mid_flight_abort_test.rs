@@ -201,7 +201,6 @@ impl DelayedSeedTransform {
 impl EffectfulTransformHandler for DelayedSeedTransform {
     type Input = SeedEvent;
     type Output = SeedEvent;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,

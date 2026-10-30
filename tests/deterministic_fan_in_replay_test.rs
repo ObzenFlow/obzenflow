@@ -224,7 +224,6 @@ impl EffectfulTail {
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = MergedRecord;
     type Output = obzenflow_core::stage_fact_set![FanInOutput, FanInEffectValue];
-    type AllowedEffects = Counting;
 
     async fn process(
         &self,

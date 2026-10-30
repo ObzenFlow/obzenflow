@@ -244,7 +244,6 @@ impl BoundEffect for ChatCompletion {
 
 impl EffectName for ChatCompletion {
     type Effect = Self;
-    type Name = Self;
 }
 
 impl AiEffect for ChatCompletion {

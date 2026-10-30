@@ -43,14 +43,14 @@
 //! `__obzenflow_*` macros are doc-hidden cross-crate lowering machinery and are
 //! unsupported for direct author calls.
 //!
-//! ## Effects come from the handler's effect set
+//! ## Effects come from the handler's systems
 //!
-//! An effectful handler's `type AllowedEffects` declares the effects its stage
-//! performs, as one request type or `effect_set![...]`, and the row never
-//! restates them. A handler whose effect set is empty is written
-//! `In -> Out => handler`. Each effect is answered by a system the handler
-//! holds in a `#[system]` field, and an `at_least_once` effect is acknowledged
-//! after the handler with `.at_least_once::<R>()`.
+//! An effectful handler's `#[system]` fields allow the effects its stage
+//! performs. A field allows every effect its port declares, or only the
+//! requests it lists in `#[system(...)]`, and the row never restates them. A
+//! handler with no `#[system]` field performs no effects and is written
+//! `In -> Out => handler`. An `at_least_once` effect is acknowledged after the
+//! handler with `.at_least_once::<R>()`.
 //!
 //! ```
 //! use async_trait::async_trait;
@@ -83,7 +83,6 @@
 //! impl EffectfulTransformHandler for Handler {
 //!     type Input = In;
 //!     type Output = Out;
-//!     type AllowedEffects = obzenflow_runtime::effect_set![];
 //!
 //!     async fn process(
 //!         &self,

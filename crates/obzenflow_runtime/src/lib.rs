@@ -54,7 +54,6 @@ pub mod __private {
         UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
         UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
     };
-    pub use obzenflow_core::event::schema::{EmptySet, WithMember};
 }
 
 #[cfg(any(test, feature = "test-support"))]

@@ -141,7 +141,6 @@ impl ChargeOrders {
 impl EffectfulTransformHandler for ChargeOrders {
     type Input = OrderPlaced;
     type Output = Charged;
-    type AllowedEffects = ChargeRequest;
 
     async fn process(
         &self,

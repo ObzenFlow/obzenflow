@@ -218,7 +218,6 @@ impl BoundEffect for EmbeddingGeneration {
 
 impl EffectName for EmbeddingGeneration {
     type Effect = Self;
-    type Name = Self;
 }
 
 impl AiEffect for EmbeddingGeneration {

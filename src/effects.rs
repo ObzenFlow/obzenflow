@@ -6,7 +6,6 @@
 //! systems a handler holds.
 
 pub use obzenflow_core::{BindingEvidenceError, SystemBindingEvidence};
-pub use obzenflow_runtime::effect_set;
 pub use obzenflow_runtime::effects::{
     port, EffectHandler, Keyed, StageSystem, System, SystemError,
 };
@@ -24,8 +23,10 @@ pub use obzenflow_runtime::effects::{
 
 #[doc(hidden)]
 pub use obzenflow_runtime::effects::{
-    __async_trait, assert_port_answer, AtLeastOnce, Call, CallRequest, CallSafety, Idempotent,
-    KeyRule, PortAnswer, PortImpl, RequiresKey, ServesPort, Transactional,
+    __async_trait, assert_port_answer, AtLeastOnce, Call, CallRequest, CallSafety,
+    DeclaredEffectSet, EffectList, Idempotent, KeyRule, NarrowedSystem, PortAnswer, PortEffects,
+    PortImpl, RequestList, RequiresKey, ServesPort, SystemServesRequest, SystemsEffects,
+    Transactional, WholeSystem,
 };
 
 /// Building blocks for simulated outside systems: a call log that answers a

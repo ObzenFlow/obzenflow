@@ -172,7 +172,6 @@ struct AuthoriseShipping {
 impl EffectfulTransformHandler for AuthoriseShipping {
     type Input = OrderAccepted;
     type Output = obzenflow_core::stage_fact_set![ShippingAuthorised, ShippingReady];
-    type AllowedEffects = AuthoriseShippingRequest;
 
     async fn process(
         &self,

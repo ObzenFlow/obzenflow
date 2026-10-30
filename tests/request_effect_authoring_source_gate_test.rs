@@ -32,7 +32,14 @@ const RETIRED_NAMES: &[&str] = &[
 
 const RETIRED_TRAITS: &[&str] = &["Effect", "NamedEffect"];
 
-const REMOVED_SPELLINGS: &[&str] = &["Call<", "type Safety", "safety =", "impl CallRequest"];
+const REMOVED_SPELLINGS: &[&str] = &[
+    "Call<",
+    "type Safety",
+    "safety =",
+    "impl CallRequest",
+    "type AllowedEffects",
+    "effect_set!",
+];
 
 const RETIRED_METHODS: &[&str] = &["perform", "project_named_effect", "transactional"];
 
@@ -110,55 +117,53 @@ fn examples_tests_and_benchmarks_declare_effects_only_as_requests() {
     assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
-fn single_member_sets(tokens: TokenStream, found: &mut usize) {
-    let tokens = tokens.into_iter().collect::<Vec<_>>();
-    for (position, token) in tokens.iter().enumerate() {
-        if let TokenTree::Group(group) = token {
-            single_member_sets(group.stream(), found);
-        }
-        let invocation = match &tokens[position..] {
-            [TokenTree::Ident(name), TokenTree::Punct(bang), TokenTree::Group(members), ..]
+fn declared_effect_sets(tokens: TokenStream, found: &mut BTreeSet<String>) {
+    let mut previous: Option<TokenTree> = None;
+    for token in tokens {
+        match (&previous, &token) {
+            (_, TokenTree::Group(group)) => declared_effect_sets(group.stream(), found),
+            (Some(TokenTree::Ident(keyword)), TokenTree::Ident(name))
+                if keyword == "type" && name == "AllowedEffects" =>
+            {
+                found.insert("declares `type AllowedEffects`".to_string());
+            }
+            (Some(TokenTree::Ident(name)), TokenTree::Punct(bang))
                 if name == "effect_set" && bang.as_char() == '!' =>
             {
-                members
+                found.insert("invokes `effect_set!`".to_string());
             }
-            _ => continue,
-        };
-        let members = invocation.stream().into_iter().collect::<Vec<_>>();
-        let separated = members
-            .iter()
-            .any(|member| matches!(member, TokenTree::Punct(comma) if comma.as_char() == ','));
-        if !members.is_empty() && !separated {
-            *found += 1;
+            _ => {}
         }
+        previous = Some(token);
     }
 }
 
 #[test]
-fn an_example_handler_with_one_effect_names_its_request_alone() {
+fn example_handlers_take_their_effects_from_their_system_fields() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     rust_files(&root.join("examples"), &mut files);
-    let wrapped = files
+    let violations = files
         .iter()
-        .filter(|file| {
-            let source = fs::read_to_string(file).expect("read an example source");
-            let tokens = TokenStream::from_str(&source).expect("tokenize an example source");
-            let mut found = 0;
-            single_member_sets(tokens, &mut found);
-            found > 0
-        })
-        .map(|file| {
-            file.strip_prefix(&root)
+        .flat_map(|file| {
+            let shown = file
+                .strip_prefix(&root)
                 .unwrap_or(file)
                 .display()
-                .to_string()
+                .to_string();
+            let source = fs::read_to_string(file)
+                .unwrap_or_else(|error| panic!("failed to read {shown}: {error}"));
+            let tokens = TokenStream::from_str(&source)
+                .unwrap_or_else(|error| panic!("failed to tokenize {shown}: {error}"));
+            let mut found = BTreeSet::new();
+            declared_effect_sets(tokens, &mut found);
+            found.into_iter().map(move |what| format!("{shown} {what}"))
         })
         .collect::<Vec<_>>();
     assert!(
-        wrapped.is_empty(),
-        "write `type AllowedEffects = Request;` for one effect: {}",
-        wrapped.join(", ")
+        violations.is_empty(),
+        "an example handler's `#[system]` fields allow its effects:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -167,13 +172,6 @@ fn is_doc(attribute: &proc_macro2::Group) -> bool {
         attribute.stream().into_iter().next(),
         Some(TokenTree::Ident(name)) if name == "doc"
     )
-}
-
-fn wraps_one_member(text: &str) -> bool {
-    text.split("effect_set![").skip(1).any(|rest| {
-        let members = rest.split(']').next().unwrap_or_default();
-        !members.trim().is_empty() && !members.contains(',')
-    })
 }
 
 fn removed_spellings(tokens: TokenStream, found: &mut Vec<String>) {
@@ -205,7 +203,6 @@ fn removed_spellings(tokens: TokenStream, found: &mut Vec<String>) {
                 if REMOVED_SPELLINGS
                     .iter()
                     .any(|spelling| text.contains(spelling))
-                    || wraps_one_member(&text)
                 {
                     found.push(text);
                 }

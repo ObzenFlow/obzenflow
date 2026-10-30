@@ -179,7 +179,6 @@ pub struct ScoreHandler {
 impl EffectfulTransformHandler for ScoreHandler {
     type Input = ProfiledTransaction;
     type Output = ScoreOutput;
-    type AllowedEffects = ScoreRequest;
 
     async fn process(
         &self,
@@ -222,7 +221,6 @@ pub struct OpenCaseHandler {
 impl EffectfulTransformHandler for OpenCaseHandler {
     type Input = AlertRaised;
     type Output = OpenCaseOutput;
-    type AllowedEffects = CaseRequest;
 
     async fn process(
         &self,

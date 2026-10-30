@@ -410,7 +410,6 @@ impl HookTransform {
 impl EffectfulTransformHandler for HookTransform {
     type Input = HookInput;
     type Output = obzenflow_core::stage_fact_set![HookOutput, HookEffectValue];
-    type AllowedEffects = HookRequest;
 
     async fn process(
         &self,

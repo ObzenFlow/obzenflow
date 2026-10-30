@@ -9,7 +9,7 @@ use super::ports::SystemPort;
 use super::{
     Effect, EffectBinding, EffectBindingBuildError, EffectDeclaration, EffectError, EffectName,
     EffectPortResolutionError, EffectRegistrationBuilder, EffectSet, LogicalEffectBindingName,
-    NamedEffect,
+    NamedEffect, RequestList,
 };
 use crate::stages::common::handlers::{EffectfulStatefulHandler, EffectfulTransformHandler};
 use obzenflow_core::event::schema::{EffectOutcomeFacts, EmptySet, WithMember};
@@ -324,9 +324,12 @@ impl<E: NamedEffect> StageSystem for EffectBinding<E> {}
 /// A handler that declares the systems it calls. Derive it with
 /// `#[derive(EffectHandler)]` and mark each field that holds a system
 /// `#[system]`; a handler that calls no system derives it with no such field.
+/// The handler may perform every effect a field's port declares, and a field
+/// written `#[system(RequestA, RequestB)]` allows only the requests it lists.
 ///
 /// ```
 /// # use obzenflow_runtime::effects::{EffectHandler, System};
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 /// # trait RiskEnginePort: Send + Sync {}
 /// #[derive(Clone, Debug, EffectHandler)]
 /// # #[effect_handler(effects = obzenflow_runtime::effects)]
@@ -353,7 +356,6 @@ impl<E: NamedEffect> StageSystem for EffectBinding<E> {}
 /// impl EffectfulTransformHandler for Checkout {
 ///     type Input = Order;
 ///     type Output = Order;
-///     type AllowedEffects = obzenflow_runtime::effect_set![];
 ///
 ///     async fn process(
 ///         &self,
@@ -365,6 +367,79 @@ impl<E: NamedEffect> StageSystem for EffectBinding<E> {}
 ///     }
 /// }
 /// ```
+///
+/// A field lists only requests its own port declares:
+///
+/// ```compile_fail,E0277
+/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, System};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Scored;
+/// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct ScoreRequest;
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct CaseRequest;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait RiskEnginePort: Send + Sync {
+/// #     #[effect(type = "docs.handler.score", exactly_once)]
+/// #     fn score(&self, request: &ScoreRequest) -> Result<Scored, EffectError>;
+/// # }
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait CasePort: Send + Sync {
+/// #     #[effect(type = "docs.handler.case", exactly_once)]
+/// #     fn open(&self, request: &CaseRequest) -> Result<Scored, EffectError>;
+/// # }
+/// #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// struct ScoreHandler {
+///     #[system(CaseRequest)]
+///     risk_engine: System<dyn RiskEnginePort>,
+/// }
+/// ```
+///
+/// lists each request once:
+///
+/// ```compile_fail
+/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, System};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Scored;
+/// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct ScoreRequest;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait RiskEnginePort: Send + Sync {
+/// #     #[effect(type = "docs.handler.score", exactly_once)]
+/// #     fn score(&self, request: &ScoreRequest) -> Result<Scored, EffectError>;
+/// # }
+/// #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// struct ScoreHandler {
+///     #[system(ScoreRequest, ScoreRequest)]
+///     risk_engine: System<dyn RiskEnginePort>,
+/// }
+/// ```
+///
+/// and lists at least one, since a bare `#[system]` allows the whole port:
+///
+/// ```compile_fail
+/// # use obzenflow_runtime::effects::{EffectError, EffectHandler, System};
+/// # #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// # struct Scored;
+/// # impl obzenflow_core::TypedPayload for Scored { const EVENT_TYPE: &'static str = "docs.handler.scored"; }
+/// # #[derive(Clone, Debug, serde::Serialize)]
+/// # struct ScoreRequest;
+/// # #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+/// # trait RiskEnginePort: Send + Sync {
+/// #     #[effect(type = "docs.handler.score", exactly_once)]
+/// #     fn score(&self, request: &ScoreRequest) -> Result<Scored, EffectError>;
+/// # }
+/// #[derive(Clone, Debug, EffectHandler)]
+/// # #[effect_handler(effects = obzenflow_runtime::effects)]
+/// struct ScoreHandler {
+///     #[system()]
+///     risk_engine: System<dyn RiskEnginePort>,
+/// }
+/// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an effect handler",
     label = "an effectful stage's handler declares the systems it calls",
@@ -374,8 +449,102 @@ pub trait EffectHandler {
     #[doc(hidden)]
     type Systems: SystemList;
 
+    /// The effects this handler may perform, which its `#[system]` fields
+    /// allow.
+    type AllowedEffects: EffectSet;
+
+    #[doc(hidden)]
+    const SYSTEM_FIELDS: &'static [&'static str] = &[];
+
     #[doc(hidden)]
     fn systems(&self) -> Self::Systems;
+}
+
+/// The effects a port declares, in method order. `#[obzenflow::port]`
+/// implements it.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a port",
+    label = "a `#[system]` field holds a system whose port declares its effects",
+    note = "mark the trait or impl that declares its `#[effect]` methods with `#[obzenflow::port]`"
+)]
+pub trait PortEffects {
+    type Members;
+}
+
+/// A `#[system]` field, which allows every effect its port declares.
+#[doc(hidden)]
+pub struct WholeSystem<S>(PhantomData<fn() -> S>);
+
+/// A `#[system(...)]` field, which allows only the requests it lists.
+#[doc(hidden)]
+pub struct NarrowedSystem<S, Requests>(PhantomData<fn() -> (S, Requests)>);
+
+/// The effects one `#[system]` field allows.
+#[doc(hidden)]
+pub trait SystemEffects {
+    type Members;
+}
+
+impl<P: ?Sized + PortEffects + Send + Sync + 'static> SystemEffects for WholeSystem<System<P>> {
+    type Members = P::Members;
+}
+
+impl<E: NamedEffect> SystemEffects for WholeSystem<EffectBinding<E>> {
+    type Members = WithMember<E, EmptySet>;
+}
+
+impl<S, Requests: RequestList> SystemEffects for NarrowedSystem<S, Requests> {
+    type Members = Requests::Members;
+}
+
+/// The effects a handler's `#[system]` fields allow, in field order.
+#[doc(hidden)]
+pub trait SystemsEffects {
+    type Members;
+}
+
+impl SystemsEffects for () {
+    type Members = EmptySet;
+}
+
+impl<Field, Rest> SystemsEffects for (Field, Rest)
+where
+    Field: SystemEffects,
+    Rest: SystemsEffects,
+    Field::Members: JoinMembers<Rest::Members>,
+{
+    type Members = <Field::Members as JoinMembers<Rest::Members>>::Joined;
+}
+
+#[doc(hidden)]
+pub trait JoinMembers<Rest> {
+    type Joined;
+}
+
+impl<Rest> JoinMembers<Rest> for EmptySet {
+    type Joined = Rest;
+}
+
+impl<Head, Tail: JoinMembers<Rest>, Rest> JoinMembers<Rest> for WithMember<Head, Tail> {
+    type Joined = WithMember<Head, Tail::Joined>;
+}
+
+/// Proof that a `#[system(...)]` field's port declares a request it lists.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{R}` is not an effect of this `#[system]` field's port",
+    label = "this field's port has no `#[effect]` method that takes `{R}`",
+    note = "list only requests whose `#[effect]` method is on the field's port"
+)]
+pub trait SystemServesRequest<R> {}
+
+#[diagnostic::do_not_recommend]
+impl<P, R> SystemServesRequest<R> for System<P>
+where
+    P: ?Sized + Send + Sync + 'static,
+    R: CallRequest<Port = P>,
+{
 }
 
 /// How a stage row acknowledges an at-least-once effect.
@@ -407,7 +576,7 @@ impl<E: NamedEffect> RowAcknowledgedEffect for E {}
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "an effectful handler cannot perform an AI effect",
-    label = "this handler's `AllowedEffects` names an AI effect",
+    label = "this handler's allowed effects include an AI effect",
     note = "AI effects are performed by `ai!`; the model comes from [ai.*] configuration"
 )]
 pub trait HandlerPerformableEffects {}
@@ -534,7 +703,8 @@ where
         Ok(EffectDeclaration::for_binding::<Call<R>>(
             binding.declaration_binding(),
             declaration_syntax(acknowledged),
-        ))
+        )
+        .allowed_by_system_field())
     }
 }
 
@@ -568,6 +738,9 @@ pub struct SystemAfter<Index>(PhantomData<fn() -> Index>);
 )]
 pub trait FindSystem<N: EffectName, Index> {
     #[doc(hidden)]
+    const POSITION: usize;
+
+    #[doc(hidden)]
     fn found_declaration(
         &self,
         acknowledged: Option<AcknowledgedSafety>,
@@ -575,6 +748,8 @@ pub trait FindSystem<N: EffectName, Index> {
 }
 
 impl<N: EffectName, S: AnswersEffect<N::Effect>, Rest> FindSystem<N, SystemFound> for (S, Rest) {
+    const POSITION: usize = 0;
+
     fn found_declaration(
         &self,
         acknowledged: Option<AcknowledgedSafety>,
@@ -587,6 +762,8 @@ impl<N: EffectName, S: AnswersEffect<N::Effect>, Rest> FindSystem<N, SystemFound
 impl<N: EffectName, S, Rest: FindSystem<N, Index>, Index> FindSystem<N, SystemAfter<Index>>
     for (S, Rest)
 {
+    const POSITION: usize = 1 + Rest::POSITION;
+
     fn found_declaration(
         &self,
         acknowledged: Option<AcknowledgedSafety>,
@@ -648,9 +825,9 @@ impl<S: StageSystem, Rest: SystemList> SystemList for (S, Rest) {
 
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "a `#[system]` field of this handler answers none of its effects",
-    label = "`{Self}` answers nothing this handler performs",
-    note = "remove that field, or perform a request whose port it serves"
+    message = "this field's port declares no `#[effect]` method",
+    label = "`{Self}` allows no effect",
+    note = "remove the field, or declare an `#[effect]` method on its port"
 )]
 pub trait SystemAnswersAnEffect {}
 
@@ -670,6 +847,7 @@ pub trait DeclareEffects<Systems, Mask, Index> {
     #[doc(hidden)]
     fn declarations(
         systems: &Systems,
+        fields: &[&'static str],
         acknowledgements: &[EffectAcknowledgement],
         out: &mut Vec<EffectDeclaration>,
     ) -> Result<(), StageEffectsError>;
@@ -680,6 +858,7 @@ impl<Systems, Mask> DeclareEffects<Systems, Mask, ()> for EmptySet {
 
     fn declarations(
         _: &Systems,
+        _: &[&'static str],
         _: &[EffectAcknowledgement],
         _: &mut Vec<EffectDeclaration>,
     ) -> Result<(), StageEffectsError> {
@@ -699,6 +878,7 @@ where
 
     fn declarations(
         systems: &Systems,
+        fields: &[&'static str],
         acknowledgements: &[EffectAcknowledgement],
         out: &mut Vec<EffectDeclaration>,
     ) -> Result<(), StageEffectsError> {
@@ -708,13 +888,20 @@ where
                 acknowledgement.effect_type == <N::Effect as Effect>::EFFECT_TYPE
             })
             .map(|acknowledgement| acknowledgement.safety);
-        out.push(systems.found_declaration(acknowledged)?.written_as::<N>());
-        Rest::declarations(systems, acknowledgements, out)
+        let field = fields.get(Systems::POSITION).copied();
+        out.push(
+            systems
+                .found_declaration(acknowledged)?
+                .written_as::<N>()
+                .held_in_field(field),
+        );
+        Rest::declarations(systems, fields, acknowledgements, out)
     }
 }
 
 fn declare_stage_effects<Set, Systems, Index>(
     systems: &Systems,
+    fields: &[&'static str],
     acknowledgements: &[EffectAcknowledgement],
 ) -> Result<Vec<EffectDeclaration>, StageEffectsError>
 where
@@ -741,6 +928,7 @@ where
     let mut declarations = Vec::new();
     <Set::Members as DeclareEffects<Systems, Systems::Unmarked, Index>>::declarations(
         systems,
+        fields,
         acknowledgements,
         &mut declarations,
     )?;
@@ -764,6 +952,7 @@ where
 {
     declare_stage_effects::<H::AllowedEffects, H::Systems, Index>(
         &handler.systems(),
+        H::SYSTEM_FIELDS,
         acknowledgements,
     )
 }
@@ -785,6 +974,7 @@ where
 {
     declare_stage_effects::<H::AllowedEffects, H::Systems, Index>(
         &handler.systems(),
+        H::SYSTEM_FIELDS,
         acknowledgements,
     )
 }

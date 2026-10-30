@@ -138,7 +138,6 @@ impl EffectfulMerge {
 impl EffectfulTransformHandler for EffectfulMerge {
     type Input = EnvelopeInput;
     type Output = obzenflow_core::stage_fact_set![EnvelopeOutput, EnvelopeEffectValue];
-    type AllowedEffects = Counting;
 
     async fn process(
         &self,

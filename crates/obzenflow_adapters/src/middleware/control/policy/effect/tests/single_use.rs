@@ -312,7 +312,6 @@ struct TransactionProbeHandler {
 impl EffectfulTransformHandler for TransactionProbeHandler {
     type Input = TransactionProbeInput;
     type Output = TransactionProbeOutput;
-    type AllowedEffects = TransactionProbeRequest;
 
     async fn process(
         &self,

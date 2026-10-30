@@ -1000,7 +1000,7 @@ pub(crate) fn merge_cursor_histories(
     let mut attempt_events = archived.attempt_events;
     for (attempt, event) in current.attempt_events {
         if let Some(existing) = attempt_events.insert(attempt, event.clone()) {
-            if !effect_identity_equal(&existing, &event)? {
+            if !effect_identity_equal(&existing, &event) {
                 return Err(EffectError::EffectProvenanceMismatch(format!(
                     "effect cursor {cursor:?} has conflicting durable identity for Start({attempt})"
                 )));
@@ -1065,7 +1065,7 @@ pub(crate) fn merge_cursor_histories(
     } else if event_groups_identity_equal(
         &archived.terminal_group_events,
         &current.terminal_group_events,
-    )? {
+    ) {
         archived.terminal_group_events
     } else {
         return Err(EffectError::EffectProvenanceMismatch(format!(
@@ -1252,30 +1252,19 @@ fn events_equal(left: &[ChainEvent], right: &[ChainEvent]) -> Result<bool, Effec
     )
 }
 
-fn effect_identity_equal(left: &ChainEvent, right: &ChainEvent) -> Result<bool, EffectError> {
-    let left_content = serde_json::to_value(&left.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let right_content = serde_json::to_value(&right.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    Ok(left.id == right.id
+fn effect_identity_equal(left: &ChainEvent, right: &ChainEvent) -> bool {
+    left.id == right.id
         && left.processing.event_time == right.processing.event_time
         && left.effect_provenance == right.effect_provenance
-        && left_content == right_content)
+        && left.payload == right.payload
 }
 
-fn event_groups_identity_equal(
-    left: &[ChainEvent],
-    right: &[ChainEvent],
-) -> Result<bool, EffectError> {
-    if left.len() != right.len() {
-        return Ok(false);
-    }
-    for (left, right) in left.iter().zip(right) {
-        if !effect_identity_equal(left, right)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn event_groups_identity_equal(left: &[ChainEvent], right: &[ChainEvent]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| effect_identity_equal(left, right))
 }
 
 pub(super) fn validate_cursor_history(

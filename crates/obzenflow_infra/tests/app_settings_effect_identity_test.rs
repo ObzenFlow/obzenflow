@@ -33,7 +33,9 @@ use obzenflow_infra::journal::read::{
     open_disk_run, read_config_changes, read_configuration_refusals, ConfigChanges,
 };
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
+use obzenflow_runtime::effects::{
+    EffectError, EffectHandler, Effects, SinkRedeliverySafety, System,
+};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{AppTable, ResolvedRuntimeConfig};
@@ -214,7 +216,7 @@ impl ScoreTransform {
     async fn score(
         &self,
         value: u64,
-        fx: &mut Effects<ScoreOutput, ScoreRequest>,
+        fx: &mut Effects<ScoreOutput, <Self as EffectHandler>::AllowedEffects>,
     ) -> Result<Score, EffectError> {
         let score = fx.call(self.request(value)).await?;
         if self.app.rescore {
@@ -228,7 +230,6 @@ impl ScoreTransform {
 impl EffectfulTransformHandler for ScoreTransform {
     type Input = Reading;
     type Output = ScoreOutput;
-    type AllowedEffects = ScoreRequest;
 
     async fn process(
         &self,

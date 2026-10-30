@@ -206,7 +206,6 @@ impl EffectfulStatefulHandler for Ledger {
     type State = Counted;
     type Input = Reading;
     type Output = Total;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     fn initial_state(&self) -> Self::State {
         Counted::new(&self.copies)

@@ -273,7 +273,6 @@ impl ScriptedGatewayTransform {
 impl EffectfulTransformHandler for ScriptedGatewayTransform {
     type Input = ValidatedOrder;
     type Output = GatewayOutput;
-    type AllowedEffects = ScriptedAuthorize;
 
     async fn process(
         &self,

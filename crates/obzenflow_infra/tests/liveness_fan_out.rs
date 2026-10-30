@@ -116,7 +116,6 @@ impl SlowTransform {
 impl EffectfulTransformHandler for SlowTransform {
     type Input = ProbeEvent;
     type Output = SlowProbeEvent;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,

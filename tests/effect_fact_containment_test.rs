@@ -112,7 +112,6 @@ impl PerformTransform {
 impl EffectfulTransformHandler for PerformTransform {
     type Input = ContainmentInput;
     type Output = obzenflow_core::stage_fact_set![ContainmentOutput, ContainmentEffectValue];
-    type AllowedEffects = ValueRequest;
 
     async fn process(
         &self,
@@ -143,7 +142,6 @@ struct EmitOnlyTransform;
 impl EffectfulTransformHandler for EmitOnlyTransform {
     type Input = ContainmentInput;
     type Output = ContainmentOutput;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,
@@ -404,7 +402,6 @@ impl CollidingTransform {
 impl EffectfulTransformHandler for CollidingTransform {
     type Input = ContainmentInput;
     type Output = ColliderA;
-    type AllowedEffects = CollidingRequest;
 
     async fn process(
         &self,

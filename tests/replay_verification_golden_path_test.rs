@@ -138,7 +138,6 @@ struct ValidateOrder;
 impl EffectfulTransformHandler for ValidateOrder {
     type Input = OrderPlaced;
     type Output = obzenflow_core::stage_fact_set![ValidatedOrder, OrderCancelled];
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,
@@ -219,7 +218,6 @@ impl EffectfulTransformHandler for AuthorizePayment {
         OrderCancelled,
         AuthGrant
     ];
-    type AllowedEffects = AuthorizeRequest;
 
     async fn process(
         &self,

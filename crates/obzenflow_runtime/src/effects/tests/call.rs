@@ -160,7 +160,6 @@ impl Effect for HandWrittenLedgerWrite {
 
 impl EffectName for HandWrittenLedgerWrite {
     type Effect = Self;
-    type Name = Self;
 }
 
 impl BoundEffect for HandWrittenLedgerWrite {
@@ -236,7 +235,7 @@ async fn a_request_records_what_an_equivalent_hand_written_effect_records() {
     let registry = EffectPortRegistry::collect_from_declarations([&declaration])
         .expect("the system's registration collects")
         .into_run_registry();
-    let mut fx = Effects::<LedgerWritten, LedgerWrite>::new(ledger_context(
+    let mut fx = Effects::<LedgerWritten, Allowed<(LedgerWrite, ())>>::new(ledger_context(
         request_journal.clone(),
         request_stage,
         registry,
@@ -264,7 +263,7 @@ async fn a_request_records_what_an_equivalent_hand_written_effect_records() {
         .unwrap()
         .into_run_registry();
     let mut hand =
-        Effects::<LedgerWritten, crate::effect_set![HandWrittenLedgerWrite]>::new(ledger_context(
+        Effects::<LedgerWritten, Allowed<(HandWrittenLedgerWrite, ())>>::new(ledger_context(
             hand_journal.clone(),
             hand_stage,
             hand_registry,
@@ -355,10 +354,9 @@ async fn one_deferred_system_resolves_its_port_once_per_run_for_every_effect_it_
         ] {
             let stage = StageId::new();
             let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
-            let mut fx =
-                Effects::<LedgerWritten, crate::effect_set![LedgerWrite, LedgerCheck]>::new(
-                    ledger_context(journal, stage, run.clone(), declarations.clone(), None),
-                );
+            let mut fx = Effects::<LedgerWritten, Allowed<(LedgerWrite, (LedgerCheck, ()))>>::new(
+                ledger_context(journal, stage, run.clone(), declarations.clone(), None),
+            );
             if check_instead {
                 fx.call(LedgerCheck { value: 2 })
                     .await
@@ -522,29 +520,26 @@ async fn a_keyed_method_receives_the_key_every_row_of_its_call_journals() {
     let registry = EffectPortRegistry::collect_from_declarations([&keyed, &unkeyed])
         .expect("the system's registration collects")
         .into_run_registry();
-    let mut fx = Effects::<LedgerWritten, crate::effect_set![KeyedWrite, UnkeyedWrite]>::new(
-        ledger_context(
+    let mut fx =
+        Effects::<LedgerWritten, Allowed<(KeyedWrite, (UnkeyedWrite, ()))>>::new(ledger_context(
             journal.clone(),
             stage,
             registry.clone(),
             declarations.clone(),
             None,
-        ),
-    );
+        ));
     fx.call(KeyedWrite { value: 4 })
         .await
         .expect("the keyed write succeeds");
     let unkeyed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut unkeyed_fx =
-        Effects::<LedgerWritten, crate::effect_set![KeyedWrite, UnkeyedWrite]>::new(
-            ledger_context(
-                unkeyed_journal.clone(),
-                stage,
-                registry,
-                declarations.clone(),
-                None,
-            ),
-        );
+        Effects::<LedgerWritten, Allowed<(KeyedWrite, (UnkeyedWrite, ()))>>::new(ledger_context(
+            unkeyed_journal.clone(),
+            stage,
+            registry,
+            declarations.clone(),
+            None,
+        ));
     unkeyed_fx
         .call(UnkeyedWrite { value: 5 })
         .await
@@ -567,15 +562,14 @@ async fn a_keyed_method_receives_the_key_every_row_of_its_call_journals() {
 
     let history = archive_current_cursor(&journal, &keyed_rows[0].cursor).await;
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
-    let mut replay = Effects::<LedgerWritten, crate::effect_set![KeyedWrite, UnkeyedWrite]>::new(
-        ledger_context(
+    let mut replay =
+        Effects::<LedgerWritten, Allowed<(KeyedWrite, (UnkeyedWrite, ()))>>::new(ledger_context(
             replay_journal.clone(),
             stage,
             EffectPortRegistry::new(),
             declarations,
             Some(history),
-        ),
-    );
+        ));
     replay
         .call(KeyedWrite { value: 4 })
         .await
@@ -719,7 +713,7 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
     let registry = EffectPortRegistry::collect_from_declarations([&declaration])
         .unwrap()
         .into_run_registry();
-    let mut fx = Effects::<LedgerWritten, LedgerWrite>::new(ledger_context(
+    let mut fx = Effects::<LedgerWritten, Allowed<(LedgerWrite, ())>>::new(ledger_context(
         journal.clone(),
         stage,
         registry,
@@ -744,7 +738,7 @@ async fn unavailable_is_a_retryable_dependency_failure_live_and_recorded() {
             .expect("the live history indexes"),
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
-    let mut replay = Effects::<LedgerWritten, LedgerWrite>::new(ledger_context(
+    let mut replay = Effects::<LedgerWritten, Allowed<(LedgerWrite, ())>>::new(ledger_context(
         replay_journal,
         stage,
         EffectPortRegistry::new(),

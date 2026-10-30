@@ -569,7 +569,6 @@ macro_rules! fixture_effect {
 
         impl EffectName for $effect {
             type Effect = Self;
-            type Name = Self;
         }
     };
 }
@@ -768,26 +767,39 @@ enum AdapterSettlement {
     Fatal,
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+type Allowed<Requests> = DeclaredEffectSet<<Requests as RequestList>::Members>;
+
+#[derive(Clone, Debug)]
 struct ConsumeOneEffectThenSettle {
     calls: Arc<AtomicUsize>,
     settlement: AdapterSettlement,
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+impl EffectHandler for ConsumeOneEffectThenSettle {
+    type Systems = ();
+    type AllowedEffects = Allowed<(CountingEffect, ())>;
+
+    fn systems(&self) -> Self::Systems {}
+}
+
+#[derive(Clone, Debug)]
 struct CatchBindingFaultThenSettle {
     invocation_binding: EffectBinding<ZeroSlotNamedEffect>,
     calls: Arc<AtomicUsize>,
     settlement: AdapterSettlement,
 }
 
+impl EffectHandler for CatchBindingFaultThenSettle {
+    type Systems = ();
+    type AllowedEffects = Allowed<(ZeroSlotNamedEffect, ())>;
+
+    fn systems(&self) -> Self::Systems {}
+}
+
 #[async_trait]
 impl crate::stages::common::handlers::EffectfulTransformHandler for CatchBindingFaultThenSettle {
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = crate::effect_set![ZeroSlotNamedEffect];
 
     async fn process(
         &self,
@@ -823,8 +835,7 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchBinding
     }
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct FoldThenCatchBindingFault {
     invocation_binding: EffectBinding<ZeroSlotNamedEffect>,
     valid_calls: Arc<AtomicUsize>,
@@ -834,12 +845,18 @@ struct FoldThenCatchBindingFault {
     settlement: AdapterSettlement,
 }
 
+impl EffectHandler for FoldThenCatchBindingFault {
+    type Systems = ();
+    type AllowedEffects = Allowed<(CountingEffect, (ZeroSlotNamedEffect, ()))>;
+
+    fn systems(&self) -> Self::Systems {}
+}
+
 #[async_trait]
 impl crate::stages::common::handlers::EffectfulStatefulHandler for FoldThenCatchBindingFault {
     type State = u64;
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = crate::effect_set![CountingEffect, ZeroSlotNamedEffect];
 
     fn initial_state(&self) -> Self::State {
         0
@@ -898,7 +915,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for FoldThenCatch
 impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEffectThenSettle {
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = crate::effect_set![CountingEffect];
 
     async fn process(
         &self,
@@ -959,10 +975,16 @@ impl Effect for AffineCountingEffect {
     }
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct RepeatableBoundaryStateful {
     calls: Arc<AtomicUsize>,
+}
+
+impl EffectHandler for RepeatableBoundaryStateful {
+    type Systems = ();
+    type AllowedEffects = Allowed<(CountingEffect, ())>;
+
+    fn systems(&self) -> Self::Systems {}
 }
 
 #[async_trait]
@@ -970,7 +992,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for RepeatableBou
     type State = Vec<u64>;
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = crate::effect_set![CountingEffect];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -998,10 +1019,16 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for RepeatableBou
     }
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct AffineBoundaryStateful {
     calls: Arc<AtomicUsize>,
+}
+
+impl EffectHandler for AffineBoundaryStateful {
+    type Systems = ();
+    type AllowedEffects = Allowed<(AffineCountingEffect, ())>;
+
+    fn systems(&self) -> Self::Systems {}
 }
 
 #[async_trait]
@@ -1009,7 +1036,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for AffineBoundar
     type State = Vec<u64>;
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = crate::effect_set![AffineCountingEffect];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1150,7 +1176,7 @@ impl CallRequests for EffectsCore {
 #[derive(Clone, Debug, EffectHandler)]
 #[effect_handler(effects = crate::effects)]
 struct TransactionalBoundaryStateful {
-    #[system]
+    #[system(TransactionalCounting)]
     ledger: System<dyn TransactionalLedger>,
 }
 
@@ -1159,7 +1185,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for Transactional
     type State = Vec<u64>;
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = TransactionalCounting;
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1258,7 +1283,6 @@ struct ZeroSlotNamedEffect {
 
 impl EffectName for ZeroSlotNamedEffect {
     type Effect = Self;
-    type Name = Self;
 }
 
 #[async_trait]
@@ -1336,10 +1360,16 @@ enum PolicyTranslationOutput {
     Failed(SecondOutput),
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct PolicyTranslationStateful {
     effect_calls: Arc<AtomicUsize>,
+}
+
+impl EffectHandler for PolicyTranslationStateful {
+    type Systems = ();
+    type AllowedEffects = Allowed<(CountingEffect, ())>;
+
+    fn systems(&self) -> Self::Systems {}
 }
 
 fn is_test_policy_rejection(error: &EffectError) -> bool {
@@ -1353,7 +1383,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTransla
     type State = Vec<u64>;
     type Input = FirstOutput;
     type Output = PolicyTranslationOutput;
-    type AllowedEffects = crate::effect_set![CountingEffect];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1409,7 +1438,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for DishonestProd
     type State = u64;
     type Input = FirstOutput;
     type Output = MultiFactOutcome;
-    type AllowedEffects = crate::effect_set![];
 
     fn initial_state(&self) -> Self::State {
         0
@@ -1443,7 +1471,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenError
     type State = Vec<String>;
     type Input = FirstOutput;
     type Output = OrderedStatefulOutput;
-    type AllowedEffects = crate::effect_set![];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1486,7 +1513,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SingleFactErr
     type State = Vec<u64>;
     type Input = FirstOutput;
     type Output = FirstOutput;
-    type AllowedEffects = crate::effect_set![];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -1522,7 +1548,6 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SecondFactApp
     type State = Vec<String>;
     type Input = FirstOutput;
     type Output = OrderedStatefulOutput;
-    type AllowedEffects = crate::effect_set![];
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
@@ -2918,7 +2943,7 @@ fn typed_completion_requires_explicit_empty_success() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
-    let effects = Effects::<FirstOutput, crate::effect_set![]>::new(ctx);
+    let effects = Effects::<FirstOutput, Allowed<()>>::new(ctx);
 
     assert!(matches!(
         effects.complete(),
@@ -2945,7 +2970,7 @@ async fn typed_completion_reports_direct_facts_in_commit_order() {
     ]);
     let mut effects = Effects::<
         obzenflow_core::stage_fact_set![FirstOutput, SecondOutput],
-        crate::effect_set![],
+        Allowed<()>,
     >::new(ctx);
 
     effects.emit(FirstOutput { value: 1 }).await.unwrap();
@@ -2980,7 +3005,7 @@ async fn typed_completion_counts_effect_outcome_facts() {
     let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
     ctx.output_contract = output_contract_for::<CountingOutput>();
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = Effects::<CountingOutput, crate::effect_set![CountingEffect]>::new(ctx);
+    let mut effects = Effects::<CountingOutput, Allowed<(CountingEffect, ())>>::new(ctx);
 
     effects
         .perform(CountingEffect {
@@ -3014,7 +3039,7 @@ async fn typed_emit_remains_durable_when_handler_later_errors() {
     );
     ctx.emit_enabled = true;
     ctx.output_contract = output_contract_for::<FirstOutput>();
-    let mut effects = Effects::<FirstOutput, crate::effect_set![]>::new(ctx);
+    let mut effects = Effects::<FirstOutput, Allowed<()>>::new(ctx);
 
     effects.emit(FirstOutput { value: 9 }).await.unwrap();
     let handler_result: Result<(), HandlerError> =
@@ -6379,19 +6404,24 @@ async fn an_in_doubt_attempt_the_declaration_cannot_follow_refuses() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-#[derive(Clone, Debug, EffectHandler)]
-#[effect_handler(effects = crate::effects)]
+#[derive(Clone, Debug)]
 struct CatchRefusalThenSettle {
     label: &'static str,
     calls: Arc<AtomicUsize>,
     settlement: AdapterSettlement,
 }
 
+impl EffectHandler for CatchRefusalThenSettle {
+    type Systems = ();
+    type AllowedEffects = Allowed<(CountingEffect, ())>;
+
+    fn systems(&self) -> Self::Systems {}
+}
+
 #[async_trait]
 impl crate::stages::common::handlers::EffectfulTransformHandler for CatchRefusalThenSettle {
     type Input = FirstOutput;
     type Output = CountingOutput;
-    type AllowedEffects = crate::effect_set![CountingEffect];
 
     async fn process(
         &self,
