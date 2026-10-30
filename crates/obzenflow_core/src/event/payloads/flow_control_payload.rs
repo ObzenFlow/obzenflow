@@ -130,7 +130,7 @@ impl From<&str> for CheckpointId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "flow_control_type", rename_all = "snake_case")]
 pub enum FlowControlPayload {
     /// End of data stream

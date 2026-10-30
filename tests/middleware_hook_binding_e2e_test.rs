@@ -36,10 +36,7 @@ use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, System};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -374,7 +371,6 @@ impl TypedFiniteSourceHandler for HookSource {
     }
 }
 
-#[obzenflow::port]
 struct HookService {
     calls: Arc<AtomicUsize>,
 }
@@ -384,32 +380,16 @@ struct HookRequest {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for HookRequest {
-    const EFFECT_TYPE: &'static str = "middleware_hook_binding.effect";
-    type Safety = RequiresKey;
-    type Port = HookService;
-    type Outcome = HookEffectValue;
-
-    async fn call(
-        &self,
-        service: &HookService,
-        _ctx: &mut EffectContext,
-    ) -> Result<HookEffectValue, EffectError> {
-        service.calls.fetch_add(1, Ordering::SeqCst);
+#[obzenflow::port]
+impl HookService {
+    #[effect(type = "middleware_hook_binding.effect", exactly_once)]
+    fn hook(&self, request: &HookRequest) -> Result<HookEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(HookEffectValue {
-            value: self.value + 100,
+            value: request.value + 100,
         })
     }
 }
-
-impl Keyed for HookRequest {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("hook-effect:{}", self.value))
-    }
-}
-
-type HookEffect = Call<HookRequest>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct HookTransform {
@@ -430,7 +410,6 @@ impl HookTransform {
 impl EffectfulTransformHandler for HookTransform {
     type Input = HookInput;
     type Output = obzenflow_core::stage_fact_set![HookOutput, HookEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![HookEffect];
 
     async fn process(
         &self,
@@ -618,7 +597,7 @@ fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
             else {
                 return None;
             };
-            if record.descriptor.effect_type.as_str() != HookRequest::EFFECT_TYPE {
+            if record.descriptor.effect_type.as_str() != "middleware_hook_binding.effect" {
                 return None;
             }
             let EffectOutcomePayload::Failed {

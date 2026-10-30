@@ -15,9 +15,7 @@ use obzenflow_core::journal::{factory::FlowJournalFactory, JournalError};
 use obzenflow_core::{FlowId, TypedPayload};
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, memory_journals};
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, Idempotent, StageCompletion, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion, System};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
@@ -249,24 +247,18 @@ struct Settled {
 impl TypedPayload for Settled {
     const EVENT_TYPE: &'static str = "bench.effect_settled";
 }
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 struct Ledger;
 #[derive(Clone, Debug, Serialize)]
 struct Settle {
     index: u64,
 }
-#[async_trait]
-impl CallRequest for Settle {
-    const EFFECT_TYPE: &'static str = "bench.settle";
-    type Safety = Idempotent;
-    type Port = Ledger;
-    type Outcome = Settled;
-    async fn call(
-        &self,
-        _ledger: &Ledger,
-        _ctx: &mut EffectContext,
-    ) -> Result<Settled, EffectError> {
-        Ok(Settled { index: self.index })
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+impl Ledger {
+    #[effect(type = "bench.settle", exactly_once)]
+    fn settle(&self, request: &Settle) -> Result<Settled, EffectError> {
+        Ok(Settled {
+            index: request.index,
+        })
     }
 }
 #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
@@ -279,7 +271,6 @@ struct SettleEach {
 impl EffectfulTransformHandler for SettleEach {
     type Input = Input;
     type Output = obzenflow_core::stage_fact_set![Settled];
-    type AllowedEffects = obzenflow_runtime::effect_set![Call<Settle>];
     async fn process(
         &self,
         input: Input,

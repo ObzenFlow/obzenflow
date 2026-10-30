@@ -350,8 +350,9 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// because its state no longer represents a fold of its durable history.
 ///
 /// The stage arrow is the operator-facing output contract, and `Output` mirrors
-/// it so Rust can check `decide` before the handler is erased. `AllowedEffects`
-/// declares the effects the stage performs, and the row never restates them.
+/// it so Rust can check `decide` before the handler is erased. The handler's
+/// `#[system]` fields allow the effects the stage performs, and the row never
+/// restates them.
 ///
 /// Unlike an effectful transform's zero-sized fact-set witness, stateful
 /// `Output` is inhabited because [`EffectfulStatefulHandler::apply`] receives
@@ -360,7 +361,6 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 ///
 /// ```ignore
 /// type Output = PaymentAuthorized;
-/// type AllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
 /// ```
 ///
 /// For a multi-fact arrow, derive [`obzenflow_core::StageOutputFacts`] on a
@@ -382,7 +382,6 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 ///     type State = PaymentState;
 ///     type Input = ValidatedOrder;
 ///     type Output = PaymentStateFact;
-///     type AllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
 ///
 ///     // `initial_state`, `decide`, and `apply` follow.
 ///     # fn initial_state(&self) -> Self::State { unimplemented!() }
@@ -410,23 +409,22 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// }
 /// ```
 ///
-/// `AllowedEffects` declares effect types only, and middleware stays in the
-/// stage's `with` clause. The handler derives
+/// Middleware stays in the stage's `with` clause. The handler derives
 /// [`EffectHandler`](crate::effects::EffectHandler) and holds each system it
-/// calls in a `#[system]` field.
+/// calls in a `#[system]` field, which allows every effect that system's port
+/// declares.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
     label = "this handler does not match the effectful stateful contract",
     note = "implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, \
-            `AllowedEffects`, `initial_state`, `decide` and `apply`; `Input` must match the \
-            arrow input, and `Output` mirrors the arrow"
+            `initial_state`, `decide` and `apply`; `Input` must match the arrow input, and \
+            `Output` mirrors the arrow"
 )]
 #[async_trait]
 pub trait EffectfulStatefulHandler: crate::effects::EffectHandler + Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: obzenflow_core::OneFactStageOutput + Send + Sync + 'static;
-    type AllowedEffects: crate::effects::EffectSet;
 
     fn initial_state(&self) -> Self::State;
 
@@ -737,7 +735,6 @@ mod tests {
         type State = u32;
         type Input = FirstOutput;
         type Output = FirstOutput;
-        type AllowedEffects = crate::effect_set![];
 
         fn initial_state(&self) -> Self::State {
             0

@@ -19,16 +19,13 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, IdempotencyKey, Keyed, System};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use obzenflow_runtime::stages::sink::SinkWriteFailure;
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Configuration-faithful policies for coordinated and independent controls.
@@ -73,6 +70,7 @@ struct InvocationPause {
 #[derive(Debug)]
 pub struct ScriptedGateway {
     calls: Arc<AtomicUsize>,
+    keys: Arc<Mutex<Vec<IdempotencyKey>>>,
     invocations: Arc<AtomicUsize>,
     panic_on_live_call: bool,
     behaviour: GatewayBehaviour,
@@ -95,6 +93,7 @@ impl ScriptedGateway {
     fn with_behaviour(behaviour: GatewayBehaviour) -> Self {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
+            keys: Arc::new(Mutex::new(Vec::new())),
             invocations: Arc::new(AtomicUsize::new(0)),
             panic_on_live_call: false,
             behaviour,
@@ -122,6 +121,11 @@ impl ScriptedGateway {
         self.calls.load(Ordering::SeqCst)
     }
 
+    /// The idempotency key each physical call sent, in call order.
+    pub fn keys(&self) -> Vec<IdempotencyKey> {
+        self.keys.lock().expect("key log").clone()
+    }
+
     pub fn invocations(&self) -> usize {
         self.invocations.load(Ordering::SeqCst)
     }
@@ -129,6 +133,7 @@ impl ScriptedGateway {
     fn port(&self) -> GatewayPort {
         GatewayPort {
             calls: self.calls.clone(),
+            keys: self.keys.clone(),
             panic_on_live_call: self.panic_on_live_call,
             behaviour: self.behaviour,
         }
@@ -165,21 +170,46 @@ impl InvocationPacing {
     }
 }
 
-/// The scripted gateway's port, which counts the physical calls that reach it.
-#[obzenflow::port]
+/// The scripted gateway's port, which counts the physical calls that reach it
+/// and logs the key each one sends.
 #[derive(Debug)]
 struct GatewayPort {
     calls: Arc<AtomicUsize>,
+    keys: Arc<Mutex<Vec<IdempotencyKey>>>,
     panic_on_live_call: bool,
     behaviour: GatewayBehaviour,
 }
 
+#[obzenflow::port]
 impl GatewayPort {
-    fn record_call(&self) -> usize {
+    #[effect(type = "payment.authorize", exactly_once)]
+    fn authorize(
+        &self,
+        request: &ScriptedAuthorize,
+        key: &IdempotencyKey,
+    ) -> Result<PaymentAuthorized, EffectError> {
+        let call = self.record_call(key);
+        if self.should_timeout(call) {
+            return Err(EffectError::Timeout(
+                "gateway_timeout_simulated".to_string(),
+            ));
+        }
+
+        Ok(PaymentAuthorized {
+            order_id: request.order_id.clone(),
+            customer_id: request.customer_id.clone(),
+            amount_cents: request.amount_cents,
+            phase: request.phase.clone(),
+            authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
+        })
+    }
+
+    fn record_call(&self, key: &IdempotencyKey) -> usize {
         assert!(
             !self.panic_on_live_call,
             "strict replay attempted a live payment gateway call"
         );
+        self.keys.lock().expect("key log").push(key.clone());
         self.calls.fetch_add(1, Ordering::SeqCst) + 1
     }
 
@@ -213,46 +243,14 @@ impl ScriptedAuthorize {
     }
 }
 
-#[async_trait]
-impl CallRequest for ScriptedAuthorize {
-    const EFFECT_TYPE: &'static str = "payment.authorize";
-    type Safety = RequiresKey;
-    type Port = GatewayPort;
-    type Outcome = PaymentAuthorized;
-
-    async fn call(
-        &self,
-        gateway: &GatewayPort,
-        _ctx: &mut EffectContext,
-    ) -> Result<PaymentAuthorized, EffectError> {
-        let call = gateway.record_call();
-        if gateway.should_timeout(call) {
-            return Err(EffectError::Timeout(
-                "gateway_timeout_simulated".to_string(),
-            ));
-        }
-
-        Ok(PaymentAuthorized {
-            order_id: self.order_id.clone(),
-            customer_id: self.customer_id.clone(),
-            amount_cents: self.amount_cents,
-            phase: self.phase.clone(),
-            authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
-        })
-    }
-}
-
 impl Keyed for ScriptedAuthorize {
     fn idempotency_key(&self) -> IdempotencyKey {
         IdempotencyKey(format!("payment-authorize:{}", self.order_id))
     }
 }
 
-type ScriptedAuthorizePayment = Call<ScriptedAuthorize>;
-
 type GatewayOutput =
     obzenflow_core::stage_fact_set![PaymentAuthorized, PaymentAuthorizationUnavailable];
-type GatewayEffects = obzenflow_runtime::effect_set![ScriptedAuthorizePayment];
 
 #[derive(Debug, Clone, obzenflow::effects::EffectHandler)]
 struct ScriptedGatewayTransform {
@@ -275,7 +273,6 @@ impl ScriptedGatewayTransform {
 impl EffectfulTransformHandler for ScriptedGatewayTransform {
     type Input = ValidatedOrder;
     type Output = GatewayOutput;
-    type AllowedEffects = GatewayEffects;
 
     async fn process(
         &self,
@@ -383,7 +380,7 @@ pub fn build_flow(
                 => authorize_payment_handler
             ),
             ReleasePolicy::RetryWithLimiterSplit => {
-                let effect_recovery = canonical_recovery().for_effect::<ScriptedAuthorizePayment>();
+                let effect_recovery = canonical_recovery().for_effect::<ScriptedAuthorize>();
                 effectful_transform!(
                     ValidatedOrder -> { PaymentAuthorized, PaymentAuthorizationUnavailable }
                     with { effect_recovery, gateway_limiter }

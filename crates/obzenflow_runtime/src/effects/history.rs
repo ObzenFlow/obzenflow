@@ -159,6 +159,7 @@ pub struct EffectHistory {
     grouped_events: Arc<GroupedJournalEvents>,
     attempt_positions: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), usize>>,
     attempt_events: Arc<HashMap<(EffectCursor, EffectAttemptOrdinal), ChainEvent>>,
+    idempotency_keys: Arc<HashMap<EffectCursor, IdempotencyKey>>,
     actions: Arc<super::RecordedActions>,
 }
 
@@ -179,6 +180,10 @@ pub(crate) struct EffectCursorHistory {
     pub terminal_attempt: Option<Option<EffectAttemptOrdinal>>,
     pub terminal_group_events: Vec<ChainEvent>,
     pub escape_control_batches: BTreeMap<EffectAttemptOrdinal, Vec<ChainEvent>>,
+    /// The key the recorded call sent, as its rows recorded it. Replay
+    /// reproduces it rather than deriving one, so an archive written before
+    /// keys were journalled replays without them.
+    pub idempotency_key: Option<IdempotencyKey>,
 }
 
 impl EffectCursorHistory {
@@ -307,7 +312,11 @@ impl EffectHistory {
         let mut grouped_events: GroupedJournalEvents = HashMap::new();
         let mut attempt_positions = HashMap::new();
         let mut attempt_events = HashMap::new();
+        let mut idempotency_keys = HashMap::new();
         for (cursor, history) in histories {
+            if let Some(key) = history.idempotency_key {
+                idempotency_keys.insert(cursor.clone(), key);
+            }
             causal.insert(cursor.clone(), history.causal);
             if !history.records.is_empty() {
                 let first = records.len();
@@ -360,6 +369,7 @@ impl EffectHistory {
             grouped_events: Arc::new(grouped_events),
             attempt_positions: Arc::new(attempt_positions),
             attempt_events: Arc::new(attempt_events),
+            idempotency_keys: Arc::new(idempotency_keys),
             actions: Arc::new(super::RecordedActions::default()),
         }
     }
@@ -379,6 +389,7 @@ impl EffectHistory {
         let mut group_causal = HashMap::<String, CausalFrontier>::new();
         let mut attempt_positions = HashMap::new();
         let mut attempt_events = HashMap::new();
+        let mut idempotency_keys = HashMap::new();
         let mut position = 0_usize;
         let mut actions = super::actions::ActionScan::passing_through(pass_through.cloned());
 
@@ -461,13 +472,20 @@ impl EffectHistory {
                 continue;
             }
             if let Some(record) = effect_record_from_event(&envelope.authored())? {
-                let attempt = envelope
+                let provenance = envelope
                     .envelope
                     .provenance
                     .event
                     .effect_provenance
-                    .as_ref()
-                    .and_then(|provenance| provenance.attempt);
+                    .as_ref();
+                let attempt = provenance.and_then(|provenance| provenance.attempt);
+                if let Some(key) =
+                    provenance.and_then(|provenance| provenance.idempotency_key.as_ref())
+                {
+                    idempotency_keys
+                        .entry(record.cursor.clone())
+                        .or_insert_with(|| key.clone());
+                }
                 match terminal_attempts.entry(record.cursor.clone()) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(attempt);
@@ -541,6 +559,7 @@ impl EffectHistory {
         history.terminal_attempts = Arc::new(terminal_attempts);
         history.attempt_positions = Arc::new(attempt_positions);
         history.attempt_events = Arc::new(attempt_events);
+        history.idempotency_keys = Arc::new(idempotency_keys);
         validate_group_grammar(&history, &grouped_events)?;
         history.grouped_events = Arc::new(grouped_events);
         let actions = actions.finish(
@@ -698,6 +717,7 @@ impl EffectHistory {
             grouped_events: Arc::new(HashMap::new()),
             attempt_positions: Arc::new(HashMap::new()),
             attempt_events: Arc::new(HashMap::new()),
+            idempotency_keys: Arc::new(HashMap::new()),
             actions: Arc::new(super::RecordedActions::default()),
         })
     }
@@ -803,6 +823,7 @@ impl EffectHistory {
             terminal_attempt: self.terminal_attempts.get(cursor).copied(),
             terminal_group_events,
             escape_control_batches,
+            idempotency_key: self.idempotency_keys.get(cursor).cloned(),
         }
     }
 
@@ -899,13 +920,17 @@ pub(crate) async fn current_cursor_history(
         }
         if let Some(record) = effect_record_from_event(&envelope.authored())? {
             if &record.cursor == cursor {
-                let attempt = envelope
+                let provenance = envelope
                     .envelope
                     .provenance
                     .event
                     .effect_provenance
-                    .as_ref()
-                    .and_then(|provenance| provenance.attempt);
+                    .as_ref();
+                let attempt = provenance.and_then(|provenance| provenance.attempt);
+                if history.idempotency_key.is_none() {
+                    history.idempotency_key =
+                        provenance.and_then(|provenance| provenance.idempotency_key.clone());
+                }
                 if history
                     .terminal_attempt
                     .is_some_and(|existing| existing != attempt)
@@ -967,6 +992,7 @@ pub(crate) fn merge_cursor_histories(
     archived: EffectCursorHistory,
     current: EffectCursorHistory,
 ) -> Result<EffectCursorHistory, EffectError> {
+    let idempotency_key = current.idempotency_key.or(archived.idempotency_key);
     let mut causal = archived.causal;
     causal
         .merge(&current.causal)
@@ -974,7 +1000,7 @@ pub(crate) fn merge_cursor_histories(
     let mut attempt_events = archived.attempt_events;
     for (attempt, event) in current.attempt_events {
         if let Some(existing) = attempt_events.insert(attempt, event.clone()) {
-            if !effect_identity_equal(&existing, &event)? {
+            if !effect_identity_equal(&existing, &event) {
                 return Err(EffectError::EffectProvenanceMismatch(format!(
                     "effect cursor {cursor:?} has conflicting durable identity for Start({attempt})"
                 )));
@@ -1039,7 +1065,7 @@ pub(crate) fn merge_cursor_histories(
     } else if event_groups_identity_equal(
         &archived.terminal_group_events,
         &current.terminal_group_events,
-    )? {
+    ) {
         archived.terminal_group_events
     } else {
         return Err(EffectError::EffectProvenanceMismatch(format!(
@@ -1055,6 +1081,7 @@ pub(crate) fn merge_cursor_histories(
         terminal_attempt,
         terminal_group_events,
         escape_control_batches,
+        idempotency_key,
     };
     validate_cursor_history(cursor, &merged)?;
     Ok(merged)
@@ -1225,30 +1252,19 @@ fn events_equal(left: &[ChainEvent], right: &[ChainEvent]) -> Result<bool, Effec
     )
 }
 
-fn effect_identity_equal(left: &ChainEvent, right: &ChainEvent) -> Result<bool, EffectError> {
-    let left_content = serde_json::to_value(&left.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let right_content = serde_json::to_value(&right.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    Ok(left.id == right.id
+fn effect_identity_equal(left: &ChainEvent, right: &ChainEvent) -> bool {
+    left.id == right.id
         && left.processing.event_time == right.processing.event_time
         && left.effect_provenance == right.effect_provenance
-        && left_content == right_content)
+        && left.payload == right.payload
 }
 
-fn event_groups_identity_equal(
-    left: &[ChainEvent],
-    right: &[ChainEvent],
-) -> Result<bool, EffectError> {
-    if left.len() != right.len() {
-        return Ok(false);
-    }
-    for (left, right) in left.iter().zip(right) {
-        if !effect_identity_equal(left, right)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn event_groups_identity_equal(left: &[ChainEvent], right: &[ChainEvent]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| effect_identity_equal(left, right))
 }
 
 pub(super) fn validate_cursor_history(

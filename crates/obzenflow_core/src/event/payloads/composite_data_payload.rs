@@ -12,7 +12,7 @@ use crate::ai::{
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CompositeDataPayload {
     MapInput(AiMapReduceMapInput<Value>),
     GroupingEnded(AiMapReduceGroupingEnded),

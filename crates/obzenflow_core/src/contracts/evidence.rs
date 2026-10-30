@@ -30,7 +30,7 @@ pub enum DivergencePredicate {
     CycleDepth,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "evidence_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContractEvidenceDetails {
     Transport {

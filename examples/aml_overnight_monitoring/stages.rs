@@ -10,7 +10,7 @@ use super::domain::{
 };
 use super::money::Currency;
 use super::risk_engine::{RiskEnginePort, ScoreRequest};
-use super::vendors::{OpenCase, ScoreTransaction, CASE_SYSTEM_SOURCE, RISK_ENGINE_SOURCE};
+use super::vendors::{CASE_SYSTEM_SOURCE, RISK_ENGINE_SOURCE};
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use obzenflow::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
@@ -168,7 +168,6 @@ impl TypedStatefulHandler for DailyProfile {
 
 pub type ScoreOutput =
     obzenflow::schema::stage_fact_set![TransactionCleared, AlertRaised, ScoreUnavailable];
-pub type ScoreEffects = obzenflow::effects::effect_set![ScoreTransaction];
 
 #[derive(Clone, Debug, EffectHandler)]
 pub struct ScoreHandler {
@@ -180,7 +179,6 @@ pub struct ScoreHandler {
 impl EffectfulTransformHandler for ScoreHandler {
     type Input = ProfiledTransaction;
     type Output = ScoreOutput;
-    type AllowedEffects = ScoreEffects;
 
     async fn process(
         &self,
@@ -212,7 +210,6 @@ impl EffectfulTransformHandler for ScoreHandler {
 }
 
 pub type OpenCaseOutput = obzenflow::schema::stage_fact_set![CaseOpened, CaseUnavailable];
-pub type OpenCaseEffects = obzenflow::effects::effect_set![OpenCase];
 
 #[derive(Clone, Debug, EffectHandler)]
 pub struct OpenCaseHandler {
@@ -224,7 +221,6 @@ pub struct OpenCaseHandler {
 impl EffectfulTransformHandler for OpenCaseHandler {
     type Input = AlertRaised;
     type Output = OpenCaseOutput;
-    type AllowedEffects = OpenCaseEffects;
 
     async fn process(
         &self,

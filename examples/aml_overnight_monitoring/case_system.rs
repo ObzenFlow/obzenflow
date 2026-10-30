@@ -8,7 +8,7 @@ use super::domain::{
 use super::vendors::CASE_SYSTEM_SOURCE;
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
-use obzenflow::effects::{EffectContext, EffectError, Keyed};
+use obzenflow::effects::{EffectContext, EffectError, IdempotencyKey};
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -50,9 +50,11 @@ pub struct CaseAnswer {
 #[obzenflow::port]
 #[async_trait]
 pub trait CaseSystemPort: Send + Sync {
+    #[effect(type = "aml.open_case", exactly_once)]
     async fn open(
         &self,
         request: &CaseRequest,
+        key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<CaseOpened, EffectError>;
 }
@@ -68,11 +70,10 @@ impl SimulatedCaseSystem {
         })
     }
 
-    fn answer(&self, request: &CaseRequest, flow_id: FlowId) -> Result<CaseAnswer, CallLogError> {
-        self.calls
-            .answer(&request.idempotency_key(), flow_id, |decided| CaseAnswer {
-                case_number: CaseNumber(decided + 1),
-            })
+    fn answer(&self, key: &IdempotencyKey, flow_id: FlowId) -> Result<CaseAnswer, CallLogError> {
+        self.calls.answer(key, flow_id, |decided| CaseAnswer {
+            case_number: CaseNumber(decided + 1),
+        })
     }
 }
 
@@ -81,9 +82,10 @@ impl CaseSystemPort for SimulatedCaseSystem {
     async fn open(
         &self,
         request: &CaseRequest,
+        key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<CaseOpened, EffectError> {
-        let answer = self.answer(request, ctx.flow_id()).map_err(|error| {
+        let answer = self.answer(key, ctx.flow_id()).map_err(|error| {
             EffectError::unavailable(CASE_SYSTEM_SOURCE, "ledger_write_failed", error)
         })?;
         Ok(request.opened(answer.case_number))
@@ -94,6 +96,7 @@ impl CaseSystemPort for SimulatedCaseSystem {
 mod tests {
     use super::super::domain::ReasonCode;
     use super::*;
+    use obzenflow::effects::Keyed;
 
     fn request(txn_id: u64) -> CaseRequest {
         CaseRequest {
@@ -112,7 +115,7 @@ mod tests {
 
     fn case_number(cases: &SimulatedCaseSystem, txn_id: u64, run: FlowId) -> CaseNumber {
         cases
-            .answer(&request(txn_id), run)
+            .answer(&request(txn_id).idempotency_key(), run)
             .expect("case opens")
             .case_number
     }

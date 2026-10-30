@@ -8,9 +8,7 @@ use super::domain::{HoldId, OrderId, Sku, StockReleased, StockReserved};
 use async_trait::async_trait;
 #[cfg(test)]
 use obzenflow::effects::EffectPortResolutionError;
-use obzenflow::effects::{
-    Call, CallRequest, EffectContext, EffectError, Idempotent, System, SystemError,
-};
+use obzenflow::effects::{EffectError, System, SystemError};
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -80,8 +78,10 @@ impl WarehouseStats {
 #[obzenflow::port]
 #[async_trait]
 pub trait WarehousePort: Send + Sync {
+    #[effect(type = "allocation.reserve_stock", exactly_once)]
     async fn reserve(&self, request: &StockReservation) -> Result<StockReserved, EffectError>;
 
+    #[effect(type = "allocation.release_stock", exactly_once)]
     async fn release(&self, request: &StockRelease) -> Result<StockReleased, EffectError>;
 }
 
@@ -177,24 +177,6 @@ impl StockReservation {
     }
 }
 
-pub type ReserveStock = Call<StockReservation>;
-
-#[async_trait]
-impl CallRequest for StockReservation {
-    const EFFECT_TYPE: &'static str = "allocation.reserve_stock";
-    type Safety = Idempotent;
-    type Port = dyn WarehousePort;
-    type Outcome = StockReserved;
-
-    async fn call(
-        &self,
-        warehouse: &dyn WarehousePort,
-        _: &mut EffectContext,
-    ) -> Result<StockReserved, EffectError> {
-        warehouse.reserve(self).await
-    }
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub struct StockRelease {
     pub order_id: OrderId,
@@ -209,23 +191,5 @@ impl StockRelease {
             sku: self.sku.clone(),
             hold_id: self.hold_id.clone(),
         }
-    }
-}
-
-pub type ReleaseStock = Call<StockRelease>;
-
-#[async_trait]
-impl CallRequest for StockRelease {
-    const EFFECT_TYPE: &'static str = "allocation.release_stock";
-    type Safety = Idempotent;
-    type Port = dyn WarehousePort;
-    type Outcome = StockReleased;
-
-    async fn call(
-        &self,
-        warehouse: &dyn WarehousePort,
-        _: &mut EffectContext,
-    ) -> Result<StockReleased, EffectError> {
-        warehouse.release(self).await
     }
 }

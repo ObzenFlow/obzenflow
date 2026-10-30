@@ -12,9 +12,8 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::{ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
-        Call, CallRequest, EffectContext, EffectError, EffectHandler, EffectPortResolutionError,
-        EffectSafety, Effects, Idempotent, SinkRedeliverySafety, StageCompletion, System,
-        Transactional,
+        EffectCommitHandle, EffectError, EffectHandler, EffectPortResolutionError, EffectSafety,
+        Effects, SinkRedeliverySafety, StageCompletion, System,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -151,7 +150,6 @@ mod tests {
     impl EffectfulTransformHandler for FxTr {
         type Input = In;
         type Output = Out;
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         async fn process(
             &self,
@@ -176,7 +174,6 @@ mod tests {
     impl EffectfulTransformHandler for TxFxTr {
         type Input = In;
         type Output = Out;
-        type AllowedEffects = obzenflow_runtime::effect_set![TxEffect];
 
         async fn process(
             &self,
@@ -212,7 +209,6 @@ mod tests {
         type State = ();
         type Input = In;
         type Output = Out;
-        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -234,25 +230,18 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
     struct PolicyPort;
 
     #[derive(Clone, Debug, Serialize)]
     struct PolicyRequest;
 
-    #[async_trait]
-    impl CallRequest for PolicyRequest {
-        const EFFECT_TYPE: &'static str = "test.stateful_policy_effect";
-        type Safety = Idempotent;
-        type Port = PolicyPort;
-        type Outcome = Out;
-
-        async fn call(&self, _: &PolicyPort, _: &mut EffectContext) -> Result<Out, EffectError> {
+    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    impl PolicyPort {
+        #[effect(type = "test.stateful_policy_effect", exactly_once)]
+        fn apply(&self, _: &PolicyRequest) -> Result<Out, EffectError> {
             Ok(Out)
         }
     }
-
-    type PolicyEffect = Call<PolicyRequest>;
 
     #[derive(Clone, Debug, EffectHandler)]
     #[effect_handler(effects = obzenflow_runtime::effects)]
@@ -272,7 +261,6 @@ mod tests {
         type State = ();
         type Input = In;
         type Output = Out;
-        type AllowedEffects = obzenflow_runtime::effect_set![PolicyEffect];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -338,27 +326,23 @@ mod tests {
         }
     }
 
-    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
     struct TxPort;
 
     #[derive(Clone, Debug, Serialize)]
     struct TxRequest;
 
-    #[async_trait]
-    impl CallRequest for TxRequest {
-        const EFFECT_TYPE: &'static str = "test.tx_effect";
-        type Safety = Transactional;
-        type Port = TxPort;
-        type Outcome = Out;
-
-        async fn call(&self, _: &TxPort, ctx: &mut EffectContext) -> Result<Out, EffectError> {
-            let tx = ctx.transaction(self)?;
+    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    impl TxPort {
+        #[effect(type = "test.tx_effect", exactly_once)]
+        async fn post(
+            &self,
+            _: &TxRequest,
+            tx: EffectCommitHandle<Out>,
+        ) -> Result<Out, EffectError> {
             tx.commit_success(&Out).await?;
             Ok(Out)
         }
     }
-
-    type TxEffect = Call<TxRequest>;
 
     fn tx_system() -> System<TxPort> {
         System::deferred(
@@ -545,17 +529,17 @@ mod tests {
         let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
-    fn effectful_transform_transactional_acknowledgement_declares_the_request() {
+    fn effectful_transform_transactional_effect_needs_no_acknowledgement() {
         let tx = tx_system();
         assert_eq!(tx.name(), "tx");
         let handler = TxFxTr { tx };
-        let descriptor = crate::effectful_transform!(
-            In -> Out => handler.transactional::<TxEffect>());
+        let descriptor = crate::effectful_transform!(In -> Out => handler);
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].effect_type(), TxRequest::EFFECT_TYPE);
+        assert_eq!(declarations[0].effect_type(), "test.tx_effect");
         assert_eq!(declarations[0].safety(), EffectSafety::Transactional);
+        assert!(declarations[0].validate_safety_syntax().is_ok());
     }
 
     // ── stateful! ───────────────────────────────────────────────────────────
@@ -604,13 +588,13 @@ mod tests {
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].effect_type(), PolicyRequest::EFFECT_TYPE);
+        assert_eq!(declarations[0].effect_type(), "test.stateful_policy_effect");
         descriptor
             .prepare_middleware()
             .expect("the policy guards the stage's one effect");
         let policies = descriptor.effect_policy_attachments();
         assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0].effect_type, PolicyRequest::EFFECT_TYPE);
+        assert_eq!(policies[0].effect_type, "test.stateful_policy_effect");
     }
 
     struct EffectAudit;
@@ -621,8 +605,8 @@ mod tests {
         use obzenflow_adapters::middleware::{
             circuit_breaker, effect_observer, rate_limit, retry, MiddlewareFactory,
         };
-        let limiter = rate_limit(10.0).for_effect::<PolicyEffect>();
-        let audit = effect_observer("audit", EffectAudit).for_effect::<PolicyEffect>();
+        let limiter = rate_limit(10.0).for_effect::<PolicyRequest>();
+        let audit = effect_observer("audit", EffectAudit).for_effect::<PolicyRequest>();
         let handler = policy_handler();
         let mut descriptor = crate::effectful_stateful!(
             In -> Out

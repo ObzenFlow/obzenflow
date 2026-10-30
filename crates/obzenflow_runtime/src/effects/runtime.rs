@@ -72,12 +72,16 @@ fn restore_archived_effect_identity(
     rebuilt: &mut ChainEvent,
     archived: &ChainEvent,
 ) -> Result<(), EffectError> {
-    let rebuilt_content = serde_json::to_value(&rebuilt.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let archived_content = serde_json::to_value(&archived.payload)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
+    if let (Some(rebuilt_provenance), Some(archived_provenance)) = (
+        rebuilt.effect_provenance.as_mut(),
+        archived.effect_provenance.as_ref(),
+    ) {
+        rebuilt_provenance
+            .idempotency_key
+            .clone_from(&archived_provenance.idempotency_key);
+    }
     if rebuilt.id != archived.id
-        || rebuilt_content != archived_content
+        || rebuilt.payload != archived.payload
         || rebuilt.effect_provenance != archived.effect_provenance
     {
         return Err(EffectError::EffectProvenanceMismatch(format!(
@@ -86,7 +90,6 @@ fn restore_archived_effect_identity(
         )));
     }
     rebuilt.processing.event_time = archived.processing.event_time;
-    rebuilt.effect_provenance = archived.effect_provenance.clone();
     Ok(())
 }
 
@@ -293,6 +296,9 @@ pub(crate) struct EffectsCore {
     committed_facts: Vec<ChainEvent>,
     drained_facts: usize,
     halt: Option<AuthoringHalt>,
+    /// The idempotency key each live keyed call of this invocation sends,
+    /// stamped onto the rows recorded at its cursor.
+    call_keys: HashMap<EffectCursor, IdempotencyKey>,
 }
 
 impl EffectsCore {
@@ -306,6 +312,15 @@ impl EffectsCore {
             committed_facts: Vec::new(),
             drained_facts: 0,
             halt: None,
+            call_keys: HashMap::new(),
+        }
+    }
+
+    fn stamp_idempotency_key(&self, event: &mut ChainEvent) {
+        if let Some(provenance) = event.effect_provenance.as_mut() {
+            if let Some(key) = self.call_keys.get(&provenance.cursor) {
+                provenance.idempotency_key = Some(key.clone());
+            }
         }
     }
 
@@ -1165,6 +1180,9 @@ impl EffectsCore {
                     // API carry no physical-group envelope. Reconstruct them
                     // through the existing per-record path rather than
                     // inventing an atomic cut the archive never proved.
+                    if let Some(key) = &selected.idempotency_key {
+                        self.call_keys.insert(cursor.clone(), key.clone());
+                    }
                     self.append_replayed_records(
                         cursor.clone(),
                         descriptor_hash,
@@ -1276,6 +1294,9 @@ impl EffectsCore {
             descriptor,
             binding_context,
         };
+        if let Some(key) = &prepared.identity.idempotency_key {
+            self.call_keys.insert(prepared.cursor.clone(), key.clone());
+        }
 
         if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
             // Keep the generated affine state machine off the caller's async
@@ -2086,12 +2107,13 @@ impl EffectsCore {
             },
             origin: None,
         };
-        let event = build_effect_record_event(
+        let mut event = build_effect_record_event(
             self.ctx.writer_id,
             &self.ctx.parent,
             record,
             self.ctx.lineage,
         )?;
+        self.stamp_idempotency_key(&mut event);
         self.commit_terminal_group(
             &cursor,
             vec![AtomicCommitEntry {
@@ -2134,12 +2156,13 @@ impl EffectsCore {
             },
             origin: None,
         };
-        let event = build_effect_record_event(
+        let mut event = build_effect_record_event(
             self.ctx.writer_id,
             &self.ctx.parent,
             record,
             self.ctx.lineage,
         )?;
+        self.stamp_idempotency_key(&mut event);
         self.commit_terminal_group(
             &cursor,
             vec![AtomicCommitEntry {
@@ -2770,6 +2793,7 @@ impl EffectsCore {
             record,
             self.ctx.lineage,
         )?;
+        self.stamp_idempotency_key(&mut event);
         self.mark_lineage(&mut event, lineage);
         crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
@@ -2850,12 +2874,13 @@ impl EffectsCore {
                     outcome: EffectOutcomePayload::Succeeded { output },
                     origin: None,
                 };
-                let event = build_effect_record_event(
+                let mut event = build_effect_record_event(
                     self.ctx.writer_id,
                     &self.ctx.parent,
                     record,
                     self.ctx.lineage,
                 )?;
+                self.stamp_idempotency_key(&mut event);
                 self.commit_terminal_group(
                     &cursor,
                     vec![AtomicCommitEntry {
@@ -2900,6 +2925,7 @@ impl EffectsCore {
             self.ctx.lineage,
         )?;
         for event in &mut events {
+            self.stamp_idempotency_key(event);
             self.mark_lineage(event, lineage);
         }
         let committed_events = crate::supervised_base::publication::with_snapshot(
@@ -2941,7 +2967,7 @@ impl EffectsCore {
         let routed_fact_count = self.count_routed_facts(&facts);
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
-        let committed_events = build_domain_effect_success_facts(
+        let mut committed_events = build_domain_effect_success_facts(
             self.ctx.writer_id,
             &self.ctx.parent,
             cursor.clone(),
@@ -2952,6 +2978,9 @@ impl EffectsCore {
             origin,
             self.ctx.lineage,
         )?;
+        for event in &mut committed_events {
+            self.stamp_idempotency_key(event);
+        }
         let outcome_entries = committed_events
             .iter()
             .cloned()

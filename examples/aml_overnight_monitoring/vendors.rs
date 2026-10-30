@@ -3,14 +3,10 @@
 // https://obzenflow.dev
 
 use super::case_system::{CaseRequest, CaseSystemPort, SimulatedCaseSystem};
-use super::domain::{AlertRaised, AlertSubject, CaseOpened, TransactionCleared};
+use super::domain::{AlertRaised, AlertSubject, TransactionCleared};
 use super::risk_engine::{RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine};
-use async_trait::async_trait;
 use obzenflow::effects::simulated::CallLogError;
-use obzenflow::effects::{
-    Call, CallRequest, EffectContext, EffectError, EffectPortResolutionError, IdempotencyKey,
-    Keyed, RequiresKey, System, SystemError,
-};
+use obzenflow::effects::{EffectPortResolutionError, IdempotencyKey, Keyed, System, SystemError};
 use obzenflow::schema::EffectOutcomeFacts;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,9 +14,6 @@ use std::sync::Arc;
 
 pub const RISK_ENGINE_SOURCE: &str = "risk_engine";
 pub const CASE_SYSTEM_SOURCE: &str = "case_system";
-
-pub type ScoreTransaction = Call<ScoreRequest>;
-pub type OpenCase = Call<CaseRequest>;
 
 #[derive(Clone, Debug, EffectOutcomeFacts)]
 #[effect_outcome(schema = obzenflow::schema)]
@@ -49,41 +42,9 @@ impl ScoreOutcome {
     }
 }
 
-#[async_trait]
-impl CallRequest for ScoreRequest {
-    const EFFECT_TYPE: &'static str = "aml.score_transaction";
-    type Safety = RequiresKey;
-    type Port = dyn RiskEnginePort;
-    type Outcome = ScoreOutcome;
-
-    async fn call(
-        &self,
-        engine: &dyn RiskEnginePort,
-        ctx: &mut EffectContext,
-    ) -> Result<ScoreOutcome, EffectError> {
-        engine.score(self, ctx).await
-    }
-}
-
 impl Keyed for ScoreRequest {
     fn idempotency_key(&self) -> IdempotencyKey {
         IdempotencyKey(format!("aml-score:{}", self.txn_id))
-    }
-}
-
-#[async_trait]
-impl CallRequest for CaseRequest {
-    const EFFECT_TYPE: &'static str = "aml.open_case";
-    type Safety = RequiresKey;
-    type Port = dyn CaseSystemPort;
-    type Outcome = CaseOpened;
-
-    async fn call(
-        &self,
-        cases: &dyn CaseSystemPort,
-        ctx: &mut EffectContext,
-    ) -> Result<CaseOpened, EffectError> {
-        cases.open(self, ctx).await
     }
 }
 

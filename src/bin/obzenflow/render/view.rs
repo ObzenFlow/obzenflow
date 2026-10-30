@@ -223,6 +223,20 @@ impl<'a> EventView<'a> {
         }
     }
 
+    pub fn idempotency_key(&self) -> Option<&'a str> {
+        let RunRecordData::Chain(row) = &self.record.record else {
+            return None;
+        };
+        row.envelope
+            .provenance
+            .event
+            .effect_provenance
+            .as_ref()?
+            .idempotency_key
+            .as_ref()
+            .map(|key| key.0.as_str())
+    }
+
     pub fn explanation(&self) -> &'static str {
         gloss(self.record)
     }

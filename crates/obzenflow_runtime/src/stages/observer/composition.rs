@@ -1042,9 +1042,7 @@ impl fmt::Debug for StageObserverBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::{
-        AnswersEffect, Call, CallRequest, EffectContext, EffectError, Idempotent, System,
-    };
+    use crate::effects::{AnswersEffect, EffectError, EffectName, System};
     use crate::messaging::upstream_subscription::StageInputPosition;
     use crate::stages::observer::EffectObserverOutcome;
     use obzenflow_core::event::context::StageType;
@@ -1207,7 +1205,6 @@ mod tests {
     impl SinkDeliveryObserver for NoopObserver {}
     impl StageLifecycleObserver for NoopObserver {}
 
-    #[crate::effects::port(effects = crate::effects)]
     struct FixturePort;
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1220,37 +1217,18 @@ mod tests {
     #[derive(Clone, Debug, serde::Serialize)]
     struct DeclaredRequestA;
 
-    #[async_trait::async_trait]
-    impl CallRequest for DeclaredRequestA {
-        const EFFECT_TYPE: &'static str = "effect.a";
-        type Safety = Idempotent;
-        type Port = FixturePort;
-        type Outcome = FixtureFact;
-
-        async fn call(
-            &self,
-            _: &FixturePort,
-            _: &mut EffectContext,
-        ) -> Result<FixtureFact, EffectError> {
-            Ok(FixtureFact)
-        }
-    }
-
     #[derive(Clone, Debug, serde::Serialize)]
     struct DeclaredRequestB;
 
-    #[async_trait::async_trait]
-    impl CallRequest for DeclaredRequestB {
-        const EFFECT_TYPE: &'static str = "effect.b";
-        type Safety = Idempotent;
-        type Port = FixturePort;
-        type Outcome = FixtureFact;
+    #[crate::effects::port(effects = crate::effects)]
+    impl FixturePort {
+        #[effect(type = "effect.a", exactly_once)]
+        fn declared_a(&self, _: &DeclaredRequestA) -> Result<FixtureFact, EffectError> {
+            Ok(FixtureFact)
+        }
 
-        async fn call(
-            &self,
-            _: &FixturePort,
-            _: &mut EffectContext,
-        ) -> Result<FixtureFact, EffectError> {
+        #[effect(type = "effect.b", exactly_once)]
+        fn declared_b(&self, _: &DeclaredRequestB) -> Result<FixtureFact, EffectError> {
             Ok(FixtureFact)
         }
     }
@@ -1258,12 +1236,12 @@ mod tests {
     fn declared_effect(effect_type: &'static str) -> EffectDeclaration {
         let system = System::eager("fixture", Arc::new(FixturePort)).expect("fixture system");
         match effect_type {
-            DeclaredRequestA::EFFECT_TYPE => {
-                AnswersEffect::<Call<DeclaredRequestA>>::declaration(&system, None)
-            }
-            DeclaredRequestB::EFFECT_TYPE => {
-                AnswersEffect::<Call<DeclaredRequestB>>::declaration(&system, None)
-            }
+            "effect.a" => AnswersEffect::<<DeclaredRequestA as EffectName>::Effect>::declaration(
+                &system, None,
+            ),
+            "effect.b" => AnswersEffect::<<DeclaredRequestB as EffectName>::Effect>::declaration(
+                &system, None,
+            ),
             _ => panic!("unknown observer fixture effect"),
         }
         .expect("fixture declaration")

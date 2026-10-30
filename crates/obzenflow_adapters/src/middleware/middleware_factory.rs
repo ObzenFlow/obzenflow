@@ -9,7 +9,7 @@
 
 use super::{MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
-use obzenflow_runtime::effects::Effect;
+use obzenflow_runtime::effects::{Effect, EffectName};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
 use std::any::TypeId;
@@ -285,14 +285,14 @@ pub trait MiddlewareFactory: Send + Sync {
     }
 
     /// Guard or watch only the effect `E` of the stage this middleware is
-    /// attached to.
-    fn for_effect<E: Effect>(self) -> EffectScoped<Self>
+    /// attached to, named by its request type.
+    fn for_effect<E: EffectName>(self) -> EffectScoped<Self>
     where
         Self: Sized,
     {
         EffectScoped {
             inner: self,
-            effect_type: E::EFFECT_TYPE,
+            effect_type: <E::Effect as Effect>::EFFECT_TYPE,
         }
     }
 }

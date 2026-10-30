@@ -13,8 +13,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    effectful_transform_effects, Call, CallRequest, EffectContext, EffectDeclaration, EffectError,
-    Effects, Idempotent, StageEffectsError, System,
+    effectful_transform_effects, EffectDeclaration, EffectError, Effects, StageEffectsError, System,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -55,7 +54,6 @@ impl TypedPayload for ContainmentEffectValue {
     const EVENT_TYPE: &'static str = "containment.effect_value";
 }
 
-#[obzenflow::port]
 struct ValueService;
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,23 +61,15 @@ struct ValueRequest {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for ValueRequest {
-    const EFFECT_TYPE: &'static str = "containment.value";
-    type Safety = Idempotent;
-    type Port = ValueService;
-    type Outcome = ContainmentEffectValue;
-
-    async fn call(
-        &self,
-        _service: &ValueService,
-        _ctx: &mut EffectContext,
-    ) -> Result<ContainmentEffectValue, EffectError> {
-        Ok(ContainmentEffectValue { value: self.value })
+#[obzenflow::port]
+impl ValueService {
+    #[effect(type = "containment.value", exactly_once)]
+    fn value(&self, request: &ValueRequest) -> Result<ContainmentEffectValue, EffectError> {
+        Ok(ContainmentEffectValue {
+            value: request.value,
+        })
     }
 }
-
-type ValueEffect = Call<ValueRequest>;
 
 #[derive(Clone, Debug)]
 struct OneShotSource {
@@ -122,7 +112,6 @@ impl PerformTransform {
 impl EffectfulTransformHandler for PerformTransform {
     type Input = ContainmentInput;
     type Output = obzenflow_core::stage_fact_set![ContainmentOutput, ContainmentEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![ValueEffect];
 
     async fn process(
         &self,
@@ -153,7 +142,6 @@ struct EmitOnlyTransform;
 impl EffectfulTransformHandler for EmitOnlyTransform {
     type Input = ContainmentInput;
     type Output = ContainmentOutput;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,
@@ -380,31 +368,20 @@ impl obzenflow_core::StageFactSet for CollidingOutcome {
     }
 }
 
-#[obzenflow::port]
 struct CollidingService;
 
 #[derive(Clone, Debug, Serialize)]
 struct CollidingRequest;
 
-#[async_trait]
-impl CallRequest for CollidingRequest {
-    const EFFECT_TYPE: &'static str = "containment.colliding";
-    type Safety = Idempotent;
-    type Port = CollidingService;
-    type Outcome = CollidingOutcome;
-
-    async fn call(
-        &self,
-        _service: &CollidingService,
-        _ctx: &mut EffectContext,
-    ) -> Result<CollidingOutcome, EffectError> {
+#[obzenflow::port]
+impl CollidingService {
+    #[effect(type = "containment.colliding", exactly_once)]
+    fn collide(&self, _: &CollidingRequest) -> Result<CollidingOutcome, EffectError> {
         Ok(CollidingOutcome {
             primary: ColliderA { value: 1 },
         })
     }
 }
-
-type CollidingEffect = Call<CollidingRequest>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct CollidingTransform {
@@ -425,7 +402,6 @@ impl CollidingTransform {
 impl EffectfulTransformHandler for CollidingTransform {
     type Input = ContainmentInput;
     type Output = ColliderA;
-    type AllowedEffects = obzenflow_runtime::effect_set![CollidingEffect];
 
     async fn process(
         &self,

@@ -15,9 +15,8 @@ use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{FlowId, JournalId, JournalOwner, TypedPayload};
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
-    AcknowledgedSafety, AnswersEffect, Call, CallRequest, CurrentRunHistory, EffectCommitHandle,
-    EffectContext, EffectHandler, EffectInvocationContext, EffectPortRegistry, Effects, System,
-    Transactional,
+    AnswersEffect, CurrentRunHistory, EffectCommitHandle, EffectHandler, EffectInvocationContext,
+    EffectName, EffectPortRegistry, Effects, System,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;
@@ -189,33 +188,16 @@ impl TypedPayload for TransactionProbeOutput {
 #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 #[async_trait]
 trait TransactionProbeLedger: Send + Sync {
+    #[effect(type = "effect.retry", exactly_once)]
     async fn write(
         &self,
+        request: &TransactionProbeRequest,
         tx: EffectCommitHandle<TransactionProbeOutput>,
     ) -> Result<TransactionProbeOutput, EffectError>;
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
 struct TransactionProbeRequest;
-
-#[async_trait]
-impl CallRequest for TransactionProbeRequest {
-    const EFFECT_TYPE: &'static str = "effect.retry";
-    type Safety = Transactional;
-    type Port = dyn TransactionProbeLedger;
-    type Outcome = TransactionProbeOutput;
-
-    async fn call(
-        &self,
-        ledger: &dyn TransactionProbeLedger,
-        ctx: &mut EffectContext,
-    ) -> Result<TransactionProbeOutput, EffectError> {
-        let tx = ctx.transaction(self)?;
-        ledger.write(tx).await
-    }
-}
-
-type TransactionProbe = Call<TransactionProbeRequest>;
 
 struct TransactionProbePort {
     calls: Arc<AtomicUsize>,
@@ -234,6 +216,7 @@ enum TransactionProbeMode {
 impl TransactionProbeLedger for TransactionProbePort {
     async fn write(
         &self,
+        _: &TransactionProbeRequest,
         tx: EffectCommitHandle<TransactionProbeOutput>,
     ) -> Result<TransactionProbeOutput, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -276,11 +259,11 @@ async fn effect_context(
         .unwrap();
     let ledger =
         System::eager("tx", Arc::new(TransactionProbePort { calls, trace, mode })).unwrap();
-    let authored_declaration = AnswersEffect::<TransactionProbe>::declaration(
-        &ledger,
-        Some(AcknowledgedSafety::Transactional),
-    )
-    .unwrap();
+    let authored_declaration =
+        AnswersEffect::<<TransactionProbeRequest as EffectName>::Effect>::declaration(
+            &ledger, None,
+        )
+        .unwrap();
     let effect_ports =
         EffectPortRegistry::collect_from_declarations([&authored_declaration]).unwrap();
 
@@ -329,7 +312,6 @@ struct TransactionProbeHandler {
 impl EffectfulTransformHandler for TransactionProbeHandler {
     type Input = TransactionProbeInput;
     type Output = TransactionProbeOutput;
-    type AllowedEffects = obzenflow_runtime::effect_set![TransactionProbe];
 
     async fn process(
         &self,

@@ -24,10 +24,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefi
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, System};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
@@ -82,7 +79,6 @@ impl TypedFiniteSourceHandler for Channel {
     }
 }
 
-#[obzenflow::port]
 struct Processor {
     calls: Arc<AtomicUsize>,
 }
@@ -92,33 +88,17 @@ struct ChargeRequest {
     order_id: u64,
 }
 
-#[async_trait]
-impl CallRequest for ChargeRequest {
-    const EFFECT_TYPE: &'static str = "replay_verification_multi.charge";
-    type Safety = RequiresKey;
-    type Port = Processor;
-    type Outcome = Charged;
-
-    async fn call(
-        &self,
-        processor: &Processor,
-        _ctx: &mut EffectContext,
-    ) -> Result<Charged, EffectError> {
-        processor.calls.fetch_add(1, Ordering::SeqCst);
+#[obzenflow::port]
+impl Processor {
+    #[effect(type = "replay_verification_multi.charge", exactly_once)]
+    fn charge(&self, request: &ChargeRequest) -> Result<Charged, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Charged {
-            order_id: self.order_id,
-            receipt: self.order_id + 5000,
+            order_id: request.order_id,
+            receipt: request.order_id + 5000,
         })
     }
 }
-
-impl Keyed for ChargeRequest {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("charge:{}", self.order_id))
-    }
-}
-
-type ChargeEffect = Call<ChargeRequest>;
 
 /// Pass-through intake: re-emits each order so the fan-in has a derived
 /// input and keeps the Kahn merge (see the module doc).
@@ -161,7 +141,6 @@ impl ChargeOrders {
 impl EffectfulTransformHandler for ChargeOrders {
     type Input = OrderPlaced;
     type Output = Charged;
-    type AllowedEffects = obzenflow_runtime::effect_set![ChargeEffect];
 
     async fn process(
         &self,

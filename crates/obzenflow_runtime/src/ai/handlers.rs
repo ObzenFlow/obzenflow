@@ -5,7 +5,8 @@
 use super::unavailable::{integrity_failure, unavailable_or_integrity};
 use super::{AiEffect, AiRole};
 use crate::effects::{
-    AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, EffectSet, Effects, StageCompletion,
+    AllowedEffectsAllowEffect, DeclaredEffectSet, EffectHandler, EffectOutcomeFitsOutput,
+    EffectSet, Effects, StageCompletion,
 };
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::EffectfulTransformHandler;
@@ -15,7 +16,7 @@ use obzenflow_core::ai::{
     AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiOutcome, AiUnavailable, Chunk, Partials,
 };
 use obzenflow_core::event::schema::{
-    MemberList, StageOutputFacts, SubsetProofEnd, TypedFactType, WithMember,
+    EmptySet, MemberList, StageOutputFacts, SubsetProofEnd, TypedFactType, WithMember,
 };
 use obzenflow_core::{StageFactSet, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
@@ -78,12 +79,19 @@ fn interpret_failure(
     }
 }
 
+type RoleEffect<E> = DeclaredEffectSet<WithMember<E, EmptySet>>;
+
 #[doc(hidden)]
-#[derive(crate::effects::EffectHandler)]
-#[effect_handler(effects = crate::effects)]
 pub struct AiInferHandler<R, In> {
     role: Arc<R>,
     _input: PhantomData<fn() -> In>,
+}
+
+impl<R: AiRole<In>, In> EffectHandler for AiInferHandler<R, In> {
+    type Systems = ();
+    type AllowedEffects = RoleEffect<R::Effect>;
+
+    fn systems(&self) -> Self::Systems {}
 }
 
 impl<R, In> AiInferHandler<R, In> {
@@ -118,7 +126,6 @@ where
 {
     type Input = In;
     type Output = R::Out;
-    type AllowedEffects = crate::effect_set![R::Effect];
 
     async fn process(
         &self,
@@ -146,11 +153,16 @@ fn chunk_of<T>(group: AiMapReduceMapInput<T>) -> Chunk<T> {
 }
 
 #[doc(hidden)]
-#[derive(crate::effects::EffectHandler)]
-#[effect_handler(effects = crate::effects)]
 pub struct AiMapHandler<R, T> {
     role: Arc<R>,
     _items: PhantomData<fn() -> T>,
+}
+
+impl<R: AiRole<Chunk<T>>, T> EffectHandler for AiMapHandler<R, T> {
+    type Systems = ();
+    type AllowedEffects = RoleEffect<R::Effect>;
+
+    fn systems(&self) -> Self::Systems {}
 }
 
 impl<R, T> AiMapHandler<R, T> {
@@ -185,7 +197,6 @@ where
 {
     type Input = AiMapReduceMapInput<T>;
     type Output = R::Out;
-    type AllowedEffects = crate::effect_set![R::Effect];
 
     async fn process(
         &self,
@@ -214,11 +225,16 @@ pub type AiMapPartialFacts<T, P> =
     obzenflow_core::stage_fact_set![AiMapReduceTaggedPartial<T, P>, AiMapReduceChunkFailed];
 
 #[doc(hidden)]
-#[derive(crate::effects::EffectHandler)]
-#[effect_handler(effects = crate::effects)]
 pub struct AiPartialMapHandler<R, T> {
     role: Arc<R>,
     _items: PhantomData<fn() -> T>,
+}
+
+impl<R: AiRole<Chunk<T>>, T> EffectHandler for AiPartialMapHandler<R, T> {
+    type Systems = ();
+    type AllowedEffects = RoleEffect<R::Effect>;
+
+    fn systems(&self) -> Self::Systems {}
 }
 
 impl<R, T> AiPartialMapHandler<R, T> {
@@ -253,7 +269,6 @@ where
 {
     type Input = AiMapReduceMapInput<T>;
     type Output = AiMapPartialFacts<T, R::Out>;
-    type AllowedEffects = crate::effect_set![R::Effect];
 
     async fn process(
         &self,
@@ -332,11 +347,16 @@ where
 }
 
 #[doc(hidden)]
-#[derive(crate::effects::EffectHandler)]
-#[effect_handler(effects = crate::effects)]
 pub struct AiReduceHandler<S, T, P> {
     role: Arc<S>,
     _types: PhantomData<fn() -> (T, P)>,
+}
+
+impl<S: AiRole<Partials<T, P>>, T, P> EffectHandler for AiReduceHandler<S, T, P> {
+    type Systems = ();
+    type AllowedEffects = RoleEffect<S::Effect>;
+
+    fn systems(&self) -> Self::Systems {}
 }
 
 impl<S, T, P> AiReduceHandler<S, T, P> {
@@ -373,7 +393,6 @@ where
 {
     type Input = AiMapReduceReduceInput<T, P>;
     type Output = AiReduceFacts<S::Out>;
-    type AllowedEffects = crate::effect_set![S::Effect];
 
     async fn process(
         &self,

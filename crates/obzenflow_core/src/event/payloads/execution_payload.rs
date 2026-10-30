@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "execution_type", rename_all = "snake_case")]
 pub enum ExecutionPayload {
     ReplayLifecycle(ReplayLifecycleEvent),
@@ -110,7 +110,7 @@ pub enum ExecutionPayload {
     EffectRecoveryAbandoned(EffectRecoveryAbandoned),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "replay_event", rename_all = "snake_case")]
 pub enum ReplayLifecycleEvent {
     Started {
@@ -150,7 +150,7 @@ impl ReplayLifecycleEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "stage_state", rename_all = "snake_case")]
 pub enum StageLifecycleFact {
     Running {
@@ -222,7 +222,7 @@ pub enum CircuitState {
     HalfOpen,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CircuitBreakerFact {
     Opened {
@@ -361,7 +361,7 @@ impl JoinPhaseFact {
 }
 
 /// Invocation recovery evidence independent of optional breaker health policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RecoveryFact {
     AttemptCompleted {
@@ -409,7 +409,7 @@ impl RecoveryFact {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RateLimiterFact {
     Delayed {
@@ -457,7 +457,7 @@ pub enum RateLimiterMode {
     Limiting,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum BackpressureFact {
     Stalled {
@@ -531,7 +531,7 @@ pub enum SourceOpenIntent {
 }
 
 /// A row a source refused and read past.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceRecordRejectedFact {
     pub kind: ErrorKind,
@@ -540,7 +540,7 @@ pub struct SourceRecordRejectedFact {
 }
 
 /// Any other source poll error, including one that stops the source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourcePollFailedFact {
     pub kind: ErrorKind,
@@ -550,7 +550,7 @@ pub struct SourcePollFailedFact {
 }
 
 /// Opening evidence, distinct from a poll failure; no poll occurred.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceOpenFailedFact {
     pub source_type: SourcePollKind,
@@ -561,7 +561,7 @@ pub struct SourceOpenFailedFact {
 }
 
 /// A supervisor opened a source reader (FLOWIP-134i B2).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceReaderAcquiredFact {
     pub source_type: SourcePollKind,
@@ -587,7 +587,7 @@ pub enum SourceCleanupTrigger {
 }
 
 /// A source released the reader it acquired (FLOWIP-134i B2).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceCleanupSucceededFact {
     pub source_type: SourcePollKind,
@@ -597,7 +597,7 @@ pub struct SourceCleanupSucceededFact {
 
 /// A source failed to release its reader. The failure is secondary: it never
 /// replaces the stage's primary failure, which it names.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceCleanupFailedFact {
     pub source_type: SourcePollKind,
@@ -673,14 +673,14 @@ pub struct SourceContinuationRefusedFact {
 }
 
 /// A positioned source failed to seek after its committed prefix.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSeekFailedFact {
     pub identity_digest: String,
     pub diagnostic: super::source_diagnostic::SourceDiagnostic,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpPullStateFact {
     pub state: HttpPullState,
@@ -689,7 +689,7 @@ pub struct HttpPullStateFact {
     pub last_success_unix_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiChunkingPlannedFact {
     pub planning: ChunkPlanningSummary,

@@ -18,7 +18,7 @@ pub enum ArchiveStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusDerivation {
     pub terminal_events_found: u64,
     pub chosen: ArchiveStatus,

@@ -14,9 +14,7 @@ use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, Idempotent, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, System};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
@@ -111,54 +109,33 @@ impl TypedPayload for PaymentEffectFact {
     const EVENT_TYPE: &'static str = "effective_config_manifest.payment_effect_fact";
 }
 
-#[obzenflow::port]
+const AUTHORIZE: &str = "payments.authorize";
+const REFUND: &str = "payments.refund";
+
 struct PaymentService;
 
 #[derive(Clone, Debug, Serialize)]
 struct Authorize;
 
-#[async_trait]
-impl CallRequest for Authorize {
-    const EFFECT_TYPE: &'static str = "payments.authorize";
-    type Safety = Idempotent;
-    type Port = PaymentService;
-    type Outcome = PaymentEffectFact;
+#[derive(Clone, Debug, Serialize)]
+struct Refund;
 
-    async fn call(
-        &self,
-        _payments: &PaymentService,
-        _ctx: &mut EffectContext,
-    ) -> Result<PaymentEffectFact, EffectError> {
+#[obzenflow::port]
+impl PaymentService {
+    #[effect(type = "payments.authorize", exactly_once)]
+    fn authorize(&self, _: &Authorize) -> Result<PaymentEffectFact, EffectError> {
         Ok(PaymentEffectFact {
             kind: "authorize".to_string(),
         })
     }
-}
 
-type AuthorizePayment = Call<Authorize>;
-
-#[derive(Clone, Debug, Serialize)]
-struct Refund;
-
-#[async_trait]
-impl CallRequest for Refund {
-    const EFFECT_TYPE: &'static str = "payments.refund";
-    type Safety = Idempotent;
-    type Port = PaymentService;
-    type Outcome = PaymentEffectFact;
-
-    async fn call(
-        &self,
-        _payments: &PaymentService,
-        _ctx: &mut EffectContext,
-    ) -> Result<PaymentEffectFact, EffectError> {
+    #[effect(type = "payments.refund", exactly_once)]
+    fn refund(&self, _: &Refund) -> Result<PaymentEffectFact, EffectError> {
         Ok(PaymentEffectFact {
             kind: "refund".to_string(),
         })
     }
 }
-
-type RefundPayment = Call<Refund>;
 
 #[derive(Clone, Debug, obzenflow::effects::EffectHandler)]
 struct PaymentEffectsHandler {
@@ -179,7 +156,6 @@ impl PaymentEffectsHandler {
 impl EffectfulTransformHandler for PaymentEffectsHandler {
     type Input = Item;
     type Output = obzenflow_core::stage_fact_set![PaymentEffectFact];
-    type AllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment, RefundPayment];
 
     async fn process(
         &self,
@@ -362,8 +338,8 @@ fn build_two_effect_flow_future(
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
     FlowDefinition::materialize(move |_runtime_config| {
-        let authorize_resilience = payment_resilience().for_effect::<AuthorizePayment>();
-        let refund_resilience = payment_resilience().for_effect::<RefundPayment>();
+        let authorize_resilience = payment_resilience().for_effect::<Authorize>();
+        let refund_resilience = payment_resilience().for_effect::<Refund>();
         let one_shot_source = OneShotSource { emitted: false };
         let payment_effects = PaymentEffectsHandler::new();
         let null_sink = NullSink::<PaymentEffectFact>::new();
@@ -687,11 +663,11 @@ async fn manifest_retains_two_real_effect_rows_for_one_stage_broadcast() {
         vec![
             Some(ResolvedForDoc::Effect {
                 stage: "authorize_payment".to_string(),
-                effect_type: Authorize::EFFECT_TYPE.to_string(),
+                effect_type: AUTHORIZE.to_string(),
             }),
             Some(ResolvedForDoc::Effect {
                 stage: "authorize_payment".to_string(),
-                effect_type: Refund::EFFECT_TYPE.to_string(),
+                effect_type: REFUND.to_string(),
             }),
         ]
     );
@@ -728,7 +704,7 @@ async fn manifest_retains_two_real_effect_rows_for_one_stage_broadcast() {
     effects.sort();
     assert_eq!(
         effects,
-        [Authorize::EFFECT_TYPE, Refund::EFFECT_TYPE],
+        [AUTHORIZE, REFUND],
         "equal inherited values retain both concrete effect operations"
     );
 }
@@ -759,7 +735,7 @@ async fn topology_retains_effect_winners_and_inactive_settings_after_a_mode_over
         candidates
             .admit(ScopedCandidate {
                 key_path: key.to_string(),
-                address: ConfigAddress::effect("authorize_payment", Authorize::EFFECT_TYPE),
+                address: ConfigAddress::effect("authorize_payment", AUTHORIZE),
                 source: ConfigSource::File,
                 value,
             })
@@ -781,8 +757,8 @@ async fn topology_retains_effect_winners_and_inactive_settings_after_a_mode_over
         };
         // Count-window and failure-rate rows remain visible even when inactive.
         let info = assert_effect_breaker(attachment, effect_type);
-        let exact = effect_type == Authorize::EFFECT_TYPE;
-        assert!(exact || effect_type == Refund::EFFECT_TYPE);
+        let exact = effect_type == AUTHORIZE;
+        assert!(exact || effect_type == REFUND);
         let effect_subject = SettingSubject::Effect {
             effect_type: effect_type.clone(),
         };

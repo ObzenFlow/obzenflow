@@ -17,9 +17,9 @@ use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::ai::{AiBinding, AiBindingError, AiEffect, AiModelSource, AiRequestError};
 use obzenflow_runtime::effects::{
     BoundEffect, Configured, Effect, EffectBindingEvidence, EffectBindingUse, EffectContext,
-    EffectError, EffectPortMetadataContext, EffectPortResolverWithMetadata, EffectPortSlot,
-    EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, LogicalEffectBindingName,
-    RecordedReply, ResolvedEffectPort,
+    EffectError, EffectName, EffectPortMetadataContext, EffectPortResolverWithMetadata,
+    EffectPortSlot, EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety,
+    LogicalEffectBindingName, RecordedReply, ResolvedEffectPort,
 };
 use std::sync::Arc;
 
@@ -214,6 +214,10 @@ impl BoundEffect for EmbeddingGeneration {
     fn required_slots() -> EffectPortSlotSet {
         EffectPortSlotSet::single(EMBEDDING_CLIENT)
     }
+}
+
+impl EffectName for EmbeddingGeneration {
+    type Effect = Self;
 }
 
 impl AiEffect for EmbeddingGeneration {

@@ -17,7 +17,7 @@ pub struct RuntimeProvenance {
 
 /// Counts retain their existing physical input/output populations. In particular,
 /// composite protocol and framework effect rows are not erased by the `fact` kind.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionAccounting {
     pub events_processed_total: u64,

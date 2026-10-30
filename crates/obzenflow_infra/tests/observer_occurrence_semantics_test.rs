@@ -854,7 +854,6 @@ struct ConcurrentTransform {
 impl EffectfulTransformHandler for ConcurrentTransform {
     type Input = ConcurrentInput;
     type Output = ConcurrentOutput;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,

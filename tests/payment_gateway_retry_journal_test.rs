@@ -659,6 +659,15 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         None,
     );
     assert_eq!(treatment_gateway.calls(), 3);
+    let order_key = obzenflow_runtime::effects::IdempotencyKey(format!(
+        "payment-authorize:{}",
+        retry_fixture::retry_order().order_id
+    ));
+    assert_eq!(
+        treatment_gateway.keys(),
+        vec![order_key; 3],
+        "every retry of one authorization sends its order's key"
+    );
     let treatment = exported_run(
         &treatment_run,
         &treatment_root.path().join("treatment.jsonl"),

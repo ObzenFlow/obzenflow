@@ -10,7 +10,7 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderCancelled, OrderId, OrderPlaced,
     ReservationConfirmed, ReservationFailed, Sku, SoldOut, StockReleased, StockReserved,
 };
-use super::warehouse::{warehouse_system, ReserveStock, WarehouseConfig, WarehouseStats};
+use super::warehouse::{warehouse_system, StockReservation, WarehouseConfig, WarehouseStats};
 use obzenflow::effects::SystemError;
 use obzenflow::flow::{effectful_stateful, flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
@@ -155,7 +155,7 @@ fn allocation_flow(
         .slow_call_rate_threshold(1.0)
         .open_for(Duration::from_secs(60))
         .probes(1);
-    let reserve_resilience = reserve_breaker.for_effect::<ReserveStock>();
+    let reserve_resilience = reserve_breaker.for_effect::<StockReservation>();
 
     let allocation_feed = sources::ValuesSource::new(inputs);
     let phone_feed = sources::ValuesSource::new(phone_reservations());

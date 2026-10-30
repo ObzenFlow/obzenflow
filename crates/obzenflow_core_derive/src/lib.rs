@@ -101,9 +101,11 @@ pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
 }
 
 /// Declare the systems an effectful handler calls. Each field marked
-/// `#[system]` holds a `System` or a typed binding, and the build matches each
-/// named effect the handler performs to one of them. A handler that calls no
-/// system derives it with no such field.
+/// `#[system]` holds a `System` or a typed binding, and the handler may perform
+/// every effect the field's port declares. A field written
+/// `#[system(RequestA, RequestB)]` allows only the requests it lists, each of
+/// which its port must declare. A handler that calls no system derives it with
+/// no such field.
 ///
 /// Generated code resolves `::obzenflow::effects`; code that depends on the
 /// runtime crate directly names its effects module with
@@ -116,19 +118,41 @@ pub fn derive_effect_handler(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Mark a trait as a port, or a struct as its own port, so a `System` takes its
-/// port type from the value it is built from. Port methods fail with
-/// `EffectError`, and the one that settles a request answers with that
-/// request's outcome. Generated code resolves
-/// `::obzenflow::effects`; code that depends on the runtime crate directly
-/// writes `#[port(effects = <path>)]`.
+/// Mark a port trait, or the inherent `impl` block of a struct that serves as
+/// its own port, so a `System` takes its port type from the value it is built
+/// from. Port methods answer with `Result<Outcome, EffectError>`.
+///
+/// Each method marked `#[effect(type = "...", exactly_once)]` or
+/// `#[effect(type = "...", at_least_once)]` declares one effect. It takes its
+/// request by reference after `&self`, and the request type then names the
+/// effect: a handler performs it with `fx.call(request)` and lists it in its
+/// `AllowedEffects`. `type` is the effect type the journal records the call
+/// under, and an optional `schema_version = N` versions the request's shape.
+///
+/// The guarantee describes the call at the other end:
+///
+/// - `exactly_once`: the call takes effect once even if it runs again. Either
+///   the operation is idempotent, or the method takes `key: &IdempotencyKey`
+///   after its request and the other end deduplicates by it, or the method
+///   takes `tx: EffectCommitHandle<Outcome>` and commits its outcome through
+///   it. A keyed request implements `Keyed`, and its key is journalled with the
+///   call.
+/// - `at_least_once`: the call may take effect more than once after a crash.
+///   The stage row accepts that with `.at_least_once::<Request>()` after its
+///   handler, and retry middleware does not repeat it.
+///
+/// After its request, an effect method takes nothing, `&EffectContext`,
+/// `key: &IdempotencyKey` optionally followed by `&EffectContext`, or a
+/// commit handle. In a struct's `impl` block, methods without `#[effect]` are
+/// ordinary methods; on a port trait, every method is a port method.
+///
+/// Generated code resolves `::obzenflow::effects`; code that depends on the
+/// runtime crate directly writes `#[port(effects = <path>)]`.
 #[proc_macro_attribute]
 pub fn port(attr: TokenStream, item: TokenStream) -> TokenStream {
     let effects = parse_macro_input!(attr as effects_path::EffectsPath);
     let item = parse_macro_input!(item as syn::Item);
-    port::expand(&effects, &item)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+    port::expand(&effects, item).into()
 }
 
 /// Select the schema contracts for the effect carrier, through either its

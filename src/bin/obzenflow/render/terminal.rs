@@ -174,6 +174,13 @@ impl TerminalRenderer {
         )?;
         self.spans(output, &palette, &relation_spans)?;
         writeln!(output, "{}", self.clock(&view.clock(), &header))?;
+        if let Some(key) = view.idempotency_key() {
+            self.spans(
+                output,
+                &palette,
+                &[Span::new(format!("idempotency key: {key}"), Role::Muted)],
+            )?;
+        }
         self.spans(
             output,
             &palette,

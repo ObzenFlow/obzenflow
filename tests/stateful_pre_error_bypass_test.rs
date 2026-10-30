@@ -339,7 +339,6 @@ impl EffectfulStatefulHandler for Tally {
     type State = usize;
     type Input = Input;
     type Output = Aggregate;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     fn initial_state(&self) -> Self::State {
         0

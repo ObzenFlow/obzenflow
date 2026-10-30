@@ -20,8 +20,7 @@
 //!
 //! `EffectOutcomeFacts` uses `#[effect_outcome(schema = obzenflow::schema)]`.
 //! If the dependency is renamed to `of`, use `of::schema` in either attribute.
-//! Declare fact sets with [`stage_fact_set!`]; effect sets use
-//! [`crate::effects::effect_set!`].
+//! Declare fact sets with [`stage_fact_set!`].
 
 pub use obzenflow_core::event::schema::{
     DeclaredStageFactSet, EffectOutcomeFacts, Member, OneFactStageOutput, StageFactSet,

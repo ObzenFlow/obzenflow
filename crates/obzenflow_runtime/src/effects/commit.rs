@@ -455,6 +455,7 @@ pub(super) fn build_effect_attempt_started_event(
         group_id: Some(started.outcome_group_id),
         fact_owner: EffectFactOwner::Framework,
         origin: None,
+        idempotency_key: None,
     });
     Ok(event)
 }
@@ -491,6 +492,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
         group_id: Some(abandoned.outcome_group_id),
         fact_owner: EffectFactOwner::Framework,
         origin: None,
+        idempotency_key: None,
     });
     Ok(event)
 }

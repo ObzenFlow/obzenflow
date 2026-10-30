@@ -8,7 +8,7 @@ use super::domain::{
     AllocationInput, CancelIgnored, HoldId, OrderId, ReservationFailed, Sku, SoldOut,
     StockReleased, StockReserved,
 };
-use super::warehouse::{ReleaseStock, ReserveStock, StockRelease, StockReservation, WarehousePort};
+use super::warehouse::{StockRelease, StockReservation, WarehousePort};
 use async_trait::async_trait;
 use obzenflow::effects::{EffectError, EffectHandler, Effects, StageCompletion, System};
 use obzenflow::error::HandlerError;
@@ -56,8 +56,6 @@ pub enum AllocationOutput {
     CancelIgnored(CancelIgnored),
 }
 
-type AllocationEffects = obzenflow::effects::effect_set![ReserveStock, ReleaseStock];
-
 #[derive(Clone, Debug, EffectHandler)]
 pub struct Allocator {
     #[system]
@@ -96,7 +94,6 @@ impl EffectfulStatefulHandler for Allocator {
     type State = AllocationState;
     type Input = AllocationInput;
     type Output = AllocationOutput;
-    type AllowedEffects = AllocationEffects;
 
     fn initial_state(&self) -> Self::State {
         AllocationState::default()

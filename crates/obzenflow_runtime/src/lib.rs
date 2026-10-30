@@ -54,7 +54,6 @@ pub mod __private {
         UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
         UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
     };
-    pub use obzenflow_core::event::schema::{EmptySet, WithMember};
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -127,9 +126,9 @@ pub mod prelude {
 
     // Event flow
     pub use crate::effects::{
-        Call, CallRequest, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
-        EffectHandler, EffectOutcomeKind, EffectOutcomePayload, EffectSafety, Effects,
-        IdempotencyKey, SinkRedeliverySafety, System,
+        EffectCommitHandle, EffectContext, EffectDeclaration, EffectError, EffectHandler,
+        EffectOutcomeKind, EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey, Keyed,
+        SinkRedeliverySafety, System,
     };
     pub use crate::messaging::UpstreamSubscription;
 

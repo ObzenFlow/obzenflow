@@ -137,6 +137,54 @@ fn root_facades_export_the_owned_authoring_surfaces() {
     );
 }
 
+fn used_names(tree: &syn::UseTree, names: &mut Vec<String>) {
+    match tree {
+        syn::UseTree::Path(path) => used_names(&path.tree, names),
+        syn::UseTree::Name(name) => names.push(name.ident.to_string()),
+        syn::UseTree::Rename(rename) => names.push(rename.ident.to_string()),
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                used_names(tree, names);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+#[test]
+fn the_effects_facade_documents_no_request_machinery() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join("src/effects.rs"))
+        .expect("effects facade module should be readable");
+    let facade = syn::parse_file(&source).expect("parse the effects facade");
+    for item in &facade.items {
+        let syn::Item::Use(item) = item else {
+            continue;
+        };
+        let hidden = item.attrs.iter().any(|attribute| {
+            matches!(&attribute.meta, syn::Meta::List(list)
+                if list.path.is_ident("doc") && list.tokens.to_string() == "hidden")
+        });
+        let mut names = Vec::new();
+        used_names(&item.tree, &mut names);
+        for machinery in [
+            "AtLeastOnce",
+            "Call",
+            "CallRequest",
+            "CallSafety",
+            "Idempotent",
+            "KeyRule",
+            "RequiresKey",
+            "Transactional",
+        ] {
+            assert!(
+                hidden || !names.iter().any(|name| name == machinery),
+                "obzenflow::effects documents `{machinery}`, which only `#[effect]` names"
+            );
+        }
+    }
+}
+
 #[test]
 fn every_example_uses_only_the_application_facade() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

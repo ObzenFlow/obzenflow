@@ -108,7 +108,8 @@ impl EffectContext {
     }
 
     /// The commit handle of a [`Transactional`] request. Its port commits the
-    /// outcome through it, and the committed record is the outcome.
+    /// outcome through it, and the committed record is the outcome. Code that
+    /// `#[effect]` generates for a method taking an `EffectCommitHandle` calls it.
     ///
     /// ```
     /// # use async_trait::async_trait;
@@ -173,6 +174,7 @@ impl EffectContext {
     ///     }
     /// }
     /// ```
+    #[doc(hidden)]
     pub fn transaction<R>(
         &self,
         _request: &R,

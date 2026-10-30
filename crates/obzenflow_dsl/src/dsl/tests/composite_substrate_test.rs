@@ -12,8 +12,7 @@ mod tests {
 
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::effects::{
-        AnswersEffect, Call, CallRequest, EffectContext, EffectDeclaration, EffectError,
-        Idempotent, System,
+        AnswersEffect, EffectDeclaration, EffectError, EffectName, System,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::TransformHandler;
@@ -60,20 +59,15 @@ mod tests {
     payload!(FailedP, "test.branch.failed");
     payload!(UnrelatedP, "test.branch.unrelated");
 
-    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
     struct FixturePort;
 
     #[derive(Clone, Debug, Serialize)]
     struct FixtureRequest;
 
-    #[async_trait::async_trait]
-    impl CallRequest for FixtureRequest {
-        const EFFECT_TYPE: &'static str = "test.fixture_effect";
-        type Safety = Idempotent;
-        type Port = FixturePort;
-        type Outcome = MidP;
-
-        async fn call(&self, _: &FixturePort, _: &mut EffectContext) -> Result<MidP, EffectError> {
+    #[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+    impl FixturePort {
+        #[effect(type = "test.fixture_effect", exactly_once)]
+        fn fixture(&self, _: &FixtureRequest) -> Result<MidP, EffectError> {
             Ok(MidP)
         }
     }
@@ -81,7 +75,7 @@ mod tests {
     fn fixture_declaration() -> EffectDeclaration {
         let system =
             System::eager("fixture", std::sync::Arc::new(FixturePort)).expect("fixture system");
-        AnswersEffect::<Call<FixtureRequest>>::declaration(&system, None)
+        AnswersEffect::<<FixtureRequest as EffectName>::Effect>::declaration(&system, None)
             .expect("fixture declaration")
     }
 

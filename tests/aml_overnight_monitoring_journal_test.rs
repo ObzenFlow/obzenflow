@@ -327,6 +327,28 @@ impl Archive {
             .collect()
     }
 
+    fn keyed_facts(
+        &self,
+        stage: &str,
+        event_type: &str,
+    ) -> Vec<(serde_json::Value, Option<String>)> {
+        self.rows(stage)
+            .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
+            .filter(|row| row.event_type() == event_type)
+            .map(|row| {
+                let key = row
+                    .envelope
+                    .provenance
+                    .event
+                    .effect_provenance
+                    .as_ref()
+                    .and_then(|provenance| provenance.idempotency_key.as_ref())
+                    .map(|key| key.0.clone());
+                (row.payload(), key)
+            })
+            .collect()
+    }
+
     fn effect_failures(&self, stage: &str) -> Vec<(String, String)> {
         self.rows(stage)
             .filter_map(|row| match &row.payload {
@@ -470,6 +492,15 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
     let decided: BTreeSet<u64> = verdicts.iter().copied().collect();
     assert_eq!(verdicts.len(), decided.len(), "each transaction ends once");
     assert_eq!(decided, fixture_txn_ids());
+    for event_type in ["aml.transaction_cleared", "aml.alert_raised"] {
+        for (verdict, key) in archive.keyed_facts("score", event_type) {
+            assert_eq!(
+                key,
+                Some(format!("aml-score:{}", txn_id(&verdict))),
+                "each score record carries its transaction's key"
+            );
+        }
+    }
 
     let flags: BTreeMap<u64, Vec<&str>> = flagged
         .iter()
@@ -676,6 +707,13 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
         let alert = raised[alert_id(case)];
         assert_eq!(reasons(case), reasons(alert));
         assert_eq!(case["rules_version"], alert["rules_version"]);
+    }
+    for (case, key) in archive.keyed_facts("open_case", "aml.case_opened") {
+        assert_eq!(
+            key,
+            Some(format!("aml-case:{}", alert_id(&case))),
+            "each case record carries its alert's key"
+        );
     }
 
     let risk_log = dir.path().join("risk-calls.jsonl");

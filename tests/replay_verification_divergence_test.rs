@@ -86,7 +86,6 @@ struct Stamp {
 impl EffectfulTransformHandler for Stamp {
     type Input = Input;
     type Output = Stamped;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,
@@ -124,7 +123,6 @@ struct StampV2;
 impl EffectfulTransformHandler for StampV2 {
     type Input = Input;
     type Output = Stamped;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,

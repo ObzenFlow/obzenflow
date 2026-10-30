@@ -99,7 +99,6 @@ impl Drop for PendingInvocationGuard {
 impl EffectfulTransformHandler for HungTransform {
     type Input = ProbeEvent;
     type Output = ProbeEvent;
-    type AllowedEffects = obzenflow_runtime::effect_set![];
 
     async fn process(
         &self,

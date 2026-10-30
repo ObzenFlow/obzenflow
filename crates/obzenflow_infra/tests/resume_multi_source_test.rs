@@ -25,10 +25,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::{
-    Call, CallRequest, EffectContext, EffectError, Effects, IdempotencyKey, Keyed, RequiresKey,
-    SinkRedeliverySafety, System,
-};
+use obzenflow_runtime::effects::{EffectError, Effects, SinkRedeliverySafety, System};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -143,7 +140,6 @@ impl TypedTransformHandler for MergeTransform {
     }
 }
 
-#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
 struct CallCounter {
     calls: Arc<AtomicUsize>,
 }
@@ -155,32 +151,16 @@ struct Counting {
     value: u64,
 }
 
-#[async_trait]
-impl CallRequest for Counting {
-    const EFFECT_TYPE: &'static str = "resume_fan_in.counting";
-    type Safety = RequiresKey;
-    type Port = CallCounter;
-    type Outcome = EffectValue;
-
-    async fn call(
-        &self,
-        counter: &CallCounter,
-        _ctx: &mut EffectContext,
-    ) -> Result<EffectValue, EffectError> {
-        counter.calls.fetch_add(1, Ordering::SeqCst);
+#[obzenflow_runtime::effects::port(effects = obzenflow_runtime::effects)]
+impl CallCounter {
+    #[effect(type = "resume_fan_in.counting", exactly_once)]
+    fn count(&self, request: &Counting) -> Result<EffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EffectValue {
-            effect_value: self.value + 1000,
+            effect_value: request.value + 1000,
         })
     }
 }
-
-impl Keyed for Counting {
-    fn idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey(format!("resume-fan-in:{}", self.value))
-    }
-}
-
-type CountingEffect = Call<Counting>;
 
 #[derive(Clone, Debug, obzenflow_runtime::effects::EffectHandler)]
 #[effect_handler(effects = obzenflow_runtime::effects)]
@@ -193,7 +173,6 @@ struct EffectfulTail {
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = Merged;
     type Output = obzenflow_core::stage_fact_set![FanInOutput, EffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
 
     async fn process(
         &self,

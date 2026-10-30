@@ -2,29 +2,51 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Effect capability sets (FLOWIP-120z).
+//! Effect capability sets.
 //!
-//! An effect set is the exhaustive, compiler-visible set of effect request
-//! types one handler may pass to `perform`. Membership is proved directly
-//! against the concrete `Effect` type; there is no second associated effect
-//! identity, and the stable runtime and archive identity remains
+//! An effect set is the exhaustive, compiler-visible set of effects one
+//! handler may perform. `#[derive(EffectHandler)]` builds it from the
+//! handler's `#[system]` fields: each field allows every effect its port
+//! declares, or the requests its `#[system(...)]` lists. [`EffectName`] maps
+//! each member to its effect; the stable runtime and archive identity remains
 //! `EFFECT_TYPE`. Sets are zero-sized declarations, never persisted.
 
+use super::call::{Call, CallRequest};
 use super::declaration::Effect;
 use obzenflow_core::event::schema::{
     const_str_eq, require_distinct, EmptySet, MemberList, WithMember,
 };
 use std::marker::PhantomData;
 
+/// A name written where an effect is named: a request type, which names the
+/// effect that performs it, or an effect type, which names itself.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a declared request",
+    label = "no `#[effect]` port method takes `{Self}`",
+    note = "declare it with `#[effect(type = \"...\", exactly_once)]` or `at_least_once` on the port method that takes it"
+)]
+pub trait EffectName: 'static {
+    type Effect: Effect;
+}
+
+impl<R: CallRequest> EffectName for R {
+    type Effect = Call<R>;
+}
+
+impl<R: CallRequest> EffectName for Call<R> {
+    type Effect = Call<R>;
+}
+
 /// Capability authority for one handler's permitted effect identities.
 ///
-/// A deliberately effect-free handler declares `effect_set![]`; the hidden
-/// `Members` projection is what `Effects::perform` bounds and the DSL
-/// manifest equality assertions consume.
+/// A handler with no `#[system]` field allows no effect. The hidden `Members`
+/// projection is what `Effects::perform` bounds and the DSL manifest equality
+/// assertions consume.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an effect capability set",
-    note = "declare the handler's permitted effects as `effect_set![EffectA, EffectB]`; a \
-            deliberately effect-free handler declares `effect_set![]` (FLOWIP-120z)"
+    note = "a handler's effects come from its `#[system]` fields; derive `EffectHandler` and \
+            mark each field that holds a system `#[system]`"
 )]
 pub trait EffectSet: Send + Sync + 'static {
     /// Hidden type-level member projection; proof machinery, not public
@@ -42,8 +64,10 @@ pub trait EffectSet: Send + Sync + 'static {
     const MEMBERS_DISTINCT: () = ();
 }
 
-/// Zero-sized expansion target of `effect_set![...]`. Never constructed and
-/// never persisted; it exists only as a type-level declaration.
+/// The zero-sized set of the members `L` lists, which `#[derive(EffectHandler)]`
+/// and the framework's own handlers name. Never constructed and never
+/// persisted; it exists only as a type-level declaration.
+#[doc(hidden)]
 pub struct DeclaredEffectSet<L>(PhantomData<fn() -> L>);
 
 impl<L: EffectList> EffectSet for DeclaredEffectSet<L> {
@@ -58,9 +82,22 @@ impl<L: EffectList> EffectSet for DeclaredEffectSet<L> {
     const MEMBERS_DISTINCT: () = L::DISTINCT_EFFECT_TYPES;
 }
 
-/// A member list whose heads are effect request types, with a const
-/// duplicate guard over `EFFECT_TYPE` and a value-level identity
-/// projection.
+/// Names written as nested pairs, `(A, (B, ()))`, read as set members.
+#[doc(hidden)]
+pub trait RequestList {
+    type Members;
+}
+
+impl RequestList for () {
+    type Members = EmptySet;
+}
+
+impl<Head, Rest: RequestList> RequestList for (Head, Rest) {
+    type Members = WithMember<Head, Rest::Members>;
+}
+
+/// A member list whose heads are effect names, with a const duplicate guard
+/// over their `EFFECT_TYPE` and a value-level identity projection.
 #[doc(hidden)]
 pub trait EffectList: MemberList {
     const DISTINCT_EFFECT_TYPES: ();
@@ -75,7 +112,7 @@ impl EffectList for EmptySet {
 
 impl<Head, Rest> EffectList for WithMember<Head, Rest>
 where
-    Head: Effect,
+    Head: EffectName,
     Rest: EffectList + EffectTypeDisjoint<Head>,
 {
     const DISTINCT_EFFECT_TYPES: () = require_distinct(
@@ -84,12 +121,12 @@ where
     );
 
     fn append_effect_types(out: &mut Vec<&'static str>) {
-        out.push(Head::EFFECT_TYPE);
+        out.push(<Head::Effect as Effect>::EFFECT_TYPE);
         Rest::append_effect_types(out);
     }
 }
 
-/// Pairwise `EFFECT_TYPE` disjointness between one effect type and every
+/// Pairwise `EFFECT_TYPE` disjointness between one effect name and every
 /// member of the list.
 #[doc(hidden)]
 pub trait EffectTypeDisjoint<X> {
@@ -102,15 +139,18 @@ impl<X> EffectTypeDisjoint<X> for EmptySet {
 
 impl<X, Head, Rest> EffectTypeDisjoint<X> for WithMember<Head, Rest>
 where
-    X: Effect,
-    Head: Effect,
+    X: EffectName,
+    Head: EffectName,
     Rest: EffectTypeDisjoint<X>,
 {
     const OK: () = {
         assert!(
-            !const_str_eq(X::EFFECT_TYPE, Head::EFFECT_TYPE),
-            "duplicate member in a declared effect capability set: two members share an \
-             effect type; each effect appears exactly once (FLOWIP-120z)"
+            !const_str_eq(
+                <X::Effect as Effect>::EFFECT_TYPE,
+                <Head::Effect as Effect>::EFFECT_TYPE
+            ),
+            "two effects this handler allows share an effect type; each effect type is \
+             allowed once"
         );
         Rest::OK
     };
@@ -123,35 +163,10 @@ pub const fn assert_distinct_effect_set<S: EffectSet>() {
     S::MEMBERS_DISTINCT
 }
 
-/// Declare an effect capability set in type position (FLOWIP-120z):
-///
-/// ```ignore
-/// type AllowedEffects = effect_set![AuthorizePayment];
-/// type NoEffects = effect_set![];
-/// ```
-///
-/// Duplicate members are compile errors (a const-eval panic when the set is
-/// used). Set equality elsewhere is semantic, not order-sensitive.
-#[macro_export]
-macro_rules! effect_set {
-    [$($member:ty),* $(,)?] => {
-        $crate::effects::DeclaredEffectSet<
-            $crate::effect_set!(@list $($member),*)
-        >
-    };
-    (@list) => { $crate::__private::EmptySet };
-    (@list $head:ty $(, $rest:ty)*) => {
-        $crate::__private::WithMember<
-            $head,
-            $crate::effect_set!(@list $($rest),*)
-        >
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::error::EffectError;
-    use super::super::{Call, CallRequest, EffectContext, Idempotent};
+    use super::super::{EffectContext, Idempotent};
     use super::*;
     use async_trait::async_trait;
     use obzenflow_core::event::schema::Member;
@@ -182,8 +197,6 @@ mod tests {
         }
     }
 
-    type Ping = Call<PingRequest>;
-
     #[derive(Debug, Clone, Serialize)]
     struct PongRequest;
 
@@ -199,7 +212,8 @@ mod tests {
         }
     }
 
-    type Pong = Call<PongRequest>;
+    type PingPong = DeclaredEffectSet<<(PingRequest, (PongRequest, ())) as RequestList>::Members>;
+    type NoEffects = DeclaredEffectSet<<() as RequestList>::Members>;
 
     fn member_holds<Set, E, Index>()
     where
@@ -210,29 +224,26 @@ mod tests {
 
     #[test]
     fn declared_effect_set_projects_identities_in_declared_order() {
-        type Allowed = crate::effect_set![Ping, Pong];
         assert_eq!(
-            <Allowed as EffectSet>::effect_types(),
+            <PingPong as EffectSet>::effect_types(),
             vec!["effect_set.ping", "effect_set.pong"]
         );
     }
 
     #[test]
     fn empty_effect_set_is_a_valid_declaration() {
-        type NoEffects = crate::effect_set![];
         assert!(<NoEffects as EffectSet>::effect_types().is_empty());
     }
 
     #[test]
-    fn membership_witnesses_resolve_against_concrete_effects() {
-        type Allowed = crate::effect_set![Ping, Pong];
-        member_holds::<Allowed, Ping, _>();
-        member_holds::<Allowed, Pong, _>();
+    fn membership_witnesses_resolve_against_written_names() {
+        member_holds::<PingPong, PingRequest, _>();
+        member_holds::<PingPong, PongRequest, _>();
     }
 
     #[test]
     fn distinct_member_guard_evaluates_for_distinct_sets() {
-        const _: () = assert_distinct_effect_set::<crate::effect_set![Ping, Pong]>();
-        const _: () = assert_distinct_effect_set::<crate::effect_set![]>();
+        const _: () = assert_distinct_effect_set::<PingPong>();
+        const _: () = assert_distinct_effect_set::<NoEffects>();
     }
 }

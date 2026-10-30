@@ -10,7 +10,7 @@ use super::money::{Currency, Money, UsdCents, UsdPerUnit};
 use super::vendors::{ScoreOutcome, RISK_ENGINE_SOURCE};
 use async_trait::async_trait;
 use obzenflow::effects::simulated::{CallLog, CallLogError};
-use obzenflow::effects::{EffectContext, EffectError, Keyed};
+use obzenflow::effects::{EffectContext, EffectError, IdempotencyKey};
 use obzenflow::schema::FlowId;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -61,9 +61,11 @@ pub enum RiskVerdict {
 #[obzenflow::port]
 #[async_trait]
 pub trait RiskEnginePort: Send + Sync {
+    #[effect(type = "aml.score_transaction", exactly_once)]
     async fn score(
         &self,
         request: &ScoreRequest,
+        key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<ScoreOutcome, EffectError>;
 }
@@ -75,6 +77,7 @@ impl RiskEnginePort for RiskEngineOutage {
     async fn score(
         &self,
         _: &ScoreRequest,
+        _: &IdempotencyKey,
         _: &EffectContext,
     ) -> Result<ScoreOutcome, EffectError> {
         Err(EffectError::unavailable(
@@ -96,9 +99,13 @@ impl SimulatedRiskEngine {
         })
     }
 
-    fn answer(&self, request: &ScoreRequest, flow_id: FlowId) -> Result<RiskVerdict, CallLogError> {
-        self.calls
-            .answer(&request.idempotency_key(), flow_id, |_| decide(request))
+    fn answer(
+        &self,
+        request: &ScoreRequest,
+        key: &IdempotencyKey,
+        flow_id: FlowId,
+    ) -> Result<RiskVerdict, CallLogError> {
+        self.calls.answer(key, flow_id, |_| decide(request))
     }
 }
 
@@ -107,9 +114,10 @@ impl RiskEnginePort for SimulatedRiskEngine {
     async fn score(
         &self,
         request: &ScoreRequest,
+        key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<ScoreOutcome, EffectError> {
-        let verdict = self.answer(request, ctx.flow_id()).map_err(|error| {
+        let verdict = self.answer(request, key, ctx.flow_id()).map_err(|error| {
             EffectError::unavailable(RISK_ENGINE_SOURCE, "ledger_write_failed", error)
         })?;
         Ok(ScoreOutcome::from_verdict(request, verdict))
@@ -230,6 +238,7 @@ fn thin_history_large_transfer(request: &ScoreRequest, usd: Option<UsdCents>) ->
 mod tests {
     use super::super::domain::Transaction;
     use super::*;
+    use obzenflow::effects::Keyed;
 
     fn transaction(
         txn_id: u64,
@@ -376,8 +385,13 @@ mod tests {
         );
         let engine = SimulatedRiskEngine::open(&path).expect("the call log opens");
         let first_run = FlowId::new();
-        let first = engine.answer(&flagged, first_run).expect("first call");
-        let repeat = engine.answer(&flagged, first_run).expect("repeated call");
+        let key = flagged.idempotency_key();
+        let first = engine
+            .answer(&flagged, &key, first_run)
+            .expect("first call");
+        let repeat = engine
+            .answer(&flagged, &key, first_run)
+            .expect("repeated call");
         assert_eq!(repeat, first);
 
         assert_eq!(

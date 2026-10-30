@@ -23,7 +23,7 @@ pub enum EventKind {
     System,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ChainPayload {
     Fact(Value),
     CompositeData(CompositeDataPayload),
