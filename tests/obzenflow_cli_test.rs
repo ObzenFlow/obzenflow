@@ -1090,10 +1090,20 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 expression.starts_with(&format!("{event_type} ← {stage}({input})")),
                 "second line names the recorded output and its origin: {block}"
             );
-            assert_eq!(lines[clock + 1], "payload schema version: 1");
-            assert_eq!(lines[clock + 2], "{", "payload starts at the left margin");
+            let schema = if stage == "authorize_payment" {
+                assert_eq!(
+                    lines[clock + 1],
+                    format!("idempotency key: payment-authorize:{order}"),
+                    "a keyed call shows its key after the clock: {block}"
+                );
+                clock + 2
+            } else {
+                clock + 1
+            };
+            assert_eq!(lines[schema], "payload schema version: 1");
+            assert_eq!(lines[schema + 1], "{", "payload starts at the left margin");
             assert!(
-                lines[clock + 3..]
+                lines[schema + 2..]
                     .iter()
                     .all(|line| line.chars().count() <= 90),
                 "{block}"
