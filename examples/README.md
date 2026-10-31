@@ -28,32 +28,15 @@ Run commands from the repository root. Most examples use:
 cargo run -p obzenflow --example <name>
 ```
 
-Follow the local run guides above for payments, flash-sale allocation,
-overnight AML monitoring, metrics, the bank and the HN digest. The bank and AI
-examples start with these commands:
+Examples with a run guide list their own commands. The one-shot inference
+example needs Ollama running with `llama3.1:8b`:
 
 ```sh
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host
-
 cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
   --config examples/one_shot_inference_demo/obzenflow.toml
-
-cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
-  --config examples/hn_ai_digest_demo/obzenflow.toml
 ```
 
-Both AI configurations require Ollama running with `llama3.1:8b` available.
-The digest uses a local mock news endpoint by default;
-[its live config](hn_ai_digest_demo/obzenflow.live.toml) fetches real Hacker News
-stories. For PostgreSQL output, select
-[the PostgreSQL config](hn_ai_digest_demo/obzenflow.postgres.toml) and supply a
-connection as described in the [local PostgreSQL guide](../dev/postgres/README.md).
-
-The bank example opens its accounts at startup from the file its
-[config](http_ingestion_piggy_bank_demo/obzenflow.toml) names under `[app] accounts_file`,
-[accounts.yaml](http_ingestion_piggy_bank_demo/accounts.yaml) by default; transactions
-arrive over HTTP. To open other accounts, pass a copy of the config that names another
-file, with `--config <file>` or `OBZENFLOW_CONFIG=<file>`. It also includes an
+The bank example also includes an
 [authenticated control-plane config](http_ingestion_piggy_bank_demo/obzenflow.auth.toml);
 see [managed web authentication](../crates/obzenflow_infra/src/web/README.md) for setup.
 

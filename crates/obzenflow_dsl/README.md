@@ -11,9 +11,8 @@ runner.
 
 ## Authoring contract
 
-`flow!` declares a name, journals, stages, and topology. Optional backpressure and
-effect-port sections configure construction; middleware attaches to the stage
-and live-I/O boundary it protects.
+`flow!` declares a name, journals, stages, and topology. Middleware attaches to
+the stage and live-I/O boundary it protects.
 
 Construct handlers, connectors, and policies inside
 `FlowDefinition::materialize`, using the resolved runtime configuration supplied
@@ -38,7 +37,7 @@ sequenceDiagram
   participant Runtime
 
   Host->>Def: build(context).await
-  Def->>Def: materialise handlers from resolved configuration
+  Def->>Def: materialize handlers from resolved configuration
   Def->>Build: build collected descriptors and edges
   Build->>Build: validate types, bindings, and join tuples
   Build->>Topology: validate graph and cycles
@@ -73,14 +72,11 @@ cannot belong to a join; internal composite joins use
 
 ## AI stages
 
-- `inference!` makes one model decision for each already-bounded input.
-- `ai_map_reduce!` budgets and chunks input, collects map results, and finalizes them.
-
-Both use a declared chat effect and a lexical `EffectBinding<ChatCompletion>`
-through `via`. Handlers and roles prepare a `ChatRequestSpec`; the effect boundary
-binds the configured target and records the reply for replay. Interpretation
-receives the retained spec and reply. The reply itself is framework evidence,
-not a selectable stage output.
+`ai!` declares a stage over a handler built with `ai::infer`, which makes one
+call per input, or `ai::map`, which makes one call per group of items.
+Configuration chooses each stage's model. A role prepares each
+`ChatRequestSpec` and interprets the reply, which the effect boundary records
+for replay.
 
 ## Implementation map
 

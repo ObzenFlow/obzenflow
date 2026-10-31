@@ -69,7 +69,7 @@ configuration problem without exposing credential values.
 
 The application validates authentication and CORS, then binds the socket before
 releasing automatic execution. Invalid configuration or an occupied port fails
-startup and stops and joins the materialised flow. Logs and Studio registration
+startup and stops and joins the materialized flow. Logs and Studio registration
 use the actual bound address. `/ready` returns 200 only while the pipeline is
 `Running`.
 

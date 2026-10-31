@@ -32,7 +32,7 @@ delivery receipts, or atomic membership. Missing measurements remain distinct
 from measured zero.
 
 `JOURNAL_SCHEMA_VERSION` is the shared authority for records, framing, and
-manifests. The current schema is 5.0; older archives require a new recording.
+manifests. Archives recorded under an older schema require a new recording.
 Infra owns the encoding described in the
 [journal format reference](https://github.com/obzenflow/obzenflow/blob/main/crates/obzenflow_infra/src/journal/disk/codec/README.md).
 

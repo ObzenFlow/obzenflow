@@ -69,26 +69,18 @@ flowchart LR
 Production task construction selects a shared runner from a typed supervised
 component. Raw task construction is restricted to unit fixtures.
 
-`HandlerSupervisedExt::run(self, ...)` owns the entire handler FSM loop and awaits
-resource cleanup after every orderly return, including registration, transition,
-failure-action and completion errors. Its local async scope contains fallible
-execution while retaining ownership of the supervisor and context until cleanup
-finishes. The single typed `spawn_handler_supervised` constructor calls this
-consuming trait method, just as self-supervised construction calls its own
-consuming trait method. There is no borrowed runner or alternate cleanup path.
+`HandlerSupervisedExt::run(self, ...)` owns the entire handler FSM loop. The
+single typed `spawn_handler_supervised` constructor calls this consuming trait
+method, just as self-supervised construction calls its own.
 
-The internal [cleanup contract](cleanup.rs) is a required supertrait of
-`HandlerSupervised`. Supervisors without asynchronous resource settlement explicitly
-use its no-op default; the external-event wrapper forwards cleanup to its inner
-supervisor. Cleanup runs inside the same task and publication scope before handle
-completion. It preserves a primary runner error and cannot drive FSM transitions,
-emit business data or EOF, or turn failure into lifecycle success. Source supervisors
-consume cleanup eligibility before awaiting, so earlier cleanup in dispatch cannot
-be repeated. Forced abort and panic do not guarantee awaited cleanup.
+Cleanup is an action a stage's state machine selects. The runner calls
+`execute_cleanup`, whose default does nothing, and the external-event wrapper
+forwards it to its inner supervisor. A cleanup error becomes the stage's failure
+event. Forced abort and panic do not guarantee cleanup.
 
 The stage wrapper publishes changed states and applies a control-channel mode:
 
-| Mode | Behavior |
+| Mode | Behaviour |
 | --- | --- |
 | `Block` | Wait for an external command, as at a startup gate. |
 | `Poll` | Check for a command and otherwise continue stage work. |
@@ -122,7 +114,7 @@ Loop-level control hooks live outside this module:
 | `AttemptObserver` | Observe and settle an admitted attempt. |
 
 `resolve_control_event` decides the runtime action without I/O. Its async
-wrapper owns pause and re-check behavior; the supervisor executes the resolved
+wrapper owns pause and re-check behaviour; the supervisor executes the resolved
 action. The default `JonestownSignalStrategy` preserves normal signal handling.
 
 Suspension goes through `suspend_until`: `WakeOn::At` waits to a deadline,
