@@ -106,7 +106,6 @@ where
         );
 
         tracing::debug!(
-            target: "flowip-080o",
             owner = owner_label,
             readers = ?upstream_journals
                 .iter()
@@ -121,7 +120,6 @@ where
             // Get journal ID for debugging
             let journal_id = journal.id();
             tracing::debug!(
-                target: "flowip-080o",
                 stage_id = ?stage_id,
                 stage_name = stage_name,
                 journal_id = ?journal_id,
@@ -147,7 +145,6 @@ where
                     // Best-effort: log the failure and use an empty reader so the
                     // FSM can continue operating (upstream treated as having no events).
                     tracing::error!(
-                        target: "flowip-080o",
                         stage_id = ?stage_id,
                         stage_name = stage_name,
                         journal_id = ?journal_id,
@@ -393,7 +390,6 @@ where
         }
 
         tracing::info!(
-            target: "flowip-059d",
             owner = owner_label,
             reader_count = sub.readers.len(),
             baseline_count = baseline_count,

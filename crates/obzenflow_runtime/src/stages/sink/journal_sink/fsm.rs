@@ -766,13 +766,11 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
 
             JournalSinkAction::FlushBuffers => {
                 tracing::trace!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - starting flush"
                 );
 
                 tracing::trace!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - acquiring handler lock"
                 );
@@ -782,7 +780,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     .expect("handler available before cleanup");
 
                 tracing::trace!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - calling handler.flush()"
                 );
@@ -830,7 +827,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
 
                         if let Some(payload) = report.audit_payload.take() {
                             tracing::trace!(
-                                target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 "sink: FlushBuffers action - flush returned audit payload, writing delivery"
                             );
@@ -909,7 +905,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     }
                 }
                 tracing::trace!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - COMPLETE (flush only)"
                 );
@@ -918,7 +913,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
 
             JournalSinkAction::VerifyContractsAfterFlush => {
                 tracing::trace!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: VerifyContractsAfterFlush action - acquiring subscription lock"
                 );
@@ -927,7 +921,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                 if let Some(mut subscription) = maybe_subscription {
                     let mut contract_state = std::mem::take(&mut ctx.contract_state);
                     tracing::trace!(
-                        target: "flowip-080o",
                         stage_name = %ctx.stage_name,
                         "sink: VerifyContractsAfterFlush action - calling authoritative check_contracts"
                     );
@@ -938,7 +931,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                 }
 
                 tracing::trace!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: VerifyContractsAfterFlush action - COMPLETE"
                 );
@@ -957,13 +949,11 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                 let stage_name = ctx.stage_name.clone();
                 async {
                     tracing::trace!(
-                        target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: DrainWriter action - acquiring handler lock"
                     );
                     let handler = ctx.handler.as_mut().expect("handler available before cleanup");
                     tracing::trace!(
-                        target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: DrainWriter action - calling handler.drain()"
                     );
@@ -1040,7 +1030,6 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     })?;
                     if let Some(payload) = drain_result.audit_payload.take() {
                         tracing::trace!(
-                            target: "flowip-080o",
                             stage_name = %ctx.stage_name,
                             "sink: DrainWriter action - drain returned audit payload, writing delivery"
                         );
@@ -1073,12 +1062,10 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         journal_commit_receipt(ctx, &parent_envelope, payload).await?;
                     }
                     tracing::trace!(
-                        target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: DrainWriter action - handler.drain() complete"
                     );
                     tracing::trace!(
-                        target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: DrainWriter action - COMPLETE"
                     );

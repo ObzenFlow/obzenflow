@@ -70,7 +70,6 @@ pub(super) async fn dispatch_running<
         .fetch_add(1, Ordering::Relaxed);
 
     tracing::trace!(
-        target: "flowip-080o",
         stage_name = %ctx.stage_name,
         loop_iteration = loop_count + 1,
         "sink: Running state - starting event loop iteration"
@@ -84,7 +83,6 @@ pub(super) async fn dispatch_running<
 
     let Some(subscription) = sup.subscription.as_mut() else {
         tracing::warn!(
-            target: "flowip-080o",
             stage_name = %ctx.stage_name,
             loop_iteration = loop_count + 1,
             "sink: No subscription available, sleeping"
@@ -94,7 +92,6 @@ pub(super) async fn dispatch_running<
     };
 
     tracing::trace!(
-        target: "flowip-080o",
         stage_name = %ctx.stage_name,
         loop_iteration = loop_count + 1,
         "sink: about to call subscription.poll_next()"
@@ -107,7 +104,6 @@ pub(super) async fn dispatch_running<
     match poll_result {
         PollResult::Event(envelope) => {
             tracing::trace!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
                 event_type = %envelope.event_type_name(),
@@ -246,7 +242,6 @@ pub(super) async fn dispatch_running<
             }
 
             tracing::trace!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
                 "sink: poll_next returned NoEvents, sleeping"
@@ -256,7 +251,6 @@ pub(super) async fn dispatch_running<
         }
         PollResult::Error(e) => {
             tracing::error!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
                 error = ?e,
@@ -390,7 +384,6 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                 match last_eof_outcome {
                     Some(outcome) => {
                         tracing::info!(
-                            target: "flowip-080o",
                             stage_name = %ctx.stage_name,
                             upstream_stage_id = ?outcome.stage_id,
                             upstream_stage_name = %outcome.stage_name,
@@ -409,7 +402,6 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                     }
                     None => {
                         tracing::debug!(
-                            target: "flowip-080o",
                             stage_name = %ctx.stage_name,
                             event_type = envelope.event_type(),
                             writer_id = ?envelope.envelope.provenance.event.writer_id,
@@ -444,7 +436,6 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
 
             if let Some(outcome) = last_eof_outcome {
                 tracing::debug!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     upstream_stage_id = ?outcome.stage_id,
                     upstream_stage_name = %outcome.stage_name,
@@ -458,7 +449,6 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
             }
 
             tracing::debug!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 "Sink EOF is final; triggering FSM transition to Drained"
             );

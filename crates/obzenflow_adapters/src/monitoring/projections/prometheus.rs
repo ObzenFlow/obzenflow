@@ -53,7 +53,7 @@ impl PrometheusProjection {
         let mut output = String::with_capacity(4096);
 
         // Header
-        writeln!(&mut output, "# ObzenFlow Metrics - FLOWIP-056-666")?;
+        writeln!(&mut output, "# ObzenFlow Metrics")?;
         writeln!(
             &mut output,
             "# HELP obzenflow_build_info ObzenFlow build information"

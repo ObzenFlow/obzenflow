@@ -59,7 +59,6 @@ pub(super) async fn dispatch_running<
         .fetch_add(1, Ordering::Relaxed);
 
     tracing::trace!(
-        target: "flowip-080o",
         stage_name = %ctx.stage_name,
         loop_iteration = loop_count + 1,
         "transform: Running state - starting event loop iteration"
@@ -147,7 +146,6 @@ async fn dispatch_running_inner<
     };
 
     tracing::trace!(
-        target: "flowip-080o",
         stage_name = %ctx.stage_name,
         loop_iteration = loop_count + 1,
         "transform: about to call subscription.poll_next()"
@@ -166,7 +164,6 @@ async fn dispatch_running_inner<
     match poll_result {
         PollResult::Event(mut envelope) => {
             tracing::trace!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
                 event_type = %envelope.event_type_name(),
@@ -616,7 +613,7 @@ async fn dispatch_running_inner<
                                     tracing::info!(
                                         stage_name = %ctx.stage_name,
                                         event_id = %event.id,
-                                        "Writing error event to error journal (FLOWIP-082e)"
+                                        "Writing error event to error journal"
                                     );
                                     crate::supervised_base::publication::append(
                                         &ctx.error_journal,

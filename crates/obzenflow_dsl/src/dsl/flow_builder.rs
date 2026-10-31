@@ -1596,7 +1596,6 @@ where
 
                 // Get the pre-built resources for this stage
                 tracing::info!(
-                    target: "flowip-080o",
                     stage_name = %name,
                     stage_id = ?id,
                     "DSL: Removing resources for stage"
@@ -1609,7 +1608,6 @@ where
                 })?;
 
                 tracing::info!(
-                    target: "flowip-080o",
                     stage_name = %name,
                     stage_id = ?id,
                     upstream_journals_count = resources.upstream_journals.len(),

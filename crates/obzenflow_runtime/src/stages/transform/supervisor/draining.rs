@@ -130,7 +130,6 @@ async fn dispatch_draining_inner<
     match poll_result {
         PollResult::Event(mut envelope) => {
             tracing::trace!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 event_type = %envelope.event_type(),
                 is_eof = envelope.is_eof(),
@@ -377,7 +376,7 @@ async fn dispatch_draining_inner<
                     tracing::info!(
                         stage_name = %ctx.stage_name,
                         event_id = %event.id,
-                        "Writing error event to error journal during drain (FLOWIP-082e)"
+                        "Writing error event to error journal during drain"
                     );
                     crate::supervised_base::publication::append(
                         &ctx.error_journal,
