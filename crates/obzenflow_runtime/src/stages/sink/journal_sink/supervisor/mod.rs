@@ -435,7 +435,6 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
                     heartbeat.state.mark_draining();
                 }
                 tracing::info!(
-                    target: "flowip-080o",
                     stage_name = %self.name,
                     "sink: Draining complete, sending completion and cleaning up"
                 );

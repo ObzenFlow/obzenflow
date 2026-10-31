@@ -3,10 +3,6 @@
 Observe Prometheus metrics while a flow exercises circuit breaking and
 backpressure.
 
-The flow processes inputs, counts successful results and prints that recorded
-count. The summary has the same meaning during replay, even when the configured
-input count changes. The framework supplies source and error metrics automatically.
-
 Run from the repository root with port 9090 available. This configuration hosts
 `/metrics` and waits for Play:
 
@@ -42,34 +38,7 @@ cargo tokio-console-run --example prometheus_demo --features prometheus,web-host
 ```
 
 This starts the flow automatically. Connect the Tokio Console client to
-`http://127.0.0.1:6669`. Ordinary builds do not carry `tokio_unstable`.
-Console is disabled by default. `--tokio-console=false` disables it in the same
-binary, including when the config file enables it. These are shared framework
-options; the demo does not initialise Console. The equivalent startup config is:
-
-```toml
-[diagnostics.tokio_console]
-enabled = true
-bind = "127.0.0.1:6669"
-```
-
-`--tokio-console-bind 127.0.0.1:6670` overrides the file's listener address.
-An explicit Console request without build support fails before the flow starts.
-Console poll durations are elapsed time within polls; they do
-not by themselves establish CPU time or the cause of pending waits.
-Managed Console rejects `TOKIO_CONSOLE_RECORD_PATH`: the upstream recorder's
-separate thread cannot join the application's shutdown lifecycle.
-
-`source_rate_limit = false` under `[app]` removes the source limiter; absent or
-`true` retains the default 1,000/s policy. Window 64 and the breaker remain in place.
-The existing outcome checker verifies a retained synthetic archive without parsing logs:
-
-```sh
-PROMETHEUS_MEASUREMENT_ARCHIVE=<archive> PROMETHEUS_MEASUREMENT_INPUTS=20000 \
-  PROMETHEUS_MEASUREMENT_RATE_LIMIT=0 cargo test --locked -p obzenflow \
-  --features studio,tokio-console --test prometheus_example_test \
-  measure_retained_prometheus_archive -- --ignored --nocapture
-```
+`http://127.0.0.1:6669`.
 
 To run without reporting, select [the disabled configuration](obzenflow.disabled.toml);
 it starts immediately. For Prometheus and Grafana setup, see

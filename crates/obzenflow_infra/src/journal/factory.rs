@@ -243,7 +243,6 @@ impl FlowJournalFactory for DiskJournalFactory {
         match preflight_nofile_for_disk_journals(estimate, env_try_raise_nofile()) {
             Ok(Some(limit)) => {
                 tracing::info!(
-                    target: "flowip-086n",
                     stages = estimate.stages,
                     edges = estimate.edges,
                     metrics_enabled = estimate.metrics_enabled,
@@ -263,7 +262,6 @@ impl FlowJournalFactory for DiskJournalFactory {
                 let warn_threshold = limit.soft.saturating_mul(70) / 100;
                 if estimate.estimated_fds >= warn_threshold {
                     tracing::warn!(
-                        target: "flowip-086n",
                         estimated_fds = estimate.estimated_fds,
                         rlimit_soft = limit.soft,
                         warn_threshold = warn_threshold,

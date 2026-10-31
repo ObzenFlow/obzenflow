@@ -672,7 +672,6 @@ impl StageResourcesBuilder {
                 .collect();
 
             tracing::debug!(
-                target: "flowip-080o",
                 stage_name = %stage_info.name,
                 stage_id = ?stage_id,
                 upstream_ulids = ?upstream_ulids,
@@ -688,7 +687,6 @@ impl StageResourcesBuilder {
 
                     if let Some(journal) = journal_opt {
                         tracing::debug!(
-                            target: "flowip-080o",
                             stage_name = %stage_info.name,
                             upstream_id = ?upstream_id,
                             upstream_stage_name = %self
@@ -701,7 +699,6 @@ impl StageResourcesBuilder {
                         Some((upstream_id, journal.clone()))
                     } else {
                         tracing::warn!(
-                            target: "flowip-080o",
                             stage_name = %stage_info.name,
                             upstream_id = ?upstream_id,
                             upstream_stage_name = %self
@@ -732,7 +729,6 @@ impl StageResourcesBuilder {
 
             if upstream_journals.len() != upstream_ulids.len() {
                 tracing::error!(
-                    target: "flowip-080o",
                     stage_name = %stage_info.name,
                     stage_id = ?stage_id,
                     expected_upstreams = upstream_ulids.len(),
@@ -970,7 +966,6 @@ impl StageResourcesBuilder {
             };
 
             tracing::debug!(
-                target: "flowip-080o",
                 stage_name = %stage_info.name,
                 stage_id = ?stage_id,
                 upstream_journals_count = upstream_journals.len(),

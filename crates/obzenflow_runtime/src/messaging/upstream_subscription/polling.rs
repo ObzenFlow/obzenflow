@@ -313,7 +313,6 @@ where
         let starting_index = self.state.current_reader_index;
 
         tracing::debug!(
-            target: "flowip-080o",
             owner = %self.owner_label,
             starting_index = starting_index,
             eof_status = ?self.state.eof_received,
@@ -334,7 +333,6 @@ where
             match self.read_transport_step(index).await {
                 Err(e) => {
                     tracing::error!(
-                        target: "flowip-080o",
                         owner = %self.owner_label,
                         reader_index = index,
                         error = %e,
@@ -371,7 +369,6 @@ where
         }
 
         tracing::debug!(
-            target: "flowip-080o",
             owner = %self.owner_label,
             eof_count = self.state.eof_count(),
             total_readers = self.readers.len(),
@@ -521,7 +518,6 @@ where
         );
 
         tracing::debug!(
-            target: "flowip-080o",
             owner = %self.owner_label,
             stage_id = ?stage_id,
             stage_key = %stage_key,
@@ -541,7 +537,6 @@ where
             self.record_eof_exhaustion(reader_index, stage_id, &stage_key, eof_kind);
         } else if is_drain {
             tracing::debug!(
-                target: "flowip-080o",
                 owner = %self.owner_label,
                 stage_id = ?stage_id,
                 stage_key = %stage_key,
@@ -879,7 +874,6 @@ where
             worst_kind: self.state.worst_eof_kind(),
         });
         tracing::debug!(
-            target: "flowip-080o",
             owner = %self.owner_label,
             stage_id = ?stage_id,
             stage_key = %stage_key,
@@ -977,7 +971,6 @@ where
             .collect();
         if !quiet_inputs.is_empty() {
             tracing::debug!(
-                target: "flowip-095d",
                 owner = %self.owner_label,
                 quiet = ?quiet_inputs.iter().map(|(_, name)| name).collect::<Vec<_>>(),
                 fsm_state = fsm_state,
@@ -1014,7 +1007,6 @@ where
         match self.read_transport_step(index).await {
             Err(e) => {
                 tracing::error!(
-                    target: "flowip-095d",
                     owner = %self.owner_label,
                     reader_index = index,
                     error = %e,
@@ -1030,7 +1022,6 @@ where
             Ok(ReadStep::Head { head, is_data }) => {
                 self.note_read_instant(reader_progress, index, is_data);
                 tracing::debug!(
-                    target: "flowip-095d",
                     owner = %self.owner_label,
                     reader_index = index,
                     fsm_state = fsm_state,
@@ -1096,7 +1087,6 @@ where
             .min_by_key(|&index| tiebreak(index))
             .or_else(|| {
                 tracing::error!(
-                    target: "flowip-095d",
                     owner = %self.owner_label,
                     "canonical merge: causality exclusion emptied the candidate set; \
                      falling back to tiebreak-only selection (still deterministic)"

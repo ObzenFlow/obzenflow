@@ -26,7 +26,7 @@ CATEGORIES = {
     "flow": ("Complete pipeline processing", "Completed flows, execution wrappers and per-run event-latency medians are different measurements; see each row's timed work."),
     "archive": ("Archive and replay operations", "Export, admission and comparison of existing archives; replay comparison excludes the original executions."),
 }
-UNCATEGORISED = ("Uncategorised", "These results have no valid case declaration. Declare the case next to its benchmark registration.")
+UNCATEGORIZED = ("Uncategorized", "These results have no valid case declaration. Declare the case next to its benchmark registration.")
 # How the plan chose the gate's reference (FLOWIP-080v B10).
 RULES = {
     "merge_base": "merge base with main (where this change started)",
@@ -251,7 +251,7 @@ def render_performance(directory, outcome):
     def classify(target, case):
         return declared.get(target, {}).get(case, (None, "No case declaration"))
 
-    for key, (title, note) in [*CATEGORIES.items(), (None, UNCATEGORISED)]:
+    for key, (title, note) in [*CATEGORIES.items(), (None, UNCATEGORIZED)]:
         selected = [(target, row, classify(target, row.case_id)[1]) for target, row in rows
                     if classify(target, row.case_id)[0] == key]
         gated = [(case, estimates, verdict) for target, case, estimates, verdict in comparisons
@@ -293,7 +293,7 @@ def context_for():
         "Measured checkout SHA": "unavailable",
         "Target": "all declared targets",
         "Configured features": "per target below",
-        "Profile": "bench (optimised)",
+        "Profile": "bench (optimized)",
         "Command": "cargo xtask performance <stage>, or cargo xtask test --lane performance serially",
         "Run / attempt": f"{os.getenv('GITHUB_RUN_ID', 'local')} / {os.getenv('GITHUB_RUN_ATTEMPT', '1')}",
         "Run URL": run_url,

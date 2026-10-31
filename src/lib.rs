@@ -94,7 +94,7 @@
 //! observers share `with middleware` or `with { first, second }`, written
 //! before `=>`. Middleware built with `.for_effect::<E>()` guards only that
 //! effect, such as `let fetch_retry = retry().max_attempts(3).for_effect::<Fetch>();`;
-//! the complete plan is validated before any middleware is materialised or
+//! the complete plan is validated before any middleware is materialized or
 //! effect connector is opened.
 //!
 //! ### `topology:`

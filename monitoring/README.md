@@ -50,7 +50,7 @@ enabled = true
 ```
 
 See [the metrics example guide](../examples/prometheus_demo/README.md) for
-example behavior, disabled reporting, and replay. Scrape targets live in
+example behaviour, disabled reporting, and replay. Scrape targets live in
 [prometheus.yml](prometheus/prometheus.yml); dashboard provisioning lives in
 [grafana/provisioning](grafana/provisioning/).
 

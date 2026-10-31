@@ -72,7 +72,7 @@ impl ReplayRunContext {
     /// manifest is readable, always the archive path.
     pub fn source_label(&self) -> String {
         match &self.archive_flow_id {
-            Some(flow_id) => format!("{flow_id} ({})", self.archive_path.display()),
+            Some(flow_id) => format!("{flow_id} at {}", self.archive_path.display()),
             None => self.archive_path.display().to_string(),
         }
     }

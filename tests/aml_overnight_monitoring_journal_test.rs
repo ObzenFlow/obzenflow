@@ -48,6 +48,9 @@ const WHOLE_DAY: [(&str, &[&str]); 4] = [
     ("day:2022/09/05:48/81F0A0003", &["fan_out", "fan_in"]),
 ];
 
+const BAD_NIGHT_ROWS: [(u64, u64, u64); 3] =
+    [(2800047, 46, 48), (2800107, 106, 108), (2800177, 176, 178)];
+
 const ENGINE_RULES: &str = "sim-2026.10";
 const WHOLE_DAY_RULES: &str = "aml-daily-profile-v1";
 
@@ -151,12 +154,20 @@ fn fixture_txn_ids() -> BTreeSet<u64> {
         .collect()
 }
 
-fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
-    let example = example_dir();
-    let mut config: toml::Table = std::fs::read_to_string(example.join("obzenflow.toml"))
+fn shipped_table(file: &str) -> toml::Table {
+    std::fs::read_to_string(example_dir().join(file))
         .expect("shipped configuration is readable")
         .parse()
-        .expect("shipped configuration parses");
+        .expect("shipped configuration parses")
+}
+
+fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
+    shipped_config("obzenflow.toml", dir, fx_rates)
+}
+
+fn shipped_config(file: &str, dir: &Path, fx_rates: &Path) -> PathBuf {
+    let example = example_dir();
+    let mut config = shipped_table(file);
     let backpressure = &config["runtime"]["backpressure"];
     assert_eq!(backpressure["flow"]["mode"].as_str(), Some("enforce"));
     let window = backpressure["flow"]["window"].as_integer().expect("window");
@@ -178,12 +189,17 @@ fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
         Some("simulated"),
         "the shipped configuration names the simulated risk engine"
     );
+    let transactions = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        app.get("transactions")
+            .and_then(toml::Value::as_str)
+            .expect("the configuration names its transactions"),
+    );
     for (key, path) in [
         (
             "account_history",
             example.join("fixtures/account-history.csv"),
         ),
-        ("transactions", example.join("fixtures/transactions.csv")),
+        ("transactions", transactions),
         ("fx_rates", fx_rates.to_path_buf()),
         ("risk_ledger", dir.join("risk-calls.jsonl")),
         ("case_ledger", dir.join("case-calls.jsonl")),
@@ -197,7 +213,7 @@ fn fixture_config(dir: &Path, fx_rates: &Path) -> PathBuf {
             toml::Value::String(path.display().to_string()),
         );
     }
-    let path = dir.join("obzenflow.toml");
+    let path = dir.join(file);
     std::fs::write(
         &path,
         toml::to_string(&config).expect("configuration serializes"),
@@ -483,6 +499,10 @@ fn the_fixture_reaches_every_planted_verdict_and_strict_replay_calls_neither_sys
 
     let baseline = runs(&journal_root).pop().expect("the live run's archive");
     let archive = Archive::read(&baseline);
+    assert!(
+        archive.error_rows.is_empty(),
+        "the default night sends nothing to an error journal"
+    );
     assert_eq!(archive.all_facts("aml.score_unavailable"), 0);
     assert_eq!(archive.all_facts("aml.case_unavailable"), 0);
 
@@ -847,6 +867,168 @@ fn the_outage_stub_refuses_every_score_and_a_replay_naming_the_simulated_engine_
             .map(|compared| compared.changes.keys())
             .collect::<Vec<_>>(),
         [vec!["app.risk_engine"]]
+    );
+}
+
+#[test]
+fn each_variant_configuration_differs_from_the_default_in_one_setting() {
+    let default = shipped_table("obzenflow.toml");
+    for (file, key, value) in [
+        (
+            "obzenflow.bad-night.toml",
+            "transactions",
+            "examples/aml_overnight_monitoring/fixtures/bad-night-transactions.csv",
+        ),
+        (
+            "obzenflow.unreadable-replies.toml",
+            "case_system",
+            "unreadable_replies",
+        ),
+    ] {
+        let mut variant = shipped_table(file);
+        let app = variant
+            .get_mut("app")
+            .and_then(toml::Value::as_table_mut)
+            .expect("[app] table");
+        assert_eq!(
+            app.insert(key.to_owned(), default["app"][key].clone()),
+            Some(toml::Value::String(value.to_owned())),
+            "{file}"
+        );
+        assert_eq!(variant, default, "{file} differs only in app.{key}");
+    }
+}
+
+#[test]
+fn a_bad_night_completes_and_its_source_journals_each_unreadable_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = shipped_config("obzenflow.bad-night.toml", dir.path(), &shipped_rates());
+    let journal_root = dir.path().join("journals");
+    run(
+        &config,
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let archive = Archive::read(&runs(&journal_root).pop().expect("the bad night's archive"));
+
+    let rejected: Vec<(String, String)> = archive
+        .error_rows
+        .iter()
+        .filter(|(stage, _)| stage == "transactions")
+        .map(|(_, row)| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::SourceRecordRejected(rejected)) => {
+                (format!("{:?}", rejected.kind), rejected.detail.clone())
+            }
+            other => panic!("a rejected row, not {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        rejected,
+        BAD_NIGHT_ROWS
+            .iter()
+            .map(|(_, record, line)| (
+                "Validation".to_owned(),
+                format!("record {record}: invalid record (line {line})")
+            ))
+            .collect::<Vec<_>>()
+    );
+    for (stage, _) in &archive.error_rows {
+        assert_eq!(stage, "transactions", "only the source rejects a record");
+    }
+
+    let unreadable: BTreeSet<u64> = BAD_NIGHT_ROWS.iter().map(|(txn, _, _)| *txn).collect();
+    let read: BTreeSet<u64> = archive
+        .facts("transactions", "aml.transaction")
+        .iter()
+        .map(txn_id)
+        .collect();
+    assert_eq!(
+        read,
+        fixture_txn_ids()
+            .difference(&unreadable)
+            .copied()
+            .collect::<BTreeSet<_>>()
+    );
+    let verdicts = archive.facts("score", "aml.transaction_cleared").len()
+        + archive.facts("score", "aml.alert_raised").len();
+    assert_eq!(verdicts, read.len(), "every row read is scored once");
+    let totals = archive.facts("day_totals", "aml.day_totals");
+    assert_eq!(totals[0]["transactions"].as_u64(), Some(read.len() as u64));
+}
+
+#[test]
+fn unreadable_case_replies_complete_and_open_case_journals_each_failed_alert() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = shipped_config(
+        "obzenflow.unreadable-replies.toml",
+        dir.path(),
+        &shipped_rates(),
+    );
+    let journal_root = dir.path().join("journals");
+    run(
+        &config,
+        &journal_root,
+        None,
+        Arc::new(VendorStats::default()),
+    );
+    let baseline = runs(&journal_root).pop().expect("the run's archive");
+    let archive = Archive::read(&baseline);
+
+    let failed: Vec<(String, String, String)> = archive
+        .error_rows
+        .iter()
+        .filter(|(stage, _)| stage == "open_case")
+        .map(|(_, row)| match &row.payload {
+            ChainPayload::Execution(ExecutionPayload::StageProcessingFailed(failure)) => (
+                format!("{:?}", failure.kind),
+                failure.detail.clone(),
+                alert_id(&failure.input.payload).to_owned(),
+            ),
+            other => panic!("a failed alert, not {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        failed,
+        WHOLE_DAY
+            .iter()
+            .map(|(id, _)| (
+                "PermanentFailure".to_owned(),
+                "the case system's reply has no case number".to_owned(),
+                (*id).to_owned()
+            ))
+            .collect::<Vec<_>>()
+    );
+    for (stage, _) in &archive.error_rows {
+        assert_eq!(stage, "open_case", "only open_case fails an alert");
+    }
+    assert!(archive
+        .facts("open_case", "aml.case_unavailable")
+        .is_empty());
+    let opened: Vec<String> = archive
+        .facts("open_case", "aml.case_opened")
+        .iter()
+        .map(|case| alert_id(case).to_owned())
+        .collect();
+    assert!(opened.iter().all(|id| id.starts_with("txn:")));
+    assert_eq!(
+        opened.len(),
+        PLANTED
+            .iter()
+            .filter(|(_, reasons)| !reasons.is_empty())
+            .count()
+    );
+
+    let simulated = shipped_config("obzenflow.toml", dir.path(), &shipped_rates());
+    let refused = Arc::new(VendorStats::default());
+    assert!(
+        try_run(&simulated, &journal_root, Some(&baseline), refused.clone()).is_err(),
+        "a replay naming the readable case system is refused"
+    );
+    assert_eq!(
+        refused.case_systems_built(),
+        0,
+        "the refusal precedes any call"
     );
 }
 

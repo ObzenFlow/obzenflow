@@ -75,7 +75,7 @@ its resources when the suite finishes. Temporary state, credentials, and
 certificate material live under `target/postgres-sessions/<run-id>`.
 
 The acceptance service is separate from the persistent development service.
-It tests authenticated connector behavior without changing the local
+It tests authenticated connector behaviour without changing the local
 development profile.
 
 ## Implementation

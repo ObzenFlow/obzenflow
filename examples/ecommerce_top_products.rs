@@ -85,14 +85,14 @@ fn main() -> Result<()> {
             .description("Real-time tracking of top products by total revenue.")
             .section(
                 "Highlights",
-                "Using FLOWIP-080j TopNByTyped and FLOWIP-082a TypedPayload.\nProcessing order stream...",
+                "Using TopNBy and TypedPayload.\nProcessing order stream...",
             ),
     )
     .with_footer(|outcome| {
         outcome
             .into_footer()
             .bullets(
-                "FLOWIP-082a TypedPayload",
+                "TypedPayload",
                 [
                     "OrderEvent::EVENT_TYPE instead of \"order.placed\"",
                     "SCHEMA_VERSION for evolution tracking",

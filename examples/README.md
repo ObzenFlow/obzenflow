@@ -8,8 +8,8 @@ and replay. A dash means there is no dedicated tutorial or run guide yet.
 | --- | --- | --- |
 | [char_transform](char_transform.rs) | Stateful text transformation | [Getting started](https://obzenflow.dev/tutorials/getting-started/) |
 | [char_transform_skeleton](char_transform_skeleton.rs) | Flow topology with placeholder handlers | [Getting started](https://obzenflow.dev/tutorials/getting-started/) |
-| [http_ingestion_piggy_bank_demo](http_ingestion_piggy_bank_demo/flow.rs) | YAML accounts, HTTP ingress, joins, and a checkbook projection | [Bank transactions](https://obzenflow.dev/tutorials/model-bank-transactions/) |
-| [hn_ai_digest_demo](hn_ai_digest_demo/flow.rs) | HTTP input, token budgeting, and AI summarisation | [Live AI inference](https://obzenflow.dev/tutorials/live-ai-inference/) |
+| [http_ingestion_piggy_bank_demo](http_ingestion_piggy_bank_demo/flow.rs) | HTTP ingress, ACH retries, fee rules, and a replay through a corrected rule | [Bank transactions](https://obzenflow.dev/tutorials/model-bank-transactions/), [run guide](http_ingestion_piggy_bank_demo/README.md) |
+| [hn_ai_digest_demo](hn_ai_digest_demo/flow.rs) | HTTP input, AI summarization, and a resumed live run | [Live AI inference](https://obzenflow.dev/tutorials/live-ai-inference/), [run guide](hn_ai_digest_demo/README.md) |
 | [one_shot_inference_demo](one_shot_inference_demo/main.rs) | One bounded input and one model decision | — |
 | [payment_gateway_resilience](payment_gateway_resilience/flow.rs) | Gateway effects with retries, circuit breaking, and rate limiting | [Run guide](payment_gateway_resilience/README.md) |
 | [flash_sale_allocation](flash_sale_allocation/flow.rs) | Stateful stock reservation and cancellation | [Run guide](flash_sale_allocation/README.md) |
@@ -28,33 +28,18 @@ Run commands from the repository root. Most examples use:
 cargo run -p obzenflow --example <name>
 ```
 
-Follow the local run guides above for payments, flash-sale allocation,
-overnight AML monitoring and metrics. The bank and AI examples use these commands:
+Examples with a run guide list their own commands. The one-shot inference
+example needs Ollama running with `llama3.1:8b`:
 
 ```sh
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host
-
 cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
   --config examples/one_shot_inference_demo/obzenflow.toml
-
-cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
-  --config examples/hn_ai_digest_demo/obzenflow.toml
 ```
 
-Both AI configurations require Ollama running with `llama3.1:8b` available.
-The digest uses a local mock news endpoint by default; set `source = "live"` under
-`[app]` in a copy of its config to fetch real Hacker News stories. For PostgreSQL output, select
-[the PostgreSQL config](hn_ai_digest_demo/obzenflow.postgres.toml) and supply a
-connection as described in the [local PostgreSQL guide](../dev/postgres/README.md).
-
-The bank example opens its accounts at startup from the file its
-[config](http_ingestion_piggy_bank_demo/obzenflow.toml) names under `[app] accounts_file`,
-[accounts.yaml](http_ingestion_piggy_bank_demo/accounts.yaml) by default; transactions
-arrive over HTTP. To open other accounts, pass a copy of the config that names another
-file, with `--config <file>` or `OBZENFLOW_CONFIG=<file>`. It also includes an
+The bank example also includes an
 [authenticated control-plane config](http_ingestion_piggy_bank_demo/obzenflow.auth.toml);
 see [managed web authentication](../crates/obzenflow_infra/src/web/README.md) for setup.
 
 To replay a recorded run, add `--replay-from <archive> --verify` to the application
 arguments, after Cargo's `--` separator. Use the archive path printed by the run
-and keep the same configuration.
+and keep the same configuration, unless a run guide names another.

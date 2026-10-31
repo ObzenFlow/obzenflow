@@ -76,7 +76,7 @@ fn resolve_configured_sink_descriptors(
 }
 
 /// Validate shared hosted ownership before any factory, connector, or journal
-/// can materialise. The final write-once fill remains the race-safety guard.
+/// can materialize. The final write-once fill remains the race-safety guard.
 #[allow(clippy::result_large_err)]
 fn validate_hosted_ingress_bindings<'a>(
     bindings: impl IntoIterator<
@@ -1596,7 +1596,6 @@ where
 
                 // Get the pre-built resources for this stage
                 tracing::info!(
-                    target: "flowip-080o",
                     stage_name = %name,
                     stage_id = ?id,
                     "DSL: Removing resources for stage"
@@ -1609,7 +1608,6 @@ where
                 })?;
 
                 tracing::info!(
-                    target: "flowip-080o",
                     stage_name = %name,
                     stage_id = ?id,
                     upstream_journals_count = resources.upstream_journals.len(),

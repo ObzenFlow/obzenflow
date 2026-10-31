@@ -55,7 +55,6 @@ pub(super) async fn dispatch_accumulating<
         .fetch_add(1, Ordering::Relaxed);
 
     tracing::trace!(
-        target: "flowip-080o",
         stage_name = %ctx.stage_name,
         loop_iteration = loop_count + 1,
         "stateful: Accumulating state - starting event loop iteration"
@@ -111,7 +110,6 @@ pub(super) async fn dispatch_accumulating<
 
     if sup.subscription.is_none() {
         tracing::warn!(
-            target: "flowip-080o",
             stage_name = %ctx.stage_name,
             loop_iteration = loop_count + 1,
             "stateful: No subscription available, sleeping"
@@ -146,7 +144,6 @@ pub(super) async fn dispatch_accumulating<
                 ctx.last_input_position = stage_input_position;
             }
             tracing::trace!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
                 event_type = %envelope.event_type_name(),
@@ -642,7 +639,6 @@ pub(super) async fn dispatch_accumulating<
 
             if matches!(directive, EventLoopDirective::Continue) {
                 tracing::trace!(
-                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     loop_iteration = loop_count + 1,
                     "stateful: poll_next returned NoEvents, sleeping"
@@ -654,7 +650,6 @@ pub(super) async fn dispatch_accumulating<
         }
         PollResult::Error(e) => {
             tracing::error!(
-                target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
                 error = ?e,
@@ -751,7 +746,6 @@ pub(super) async fn dispatch_emitting<
     }
 
     tracing::info!(
-        target: "flowip-080o",
         stage_name = %ctx.stage_name,
         "stateful: Emitting state - about to emit aggregated events"
     );

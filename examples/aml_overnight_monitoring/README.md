@@ -34,6 +34,25 @@ cargo run -p obzenflow --example aml_overnight_monitoring -- \
   --replay-from <archive> --verify
 ```
 
+## A bad night and unreadable replies
+
+Each of two configurations changes one setting. The bad night reads a copy of
+the fixture in which three rows carry their timestamp in another format. The
+unreadable replies make the case system answer each whole-day alert without a
+case number. Both nights complete, and `show` lists each rejected row or failed
+alert from its error journal:
+
+```sh
+rm -f target/aml-risk-calls.jsonl target/aml-case-calls.jsonl
+cargo run -p obzenflow --example aml_overnight_monitoring -- \
+  --config examples/aml_overnight_monitoring/obzenflow.bad-night.toml
+cargo run -p obzenflow --features cli --bin obzenflow -- show <archive>
+```
+
+Run the unreadable replies the same way with
+`examples/aml_overnight_monitoring/obzenflow.unreadable-replies.toml`. Replay
+either night with the configuration that recorded it.
+
 Source: [flow](flow.rs), [stages](stages.rs), [risk engine](risk_engine.rs) and
 [case system](case_system.rs).
 See the [examples index](../README.md) for published tutorials.

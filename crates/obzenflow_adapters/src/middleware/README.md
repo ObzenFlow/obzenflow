@@ -66,7 +66,7 @@ limiting and breaking, while ingress supports limiting.
 
 ## Framework integration
 
-Internal policy factories declare supported surfaces and materialise one typed
+Internal policy factories declare supported surfaces and materialize one typed
 attachment for each protected unit. Unsupported requests fail during flow
 construction. The ports include `SourcePolicy`/`SourceBoundary`,
 `EffectPolicy`/`EffectBoundary`, `SinkPolicy`/`SinkDeliveryBoundary`, and ingress.

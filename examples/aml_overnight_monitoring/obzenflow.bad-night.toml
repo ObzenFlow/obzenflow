@@ -1,0 +1,24 @@
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 64
+stall_timeout_ms = 30000
+
+[runtime.backpressure.stages.daily_profile.edges.alerts]
+mode = "track"
+
+[app]
+account_history = "examples/aml_overnight_monitoring/fixtures/account-history.csv"
+transactions = "examples/aml_overnight_monitoring/fixtures/bad-night-transactions.csv"
+fx_rates = "examples/aml_overnight_monitoring/fixtures/simulated-treasury-rates.csv"
+risk_ledger = "target/aml-risk-calls.jsonl"
+case_ledger = "target/aml-case-calls.jsonl"
+cleared_register = "target/aml-cleared.csv"
+unscored_register = "target/aml-unscored.csv"
+case_register = "target/aml-cases.csv"
+unopened_register = "target/aml-unopened-alerts.csv"
+risk_engine = "simulated"
+case_system = "simulated"
+
+[app.rules]
+fan_out_counterparties = 10
+fan_in_counterparties = 10

@@ -82,7 +82,7 @@ where
     /// 5. Retain an initiated physical commit through storage bookkeeping if
     ///    the caller stops waiting. Cancellation is not rollback.
     /// 6. Enforce [`super::limits`] before commitment so readers have finite
-    ///    record and atomic-group materialisation bounds.
+    ///    record and atomic-group materialization bounds.
     ///
     /// An error certifies non-commit, except `JournalError::CommitIndeterminate`.
     /// That result means storage may have committed and must not be retried.

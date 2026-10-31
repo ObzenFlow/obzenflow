@@ -187,7 +187,7 @@ pub trait MiddlewareFactory: Send + Sync {
 
     /// Validate authored and effective settings without allocating runtime
     /// state or opening a connector. Custom factories with configuration must
-    /// reject invalid settings here; materialisation remains a separate phase.
+    /// reject invalid settings here; materialization remains a separate phase.
     fn validate_configuration(
         &self,
         _request: MiddlewareAttachmentRequest<'_>,

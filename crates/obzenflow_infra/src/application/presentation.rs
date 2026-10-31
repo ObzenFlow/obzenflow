@@ -947,7 +947,7 @@ mod tests {
         };
         let footer = completed.default_footer();
         assert!(
-            footer.contains("strict replay of flow_01SOURCE (tmp/archive)"),
+            footer.contains("strict replay of flow_01SOURCE at tmp/archive"),
             "replay footer must name the source archive: {footer}"
         );
         assert!(
@@ -975,7 +975,7 @@ mod tests {
         };
         assert_eq!(
             failed.default_footer(),
-            "flow failed (strict replay of flow_01SOURCE (tmp/archive)): err"
+            "flow failed (strict replay of flow_01SOURCE at tmp/archive): err"
         );
     }
 
@@ -1018,7 +1018,7 @@ mod tests {
         };
         let footer = stopped.default_footer();
         assert!(
-            footer.contains("resumed from flow_01SOURCE (tmp/archive)"),
+            footer.contains("resumed from flow_01SOURCE at tmp/archive"),
             "resume footer must name the source archive: {footer}"
         );
         assert!(
@@ -1056,7 +1056,7 @@ mod tests {
         };
         assert_eq!(
             failed.default_footer(),
-            "flow failed (resumed from flow_01SOURCE (tmp/archive)): err"
+            "flow failed (resumed from flow_01SOURCE at tmp/archive): err"
         );
     }
 
@@ -1074,7 +1074,7 @@ mod tests {
         let rendered = presentation.render_banner(&resume_mode);
         assert!(
             rendered.text.contains(
-                "Resuming from flow_01SOURCE (tmp/archive). Recorded facts catch up first, then the run continues live at the recorded high-water mark."
+                "Resuming from flow_01SOURCE at tmp/archive. Recorded facts catch up first, then the run continues live at the recorded high-water mark."
             ),
             "resume banner must announce catch-up then live: {}",
             rendered.text

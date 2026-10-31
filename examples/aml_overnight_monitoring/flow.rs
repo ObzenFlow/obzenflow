@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::case_system::CaseSystem;
 use super::console;
 use super::domain::{
     AccountHistory, AlertRaised, CaseOpened, CaseUnavailable, DayTotals, FxRate, PricedTransaction,
@@ -41,6 +42,7 @@ pub struct AmlApp {
     pub case_register: PathBuf,
     pub unopened_register: PathBuf,
     pub risk_engine: RiskEngine,
+    pub case_system: CaseSystem,
     pub rules: AmlRules,
 }
 
@@ -241,7 +243,7 @@ pub fn assemble_flow(journal_root: PathBuf, stats: Arc<VendorStats>) -> FlowDefi
         );
         let day_totals = stateful::reduce(DayTotals::default(), DayTotals::add).emit(emit::on_eof);
         let open_case = OpenCaseHandler {
-            case_system: simulated_case_system(&app.case_ledger, &stats)?,
+            case_system: simulated_case_system(&app.case_ledger, app.case_system, &stats)?,
         };
         register_dir(&app.cleared_register).map_err(resources_failed)?;
         let cleared_register = CsvSink::builder(ClearedRow)

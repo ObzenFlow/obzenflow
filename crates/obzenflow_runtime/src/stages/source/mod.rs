@@ -15,7 +15,7 @@
 //! returns an independent typed reader owning its cursor, buffers and resources.
 //! Direct typed handlers instead transfer into one execution without `Clone`.
 //!
-//! The supervisor acquires a reader only after authorised start, or after resume
+//! The supervisor acquires a reader only after authorized start, or after resume
 //! reconstruction requires live input. Strict replay never opens or polls one.
 //! [`SourceReaderInitContext`] supplies identity only; connectors receive no
 //! journals, execution modes, policy controls or supervisor handles.
