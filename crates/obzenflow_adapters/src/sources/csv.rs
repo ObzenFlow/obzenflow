@@ -164,7 +164,7 @@ fn located(diagnostic: SourceDiagnostic, position: Option<&csv::Position>) -> So
 }
 
 /// csv 1.4 raises `Utf8` and `UnequalLengths` after passing the record, so the
-/// reader stays synchronised. An I/O failure makes the crate report end of
+/// reader stays synchronized. An I/O failure makes the crate report end of
 /// input, so continuing would certify an unread suffix (B8).
 fn read_failure(error: &csv::Error, record_index: u64) -> SourceError {
     let diagnostic = |reason| {

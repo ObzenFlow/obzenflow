@@ -175,7 +175,7 @@ impl HttpEndpoint for TopologyHttpEndpoint {
         let topology_response = self.build_response(include);
 
         let json_body = serde_json::to_string(&topology_response)
-            .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
+            .map_err(|e| EndpointError::with_source("Serializing endpoint response", e))?;
 
         let mut response = Response::ok();
         response

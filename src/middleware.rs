@@ -5,7 +5,7 @@
 //! Live-I/O policies and passive observers, separate from stage handlers.
 //!
 //! Constructors and setters return inert values of the same concrete type.
-//! The flow validates the complete attachment plan before materialisation.
+//! The flow validates the complete attachment plan before materialization.
 //!
 //! ```
 //! use obzenflow::middleware::{circuit_breaker, rate_limit, retry, CircuitBreaker, RateLimiter, Retry};

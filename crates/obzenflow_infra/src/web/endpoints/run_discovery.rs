@@ -72,6 +72,6 @@ impl HttpEndpoint for RunDiscoveryEndpoint {
                 archive,
             })
             .map(Into::into)
-            .map_err(|error| EndpointError::with_source("Serialising run discovery", error))
+            .map_err(|error| EndpointError::with_source("Serializing run discovery", error))
     }
 }

@@ -28,7 +28,7 @@ use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
 
-/// Preflight uses the same typed surface and protected unit as materialisation.
+/// Preflight uses the same typed surface and protected unit as materialization.
 /// It runs over every stage before any factory or connector can open.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_factory_configuration(

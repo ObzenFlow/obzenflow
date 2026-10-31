@@ -12,7 +12,7 @@ use async_trait::async_trait;
 /// preserve the fail-closed retry behaviour required by [`JournalReader`].
 ///
 /// Core admits evidence only as the successful operation returns through
-/// [`JournalReader`]. Deserialisation itself never admits evidence. Implementing
+/// [`JournalReader`]. Deserialization itself never admits evidence. Implementing
 /// this storage port, like implementing a journal, is a provider trust boundary.
 #[async_trait]
 pub trait JournalStorageReader<T: JournalEvent>: Send + Sync {

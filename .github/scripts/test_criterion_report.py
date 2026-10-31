@@ -191,7 +191,7 @@ class PerformanceReportTests(unittest.TestCase):
         self.assertIn(f"**{CASES} cases**", markdown)
         for title, _ in report.CATEGORIES.values():
             self.assertEqual(markdown.count("## " + title + "\n"), 1)
-        self.assertNotIn("## Uncategorised", markdown)
+        self.assertNotIn("## Uncategorized", markdown)
         self.assertIn("| 1 [0.99–1.01; 95%] | 1.1 [1.09–1.11; 95%] | 1.05 [1.04–1.06; 95%] | passed |", markdown)
         self.assertIn("Process CPU time in a 2 s idle window", markdown)
         self.assertIn("measured-commit", markdown)
@@ -216,7 +216,7 @@ class PerformanceReportTests(unittest.TestCase):
         self.assertIn(f"**{CASES - 1} cases**", markdown)
         self.assertIn("two/per_event_latency: measured case IDs differ from the shard's selection", markdown)
 
-    def test_undeclared_or_miscategorised_cases_stay_visible_as_evidence_errors(self):
+    def test_undeclared_or_miscategorized_cases_stay_visible_as_evidence_errors(self):
         self.fixture()
         self.write(self.declarations("per_event_latency"), [])
         self.write(self.declarations("journal_components"), [{"case": "causal_components/journal_clock_restore/w1_p256",
@@ -225,7 +225,7 @@ class PerformanceReportTests(unittest.TestCase):
         self.assertIn("**INCOMPLETE**", markdown)
         self.assertIn("per_event_latency: 3_stage_latency/median_latency: no case declaration.", errors)
         self.assertTrue(any("unknown category 'codec'" in error for error in errors))
-        self.assertIn("## Uncategorised", markdown)
+        self.assertIn("## Uncategorized", markdown)
         self.assertIn("| per_event_latency | 3_stage_latency/median_latency | No case declaration |", markdown)
 
     def test_failed_gate_keeps_full_suite_and_native_decision(self):

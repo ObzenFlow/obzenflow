@@ -113,7 +113,7 @@ impl FlowControlEndpoint {
         };
         encoded
             .map(Into::into)
-            .map_err(|error| EndpointError::with_source("Serialising flow control", error))
+            .map_err(|error| EndpointError::with_source("Serializing flow control", error))
     }
 }
 

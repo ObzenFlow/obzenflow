@@ -2,17 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Test-only helpers for deterministic CI tests (FLOWIP-114h).
+//! Helpers for deterministic tests, behind the `test-support` feature.
 //!
-//! Gated behind `#[cfg(any(test, feature = "test-support"))]`. The
-//! `test-support` feature pulls in `tokio/test-util` so callers can use
-//! `#[tokio::test(start_paused = true)]` together with [`TestClock`].
-//!
-//! Positive probes cover observed committed records, including cycle and fan-in
-//! attribution. Snapshots do not establish producer completion. FLOWIP-145i
-//! retires scheduler-settling and generic absence guarantees in version 0.2.6:
-//! close the relevant producers and accepted publications, or identify a
-//! completed journal prefix, before asserting scoped absence.
+//! Wait on [`JournalProbe`], [`JournalSnapshot`] or [`MetricsBarrier`] instead of
+//! a fixed sleep. For time-driven behaviour, use [`TestClock`] with
+//! `#[tokio::test(start_paused = true)]`. A probe sees only committed records, so
+//! before asserting that something did not happen, finish the producers involved
+//! or read a completed journal prefix.
 
 #[cfg(test)]
 pub(crate) mod causal_fixture;

@@ -26,6 +26,8 @@
 //!
 //! Digest output configuration:
 //! - `obzenflow.toml` selects `console_sink`.
+//! - `obzenflow.live.toml` is `obzenflow.toml` reading the live Hacker News API.
+//! - `obzenflow.replay.toml` is `obzenflow.live.toml` without `[ai.models]`, for replay.
 //! - `obzenflow.postgres.toml` selects `postgres_sink`.
 //! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL`, optionally
 //!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`), and optionally

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::case_system::{CaseRequest, CaseSystemPort, SimulatedCaseSystem};
+use super::case_system::{CaseRequest, CaseSystem, CaseSystemPort, SimulatedCaseSystem};
 use super::domain::{AlertRaised, AlertSubject, TransactionCleared};
 use super::risk_engine::{RiskEnginePort, RiskVerdict, ScoreRequest, SimulatedRiskEngine};
 use obzenflow::effects::simulated::CallLogError;
@@ -86,13 +86,18 @@ pub fn simulated_risk_engine(
 
 pub fn simulated_case_system(
     ledger: &Path,
+    case_system: CaseSystem,
     stats: &Arc<VendorStats>,
 ) -> Result<System<dyn CaseSystemPort>, SystemError> {
     let ledger = ledger.to_path_buf();
     let stats = stats.clone();
-    System::deferred("simulated-case-system", move || {
+    let name = match case_system {
+        CaseSystem::Simulated => "simulated-case-system",
+        CaseSystem::UnreadableReplies => "case-system-unreadable-replies",
+    };
+    System::deferred(name, move || {
         stats.case_systems_built.fetch_add(1, Ordering::SeqCst);
-        let cases = SimulatedCaseSystem::open(&ledger).map_err(construction_failed)?;
+        let cases = SimulatedCaseSystem::open(&ledger, case_system).map_err(construction_failed)?;
         Ok(Arc::new(cases))
     })
 }

@@ -1,0 +1,12 @@
+[server]
+enabled = true
+
+[metrics]
+enabled = true
+
+# The demo's own settings. Relative paths resolve against the working directory.
+[app]
+accounts_file = "examples/http_ingestion_piggy_bank_demo/accounts.yaml"
+transactions_file = "examples/http_ingestion_piggy_bank_demo/transactions.csv"
+ach_debits_file = "examples/http_ingestion_piggy_bank_demo/ach-debits.csv"
+fee_rule = "one_fee_per_payment"

@@ -207,7 +207,7 @@ macro_rules! delegate_effect_value {
                 ($plan)(self).validate_configuration(request, config, stage_type)
             }
             fn materialize(&self, _request: crate::middleware::MiddlewareAttachmentRequest<'_>, context: &crate::middleware::MiddlewareMaterializationContext<'_>) -> crate::middleware::MiddlewareFactoryResult<crate::middleware::MiddlewareSurfaceAttachment> {
-                Err(crate::middleware::MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, std::io::Error::other("effect controls must be resolved through the complete attachment plan before materialisation")))
+                Err(crate::middleware::MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, std::io::Error::other("effect controls must be resolved through the complete attachment plan before materialization")))
             }
             fn config_snapshot(&self) -> Option<serde_json::Value> { ($plan)(self).config_snapshot() }
         }

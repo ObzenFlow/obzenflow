@@ -174,7 +174,7 @@ impl SubmissionResponse {
         }
         Ok(response
             .with_json(&self)
-            .map_err(|error| EndpointError::with_source("Serialising endpoint response", error))?
+            .map_err(|error| EndpointError::with_source("Serializing endpoint response", error))?
             .into())
     }
 }
@@ -206,7 +206,7 @@ pub(crate) fn refusal_response(
             code,
             retryable: code.is_retryable(),
         })
-        .map_err(|error| EndpointError::with_source("Serialising endpoint response", error))?
+        .map_err(|error| EndpointError::with_source("Serializing endpoint response", error))?
         .into())
 }
 

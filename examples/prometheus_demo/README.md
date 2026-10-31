@@ -45,7 +45,7 @@ This starts the flow automatically. Connect the Tokio Console client to
 `http://127.0.0.1:6669`. Ordinary builds do not carry `tokio_unstable`.
 Console is disabled by default. `--tokio-console=false` disables it in the same
 binary, including when the config file enables it. These are shared framework
-options; the demo does not initialise Console. The equivalent startup config is:
+options; the demo does not initialize Console. The equivalent startup config is:
 
 ```toml
 [diagnostics.tokio_console]

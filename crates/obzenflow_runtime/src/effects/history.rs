@@ -1120,7 +1120,7 @@ pub(crate) fn validate_affine_terminal_group(
         }
         if event.consumes_data_credit() {
             return Err(EffectError::EffectProvenanceMismatch(format!(
-                "affine effect cursor {cursor:?} terminal group contains unrecognised Data"
+                "affine effect cursor {cursor:?} terminal group contains unrecognized Data"
             )));
         }
     }

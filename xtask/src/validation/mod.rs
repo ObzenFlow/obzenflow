@@ -93,7 +93,12 @@ fn settle(obligations: &[(String, Outcome)]) -> Result<()> {
 
 fn help() -> String {
     let lanes: Vec<_> = Lane::ALL.iter().map(|lane| lane.name()).collect();
-    format!("cargo xtask test [--lane <lane>]\n\nLanes: {}\nOmitting --lane requests all correctness lanes. Use --lane performance for complete performance qualification, executed serially; `cargo xtask performance` runs its stages separately. Repeated --lane selects exactly the declared scope.\nReports: target/test-runs/<run-id>/report.json. Failed attempts and incomplete required coverage return nonzero. Unrequested lanes supply no acceptance evidence.", lanes.join(", "))
+    let width = lanes.iter().map(|name| name.len()).max().unwrap_or(0);
+    let rows: String = Lane::ALL
+        .iter()
+        .map(|lane| format!("\n  {:<width$}  {}", lane.name(), lane.description()))
+        .collect();
+    format!("cargo xtask test [--lane <lane>]...\n\nWithout --lane, runs the seven correctness lanes CI requires. Repeat --lane to\nrun only the lanes you name.\n\nLanes: {}{rows}\n\nEach run writes target/test-runs/<run-id>/report.json and fails if any requested\ntest fails or doesn't run.", lanes.join(", "))
 }
 
 const STAGES: [&str; 5] = ["plan", "build", "qualify", "measure", "assemble"];

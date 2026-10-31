@@ -100,6 +100,19 @@ impl Lane {
         }
     }
 
+    pub(super) fn description(self) -> &'static str {
+        match self {
+            Self::Default => "whole workspace, no extra features",
+            Self::ProductionFeatures => "whole workspace with every production feature",
+            Self::TestSupport => "whole workspace with test-support and warp-server",
+            Self::JournalFixtures => "journal codec fixtures",
+            Self::Doctest => "documentation tests",
+            Self::Postgres => "PostgreSQL tests against their own database service",
+            Self::Benchmarks => "every benchmark once, untimed",
+            Self::Performance => "Criterion comparison, run serially, only when named",
+        }
+    }
+
     pub(super) fn parse(value: &str) -> Result<Self> {
         Self::ALL
             .into_iter()
