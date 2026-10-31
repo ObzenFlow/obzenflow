@@ -133,7 +133,6 @@ impl IngressDecoder for LedgerIngress {
     }
 }
 
-/// Decodes one posted ACH debit; a zero amount rejects only that debit.
 #[derive(Clone, Debug)]
 pub struct AchIngress;
 
@@ -175,18 +174,39 @@ fn post(account: AccountOpened, entry: LedgerEntry) -> PostedEntry {
     }
 }
 
-fn fee_report_line(returned: &PaymentReturned) -> String {
-    let fee = match returned.fee_cents {
-        0 => "no fee".to_string(),
-        cents => format!("fee {}", format_unsigned_cents(cents)),
-    };
+fn return_line(
+    account_id: &str,
+    company_name: &str,
+    amount_cents: u64,
+    presentment: u32,
+    fee: &str,
+    fee_rule: &str,
+) -> String {
     format!(
-        "{:<9}  {:<16}  {:>8}  presentment {}  returned, {fee} ({})",
-        returned.account_id,
-        returned.company_name,
-        format_unsigned_cents(returned.amount_cents),
+        "{account_id:<9}  {company_name:<16}  {:>8}  presentment {presentment}  returned, {fee} ({fee_rule})",
+        format_unsigned_cents(amount_cents),
+    )
+}
+
+fn fee_charged_line(charged: &FeeCharged) -> String {
+    return_line(
+        &charged.account_id,
+        &charged.company_name,
+        charged.amount_cents,
+        charged.presentment,
+        &format!("fee {}", format_unsigned_cents(charged.fee_cents)),
+        &charged.fee_rule,
+    )
+}
+
+fn retry_returned_line(returned: &RetryReturned) -> String {
+    return_line(
+        &returned.account_id,
+        &returned.company_name,
+        returned.amount_cents,
         returned.presentment,
-        returned.fee_rule,
+        "no fee",
+        &returned.fee_rule,
     )
 }
 
@@ -292,7 +312,8 @@ pub fn assemble_flow(
             }),
         );
 
-        let fee_report_sink = sinks::ConsoleSink::new(fee_report_line);
+        let fee_report_sink = sinks::ConsoleSink::new(fee_charged_line);
+        let free_retry_sink = sinks::ConsoleSink::new(retry_returned_line);
 
         Ok(flow! {
             name: "http_ingestion_piggy_bank_demo",
@@ -319,7 +340,7 @@ pub fn assemble_flow(
                     LedgerEntry -> PostedEntry => post_entry
                 );
                 assess = stateful!(
-                    PostedEntry -> { BalanceMoved, PaymentReturned } => assess_handler
+                    PostedEntry -> { BalanceMoved, FeeCharged, RetryReturned } => assess_handler
                 );
                 checkbook = stateful!(
                     BalanceMoved -> CheckbookSnapshot => checkbook_handler
@@ -329,7 +350,8 @@ pub fn assemble_flow(
                 printer = sink!(
                     CheckbookSnapshot => printer_sink
                 );
-                fee_report = sink!(PaymentReturned => fee_report_sink);
+                fee_report = sink!(FeeCharged => fee_report_sink);
+                free_retries = sink!(RetryReturned => free_retry_sink);
             },
 
             topology: {
@@ -345,6 +367,7 @@ pub fn assemble_flow(
                 posted |> assess;
                 assess |> checkbook;
                 assess |> fee_report;
+                assess |> free_retries;
                 checkbook |> printer;
             }
         })

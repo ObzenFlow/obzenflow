@@ -93,11 +93,10 @@ pub enum FeeRule {
 }
 
 impl FeeRule {
-    pub fn fee_cents(self, presentment: u32) -> u64 {
+    pub fn fee_cents(self, presentment: u32) -> Option<u64> {
         match self {
-            Self::FeePerReturn => RETURNED_PAYMENT_FEE_CENTS,
-            Self::OneFeePerPayment if presentment == 1 => RETURNED_PAYMENT_FEE_CENTS,
-            Self::OneFeePerPayment => 0,
+            Self::OneFeePerPayment if presentment > 1 => None,
+            Self::FeePerReturn | Self::OneFeePerPayment => Some(RETURNED_PAYMENT_FEE_CENTS),
         }
     }
 }
@@ -128,7 +127,7 @@ impl TypedPayload for BalanceMoved {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaymentReturned {
+pub struct FeeCharged {
     pub account_id: String,
     pub company_name: String,
     pub company_id: String,
@@ -139,14 +138,30 @@ pub struct PaymentReturned {
     pub fee_rule: String,
 }
 
-impl TypedPayload for PaymentReturned {
-    const EVENT_TYPE: &'static str = "bank.payment_returned";
+impl TypedPayload for FeeCharged {
+    const EVENT_TYPE: &'static str = "bank.fee_charged";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryReturned {
+    pub account_id: String,
+    pub company_name: String,
+    pub company_id: String,
+    pub amount_cents: u64,
+    pub presentment: u32,
+    pub balance_cents: i64,
+    pub fee_rule: String,
+}
+
+impl TypedPayload for RetryReturned {
+    const EVENT_TYPE: &'static str = "bank.retry_returned";
 }
 
 #[derive(Debug, Clone, StageOutputFacts)]
 pub enum Assessed {
     Moved(BalanceMoved),
-    Returned(PaymentReturned),
+    FeeCharged(FeeCharged),
+    RetryReturned(RetryReturned),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

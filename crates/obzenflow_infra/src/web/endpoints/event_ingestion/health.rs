@@ -70,7 +70,7 @@ impl<T: Send + Sync + 'static> HttpEndpoint for IngestionHealthEndpoint<T> {
 
         let response = response
             .with_json(&body)
-            .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
+            .map_err(|e| EndpointError::with_source("Serializing endpoint response", e))?;
         Ok(response.into())
     }
 }

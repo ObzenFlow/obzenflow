@@ -76,7 +76,7 @@ fn resolve_configured_sink_descriptors(
 }
 
 /// Validate shared hosted ownership before any factory, connector, or journal
-/// can materialise. The final write-once fill remains the race-safety guard.
+/// can materialize. The final write-once fill remains the race-safety guard.
 #[allow(clippy::result_large_err)]
 fn validate_hosted_ingress_bindings<'a>(
     bindings: impl IntoIterator<

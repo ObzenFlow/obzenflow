@@ -345,7 +345,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
     /// Read one logical record from `reader` under the current policy, advancing
     /// `read_offset` and `position` only after prefix admission. A checked
-    /// header cannot authorise skipping a corrupt commitment. Returns the
+    /// header cannot authorize skipping a corrupt commitment. Returns the
     /// disposition plus the byte offset where the disposed frame began, for
     /// corruption reporting. Leaves `at_end`/`stall_polls` to the caller. Clean
     /// EOF maps to `EndOfCommittedRecords`.

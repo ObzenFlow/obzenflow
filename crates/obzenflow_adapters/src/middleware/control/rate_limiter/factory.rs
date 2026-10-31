@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Inert rate-limiter values and checked boundary materialisation.
+//! Inert rate-limiter values and checked boundary materialization.
 //!
 //! [`RateLimiter::declaration`] plus [`RateLimiter::materialize`]
 //! are the sole production placement authority for the hook-bound rate limiter:
@@ -30,7 +30,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use std::sync::Arc;
 
-/// Inert token-bucket configuration. Every attachment materialises its own bucket.
+/// Inert token-bucket configuration. Every attachment materializes its own bucket.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
     pub(in crate::middleware::control) events_per_second: f64,

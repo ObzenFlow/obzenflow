@@ -287,7 +287,7 @@ impl HttpEndpoint for ConfigHttpEndpoint {
         };
 
         let json_body = serde_json::to_string(&body)
-            .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
+            .map_err(|e| EndpointError::with_source("Serializing endpoint response", e))?;
         response
             .headers
             .insert("Content-Type".to_string(), "application/json".to_string());

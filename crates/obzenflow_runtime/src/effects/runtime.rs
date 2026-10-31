@@ -3170,7 +3170,7 @@ impl EffectsCore {
             if event.consumes_data_credit() {
                 return Err(self.refuse(ReconstructionRefusal::HistoryShape(
                     EffectError::EffectProvenanceMismatch(format!(
-                        "terminal control evidence for cursor {cursor:?} contains unrecognised Data"
+                        "terminal control evidence for cursor {cursor:?} contains unrecognized Data"
                     )),
                 )));
             }

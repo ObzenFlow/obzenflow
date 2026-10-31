@@ -835,7 +835,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 "sink: FlushBuffers action - flush returned audit payload, writing delivery"
                             );
                             let writer_id = ctx.writer_id.ok_or_else(|| {
-                                FsmError::HandlerError("writer_id not initialised".to_string())
+                                FsmError::HandlerError("writer_id not initialized".to_string())
                             })?;
 
                             let flow_ctx = FlowContext {
@@ -1046,7 +1046,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         );
                         let writer_id = ctx.writer_id.ok_or_else(|| {
                             FsmError::HandlerError(
-                                "writer_id not initialised".to_string(),
+                                "writer_id not initialized".to_string(),
                             )
                         })?;
 
@@ -1157,7 +1157,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
 ) -> Result<(), FsmError> {
     let writer_id = ctx
         .writer_id
-        .ok_or_else(|| FsmError::HandlerError("writer_id not initialised".to_string()))?;
+        .ok_or_else(|| FsmError::HandlerError("writer_id not initialized".to_string()))?;
     let flow_ctx = FlowContext {
         flow_name: ctx.flow_name.clone(),
         flow_id: ctx.flow_id.to_string(),

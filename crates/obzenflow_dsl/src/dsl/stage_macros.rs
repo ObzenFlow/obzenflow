@@ -1901,7 +1901,7 @@ macro_rules! handler_set {
 /// `with middleware` or `with { a, b }` is optional and holds controls and
 /// passive observers, and the handler may be followed by `.idempotent()` or
 /// `.non_idempotent()`. Configure a built-in or named trait implementation in
-/// ordinary Rust inside the materialiser, then pass the resulting binding by
+/// ordinary Rust inside the materializer, then pass the resulting binding by
 /// path.
 ///
 /// The config-selected form composes the direct surface with a syntax-only

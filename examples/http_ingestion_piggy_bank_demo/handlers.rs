@@ -145,20 +145,31 @@ impl TypedStatefulHandler for Assess {
             state.post(&entry, EntryKind::Debit, entry.amount_cents, note);
             return;
         }
-        let fee_cents = self.fee_rule.fee_cents(presentment);
-        state.pending.push(Assessed::Returned(PaymentReturned {
-            account_id: payment.account_id.clone(),
-            company_name: payment.company_name.clone(),
-            company_id: payment.company_id.clone(),
-            amount_cents: payment.amount_cents,
-            presentment,
-            balance_cents,
-            fee_cents,
-            fee_rule: self.fee_rule.to_string(),
-        }));
-        if fee_cents > 0 {
-            let note = Some(format!("NSF fee: {}", payment.company_name));
-            state.post(&entry, EntryKind::Debit, fee_cents, note);
+        let fee_rule = self.fee_rule.to_string();
+        match self.fee_rule.fee_cents(presentment) {
+            Some(fee_cents) => {
+                state.pending.push(Assessed::FeeCharged(FeeCharged {
+                    account_id: payment.account_id.clone(),
+                    company_name: payment.company_name.clone(),
+                    company_id: payment.company_id.clone(),
+                    amount_cents: payment.amount_cents,
+                    presentment,
+                    balance_cents,
+                    fee_cents,
+                    fee_rule,
+                }));
+                let note = Some(format!("NSF fee: {}", payment.company_name));
+                state.post(&entry, EntryKind::Debit, fee_cents, note);
+            }
+            None => state.pending.push(Assessed::RetryReturned(RetryReturned {
+                account_id: payment.account_id.clone(),
+                company_name: payment.company_name.clone(),
+                company_id: payment.company_id.clone(),
+                amount_cents: payment.amount_cents,
+                presentment,
+                balance_cents,
+                fee_rule,
+            })),
         }
         state.unpaid.insert(payment, presentment);
     }

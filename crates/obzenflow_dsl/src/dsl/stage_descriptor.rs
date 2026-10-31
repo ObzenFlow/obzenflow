@@ -500,7 +500,7 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
             .map(|slot| slot.ingress_key().clone())
     }
 
-    /// Validate every frozen attachment before any stage is materialised.
+    /// Validate every frozen attachment before any stage is materialized.
     fn validate_middleware_configuration(
         &self,
         config: &StageConfig,

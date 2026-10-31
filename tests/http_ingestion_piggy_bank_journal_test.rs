@@ -24,6 +24,10 @@ use support::flow::{assemble_flow, AccountIngress, AchIngress, LedgerIngress};
 
 const RETRY_KEY: &str = "ach-20260306-000412";
 
+const RETURN_RECORDS: [&str; 2] = ["bank.fee_charged", "bank.retry_returned"];
+
+type Decision = (String, String, u64, String, Option<u64>, String);
+
 const RETURNS: [(&str, &str, u64); 6] = [
     ("chk-58213", "NORTHSIDE FIT", 1),
     ("chk-60472", "SPARKLE TV", 1),
@@ -85,7 +89,7 @@ fn retry() -> AchDebit {
 
 fn is_retry_return(record: &JournalRecord<ChainPayload>) -> bool {
     let payload = record.payload();
-    record.event_type() == "bank.payment_returned"
+    RETURN_RECORDS.contains(&record.event_type_name())
         && payload["account_id"] == "chk-58213"
         && payload["presentment"] == 2
 }
@@ -222,13 +226,25 @@ async fn rows(run: &Path, stage: &str) -> Vec<JournalRecord<ChainPayload>> {
     rows
 }
 
-async fn facts(run: &Path, stage: &str, event_type: &str) -> Vec<serde_json::Value> {
-    rows(run, stage)
+fn decision(record: &JournalRecord<ChainPayload>) -> Decision {
+    let fact = record.payload();
+    (
+        fact["account_id"].as_str().expect("account").to_owned(),
+        fact["company_name"].as_str().expect("company").to_owned(),
+        fact["presentment"].as_u64().expect("presentment"),
+        record.event_type(),
+        fact["fee_cents"].as_u64(),
+        fact["fee_rule"].as_str().expect("rule").to_owned(),
+    )
+}
+
+async fn returns(run: &Path) -> Vec<Decision> {
+    rows(run, "assess")
         .await
         .into_iter()
         .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
-        .filter(|row| row.event_type() == event_type)
-        .map(|row| row.payload())
+        .filter(|row| RETURN_RECORDS.contains(&row.event_type_name()))
+        .map(|row| decision(&row))
         .collect()
 }
 
@@ -279,55 +295,53 @@ async fn balances_chain_from_their_opening_balances(run: &Path) {
     assert!(!balances.is_empty(), "the run moved balances");
 }
 
-async fn printed_returns(run: &Path) -> Vec<serde_json::Value> {
+async fn printed_returns(run: &Path) -> Vec<Decision> {
     let returns: HashMap<_, _> = rows(run, "assess")
         .await
         .into_iter()
-        .filter(|row| row.event_type() == "bank.payment_returned")
-        .map(|row| (row.envelope.provenance.event.id, row.payload()))
-        .collect();
-    rows(run, "fee_report")
-        .await
-        .into_iter()
-        .filter(|row| row.event_type() == "delivery.succeeded")
+        .filter(|row| RETURN_RECORDS.contains(&row.event_type_name()))
         .map(|row| {
-            row.envelope
-                .provenance
-                .event
-                .causality
-                .parent_ids
-                .first()
-                .and_then(|parent| returns.get(parent))
-                .cloned()
-                .expect("each printed line follows a return")
+            let decided = decision(&row);
+            (row.envelope.provenance.event.id, decided)
         })
-        .collect()
+        .collect();
+    let mut printed = Vec::new();
+    for report in ["fee_report", "free_retries"] {
+        printed.extend(
+            rows(run, report)
+                .await
+                .into_iter()
+                .filter(|row| row.event_type() == "delivery.succeeded")
+                .map(|row| {
+                    row.envelope
+                        .provenance
+                        .event
+                        .causality
+                        .parent_ids
+                        .first()
+                        .and_then(|parent| returns.get(parent))
+                        .cloned()
+                        .expect("each printed line follows a return")
+                }),
+        );
+    }
+    printed
 }
 
-fn decisions(returned: &[serde_json::Value]) -> Vec<(String, String, u64, u64, String)> {
-    returned
-        .iter()
-        .map(|fact| {
-            (
-                fact["account_id"].as_str().expect("account").to_owned(),
-                fact["company_name"].as_str().expect("company").to_owned(),
-                fact["presentment"].as_u64().expect("presentment"),
-                fact["fee_cents"].as_u64().expect("fee"),
-                fact["fee_rule"].as_str().expect("rule").to_owned(),
-            )
-        })
-        .collect()
-}
-
-fn expected(fees: [u64; 6], rule: &str) -> Vec<(String, String, u64, u64, String)> {
+fn expected(fees: [Option<u64>; 6], rule: &str) -> Vec<Decision> {
     RETURNS
         .iter()
         .zip(fees)
         .map(|((account, company, presentment), fee)| {
+            let record = match fee {
+                Some(_) => "bank.fee_charged",
+                None => "bank.retry_returned",
+            };
             (
                 (*account).to_owned(),
                 (*company).to_owned(),
                 *presentment,
+                record.to_owned(),
                 fee,
                 rule.to_owned(),
             )
@@ -352,10 +366,9 @@ async fn a_retry_charged_under_v1_replays_under_v2_with_no_fee() {
     );
 
     let baseline = runs(&journal_root).pop().expect("the fee run's archive");
-    let charged = facts(&baseline, "assess", "bank.payment_returned").await;
     assert_eq!(
-        decisions(&charged),
-        expected([3500; 6], "fee_per_return v1"),
+        returns(&baseline).await,
+        expected([Some(3500); 6], "fee_per_return v1"),
         "rule v1 charges every return, the retry included"
     );
     balances_chain_from_their_opening_balances(&baseline).await;
@@ -363,16 +376,21 @@ async fn a_retry_charged_under_v1_replays_under_v2_with_no_fee() {
     replay(&v2, &journal_root, &baseline).await;
     let candidate = runs(&journal_root).pop().expect("the replay's archive");
     assert_ne!(candidate, baseline);
-    let corrected = facts(&candidate, "assess", "bank.payment_returned").await;
+    let mut corrected = returns(&candidate).await;
     assert_eq!(
-        decisions(&corrected),
-        expected([3500, 3500, 3500, 0, 0, 0], "one_fee_per_payment v2"),
-        "rule v2 charges one fee per unpaid payment"
+        corrected,
+        expected(
+            [Some(3500), Some(3500), Some(3500), None, None, None],
+            "one_fee_per_payment v2"
+        ),
+        "rule v2 charges one fee per unpaid payment and returns its retries with no fee"
     );
+    let mut printed = printed_returns(&candidate).await;
+    printed.sort();
+    corrected.sort();
     assert_eq!(
-        decisions(&printed_returns(&candidate).await),
-        decisions(&corrected),
-        "the replay's fee report prints every corrected return"
+        printed, corrected,
+        "the replay's two reports print every corrected return"
     );
     balances_chain_from_their_opening_balances(&candidate).await;
 
