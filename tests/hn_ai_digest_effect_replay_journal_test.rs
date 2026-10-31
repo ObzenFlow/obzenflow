@@ -850,7 +850,7 @@ fn hn_witness_uses_materialization_and_the_ai_stage() {
             .expect("HN witness config is readable");
 
     for required in [
-        "FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {",
+        "FlowDefinition::materialize_with(move |_runtime_config, settings: HnSettings| {",
         ".into_inputs()",
         "Ok(build_flow_definition(inputs, HnFlowOptions::default()))",
         "FlowDefinition::materialize(move |_| {",
@@ -1843,16 +1843,47 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     assert_eq!(receipt.items, Some(1));
 }
 
+fn shipped_config(file: &str) -> toml::Table {
+    let shipped = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/hn_ai_digest_demo")
+        .join(file);
+    toml::from_str(&std::fs::read_to_string(shipped).unwrap()).unwrap()
+}
+
 fn witness_config(dir: &Path, edit: impl FnOnce(&mut toml::Table)) -> PathBuf {
-    let shipped =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
-    let mut config: toml::Table =
-        toml::from_str(&std::fs::read_to_string(shipped).unwrap()).unwrap();
+    shipped_witness_config("obzenflow.toml", dir, edit)
+}
+
+fn shipped_witness_config(file: &str, dir: &Path, edit: impl FnOnce(&mut toml::Table)) -> PathBuf {
+    let mut config = shipped_config(file);
     assert!(config.remove("app").is_some(), "the demo ships [app]");
     edit(&mut config);
-    let path = dir.join("witness-obzenflow.toml");
+    let path = dir.join(format!("witness-{file}"));
     std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
     path
+}
+
+#[test]
+fn the_live_and_replay_configurations_differ_from_the_default_as_documented() {
+    let default = shipped_config("obzenflow.toml");
+    let mut live = shipped_config("obzenflow.live.toml");
+    let app = live
+        .get_mut("app")
+        .and_then(toml::Value::as_table_mut)
+        .expect("[app] table");
+    assert_eq!(
+        app.insert("source".to_owned(), default["app"]["source"].clone()),
+        Some(toml::Value::String("live".to_owned()))
+    );
+    assert_eq!(live, default, "the live file differs only in app.source");
+
+    let mut live = shipped_config("obzenflow.live.toml");
+    assert!(live.remove("ai").is_some(), "the live file configures AI");
+    assert_eq!(
+        shipped_config("obzenflow.replay.toml"),
+        live,
+        "the replay file is the live file without [ai]"
+    );
 }
 
 #[tokio::test]
@@ -1941,7 +1972,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         mode_label: "mock".to_string(),
         base_url: server.base_url(),
     };
-    let config_path = witness_config(temp.path(), |config| {
+    let periodic_observability = |config: &mut toml::Table| {
         config
             .get_mut("runtime")
             .unwrap()
@@ -1953,7 +1984,10 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 interval_ms = 250 }
                 .into(),
             );
-    });
+    };
+    let config_path = witness_config(temp.path(), periodic_observability);
+    let replay_config_path =
+        shipped_witness_config("obzenflow.replay.toml", temp.path(), periodic_observability);
     let live = recording();
 
     FlowApplication::builder()
@@ -2031,7 +2065,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         .with_cli_args(vec![
             OsString::from("obzenflow"),
             OsString::from("--config"),
-            config_path.as_os_str().to_os_string(),
+            replay_config_path.as_os_str().to_os_string(),
             OsString::from("--replay-from"),
             live_archive.as_os_str().to_os_string(),
         ])

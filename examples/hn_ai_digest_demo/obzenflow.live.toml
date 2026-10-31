@@ -1,0 +1,31 @@
+# The generated map and reduce members each reserve their complete three-row
+# direct-fact bound before starting a live chat continuation.
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 3
+stall_timeout_ms = 30000
+
+# Every chat stage's endpoint and model. The built-in `ollama` endpoint needs
+# no table. Secrets are read only when a live call first needs them.
+[ai.models]
+endpoint = "ollama"
+model = "llama3.1:8b"
+
+# The logical `digest_summary` stage declares `console_sink` and
+# `postgres_sink`; deployment configuration chooses one binding by name.
+[sinks]
+handler = "console_sink"
+
+# `source = "live"` reads the Hacker News API; "mock" serves a loopback fixture.
+# Pacing is `events_per_second` under [middleware.stages.hn_stories.rate_limiter].
+[app]
+source = "live"
+max_stories = 60
+poll_timeout_secs = 120
+# Interests personalize both prompts and form part of every chat effect's
+# identity, so a replay or resume with different interests refuses.
+# interests = "rust, ai, security"
+
+[app.digest]
+# Stories per group, 1 or more.
+group_max_stories = 10

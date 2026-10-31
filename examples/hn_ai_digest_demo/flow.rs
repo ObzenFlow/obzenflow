@@ -23,7 +23,10 @@ use obzenflow::stages::sinks::SinkRedeliverySafety;
 use obzenflow::stages::sources::{http_pull_config, HttpPullSource};
 use obzenflow::stages::{sinks, transforms};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, time::Duration};
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 const HN_SOURCE_BREAKER_FAILURES: u32 = 3;
 const HN_SOURCE_BREAKER_COOLDOWN_SECS: u64 = 2;
@@ -266,11 +269,12 @@ impl Default for HnFlowOptions {
     }
 }
 
-pub(crate) fn settings_flow_definition() -> FlowDefinition {
-    FlowDefinition::materialize_with(|_runtime_config, settings: HnSettings| {
+pub(crate) fn settings_flow_definition(reads_mock: Arc<AtomicBool>) -> FlowDefinition {
+    FlowDefinition::materialize_with(move |_runtime_config, settings: HnSettings| {
         let inputs = settings
             .into_inputs()
             .map_err(|error| FlowBuildError::StageResourcesFailed(format!("{error:#}")))?;
+        reads_mock.store(inputs.mode_label == "mock", Ordering::SeqCst);
         Ok(build_flow_definition(inputs, HnFlowOptions::default()))
     })
 }
@@ -365,10 +369,10 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
     })
 }
 
-pub async fn run_example(presentation: Presentation) -> Result<()> {
+pub async fn run_example(presentation: Presentation, reads_mock: Arc<AtomicBool>) -> Result<()> {
     FlowApplication::builder()
         .with_presentation(presentation)
-        .run_async(settings_flow_definition())
+        .run_async(settings_flow_definition(reads_mock))
         .await?;
     Ok(())
 }
@@ -378,10 +382,14 @@ pub fn run_demo_blocking() -> Result<()> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(run_example(build_presentation()))
+    let reads_mock = Arc::new(AtomicBool::new(false));
+    runtime.block_on(run_example(
+        build_presentation(reads_mock.clone()),
+        reads_mock,
+    ))
 }
 
-pub(crate) fn build_presentation() -> Presentation {
+pub(crate) fn build_presentation(reads_mock: Arc<AtomicBool>) -> Presentation {
     Presentation::new(
         Banner::new("HN AI Digest Demo")
             .description(
@@ -395,16 +403,18 @@ pub(crate) fn build_presentation() -> Presentation {
                 ),
             ),
     )
-    .with_footer(|outcome| {
+    .with_footer(move |outcome| {
         let is_success = matches!(&outcome, RunPresentationOutcome::Completed { .. });
         let footer = outcome.into_footer();
-        if is_success {
+        if !is_success {
+            footer
+        } else if reads_mock.load(Ordering::SeqCst) {
             footer.paragraph(
                 "The generated digest was delivered by the configured sink handler.\n\
-                 Set source = \"live\" under [app] to fetch from the real Hacker News API."
+                 Set source = \"live\" under [app] to fetch from the real Hacker News API.",
             )
         } else {
-            footer
+            footer.paragraph("The generated digest was delivered by the configured sink handler.")
         }
     })
 }

@@ -1,5 +1,5 @@
-# Accounts open once at startup. transactions.csv posts against them first;
-# live accounts and transactions then arrive over HTTP.
+# Accounts open once at startup. transactions.csv and ach-debits.csv post
+# against them first; live accounts and transactions then arrive over HTTP.
 # Quote identifiers so YAML never reads them as numbers.
 accounts:
   - account_id: "acct-1"
@@ -8,3 +8,15 @@ accounts:
   - account_id: "acct-2"
     owner: Bob
     initial_balance_cents: 0
+  - account_id: "chk-58213"
+    owner: Dana
+    initial_balance_cents: 3120
+  - account_id: "chk-60472"
+    owner: Marcus
+    initial_balance_cents: 1288
+  - account_id: "chk-71530"
+    owner: Priya
+    initial_balance_cents: 245010
+  - account_id: "chk-44108"
+    owner: Leon
+    initial_balance_cents: 5602

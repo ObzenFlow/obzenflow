@@ -59,20 +59,58 @@ pub trait CaseSystemPort: Send + Sync {
     ) -> Result<CaseOpened, EffectError>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseSystem {
+    Simulated,
+    UnreadableReplies,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+enum ReplyFailure {
+    NoCaseNumber,
+}
+
+impl From<ReplyFailure> for EffectError {
+    fn from(failure: ReplyFailure) -> Self {
+        match failure {
+            ReplyFailure::NoCaseNumber => {
+                Self::Permanent("the case system's reply has no case number".to_owned())
+            }
+        }
+    }
+}
+
 pub struct SimulatedCaseSystem {
     calls: CallLog<CaseAnswer>,
+    case_system: CaseSystem,
 }
 
 impl SimulatedCaseSystem {
-    pub fn open(path: &Path) -> Result<Self, CallLogError> {
+    pub fn open(path: &Path, case_system: CaseSystem) -> Result<Self, CallLogError> {
         Ok(Self {
             calls: CallLog::open(path)?,
+            case_system,
         })
     }
 
-    fn answer(&self, key: &IdempotencyKey, flow_id: FlowId) -> Result<CaseAnswer, CallLogError> {
-        self.calls.answer(key, flow_id, |decided| CaseAnswer {
-            case_number: CaseNumber(decided + 1),
+    fn answer(
+        &self,
+        request: &CaseRequest,
+        key: &IdempotencyKey,
+        flow_id: FlowId,
+    ) -> Result<Result<CaseAnswer, ReplyFailure>, CallLogError> {
+        let unreadable =
+            self.case_system == CaseSystem::UnreadableReplies && request.alert_id.is_whole_day();
+        self.calls.try_answer(key, flow_id, |decided| {
+            if unreadable {
+                Err(ReplyFailure::NoCaseNumber)
+            } else {
+                Ok(CaseAnswer {
+                    case_number: CaseNumber(decided + 1),
+                })
+            }
         })
     }
 }
@@ -85,9 +123,9 @@ impl CaseSystemPort for SimulatedCaseSystem {
         key: &IdempotencyKey,
         ctx: &EffectContext,
     ) -> Result<CaseOpened, EffectError> {
-        let answer = self.answer(key, ctx.flow_id()).map_err(|error| {
+        let answer = self.answer(request, key, ctx.flow_id()).map_err(|error| {
             EffectError::unavailable(CASE_SYSTEM_SOURCE, "ledger_write_failed", error)
-        })?;
+        })??;
         Ok(request.opened(answer.case_number))
     }
 }
@@ -99,8 +137,12 @@ mod tests {
     use obzenflow::effects::Keyed;
 
     fn request(txn_id: u64) -> CaseRequest {
+        alert(format!("txn:{txn_id}"))
+    }
+
+    fn alert(alert_id: String) -> CaseRequest {
         CaseRequest {
-            alert_id: AlertId(format!("txn:{txn_id}")),
+            alert_id: AlertId(alert_id),
             account: AccountKey {
                 bank: "70".to_owned(),
                 account: "8000A1B2C".to_owned(),
@@ -114,8 +156,10 @@ mod tests {
     }
 
     fn case_number(cases: &SimulatedCaseSystem, txn_id: u64, run: FlowId) -> CaseNumber {
+        let request = request(txn_id);
         cases
-            .answer(&request(txn_id).idempotency_key(), run)
+            .answer(&request, &request.idempotency_key(), run)
+            .expect("the call log records the call")
             .expect("case opens")
             .case_number
     }
@@ -124,7 +168,8 @@ mod tests {
     fn cases_are_numbered_in_call_order_and_a_repeat_keeps_its_number() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cases.jsonl");
-        let cases = SimulatedCaseSystem::open(&path).expect("the call log opens");
+        let cases =
+            SimulatedCaseSystem::open(&path, CaseSystem::Simulated).expect("the call log opens");
         let run = FlowId::new();
         assert_eq!(case_number(&cases, 5, run), CaseNumber(1));
         assert_eq!(case_number(&cases, 3, run), CaseNumber(2));
@@ -151,15 +196,49 @@ mod tests {
         let path = dir.path().join("cases.jsonl");
         let first_run = FlowId::new();
         {
-            let cases = SimulatedCaseSystem::open(&path).expect("the call log opens");
+            let cases = SimulatedCaseSystem::open(&path, CaseSystem::Simulated)
+                .expect("the call log opens");
             for txn_id in [11, 12, 13] {
                 case_number(&cases, txn_id, first_run);
             }
         }
 
-        let reopened = SimulatedCaseSystem::open(&path).expect("the call log reopens");
+        let reopened =
+            SimulatedCaseSystem::open(&path, CaseSystem::Simulated).expect("the call log reopens");
         let resumed = FlowId::new();
         assert_eq!(case_number(&reopened, 12, resumed), CaseNumber(2));
         assert_eq!(case_number(&reopened, 14, resumed), CaseNumber(4));
+    }
+
+    #[test]
+    fn unreadable_replies_fail_whole_day_alerts_and_number_only_the_cases_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cases.jsonl");
+        let cases = SimulatedCaseSystem::open(&path, CaseSystem::UnreadableReplies)
+            .expect("the call log opens");
+        let run = FlowId::new();
+        let day = alert("day:2022/09/05:48/81F0A0001".to_owned());
+        let failure = cases
+            .answer(&day, &day.idempotency_key(), run)
+            .expect("the call log records the call")
+            .expect_err("a whole-day reply is unreadable");
+        assert!(matches!(
+            EffectError::from(failure.clone()),
+            EffectError::Permanent(message) if message == "the case system's reply has no case number"
+        ));
+        assert_eq!(case_number(&cases, 5, run), CaseNumber(1));
+
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .expect("the call log is readable")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                serde_json::json!({"result": "failed", "key": "aml-case:day:2022/09/05:48/81F0A0001", "flow_id": run.to_string(), "error": {"reason": "no_case_number"}}),
+                serde_json::json!({"result": "decided", "key": "aml-case:txn:5", "flow_id": run.to_string(), "response": {"case_number": 1}}),
+            ]
+        );
     }
 }

@@ -328,6 +328,12 @@ impl TypedPayload for TransactionCleared {
 #[serde(transparent)]
 pub struct AlertId(pub String);
 
+impl AlertId {
+    pub fn is_whole_day(&self) -> bool {
+        self.0.starts_with("day:")
+    }
+}
+
 impl fmt::Display for AlertId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
