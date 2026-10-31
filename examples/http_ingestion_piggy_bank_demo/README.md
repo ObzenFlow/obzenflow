@@ -49,7 +49,8 @@ cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prome
 ```
 
 The replay decides every presentment again under `one_fee_per_payment`. It
-prints each fee it still charges and each retry it now returns with no fee, and
-`--verify` lists where they differ.
+prints each fee it still charges and each retry it now returns with no fee.
+`--verify` lists where they differ and exits with an error, because the
+decisions changed.
 
 Source: [flow](flow.rs), [fees](handlers.rs) and [records](domain.rs).

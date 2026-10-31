@@ -230,7 +230,7 @@ diagnostic operation that does not measure the production disk codec.
 Observation rows consume only this run's per-shard `new/` results. Failed or skipped
 stages produce an incomplete report with any available rows. Missing, malformed or
 duplicate results are called out and fail report generation after the report is saved.
-Cases without a valid declaration remain visible under **Uncategorised** and fail
+Cases without a valid declaration remain visible under **Uncategorized** and fail
 report generation. Raw output and Markdown uploads run even after failures. Each run
 has its own output directory so cached results cannot appear as new measurements.
 

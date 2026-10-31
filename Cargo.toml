@@ -3,10 +3,10 @@ name = "obzenflow"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "High-performance event streaming and processing framework"
+description = "A durable execution runtime for building event-sourced streaming workflows."
 license.workspace = true
 repository.workspace = true
-keywords = ["event-streaming", "event-sourcing", "async", "pipeline"]
+keywords = ["durable-execution", "event-sourcing", "workflow", "streaming", "replay"]
 publish = true
 autobins = false
 

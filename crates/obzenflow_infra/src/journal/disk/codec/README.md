@@ -36,7 +36,7 @@ The disk writer checks its encoded buffer before commitment; readers check the
 frame header before allocating the body. There is no separate 8 MiB payload cap
 or canonical-JSON record/group accounting pass. Memory journals enforce the member
 count but have no encoded frame. These limits do not describe heap/RSS usage after
-JSON and immutable definitions are materialised. Sequential readers decode frames
+JSON and immutable definitions are materialized. Sequential readers decode frames
 on the blocking pool, outside Tokio worker threads.
 
 ## Framing
@@ -170,7 +170,7 @@ publishes none. The provider never waits for another journal's pending definitio
 while holding its write lock. Required definitions live in retained journal
 frames; caches and indexes are disposable accelerators.
 
-Decoded values are memoised within the current frame and are not retained by
+Decoded values are memoized within the current frame and are not retained by
 the archive-wide cache. Numeric clock values are never cached.
 
 Cached locators carry file identity, length and modification stamps. Referenced
