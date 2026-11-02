@@ -462,7 +462,7 @@ fn resolve_max_open_keys(
         build
             .runtime_config()
             .resolve_max_open_keys(stage)
-            .map_err(FlowBuildError::ConfigResolution)?
+            .map_err(|error| FlowBuildError::ConfigResolution(Box::new(error)))?
     };
     NonZeroU64::new(limit)
         .ok_or_else(|| ai_error(format!("stage `{stage}`: max_open_keys must be 1 or more")))

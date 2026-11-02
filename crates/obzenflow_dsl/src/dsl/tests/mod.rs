@@ -15,18 +15,16 @@ pub mod then_live_build_rules_test;
 pub mod typed_decoration_matrix_test;
 pub mod typed_stage_contracts_test;
 
+type LoweredEdges = (
+    std::collections::HashMap<String, Box<dyn super::stage_descriptor::StageDescriptor>>,
+    super::composites::LoweringArtifacts,
+);
+
 /// Existing non-join graph fixtures still assert physical edge rewrites.
-#[allow(clippy::type_complexity, clippy::result_large_err)]
 fn lower_edges(
     members: std::collections::HashMap<String, super::composition::FlowMember>,
     connections: &mut Vec<(String, String, obzenflow_topology::EdgeKind)>,
-) -> Result<
-    (
-        std::collections::HashMap<String, Box<dyn super::stage_descriptor::StageDescriptor>>,
-        super::composites::LoweringArtifacts,
-    ),
-    super::FlowBuildError,
-> {
+) -> Result<LoweredEdges, super::FlowBuildError> {
     let authored = connections
         .iter()
         .map(|(from, to, kind)| {

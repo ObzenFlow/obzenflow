@@ -39,8 +39,4 @@ pub use control_strategies::{
     SignalGate,
 };
 
-// Re-export the FLOWIP-115c runtime control-strategy hooks.
-pub use control_strategies::{
-    AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
-    CreditWaker, WakeOn,
-};
+pub use control_strategies::{CreditWaker, WakeOn};

@@ -108,7 +108,7 @@ async fn pre_substrate_failure_carries_no_run_state() {
     );
     assert!(matches!(
         failure.error,
-        obzenflow_dsl::dsl::FlowBuildError::EdgeTypingMismatch { .. }
+        obzenflow_dsl::dsl::FlowBuildError::EdgeTypingMismatch(_)
     ));
 }
 

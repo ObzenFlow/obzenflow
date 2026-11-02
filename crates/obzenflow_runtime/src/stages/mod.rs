@@ -28,11 +28,7 @@ pub use common::{
     TypedStatefulHandler,
 };
 
-// FLOWIP-115c runtime control-strategy hooks.
-pub use common::{
-    AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
-    CreditWaker, WakeOn,
-};
+pub use common::{CreditWaker, WakeOn};
 
 // Public join authoring is the typed witness surface.
 pub use common::handlers::{

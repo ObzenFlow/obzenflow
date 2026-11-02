@@ -294,8 +294,6 @@ pub fn assert_concurrent<P: JournalPayload>(
 
 #[derive(Debug, Clone)]
 struct SnapshotRow<T: JournalEvent + 'static> {
-    #[allow(dead_code)]
-    append_index: u64,
     envelope: JournalRecord<T::Payload>,
 }
 
@@ -433,13 +431,7 @@ async fn capture_journal<T: JournalEvent + 'static>(
     let mut rows: Vec<SnapshotRow<T>> = Vec::new();
     loop {
         match reader.next().await {
-            Ok(Some(env)) => {
-                let append_index = rows.len() as u64;
-                rows.push(SnapshotRow {
-                    append_index,
-                    envelope: env,
-                });
-            }
+            Ok(Some(env)) => rows.push(SnapshotRow { envelope: env }),
             Ok(None) => return Ok(JournalSnapshot { rows }),
             Err(e) => return Err(JournalProbeError::JournalRead(e.to_string())),
         }
@@ -840,18 +832,9 @@ mod tests {
 
         let snapshot = JournalSnapshot::<ChainEvent> {
             rows: vec![
-                SnapshotRow {
-                    append_index: 0,
-                    envelope: mk("a"),
-                },
-                SnapshotRow {
-                    append_index: 1,
-                    envelope: mk("x"),
-                },
-                SnapshotRow {
-                    append_index: 2,
-                    envelope: mk("b"),
-                },
+                SnapshotRow { envelope: mk("a") },
+                SnapshotRow { envelope: mk("x") },
+                SnapshotRow { envelope: mk("b") },
             ],
         };
 

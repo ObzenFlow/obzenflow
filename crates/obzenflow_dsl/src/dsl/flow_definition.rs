@@ -401,4 +401,10 @@ mod tests {
                 if binding == "chat" && detail == "missing model"
         ));
     }
+
+    #[test]
+    fn flow_build_failure_stays_under_the_large_error_threshold() {
+        let size = size_of::<FlowBuildFailure>();
+        assert!(size < 128, "FlowBuildFailure is {size} bytes");
+    }
 }

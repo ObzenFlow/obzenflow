@@ -2,27 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Bounded suspension and output-commit attempt finalization (FLOWIP-115c).
+//! Bounded suspension for paused supervisors.
 //!
 //! A control-strategy gate never awaits. It returns a [`WakeOn`] and the
 //! supervisor calls [`suspend_until`], the single place a wake becomes an
 //! `await`. The bounded-wake rule lives here: every non-source pause is bounded
 //! by a deadline or a runtime-supplied stall cap, so a wedged downstream can
 //! never hang the loop.
-//!
-//! [`AdmittedAttempt`] is the loop-driven finalization shape for future
-//! output-commit/backpressure use: a guard that settles its observers once, on
-//! every exit path, modelled on the circuit-breaker probe-slot guard. Live I/O
-//! attempts use boundary middleware instead.
-//!
-//! These items are the reusable machinery the supervisor loop and the binding
-//! slices consume: `suspend_until` is wired into the signal `Pause` path, and
-//! `AdmittedAttempt` is reserved for output-commit/backpressure binding.
 
-use crate::stages::common::control_strategies::{
-    AdmissionPosition, AttemptObserver, AttemptOutcome, WakeOn,
-};
-use std::sync::Arc;
+use crate::stages::common::control_strategies::WakeOn;
 use std::time::Duration;
 
 /// Outcome of a bounded suspension.
@@ -65,88 +53,10 @@ pub(crate) async fn suspend_until(wake: &WakeOn, max_wait: Option<Duration>) -> 
     }
 }
 
-/// RAII guard for an admitted attempt whose work the supervisor performs in
-/// pieces. Guarantees each observer that admitted the attempt is notified of
-/// the terminal outcome exactly once, on every exit path.
-///
-/// Two paths: call [`AdmittedAttempt::settle`] when the loop knows the outcome
-/// and durable journal work must happen, or let `Drop` run the synchronous
-/// `observe` with a default `Aborted` outcome. `Drop` cannot await, so it never
-/// runs the durable `settle`; an attempt ended by a drop is, by the
-/// event-sourcing model, simply not recorded as complete and is re-attempted on
-/// restart.
-#[allow(dead_code)]
-pub(crate) struct AdmittedAttempt {
-    position: AdmissionPosition,
-    observers: Vec<Arc<dyn AttemptObserver>>,
-    settled: bool,
-}
-
-#[allow(dead_code)]
-impl AdmittedAttempt {
-    pub(crate) fn new(
-        position: AdmissionPosition,
-        observers: Vec<Arc<dyn AttemptObserver>>,
-    ) -> Self {
-        Self {
-            position,
-            observers,
-            settled: false,
-        }
-    }
-
-    /// Durable settle. Notifies every observer's `observe` once, then attempts
-    /// every observer's async `settle`; the subsequent `Drop` is a no-op.
-    pub(crate) async fn settle(
-        mut self,
-        outcome: AttemptOutcome,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        for observer in &self.observers {
-            observer.observe(self.position, &outcome);
-        }
-        self.settled = true;
-
-        let mut first_error = None;
-        for observer in &self.observers {
-            if let Err(error) = observer.settle(self.position, &outcome).await {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                } else {
-                    tracing::warn!(
-                        error = %error,
-                        "additional admitted-attempt observer settle failed"
-                    );
-                }
-            }
-        }
-
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-}
-
-impl Drop for AdmittedAttempt {
-    fn drop(&mut self) {
-        if self.settled {
-            return;
-        }
-        let outcome = AttemptOutcome::Aborted {
-            reason: "attempt dropped without explicit settle".to_string(),
-        };
-        for observer in &self.observers {
-            // Drop cannot await, so only the synchronous observe runs here.
-            observer.observe(self.position, &outcome);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stages::common::control_strategies::CreditWaker;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test(start_paused = true)]
     async fn deadline_wake_returns_woke() {
@@ -189,103 +99,5 @@ mod tests {
     async fn credit_wake_without_cap_panics() {
         let wake = WakeOn::Notify(CreditWaker::new());
         let _ = suspend_until(&wake, None).await;
-    }
-
-    #[derive(Default)]
-    struct CountingObserver {
-        observed: Arc<AtomicUsize>,
-        settled: Arc<AtomicUsize>,
-        last_was_abort: Arc<AtomicUsize>,
-        fail_settle: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl AttemptObserver for CountingObserver {
-        fn observe(&self, _position: AdmissionPosition, outcome: &AttemptOutcome) {
-            self.observed.fetch_add(1, Ordering::SeqCst);
-            if matches!(outcome, AttemptOutcome::Aborted { .. }) {
-                self.last_was_abort.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        async fn settle(
-            &self,
-            _position: AdmissionPosition,
-            _outcome: &AttemptOutcome,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.settled.fetch_add(1, Ordering::SeqCst);
-            if self.fail_settle {
-                return Err(Box::new(std::io::Error::other("settle failed")));
-            }
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn settle_runs_observe_and_settle_once() {
-        let observer = Arc::new(CountingObserver::default());
-        let observed = observer.observed.clone();
-        let settled = observer.settled.clone();
-        let attempt = AdmittedAttempt::new(
-            AdmissionPosition::BeforeOutputCommit,
-            vec![observer.clone()],
-        );
-        attempt
-            .settle(AttemptOutcome::Succeeded)
-            .await
-            .expect("settle should succeed");
-        assert_eq!(observed.load(Ordering::SeqCst), 1);
-        assert_eq!(settled.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn settle_failure_still_notifies_all_observers_once() {
-        let failing = Arc::new(CountingObserver {
-            fail_settle: true,
-            ..CountingObserver::default()
-        });
-        let succeeding = Arc::new(CountingObserver::default());
-        let failing_observed = failing.observed.clone();
-        let failing_settled = failing.settled.clone();
-        let succeeding_observed = succeeding.observed.clone();
-        let succeeding_settled = succeeding.settled.clone();
-        let attempt = AdmittedAttempt::new(
-            AdmissionPosition::BeforeOutputCommit,
-            vec![failing.clone(), succeeding.clone()],
-        );
-
-        let result = attempt.settle(AttemptOutcome::Succeeded).await;
-
-        assert!(result.is_err());
-        assert_eq!(failing_observed.load(Ordering::SeqCst), 1);
-        assert_eq!(failing_settled.load(Ordering::SeqCst), 1);
-        assert_eq!(succeeding_observed.load(Ordering::SeqCst), 1);
-        assert_eq!(succeeding_settled.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn drop_without_settle_runs_only_sync_observe_with_abort() {
-        let observer = Arc::new(CountingObserver::default());
-        let observed = observer.observed.clone();
-        let settled = observer.settled.clone();
-        let aborts = observer.last_was_abort.clone();
-        {
-            let _attempt = AdmittedAttempt::new(
-                AdmissionPosition::BeforeOutputCommit,
-                vec![observer.clone()],
-            );
-            // dropped here without settle
-        }
-        assert_eq!(
-            observed.load(Ordering::SeqCst),
-            1,
-            "sync observe ran on drop"
-        );
-        assert_eq!(
-            settled.load(Ordering::SeqCst),
-            0,
-            "Drop cannot run the async durable settle"
-        );
-        assert_eq!(aborts.load(Ordering::SeqCst), 1, "drop default is Aborted");
     }
 }

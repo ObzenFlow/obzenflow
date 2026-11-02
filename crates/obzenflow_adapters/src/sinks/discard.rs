@@ -23,14 +23,16 @@ pub struct DiscardSink<T> {
 }
 
 impl<T: TypedPayload + Send + Sync + 'static> DiscardSink<T> {
-    #[allow(
-        clippy::new_without_default,
-        reason = "Built-in sinks expose one construction entry point"
-    )]
     pub fn new() -> Self {
         Self {
             _input: PhantomData,
         }
+    }
+}
+
+impl<T: TypedPayload + Send + Sync + 'static> Default for DiscardSink<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

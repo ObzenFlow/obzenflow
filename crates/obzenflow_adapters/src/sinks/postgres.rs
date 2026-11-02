@@ -333,8 +333,6 @@ impl PostgresTable {
         format!("INSERT INTO {} {body}", self.quoted_target())
     }
 
-    // Keep server-authority failures in the sink protocol's typed error.
-    #[allow(clippy::result_large_err)]
     fn validate_server_limit(&self, limit: i32) -> SinkOperationResult<()> {
         let limit = usize::try_from(limit).unwrap_or_default();
         if limit == 0 || self.schema.len() > limit || self.table.len() > limit {
@@ -965,13 +963,11 @@ impl WriterProbe {
         }
     }
 
+    #[cfg(feature = "test-support")]
     fn record_authority_session(&self, backend_pid: i32) {
-        #[cfg(feature = "test-support")]
         if let Some(probe) = &self.probe {
             probe.record_authority_session(self.writer, backend_pid);
         }
-        #[cfg(not(feature = "test-support"))]
-        let _ = backend_pid;
     }
 
     fn record_authority_rejection(&self) {
@@ -1103,16 +1099,21 @@ impl PostgresSessionPool {
                     authority.mark_unverified();
                     probe.record_authority_hook();
                     let verdict = async {
-                        let (max_identifier_length, backend_pid): (i32, i32) = sqlx::query_as(
-                            "SELECT current_setting('max_identifier_length')::integer, \
-                                 pg_backend_pid()",
+                        let max_identifier_length: i32 = sqlx::query_scalar(
+                            "SELECT current_setting('max_identifier_length')::integer",
                         )
                         .fetch_one(&mut *connection)
                         .await
                         .map_err(operation_error)?;
-                        probe.record_authority_session(backend_pid);
                         #[cfg(feature = "test-support")]
-                        probe.delay(testing::PostgresDelayPoint::Authority).await;
+                        {
+                            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                                .fetch_one(&mut *connection)
+                                .await
+                                .map_err(operation_error)?;
+                            probe.record_authority_session(backend_pid);
+                            probe.delay(testing::PostgresDelayPoint::Authority).await;
+                        }
                         if probe.fault_authority_query() {
                             return Err(operation_error(sqlx::Error::Protocol(
                                 "injected PostgreSQL authority-query failure".into(),
