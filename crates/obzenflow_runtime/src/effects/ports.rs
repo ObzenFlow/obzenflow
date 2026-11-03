@@ -1162,7 +1162,7 @@ mod tests {
     fn failed_multi_package_collection_leaves_every_unclaimed_package_retryable() {
         let already_collected = bound_binding("already_collected");
         let retryable = bound_binding("retryable");
-        let _first_registry = collect(&already_collected);
+        collect(&already_collected);
 
         let already_collected_declaration = EffectDeclaration::named(&already_collected);
         let retryable_declaration = EffectDeclaration::named(&retryable);
@@ -1179,7 +1179,7 @@ mod tests {
                 if binding.as_str() == "already_collected"
         ));
 
-        let _retry_registry = collect(&retryable);
+        collect(&retryable);
     }
 
     #[test]
@@ -1207,8 +1207,8 @@ mod tests {
                 if binding.as_str() == "duplicate"
         ));
 
-        let _first_registry = collect(&first);
-        let _second_registry = collect(&second);
+        collect(&first);
+        collect(&second);
     }
 
     #[test]
@@ -1240,13 +1240,13 @@ mod tests {
                 right,
                 Err(EffectRegistrationCollectionError::AlreadyCollected { .. })
             ));
-            let _right_only_registry = collect(&right_only);
+            collect(&right_only);
         } else {
             assert!(matches!(
                 left,
                 Err(EffectRegistrationCollectionError::AlreadyCollected { .. })
             ));
-            let _left_only_registry = collect(&left_only);
+            collect(&left_only);
         }
     }
 
@@ -1265,7 +1265,7 @@ mod tests {
                 if binding.as_str() == "projection"
         ));
 
-        let _registry = EffectPortRegistry::collect_from_declarations([&authored]).unwrap();
+        EffectPortRegistry::collect_from_declarations([&authored]).unwrap();
     }
 
     #[test]
@@ -1482,7 +1482,9 @@ mod tests {
             .expect("resolver must begin");
         first.abort();
         release_tx.send(()).expect("release begun resolver");
-        let _ = first.await;
+        if let Err(error) = first.await {
+            assert!(error.is_cancelled(), "{error}");
+        }
 
         let view = registry
             .scoped_view(named.registration, &named.slots)

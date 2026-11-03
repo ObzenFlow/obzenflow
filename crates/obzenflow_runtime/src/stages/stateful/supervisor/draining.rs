@@ -12,7 +12,7 @@ use crate::stages::common::handlers::{
 };
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{
-    drain_one_pending, DrainOutcome, PendingOutput,
+    drain_one_pending, DrainOutcome, DrainRequest, PendingOutput,
 };
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -127,20 +127,20 @@ pub(super) async fn dispatch_draining<
 
     // Drain any pending stage outputs first (FLOWIP-086k).
     while let Some(pending) = ctx.pending_outputs.pop_front() {
-        match drain_one_pending(
+        match drain_one_pending(DrainRequest {
             pending,
-            &flow_context,
-            sup.stage_id,
-            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-            &ctx.data_journal,
-            ctx.last_consumed_envelope.as_ref(),
-            &ctx.instrumentation,
-            &ctx.backpressure_writer,
-            &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_stall,
-            Some(&ctx.output_contract),
-            &mut ctx.pending_outputs,
-        )
+            flow_context: &flow_context,
+            stage_id: sup.stage_id,
+            heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+            data_journal: &ctx.data_journal,
+            pending_parent: ctx.last_consumed_envelope.as_ref(),
+            instrumentation: &ctx.instrumentation,
+            backpressure_writer: &ctx.backpressure_writer,
+            backpressure_pulse: &mut ctx.backpressure_pulse,
+            backpressure_stall: &mut ctx.backpressure_stall,
+            output_contract: Some(&ctx.output_contract),
+            pending_outputs: &mut ctx.pending_outputs,
+        })
         .await?
         {
             DrainOutcome::Committed { was_data } => {
@@ -215,10 +215,6 @@ pub(super) async fn dispatch_draining<
                         stage_input_position,
                         None,
                     );
-                    let _observer_parent = ctx
-                        .last_consumed_envelope
-                        .as_ref()
-                        .map(|envelope| envelope.authored());
                     let observer_ctx = StatefulObserverContext::new(
                         ctx.flow_id,
                         &flow_context,
@@ -412,10 +408,6 @@ pub(super) async fn dispatch_draining<
                                     );
                                     let stage_writer_id =
                                         ctx.writer_id.ok_or("No writer ID available")?;
-                                    let _observer_parent = ctx
-                                        .last_consumed_envelope
-                                        .as_ref()
-                                        .map(|envelope| envelope.authored());
                                     let observer_ctx = StatefulObserverContext::new(
                                         ctx.flow_id,
                                         &flow_context,
@@ -856,29 +848,22 @@ pub(super) async fn drain_final_output<
         ctx.stage_id,
         StageType::Stateful,
     );
-    // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
-    // scope each pending output now carries through the drain).
-    // Generation None: drain follows the stage frontier (FLOWIP-120n).
-    let _observer_scope =
-        ctx.runtime_execution
-            .dispatch_scope(ctx.stage_id, ctx.last_input_position, None);
-
     // Drain any pending stage outputs first (FLOWIP-086k).
     while let Some(pending) = ctx.pending_outputs.pop_front() {
-        match drain_one_pending(
+        match drain_one_pending(DrainRequest {
             pending,
-            &flow_context,
-            ctx.stage_id,
-            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-            &ctx.data_journal,
-            ctx.last_consumed_envelope.as_ref(),
-            &ctx.instrumentation,
-            &ctx.backpressure_writer,
-            &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_stall,
-            Some(&ctx.output_contract),
-            &mut ctx.pending_outputs,
-        )
+            flow_context: &flow_context,
+            stage_id: ctx.stage_id,
+            heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+            data_journal: &ctx.data_journal,
+            pending_parent: ctx.last_consumed_envelope.as_ref(),
+            instrumentation: &ctx.instrumentation,
+            backpressure_writer: &ctx.backpressure_writer,
+            backpressure_pulse: &mut ctx.backpressure_pulse,
+            backpressure_stall: &mut ctx.backpressure_stall,
+            output_contract: Some(&ctx.output_contract),
+            pending_outputs: &mut ctx.pending_outputs,
+        })
         .await?
         {
             DrainOutcome::Committed { was_data } => {

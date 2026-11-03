@@ -56,7 +56,9 @@ struct PendingPollDrop(Option<oneshot::Sender<()>>);
 impl Drop for PendingPollDrop {
     fn drop(&mut self) {
         if let Some(sender) = self.0.take() {
-            let _ = sender.send(());
+            if sender.send(()).is_err() {
+                eprintln!("the test stopped waiting for this poll to drop");
+            }
         }
     }
 }
@@ -70,7 +72,7 @@ impl obzenflow_runtime::stages::common::handlers::TypedAsyncInfiniteSourceHandle
     async fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
         let _drop = PendingPollDrop(self.cancelled.lock().unwrap().take());
         if let Some(started) = self.started.lock().unwrap().take() {
-            let _ = started.send(());
+            started.send(()).unwrap();
         }
         std::future::pending().await
     }
@@ -515,7 +517,7 @@ enabled = false
     let (terminated_tx, mut terminated_rx) = oneshot::channel();
     let task = tokio::task::spawn_blocking(move || {
         started_tx.send(()).unwrap();
-        let _ = release_rx.recv();
+        release_rx.recv().unwrap();
         terminated_tx.send(()).unwrap();
     });
     started_rx.await.unwrap();
@@ -937,7 +939,16 @@ enabled = false
                 }),
             ])
             .with_flow_handle_hook(move |flow| {
-                let _ = handle_tx.lock().unwrap().take().unwrap().send(flow.clone());
+                assert!(
+                    handle_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(flow.clone())
+                        .is_ok(),
+                    "the test awaits the flow handle"
+                );
                 tokio::spawn(async {})
             });
         let definition = FlowDefinition::materialize(move |_| {
@@ -999,13 +1010,21 @@ enabled = false
             result.unwrap();
         }
         assert_eq!(dropped.load(Ordering::SeqCst), 2);
-        let _ = tokio::time::timeout(Duration::from_secs(1), unary.read_to_end(&mut Vec::new()))
-            .await
-            .unwrap();
-        let _ = tokio::time::timeout(Duration::from_secs(1), sse.read_to_end(&mut Vec::new()))
-            .await
-            .unwrap();
-        let _rebound = tokio::net::TcpListener::bind(address).await.unwrap();
+        if let Err(error) =
+            tokio::time::timeout(Duration::from_secs(1), unary.read_to_end(&mut Vec::new()))
+                .await
+                .unwrap()
+        {
+            eprintln!("the unary socket closed with {error}");
+        }
+        if let Err(error) =
+            tokio::time::timeout(Duration::from_secs(1), sse.read_to_end(&mut Vec::new()))
+                .await
+                .unwrap()
+        {
+            eprintln!("the SSE socket closed with {error}");
+        }
+        tokio::net::TcpListener::bind(address).await.unwrap();
         assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
     }
 }
@@ -1079,7 +1098,10 @@ enabled = false
                                 // In park mode, the signal is strictly later than publication
                                 // and this observer cannot consume the application's join.
                                 assert!(flow.wait_for_completion().await.is_err());
-                                let _ = signal_tx.send(signal);
+                                assert!(
+                                    signal_tx.send(signal).is_ok(),
+                                    "the driver awaits the injected signal"
+                                );
                             }))
                         })],
                         ..LaunchParams::default()
@@ -1136,7 +1158,7 @@ enabled = false
                     terminal.as_slice(),
                     [SystemFact::PipelineLifecycle(PipelineFact::Failed { .. })]
                 ));
-                let _rebound = TcpListener::bind(bound_rx.await.unwrap()).unwrap();
+                TcpListener::bind(bound_rx.await.unwrap()).unwrap();
             }
         }
     }

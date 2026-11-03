@@ -1025,7 +1025,7 @@ mod tests {
     #[test]
     fn delivery_contract_orphan_receipt_fails() {
         let contract = DeliveryContract::default();
-        let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+        let (mut write_ctx, read_ctx, upstream, downstream) = dummy_ctx();
 
         let parent_id = EventId::new();
         // No consumed event observed, but a receipt arrives.
@@ -1060,9 +1060,6 @@ mod tests {
             },
             other => panic!("expected failure, got: {other:?}"),
         }
-
-        // Keep the compiler honest about the unused read_ctx.
-        let _ = &mut read_ctx;
     }
 
     #[test]

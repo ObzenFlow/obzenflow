@@ -79,7 +79,7 @@ where
 {
     fn execute(&self, future: F) {
         self.spawn(async move {
-            let _ = future.await;
+            future.await;
         });
     }
 }
@@ -178,7 +178,9 @@ impl ManagedWebHost {
     ) {
         let previous = self.serving.take().unwrap();
         previous.abort();
-        let _ = previous.await;
+        if let Err(error) = previous.await {
+            assert!(error.is_cancelled(), "{error}");
+        }
         self.serving = Some(tokio::spawn(future));
         if complete_before_run {
             while !self.serving.as_ref().unwrap().is_finished() {

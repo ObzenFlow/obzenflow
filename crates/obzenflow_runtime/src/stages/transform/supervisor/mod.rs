@@ -638,7 +638,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         envelope: &DeliveredRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let _ = forward_control_event_helper(
+        forward_control_event_helper(
             envelope,
             self.stage_id,
             stage_name,

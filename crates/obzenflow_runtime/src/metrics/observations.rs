@@ -189,7 +189,9 @@ impl LatestObservationMap {
     /// Recorded attachments never activate an execution generation.
     pub(crate) fn offer_recorded(&self, packet: &ObservabilityContext) {
         if self.could_update(packet, true).unwrap_or(false) {
-            let _ = self.select_inner(packet.clone(), true, false);
+            if let Err(offer) = self.select_inner(packet.clone(), true, false) {
+                tracing::trace!(?offer, "recorded observation was not selected");
+            }
         }
     }
 
@@ -369,7 +371,7 @@ impl ObservationOwner {
         let sequence = self
             .sequence
             .as_ref()?
-            .fetch_update(
+            .try_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
                 |current_capture_seq| current_capture_seq.checked_add(1),
@@ -423,6 +425,7 @@ mod tests {
     use obzenflow_core::event::observability::{MeasurementWindow, TimingMeasurements};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{ReaderGeneration, StageId};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     fn packet(
@@ -635,7 +638,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::await_holding_lock)] // Deliberately force the sampler's nonblocking offer to lose contention.
     async fn heartbeat_refreshes_an_edge_after_a_dropped_transition() {
         use crate::stages::common::heartbeat::{
             spawn_heartbeat, HeartbeatConfig, HeartbeatProcessingGuard, HeartbeatState,
@@ -664,17 +666,27 @@ mod tests {
             execution.clone(),
         );
         tokio::task::yield_now().await;
-        {
-            let _held = observations.latest.view.lock().unwrap();
-            tokio::time::advance(Duration::from_secs(8)).await;
-            tokio::task::yield_now().await;
-            let snapshot = snapshots
-                .get(stage)
-                .expect("sampler ran while the handoff was locked");
-            assert_eq!(snapshot.edges[0].state, EdgeLivenessState::Idle);
-            assert_eq!(snapshot.edges[1].state, EdgeLivenessState::Healthy);
-            assert!(observations.latest.dropped.load(Ordering::Relaxed) > 0);
-        }
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let observations = Arc::clone(observations);
+            move || {
+                let _held = observations.latest.view.lock().unwrap();
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        held_rx.recv().unwrap();
+        tokio::time::advance(Duration::from_secs(8)).await;
+        tokio::task::yield_now().await;
+        let snapshot = snapshots
+            .get(stage)
+            .expect("sampler ran while the handoff was locked");
+        assert_eq!(snapshot.edges[0].state, EdgeLivenessState::Idle);
+        assert_eq!(snapshot.edges[1].state, EdgeLivenessState::Healthy);
+        assert!(observations.latest.dropped.load(Ordering::Relaxed) > 0);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
         assert!(!observations.snapshot().iter().any(|packet| {
             packet.records.iter().any(|record|
             matches!(record, ObservationRecord::EdgeLiveness { upstream, .. } if *upstream == idle)

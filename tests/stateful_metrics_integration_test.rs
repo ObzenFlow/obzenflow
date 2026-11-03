@@ -8,7 +8,10 @@
 //! - record processing time during `accumulate()` (051j-1)
 //! - count input events per-accumulate even when heartbeats are disabled (051j-2)
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    pub use self::journal::*;
+}
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;

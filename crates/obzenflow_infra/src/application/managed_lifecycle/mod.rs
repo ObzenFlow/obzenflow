@@ -5,8 +5,6 @@
 //! Private coordination of FlowApplication resources and Runtime observations.
 
 mod driver;
-// Hosted observations remain in the closed vocabulary for non-hosted builds.
-#[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
 mod machine;
 mod signals;
 

@@ -6,7 +6,14 @@
 //! `Unclassified` is produced by a real connector from real input, and record
 //! rejections leave an attached source breaker closed (B4).
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{discard::*, journal::*, manifest::*, run_dir::*, stage_journal::*};
+}
 
 use async_trait::async_trait;
 use obzenflow::middleware::circuit_breaker;

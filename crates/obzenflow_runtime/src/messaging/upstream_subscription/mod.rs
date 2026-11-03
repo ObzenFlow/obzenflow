@@ -220,7 +220,7 @@ pub(super) struct ReaderSlot<T: JournalEvent> {
 /// specially (tiebreak-only ordering, exhaustion at delivery) without
 /// re-deriving it on the delivery side.
 pub(super) struct HeldHead<T: JournalEvent> {
-    pub(super) envelope: JournalRecord<T::Payload>,
+    pub(super) envelope: Box<JournalRecord<T::Payload>>,
     pub(super) is_authored_eof: bool,
     pub(super) is_drain: bool,
     /// The announced generation when this head is a catch-up watermark

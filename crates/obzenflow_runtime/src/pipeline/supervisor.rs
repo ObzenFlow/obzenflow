@@ -91,7 +91,9 @@ impl PipelineSupervisor {
                 return Poll::Ready(event.into());
             }
             deadline.as_mut().reset(at);
-            let _ = deadline.as_mut().poll(cx);
+            if deadline.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(event.into());
+            }
         }
         if allow_phase {
             if state.phase_satisfied(ctx) {
@@ -273,9 +275,9 @@ impl SelfSupervised for PipelineSupervisor {
     }
     fn after_transition(&mut self, state: &S, ctx: &PipelineContext) {
         self.failure_reported |= ctx.resources.failure.get().is_some();
-        let projection = state.public_state(ctx);
+        let projection = state.public_state();
         if projection != self.watcher.current() {
-            let _ = self.watcher.update(projection);
+            self.watcher.update(projection);
         }
     }
     async fn next_control(&mut self, state: &S, ctx: &mut PipelineContext) -> Option<E> {

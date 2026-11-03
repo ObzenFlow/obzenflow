@@ -143,7 +143,9 @@ impl TypedJoinHandler for SlowJoin {
         // Keep this synchronous invocation in flight until the test observes
         // the idle reference edge. Dropping the sender also releases this wait
         // if the driver fails, so runtime shutdown cannot strand the worker.
-        let _ = self.release.lock().unwrap().recv();
+        if let Err(error) = self.release.lock().unwrap().recv() {
+            eprintln!("the driver left without releasing this invocation: {error}");
+        }
         Ok(vec![EnrichedRecord {
             kind: stream.kind,
             value: stream.value,

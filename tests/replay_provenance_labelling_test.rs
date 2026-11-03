@@ -17,7 +17,11 @@
 //! provenance, including the converged fan-in path and outputs derived from
 //! recorded effect failures. Live runs must carry none.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod ordered_journal;
+    pub use self::ordered_journal::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
@@ -244,8 +248,7 @@ impl EffectfulTransformHandler for AuthorizePayment {
             .await;
 
         match outcome {
-            Ok(grant) if order.amount > 500 => {
-                let _ = grant;
+            Ok(_grant) if order.amount > 500 => {
                 fx.emit(OrderCancelled {
                     order_id: order.order_id,
                     origin: "declined".to_string(),

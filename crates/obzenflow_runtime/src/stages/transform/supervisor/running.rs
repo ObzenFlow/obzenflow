@@ -9,10 +9,12 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::backpressure_drain::{
+    drain_one_pending, DrainOutcome, DrainRequest,
+};
 use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEvent};
 use crate::stages::common::supervision::control_resolution::{
-    is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction,
+    is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction, ControlResolutionInputs,
 };
 use crate::stages::common::supervision::error_routing::{
     error_row_in_scope, processing_failed, route_to_error_journal,
@@ -91,20 +93,20 @@ async fn dispatch_running_inner<
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if sup.subscription.is_some() {
         while let Some(pending) = ctx.pending_outputs.pop_front() {
-            match drain_one_pending(
+            match drain_one_pending(DrainRequest {
                 pending,
                 flow_context,
-                sup.stage_id,
-                ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                &ctx.data_journal,
-                ctx.pending_parent.as_ref(),
-                &ctx.instrumentation,
-                &ctx.backpressure_writer,
-                &mut ctx.backpressure_pulse,
-                &mut ctx.backpressure_stall,
-                Some(&ctx.output_contract),
-                &mut ctx.pending_outputs,
-            )
+                stage_id: sup.stage_id,
+                heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+                data_journal: &ctx.data_journal,
+                pending_parent: ctx.pending_parent.as_ref(),
+                instrumentation: &ctx.instrumentation,
+                backpressure_writer: &ctx.backpressure_writer,
+                backpressure_pulse: &mut ctx.backpressure_pulse,
+                backpressure_stall: &mut ctx.backpressure_stall,
+                output_contract: Some(&ctx.output_contract),
+                pending_outputs: &mut ctx.pending_outputs,
+            })
             .await?
             {
                 DrainOutcome::Committed { was_data } => {
@@ -315,12 +317,14 @@ async fn dispatch_running_inner<
                         &envelope,
                         ctx.control_strategy.as_ref(),
                         &mut ctx.processing_context,
-                        cycle_config,
-                        sup.cycle_guard.as_mut(),
-                        last_eof_outcome.as_ref(),
-                        upstream_stage,
-                        contract_reader_count,
-                        /* drain_is_terminal */ true,
+                        ControlResolutionInputs {
+                            cycle_config,
+                            cycle_guard: sup.cycle_guard.as_mut(),
+                            eof_outcome: last_eof_outcome.as_ref(),
+                            upstream_stage,
+                            contract_reader_count,
+                            drain_is_terminal: true,
+                        },
                         &ctx.stage_name,
                     )
                     .await;
@@ -341,7 +345,7 @@ async fn dispatch_running_inner<
                                             .check_contracts(&mut ctx.contract_state[..])
                                             .await
                                             .into_result()?;
-                                        let _ = subscription.take_last_eof_outcome();
+                                        subscription.take_last_eof_outcome();
                                     }
                                 }
                             }
@@ -374,7 +378,7 @@ async fn dispatch_running_inner<
                                         .await
                                         .into_result()?;
                                     if !is_cycle_entry_point {
-                                        let _ = subscription.take_last_eof_outcome();
+                                        subscription.take_last_eof_outcome();
                                     }
                                 }
                             }
@@ -634,20 +638,20 @@ async fn dispatch_running_inner<
                             }
 
                             while let Some(event) = stage_outputs.pop_front() {
-                                match drain_one_pending(
-                                    event,
+                                match drain_one_pending(DrainRequest {
+                                    pending: event,
                                     flow_context,
-                                    sup.stage_id,
-                                    ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                                    &ctx.data_journal,
-                                    Some(&envelope),
-                                    &ctx.instrumentation,
-                                    &ctx.backpressure_writer,
-                                    &mut ctx.backpressure_pulse,
-                                    &mut ctx.backpressure_stall,
-                                    Some(&ctx.output_contract),
-                                    &mut stage_outputs,
-                                )
+                                    stage_id: sup.stage_id,
+                                    heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+                                    data_journal: &ctx.data_journal,
+                                    pending_parent: Some(&envelope),
+                                    instrumentation: &ctx.instrumentation,
+                                    backpressure_writer: &ctx.backpressure_writer,
+                                    backpressure_pulse: &mut ctx.backpressure_pulse,
+                                    backpressure_stall: &mut ctx.backpressure_stall,
+                                    output_contract: Some(&ctx.output_contract),
+                                    pending_outputs: &mut stage_outputs,
+                                })
                                 .await?
                                 {
                                     DrainOutcome::Committed { was_data } => {

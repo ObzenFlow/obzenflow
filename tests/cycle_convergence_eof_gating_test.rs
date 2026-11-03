@@ -2,7 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    mod stage_writer;
+    mod verdicts;
+    pub use self::{manifest::*, run_dir::*, stage_journal::*, stage_writer::*, verdicts::*};
+}
 
 use anyhow::Result;
 use async_trait::async_trait;

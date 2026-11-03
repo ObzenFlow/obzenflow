@@ -11,8 +11,11 @@ use obzenflow_runtime::bootstrap::{BootstrapConfig, ReplayVerb};
 use obzenflow_runtime::runtime_config::AppTable;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+#[cfg(feature = "tokio-console")]
+use std::env::VarError;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
+#[cfg(feature = "tokio-console")]
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -230,25 +233,27 @@ pub(crate) struct ResolvedStartupConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedConsoleConfig {
     pub enabled: bool,
-    // Resolve and validate requests even when the transport was not compiled.
-    #[cfg_attr(not(feature = "tokio-console"), allow(dead_code))]
+    #[cfg(feature = "tokio-console")]
     pub bind: SocketAddr,
 }
 
 #[derive(Default)]
 pub(crate) struct ConsoleDefaults {
     pub enabled: bool,
+    #[cfg(feature = "tokio-console")]
     pub bind: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-// Configuration is parsed and validated even in builds without the managed host.
-#[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
 pub(crate) struct ResolvedServerConfig {
     pub enabled: bool,
+    #[cfg(feature = "warp-server")]
     pub host: String,
+    #[cfg(feature = "warp-server")]
     pub port: u16,
+    #[cfg(feature = "warp-server")]
     pub max_body_size_bytes: usize,
+    #[cfg(feature = "warp-server")]
     pub request_timeout_secs: u64,
     pub startup_mode: StartupMode,
     pub on_terminal: OnTerminalArg,
@@ -276,7 +281,6 @@ pub(crate) struct ResolvedStudioConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedStartupRuntimeConfig {
     pub shutdown_timeout: Duration,
-    #[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
     pub surface_metrics_interval: Duration,
 }
 
@@ -458,27 +462,51 @@ struct RawFileConsoleConfig {
     bind: Option<String>,
 }
 
-fn resolve_console(
+struct ConsoleResolveInputs {
     cli_enabled: Option<bool>,
+    #[cfg(feature = "tokio-console")]
     cli_bind: Option<String>,
     file: RawFileConsoleConfig,
     defaults: ConsoleDefaults,
-) -> Result<ResolvedConsoleConfig, ConfigError> {
-    let enabled = cli_enabled.or(file.enabled).unwrap_or(defaults.enabled);
-    let default_bind = SocketAddr::from(([127, 0, 0, 1], 6669));
+}
+
+fn resolve_console(inputs: ConsoleResolveInputs) -> Result<ResolvedConsoleConfig, ConfigError> {
+    let enabled = inputs
+        .cli_enabled
+        .or(inputs.file.enabled)
+        .unwrap_or(inputs.defaults.enabled);
+    #[cfg(feature = "tokio-console")]
+    let bind = resolve_console_bind(
+        enabled,
+        inputs.cli_bind,
+        inputs.file.bind,
+        inputs.defaults.bind,
+    )?;
+    Ok(ResolvedConsoleConfig {
+        enabled,
+        #[cfg(feature = "tokio-console")]
+        bind,
+    })
+}
+
+#[cfg(feature = "tokio-console")]
+fn resolve_console_bind(
+    enabled: bool,
+    cli_bind: Option<String>,
+    file_bind: Option<String>,
+    default_bind: Option<String>,
+) -> Result<SocketAddr, ConfigError> {
+    let fallback = SocketAddr::from(([127, 0, 0, 1], 6669));
     // Disabled diagnostics neither consult nor validate inactive transport inputs.
     if !enabled {
-        return Ok(ResolvedConsoleConfig {
-            enabled,
-            bind: default_bind,
-        });
+        return Ok(fallback);
     }
-    let bind = match cli_bind.or(file.bind) {
+    let bind = match cli_bind.or(file_bind) {
         Some(bind) => Some(bind),
         None => match std::env::var("TOKIO_CONSOLE_BIND") {
             Ok(bind) => Some(bind),
-            Err(std::env::VarError::NotPresent) => defaults.bind,
-            Err(std::env::VarError::NotUnicode(_)) => {
+            Err(VarError::NotPresent) => default_bind,
+            Err(VarError::NotUnicode(_)) => {
                 return Err(ConfigError::at(
                     "diagnostics.tokio_console.bind",
                     "TOKIO_CONSOLE_BIND must be a Unicode socket address",
@@ -486,15 +514,14 @@ fn resolve_console(
             }
         },
     };
-    let bind = bind.map_or(Ok(default_bind), |bind| {
+    bind.map_or(Ok(fallback), |bind| {
         bind.parse().map_err(|error| {
             ConfigError::at(
                 "diagnostics.tokio_console.bind",
                 format!("invalid socket address {bind:?}: {error}"),
             )
         })
-    })?;
-    Ok(ResolvedConsoleConfig { enabled, bind })
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -918,12 +945,13 @@ impl FlowConfig {
                 .with_app(app),
         );
         let control_plane_auth = self.resolve_control_plane_auth(&file)?;
-        let tokio_console = resolve_console(
-            self.tokio_console,
-            self.tokio_console_bind,
-            file.diagnostics.tokio_console,
-            console,
-        )?;
+        let tokio_console = resolve_console(ConsoleResolveInputs {
+            cli_enabled: self.tokio_console,
+            #[cfg(feature = "tokio-console")]
+            cli_bind: self.tokio_console_bind,
+            file: file.diagnostics.tokio_console,
+            defaults: console,
+        })?;
         let studio_enabled = resolve_positive_flag(
             self.studio_enabled,
             file.studio.enabled,
@@ -989,18 +1017,21 @@ impl FlowConfig {
 
         let server = ResolvedServerConfig {
             enabled: server_enabled,
+            #[cfg(feature = "warp-server")]
             host: resolve_scalar(
                 self.server_host,
                 file.server.host,
                 None,
                 "127.0.0.1".to_string(),
             ),
+            #[cfg(feature = "warp-server")]
             port: resolve_scalar(
                 self.server_port,
                 parse_port(file.server.port, "server.port")?,
                 None,
                 9090,
             ),
+            #[cfg(feature = "warp-server")]
             max_body_size_bytes: resolve_scalar(
                 self.max_body_size_bytes,
                 parse_non_negative_usize(
@@ -1010,6 +1041,7 @@ impl FlowConfig {
                 None,
                 10 * 1024 * 1024,
             ),
+            #[cfg(feature = "warp-server")]
             request_timeout_secs,
             startup_mode,
             on_terminal,
@@ -1701,6 +1733,7 @@ fn parse_non_negative_u64(value: Option<i64>, path: &str) -> Result<Option<u64>,
     }
 }
 
+#[cfg(feature = "warp-server")]
 fn parse_non_negative_usize(value: Option<i64>, path: &str) -> Result<Option<usize>, ConfigError> {
     match value {
         None => Ok(None),
@@ -1709,6 +1742,7 @@ fn parse_non_negative_usize(value: Option<i64>, path: &str) -> Result<Option<usi
     }
 }
 
+#[cfg(feature = "warp-server")]
 fn parse_port(value: Option<i64>, path: &str) -> Result<Option<u16>, ConfigError> {
     match value {
         None => Ok(None),
@@ -1848,18 +1882,20 @@ mod tests {
         for cli in [None, Some(false), Some(true)] {
             for file in [None, Some(false), Some(true)] {
                 for builder in [false, true] {
-                    let resolved = resolve_console(
-                        cli,
-                        None,
-                        RawFileConsoleConfig {
+                    let resolved = resolve_console(ConsoleResolveInputs {
+                        cli_enabled: cli,
+                        #[cfg(feature = "tokio-console")]
+                        cli_bind: None,
+                        file: RawFileConsoleConfig {
                             enabled: file,
                             bind: None,
                         },
-                        ConsoleDefaults {
+                        defaults: ConsoleDefaults {
                             enabled: builder,
+                            #[cfg(feature = "tokio-console")]
                             bind: None,
                         },
-                    )
+                    })
                     .unwrap();
                     assert_eq!(resolved.enabled, cli.or(file).unwrap_or(builder));
                 }
@@ -1868,6 +1904,15 @@ mod tests {
         assert!(FlowConfig::try_parse_from(["test", "--tokio-console=maybe"]).is_err());
     }
 
+    #[test]
+    fn console_bind_flag_is_accepted_in_every_build() {
+        let _lock = env_lock();
+        let resolved =
+            resolve_studio_file("", &["--tokio-console-bind", "127.0.0.1:6672"]).unwrap();
+        assert!(!resolved.tokio_console.enabled);
+    }
+
+    #[cfg(feature = "tokio-console")]
     #[test]
     fn console_bind_has_one_resolution_authority() {
         let _lock = env_lock();
@@ -1904,18 +1949,28 @@ mod tests {
             bind: Some("127.0.0.1:6674".into()),
         };
         assert_eq!(
-            resolve_console(None, None, RawFileConsoleConfig::default(), defaults())
-                .unwrap()
-                .bind
-                .port(),
+            resolve_console(ConsoleResolveInputs {
+                cli_enabled: None,
+                cli_bind: None,
+                file: RawFileConsoleConfig::default(),
+                defaults: defaults(),
+            })
+            .unwrap()
+            .bind
+            .port(),
             6673
         );
         guard.remove("TOKIO_CONSOLE_BIND");
         assert_eq!(
-            resolve_console(None, None, RawFileConsoleConfig::default(), defaults())
-                .unwrap()
-                .bind
-                .port(),
+            resolve_console(ConsoleResolveInputs {
+                cli_enabled: None,
+                cli_bind: None,
+                file: RawFileConsoleConfig::default(),
+                defaults: defaults(),
+            })
+            .unwrap()
+            .bind
+            .port(),
             6674
         );
         assert_eq!(
@@ -2381,8 +2436,12 @@ port = 9876
         std::env::set_current_dir(tempdir.path()).unwrap();
 
         let cli = FlowConfig::try_parse_from(["obzenflow"]).unwrap();
+        #[cfg(feature = "warp-server")]
         assert_eq!(cli.clone().resolve(None, true).unwrap().server.port, 9876);
+        #[cfg(feature = "warp-server")]
         assert_eq!(cli.resolve(None, false).unwrap().server.port, 9090);
+        #[cfg(not(feature = "warp-server"))]
+        assert!(cli.resolve(None, true).is_ok());
 
         std::env::set_current_dir(cwd).unwrap();
     }
@@ -2590,6 +2649,7 @@ port = 9876
         let cli = FlowConfig::try_parse_from(["obzenflow"]).unwrap();
         let resolved = cli.resolve(Some(config_path.clone()), false).unwrap();
         assert!(!resolved.server.enabled);
+        #[cfg(feature = "warp-server")]
         assert_eq!(resolved.server.port, 9876);
     }
 
@@ -2624,6 +2684,7 @@ port = 2222
 
         let resolved = cli.resolve(Some(builder_path.clone()), true).unwrap();
         assert!(!resolved.server.enabled);
+        #[cfg(feature = "warp-server")]
         assert_eq!(resolved.server.port, 2222);
     }
 
@@ -2923,16 +2984,22 @@ port = "abc"
         let env = env.to_str().unwrap();
 
         let selected = resolve_selected(&[], Some(builder.clone()), Some(env)).unwrap();
+        #[cfg(feature = "warp-server")]
         assert_eq!(selected.server.port, 2222);
+        assert!(!selected.server.enabled);
         let selected = resolve_selected(
             &["--config", cli.to_str().unwrap()],
             Some(builder.clone()),
             Some(env),
         )
         .unwrap();
+        #[cfg(feature = "warp-server")]
         assert_eq!(selected.server.port, 3333);
+        assert!(!selected.server.enabled);
         let selected = resolve_selected(&[], Some(builder), None).unwrap();
+        #[cfg(feature = "warp-server")]
         assert_eq!(selected.server.port, 1111);
+        assert!(!selected.server.enabled);
     }
 
     #[test]

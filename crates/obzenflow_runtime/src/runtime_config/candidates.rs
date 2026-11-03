@@ -157,7 +157,7 @@ impl CandidateSet {
         if !address_admitted(spec.target, &address) {
             return Err(ConfigResolveError::ScopeNotAdmitted {
                 key_path,
-                address,
+                address: Box::new(address),
                 reason: format!(
                     "the knob's target is {:?}; this scope/subject combination is invalid",
                     spec.target
@@ -177,7 +177,7 @@ impl CandidateSet {
         {
             return Err(ConfigResolveError::ScopeNotAdmitted {
                 key_path,
-                address,
+                address: Box::new(address),
                 reason: format!(
                     "{source} overrides are global-only in the first pass; use a file entry at this scope"
                 ),
@@ -187,7 +187,7 @@ impl CandidateSet {
         if let Err(message) = spec.value_type.validate(&value) {
             return Err(ConfigResolveError::InvalidValue {
                 key_path,
-                address,
+                address: Box::new(address),
                 message,
             });
         }
@@ -203,7 +203,7 @@ impl CandidateSet {
                 {
                     return Err(ConfigResolveError::InvalidValue {
                         key_path,
-                        address,
+                        address: Box::new(address),
                         message: "interval exceeds the monotonic timer range".into(),
                     });
                 }
@@ -219,14 +219,14 @@ impl CandidateSet {
         let Some(slot) = slots.slot_mut(&source) else {
             return Err(ConfigResolveError::ScopeNotAdmitted {
                 key_path,
-                address,
+                address: Box::new(address),
                 reason: format!("{source} is not an admissible candidate source"),
             });
         };
         match slot {
             Some(existing) if *existing != value => Err(ConfigResolveError::Conflict {
                 key_path,
-                address,
+                address: Box::new(address),
                 source,
             }),
             _ => {
@@ -546,7 +546,7 @@ mod tests {
         assert!(matches!(
             error,
             ConfigResolveError::Conflict { address, .. }
-                if address == ConfigAddress::effect("payments", "payments.authorize")
+                if *address == ConfigAddress::effect("payments", "payments.authorize")
         ));
         assert_eq!(set.addresses_for(key).count(), 2);
     }

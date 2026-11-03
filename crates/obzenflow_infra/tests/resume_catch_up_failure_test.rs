@@ -15,8 +15,16 @@
 //! per-stage flip is local by design and the fan-in is where admission is
 //! blocked.
 
-#[path = "../../../tests/replay_testkit/mod.rs"]
-mod replay_testkit;
+#[path = "../../../tests/replay_testkit"]
+mod replay_testkit {
+    mod bootstrap;
+    mod journal;
+    mod manifest;
+    mod reattaching_source;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{bootstrap::*, reattaching_source::*, run_dir::*, stage_journal::*};
+}
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -427,8 +435,15 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         let reason = wait_for_failed(&handle).await?;
         // Teardown after failure; stop is an idempotent no-op if the
         // supervisor already terminated.
-        let _ = handle.stop().await;
-        let _ = tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion()).await;
+        if let Err(error) = handle.stop().await {
+            eprintln!("teardown stop failed: {error:?}");
+        }
+        if tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+            .await
+            .is_err()
+        {
+            eprintln!("teardown did not settle within its bound");
+        }
         reason
     };
     assert!(

@@ -157,7 +157,7 @@ pub fn install_bootstrap_config(config: BootstrapConfig) -> BootstrapConfigGuard
 
     BootstrapConfigGuard {
         previous: Some(previous),
-        active_install,
+        _active_install: active_install,
     }
 }
 
@@ -180,14 +180,14 @@ pub fn try_install_bootstrap_config(
 
     Ok(BootstrapConfigGuard {
         previous: Some(previous),
-        active_install,
+        _active_install: active_install,
     })
 }
 
 /// Restores the prior bootstrap snapshot on drop.
 pub struct BootstrapConfigGuard {
     previous: Option<BootstrapConfig>,
-    active_install: ActiveInstallLease,
+    _active_install: ActiveInstallLease,
 }
 
 impl Drop for BootstrapConfigGuard {
@@ -195,7 +195,6 @@ impl Drop for BootstrapConfigGuard {
         if let Some(previous) = self.previous.take() {
             *storage().write().expect("bootstrap config lock poisoned") = previous;
         }
-        let _ = &self.active_install;
     }
 }
 

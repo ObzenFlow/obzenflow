@@ -227,7 +227,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         id: toolchain
         with:
-          toolchain: 1.93.0
+          toolchain: 1.99.1
 
       - name: Verify every release package
         id: packages
@@ -362,7 +362,7 @@ jobs:
               ("resolve", "Release commit SHA"),
               ("ci", "Successful full main CI for the release SHA"),
               ("manifests", "Workspace versions, dependency pins, and facade/CLI boundary"),
-              ("toolchain", "Rust 1.93.0 setup"),
+              ("toolchain", "Rust 1.99.1 setup"),
               ("packages", "Package versions, archive rules, and licenses"),
               ("dry_run", "Cargo packaging, dependency resolution, and build verification"),
           ]
@@ -393,7 +393,7 @@ jobs:
           for package in packages:
               name, version = package["name"], package["version"]
               archive_name = f"{name}-{version}"
-              # Cargo 1.93 publish keeps archives in build-dir/package/tmp-crate.
+              # Cargo 1.99.1 publish keeps archives in build-dir/package/tmp-crate.
               archive = Path(metadata["build_directory"]) / "package" / "tmp-crate" / f"{archive_name}.crate"
               listing = report_dir / f"{name}.files"
               files = listing.read_text().splitlines() if listing.exists() else []

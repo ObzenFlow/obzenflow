@@ -368,43 +368,43 @@ mod tests {
         let join = Jn;
         let sink = Sn;
 
-        let _ = crate::source!(
+        crate::source!(
             name: "finite",
             Out with rate_limit(10.0) => finite
         );
-        let _ = crate::async_source!(
+        crate::async_source!(
             name: "async_finite",
             Out with rate_limit(10.0) => async_finite
         );
-        let _ = crate::infinite_source!(
+        crate::infinite_source!(
             name: "infinite",
             Out with rate_limit(10.0) => infinite
         );
-        let _ = crate::async_infinite_source!(
+        crate::async_infinite_source!(
             name: "async_infinite",
             Out with rate_limit(10.0) => async_infinite
         );
-        let _ = crate::transform!(
+        crate::transform!(
             name: "transform",
             In -> Out with rate_limit(10.0) => transform
         );
-        let _ = crate::effectful_transform!(
+        crate::effectful_transform!(
             name: "effectful_transform",
             In -> Out with rate_limit(10.0) => effectful_transform
         );
-        let _ = crate::stateful!(
+        crate::stateful!(
             name: "stateful",
             In -> Out with rate_limit(10.0) => stateful
         );
-        let _ = crate::effectful_stateful!(
+        crate::effectful_stateful!(
             name: "effectful_stateful",
             In -> Out with rate_limit(10.0) => effectful_stateful
         );
-        let _ = crate::join!(
+        crate::join!(
             name: "join",
             catalog reference_stage: In,
             In -> Out with rate_limit(10.0) => join);
-        let _ = crate::sink!(
+        crate::sink!(
             name: "sink",
             Out with rate_limit(10.0) => sink.idempotent());
     }
@@ -412,28 +412,28 @@ mod tests {
     // ── source! ─────────────────────────────────────────────────────────────
     #[test]
     fn source_typed_bare() {
-        let _ = crate::source!(Out => Src);
+        crate::source!(Out => Src);
     }
     #[test]
     fn source_typed_mw() {
-        let _ = crate::source!(Out => Src );
+        crate::source!(Out => Src );
     }
     #[test]
     fn source_typed_name() {
-        let _ = crate::source!(name: "s", Out => Src);
+        crate::source!(name: "s", Out => Src);
     }
     #[test]
     fn source_typed_name_mw() {
-        let _ = crate::source!(name: "s", Out => Src );
+        crate::source!(name: "s", Out => Src );
     }
     #[test]
     fn source_accepts_a_qualified_unit_path() {
-        let _ = crate::source!(Out => qualified::Source);
+        crate::source!(Out => qualified::Source);
     }
     #[test]
     fn source_accepts_a_function_parameter_name() {
         fn declare(handler: Src) {
-            let _ = crate::source!(Out => handler);
+            crate::source!(Out => handler);
         }
 
         declare(Src);
@@ -442,91 +442,91 @@ mod tests {
     // ── async_source! ───────────────────────────────────────────────────────
     #[test]
     fn async_source_typed_bare() {
-        let _ = crate::async_source!(Out => AsyncSrc);
+        crate::async_source!(Out => AsyncSrc);
     }
     #[test]
     fn async_source_typed_mw() {
-        let _ = crate::async_source!(Out => AsyncSrc );
+        crate::async_source!(Out => AsyncSrc );
     }
     #[test]
     fn async_source_typed_name() {
-        let _ = crate::async_source!(name: "s", Out => AsyncSrc);
+        crate::async_source!(name: "s", Out => AsyncSrc);
     }
     #[test]
     fn async_source_typed_name_mw() {
-        let _ = crate::async_source!(name: "s", Out => AsyncSrc );
+        crate::async_source!(name: "s", Out => AsyncSrc );
     }
 
     // ── infinite_source! ────────────────────────────────────────────────────
     #[test]
     fn infinite_source_typed_bare() {
-        let _ = crate::infinite_source!(Out => InfSrc);
+        crate::infinite_source!(Out => InfSrc);
     }
     #[test]
     fn infinite_source_typed_mw() {
-        let _ = crate::infinite_source!(Out => InfSrc );
+        crate::infinite_source!(Out => InfSrc );
     }
     #[test]
     fn infinite_source_typed_name() {
-        let _ = crate::infinite_source!(name: "s", Out => InfSrc);
+        crate::infinite_source!(name: "s", Out => InfSrc);
     }
     #[test]
     fn infinite_source_typed_name_mw() {
-        let _ = crate::infinite_source!(name: "s", Out => InfSrc );
+        crate::infinite_source!(name: "s", Out => InfSrc );
     }
 
     // ── async_infinite_source! ──────────────────────────────────────────────
     #[test]
     fn async_infinite_source_typed_bare() {
-        let _ = crate::async_infinite_source!(Out => AsyncInfSrc);
+        crate::async_infinite_source!(Out => AsyncInfSrc);
     }
     #[test]
     fn async_infinite_source_typed_mw() {
-        let _ = crate::async_infinite_source!(Out => AsyncInfSrc );
+        crate::async_infinite_source!(Out => AsyncInfSrc );
     }
     #[test]
     fn async_infinite_source_typed_name() {
-        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc);
+        crate::async_infinite_source!(name: "s", Out => AsyncInfSrc);
     }
     #[test]
     fn async_infinite_source_typed_name_mw() {
-        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc );
+        crate::async_infinite_source!(name: "s", Out => AsyncInfSrc );
     }
 
     // ── transform! ──────────────────────────────────────────────────────────
     #[test]
     fn transform_typed_bare() {
-        let _ = crate::transform!(In -> Out => Tr);
+        crate::transform!(In -> Out => Tr);
     }
     #[test]
     fn transform_typed_mw() {
-        let _ = crate::transform!(In -> Out => Tr);
+        crate::transform!(In -> Out => Tr);
     }
     #[test]
     fn transform_typed_name() {
-        let _ = crate::transform!(name: "t", In -> Out => Tr);
+        crate::transform!(name: "t", In -> Out => Tr);
     }
     #[test]
     fn transform_typed_name_mw() {
-        let _ = crate::transform!(name: "t", In -> Out => Tr);
+        crate::transform!(name: "t", In -> Out => Tr);
     }
 
     // ── effectful_transform! ──────────────────────────────────────────
     #[test]
     fn effectful_transform_typed_bare() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr);
+        crate::effectful_transform!(In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_typed_mw() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr);
+        crate::effectful_transform!(In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_typed_name() {
-        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
+        crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_typed_name_mw() {
-        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
+        crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
     fn effectful_transform_transactional_effect_needs_no_acknowledgement() {
@@ -545,37 +545,37 @@ mod tests {
     // ── stateful! ───────────────────────────────────────────────────────────
     #[test]
     fn stateful_typed_bare() {
-        let _ = crate::stateful!(In -> Out => St);
+        crate::stateful!(In -> Out => St);
     }
     #[test]
     fn stateful_typed_mw() {
-        let _ = crate::stateful!(In -> Out => St);
+        crate::stateful!(In -> Out => St);
     }
     #[test]
     fn stateful_typed_name() {
-        let _ = crate::stateful!(name: "s", In -> Out => St);
+        crate::stateful!(name: "s", In -> Out => St);
     }
     #[test]
     fn stateful_typed_name_mw() {
-        let _ = crate::stateful!(name: "s", In -> Out => St);
+        crate::stateful!(name: "s", In -> Out => St);
     }
 
     // ── effectful_stateful! ─────────────────────────────────────────────────
     #[test]
     fn effectful_stateful_typed_bare() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt);
+        crate::effectful_stateful!(In -> Out => FxSt);
     }
     #[test]
     fn effectful_stateful_typed_mw() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt);
+        crate::effectful_stateful!(In -> Out => FxSt);
     }
     #[test]
     fn effectful_stateful_typed_name() {
-        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt);
+        crate::effectful_stateful!(name: "s", In -> Out => FxSt);
     }
     #[test]
     fn effectful_stateful_typed_name_mw() {
-        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt);
+        crate::effectful_stateful!(name: "s", In -> Out => FxSt);
     }
 
     #[test]
@@ -647,19 +647,19 @@ mod tests {
     // ── sink! ───────────────────────────────────────────────────────────────
     #[test]
     fn sink_typed_bare() {
-        let _ = crate::sink!(Out => Sn);
+        crate::sink!(Out => Sn);
     }
     #[test]
     fn sink_typed_mw() {
-        let _ = crate::sink!(Out => Sn);
+        crate::sink!(Out => Sn);
     }
     #[test]
     fn sink_typed_name() {
-        let _ = crate::sink!(name: "s", Out => Sn);
+        crate::sink!(name: "s", Out => Sn);
     }
     #[test]
     fn sink_typed_name_mw() {
-        let _ = crate::sink!(name: "s", Out => Sn);
+        crate::sink!(name: "s", Out => Sn);
     }
     #[test]
     fn sink_handler_set_lowers_one_heterogeneous_binding_by_its_exact_name() {
@@ -788,25 +788,25 @@ mod tests {
     #[test]
     fn sink_typed_redelivery_decoration() {
         let idempotent_sink = Sn;
-        let _ = crate::sink!(Out => idempotent_sink.idempotent());
+        crate::sink!(Out => idempotent_sink.idempotent());
         let non_idempotent_sink = Sn;
-        let _ = crate::sink!(Out => non_idempotent_sink.non_idempotent());
+        crate::sink!(Out => non_idempotent_sink.non_idempotent());
     }
     #[test]
     fn sink_exact_contract_inline_sink() {
         let bare_sink = Sn;
-        let _ = crate::sink!(Out => bare_sink);
+        crate::sink!(Out => bare_sink);
         let idempotent_sink = Sn;
-        let _ = crate::sink!(Out => idempotent_sink.idempotent());
+        crate::sink!(Out => idempotent_sink.idempotent());
         let named_sink = Sn;
-        let _ = crate::sink!(name: "s", Out => named_sink);
+        crate::sink!(name: "s", Out => named_sink);
     }
     #[test]
     fn sink_exact_contract_named_delivery() {
         let bare_sink = Sn;
-        let _ = crate::sink!(Out => bare_sink);
+        crate::sink!(Out => bare_sink);
         let named_sink = Sn;
-        let _ = crate::sink!(
+        crate::sink!(
             name: "s",
             Out => named_sink.idempotent());
     }

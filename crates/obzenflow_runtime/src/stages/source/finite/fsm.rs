@@ -40,7 +40,7 @@ use crate::stages::source::supervision::SourceExit;
 // ============================================================================
 
 /// FSM states for finite source stages
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, StateVariant)]
 pub enum FiniteSourceState<H> {
     /// Initial state - source has been created but not initialized
     Created,
@@ -146,29 +146,6 @@ impl<H: Send + Sync> PartialEq for FiniteSourceState<H> {
     }
 }
 
-impl<H: Send + Sync + 'static> StateVariant for FiniteSourceState<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            FiniteSourceState::Created => "Created",
-            Self::Initializing => "Initializing",
-            Self::Starting => "Starting",
-            Self::Finalizing => "Finalizing",
-            Self::AcquiringInput => "AcquiringInput",
-            Self::Failing(..) => "Failing",
-            Self::Cancelling(..) => "Cancelling",
-            Self::Cancelled(..) => "Cancelled",
-
-            FiniteSourceState::Initialized => "Initialized",
-            FiniteSourceState::WaitingForGun => "WaitingForGun",
-            FiniteSourceState::Running => "Running",
-            FiniteSourceState::Draining => "Draining",
-            FiniteSourceState::Drained => "Drained",
-            FiniteSourceState::Failed(_) => "Failed",
-            FiniteSourceState::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
-    }
-}
-
 impl<H> FiniteSourceState<H> {
     pub(crate) fn defer_external_event(state: &Self, event: &FiniteSourceEvent<H>) -> bool {
         match state {
@@ -226,6 +203,7 @@ impl<H> FiniteSourceState<H> {
 // ============================================================================
 
 /// Events that can trigger finite source state transitions
+#[derive(EventVariant)]
 pub enum FiniteSourceEvent<H> {
     /// Initialize the source - allocate resources, create writer ID
     Initialize,
@@ -318,26 +296,6 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
             }
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
-    }
-}
-
-impl<H: Send + Sync + 'static> EventVariant for FiniteSourceEvent<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            FiniteSourceEvent::Initialize => "Initialize",
-            Self::InitializationCompleted => "InitializationCompleted",
-            Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalizationCompleted => "FinalizationCompleted",
-            Self::TerminationSettled => "TerminationSettled",
-            Self::InputAcquired => "InputAcquired",
-
-            FiniteSourceEvent::Ready => "Ready",
-            FiniteSourceEvent::Start => "Start",
-            FiniteSourceEvent::BeginDrain => "BeginDrain",
-            FiniteSourceEvent::Completed => "Completed",
-            FiniteSourceEvent::Error(_) => "Error",
-            FiniteSourceEvent::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
     }
 }
 

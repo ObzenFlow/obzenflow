@@ -145,7 +145,10 @@ async fn record_fee_run(config: &Path, journal_root: &Path) -> (IngressOutcome, 
             }
             flow.stop().await.expect("the run stops");
             if let Some(outcomes_tx) = outcomes_tx {
-                let _ = outcomes_tx.send((committed, resent));
+                assert!(
+                    outcomes_tx.send((committed, resent)).is_ok(),
+                    "the test awaits the outcomes"
+                );
             }
         })
     });

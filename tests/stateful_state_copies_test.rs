@@ -2,7 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit;
+mod replay_testkit {
+    mod bootstrap;
+    mod count_deliveries;
+    mod discard;
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{bootstrap::*, count_deliveries::*, discard::*, run_dir::*, stage_journal::*};
+}
 
 use async_trait::async_trait;
 use obzenflow::stages::stateful::{

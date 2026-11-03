@@ -83,7 +83,7 @@ pub struct RecordFixture {
     pub clock_bytes: usize,
     pub journal: DiskJournal<ChainEvent>,
     pub rows: Vec<ChainJournalRecord>,
-    pub _directory: tempfile::TempDir,
+    pub directory: tempfile::TempDir,
 }
 impl RecordFixture {
     pub async fn build(d: Dimensions) -> Self {
@@ -141,7 +141,7 @@ impl RecordFixture {
             canonical_bytes,
             clock_bytes,
             journal,
-            _directory: directory,
+            directory,
         }
     }
 }

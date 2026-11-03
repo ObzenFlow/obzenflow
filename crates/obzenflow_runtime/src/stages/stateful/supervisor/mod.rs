@@ -341,9 +341,8 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             state StatefulState::Failed {}
 
             state StatefulState::Initializing {
-                on StatefulEvent::InitializationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                on StatefulEvent::InitializationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                     let next_state = StatefulState::Initialized;
-                    let _ = ctx;
                     Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
                 };
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
@@ -354,9 +353,8 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::Starting {
-                on StatefulEvent::ActivationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                on StatefulEvent::ActivationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                     let next_state = StatefulState::Accumulating;
-                    let _ = ctx;
                     Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
                 };
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
@@ -415,9 +413,8 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
             }
 
             state StatefulState::Finalizing {
-                on StatefulEvent::FinalizationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                on StatefulEvent::FinalizationCompleted => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                     let next_state = StatefulState::Drained;
-                    let _ = ctx;
                     Box::pin(async move { Ok(Transition { next_state, actions: vec![] }) })
                 };
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, __ctx: &mut StatefulContext<H>| {
@@ -659,7 +656,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> HandlerS
                 running::dispatch_accumulating(self, state, ctx.resources_mut()?).await
             }
             StatefulState::Emitting | StatefulState::EmittingDuringDrain => {
-                running::dispatch_emitting(self, state, ctx.resources_mut()?).await
+                running::dispatch_emitting(self, ctx.resources_mut()?).await
             }
             StatefulState::ValidatingTerminal
             | StatefulState::ForwardingTerminal
@@ -713,7 +710,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Stateful
         ctx: &StatefulResources<H>,
         envelope: &JournalRecord<ChainPayload>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let _ = forward_control_event_helper(
+        forward_control_event_helper(
             envelope,
             ctx.stage_id,
             &ctx.stage_name,

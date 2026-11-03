@@ -2,8 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "../../../tests/replay_testkit/mod.rs"]
-mod replay_testkit;
+#[path = "../../../tests/replay_testkit"]
+mod replay_testkit {
+    mod bootstrap;
+    mod count_deliveries;
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{bootstrap::*, count_deliveries::*, manifest::*, run_dir::*, stage_journal::*};
+}
 
 use anyhow::{anyhow, Result};
 use obzenflow_adapters::sources::ChannelSource;

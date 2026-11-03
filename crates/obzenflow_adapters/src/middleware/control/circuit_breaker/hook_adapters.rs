@@ -14,8 +14,8 @@ use crate::middleware::context_keys::{
 };
 use crate::middleware::MiddlewareContext;
 use crate::middleware::{
-    SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
-    SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
+    SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::execution_payload::{
@@ -242,7 +242,6 @@ enum EffectAdmissionDecision {
     Reject {
         transition_event: Option<ChainEvent>,
         reason: CircuitBreakerRejectionReason,
-        cooldown_remaining: Option<Duration>,
     },
 }
 
@@ -257,7 +256,7 @@ impl CircuitBreakerMiddleware {
         &self,
         ctx: &mut MiddlewareContext,
         fence: EffectAdmissionFence,
-    ) -> crate::middleware::PolicyAdmission {
+    ) -> PolicyAdmission {
         let decision = {
             let _probe_gate = self
                 .probe_gate
@@ -274,7 +273,6 @@ impl CircuitBreakerMiddleware {
                 EffectAdmissionDecision::Reject {
                     transition_event: None,
                     reason: CircuitBreakerRejectionReason::CircuitOpen,
-                    cooldown_remaining: self.effect_open_cooldown_remaining(),
                 }
             } else {
                 let mut transition_event = None;
@@ -303,7 +301,6 @@ impl CircuitBreakerMiddleware {
                     CircuitState::Open => EffectAdmissionDecision::Reject {
                         transition_event,
                         reason: CircuitBreakerRejectionReason::CircuitOpen,
-                        cooldown_remaining: self.effect_open_cooldown_remaining(),
                     },
                     CircuitState::HalfOpen => {
                         let probe_generation = self.probe_generation.load(Ordering::SeqCst);
@@ -313,7 +310,6 @@ impl CircuitBreakerMiddleware {
                             EffectAdmissionDecision::Reject {
                                 transition_event,
                                 reason: CircuitBreakerRejectionReason::ProbeInProgress,
-                                cooldown_remaining: None,
                             }
                         } else {
                             self.probe_in_flight.fetch_add(1, Ordering::SeqCst);
@@ -343,21 +339,16 @@ impl CircuitBreakerMiddleware {
                     ctx.insert::<CircuitBreakerProbeGeneration>(generation);
                     ctx.insert::<CircuitBreakerProbeSlot>(guard);
                 }
-                crate::middleware::PolicyAdmission::Admit
+                PolicyAdmission::Admit
             }
             EffectAdmissionDecision::Reject {
                 transition_event,
                 reason,
-                cooldown_remaining,
             } => {
                 if let Some(event) = transition_event {
                     ctx.write_control_event(event);
                 }
-                crate::middleware::PolicyAdmission::Reject(self.effect_rejection_cause(
-                    ctx,
-                    reason,
-                    cooldown_remaining,
-                ))
+                PolicyAdmission::Reject(self.effect_rejection_cause(ctx, reason))
             }
         }
     }
@@ -377,43 +368,23 @@ impl CircuitBreakerMiddleware {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let epoch =
                 EffectAdmissionEpoch(self.effect_recovery_open_epoch.load(Ordering::SeqCst));
-            if initial_epoch.is_some_and(|initial| initial != epoch) {
-                Err((CircuitBreakerRejectionReason::CircuitOpen, None))
-            } else if matches!(self.current_state(), CircuitState::Open)
-                && !self.should_attempt_reset()
+            if initial_epoch.is_some_and(|initial| initial != epoch)
+                || (matches!(self.current_state(), CircuitState::Open)
+                    && !self.should_attempt_reset())
             {
-                Err((
-                    CircuitBreakerRejectionReason::CircuitOpen,
-                    self.effect_open_cooldown_remaining(),
-                ))
+                Err(CircuitBreakerRejectionReason::CircuitOpen)
             } else {
                 Ok(epoch)
             }
         };
 
-        observation.map_err(|(reason, cooldown)| self.effect_rejection_cause(ctx, reason, cooldown))
-    }
-
-    fn effect_open_cooldown_remaining(&self) -> Option<Duration> {
-        if !matches!(self.current_state(), CircuitState::Open) {
-            return None;
-        }
-        Some(if let Ok(opened_at_guard) = self.opened_at.lock() {
-            if let Some(opened_at) = *opened_at_guard {
-                self.cooldown.saturating_sub(opened_at.elapsed())
-            } else {
-                self.cooldown
-            }
-        } else {
-            self.cooldown
-        })
+        observation.map_err(|reason| self.effect_rejection_cause(ctx, reason))
     }
 
     fn effect_rejection_cause(
         &self,
         ctx: &mut MiddlewareContext,
         reason: CircuitBreakerRejectionReason,
-        _cooldown_remaining: Option<Duration>,
     ) -> Box<crate::middleware::MiddlewareAbortCause> {
         Box::new(self.record_rejection(ctx, reason))
     }

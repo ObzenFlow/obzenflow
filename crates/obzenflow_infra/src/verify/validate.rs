@@ -75,10 +75,9 @@ pub(crate) fn validate(
     }
 
     // The same terminal gate replay itself applies.
-    for (source, label) in [(baseline, "baseline"), (candidate, "candidate")] {
+    for source in [baseline, candidate] {
         let status = source.status();
         if !matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled) {
-            let _ = label;
             return Err(Box::new(RefusalReason::StatusGate {
                 run: source.run_dir().to_path_buf(),
                 status: format!("{status:?}"),

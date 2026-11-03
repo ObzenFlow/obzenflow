@@ -4980,7 +4980,6 @@ mod refused_catalog_row {
 mod flash_sale {
     use super::*;
     use flash_sale_demo::domain::{ReservationConfirmed, SoldOut};
-    use flash_sale_demo::warehouse::WarehouseStats;
 
     const INPUTS: usize = 6;
 
@@ -5003,7 +5002,6 @@ mod flash_sale {
     pub(super) fn build_flow(scenario: &Scenario) -> FlowDefinition {
         flash_sale_demo::flow::settings_flow(
             flash_sale_demo::flow::scripted_inputs(),
-            std::sync::Arc::new(WarehouseStats::default()),
             scenario.journals(),
         )
     }

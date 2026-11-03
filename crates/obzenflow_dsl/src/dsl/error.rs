@@ -5,6 +5,7 @@
 use thiserror::Error;
 
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
+use obzenflow_runtime::runtime_config::{ApplicationSettingsError, ConfigResolveError};
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
@@ -113,11 +114,64 @@ pub enum EdgeTypingMismatchKind {
     DeclaredFeedPayloadMissing,
 }
 
+/// An upstream emits a type the downstream input slot does not declare.
+#[derive(Debug, Error)]
+#[error(
+    "{}",
+    FlowBuildError::fmt_edge_typing_mismatch(
+        .upstream_stage,
+        .downstream_stage,
+        *.role,
+        .actual_type,
+        .expected_type,
+        .kind,
+        .suggested_fix,
+    )
+)]
+pub struct EdgeTypingMismatch {
+    pub upstream_stage: String,
+    pub downstream_stage: String,
+    pub role: EdgeInputRole,
+    pub expected_type: String,
+    pub actual_type: String,
+    pub kind: EdgeTypingMismatchKind,
+    pub suggested_fix: String,
+}
+
+/// An effect may produce a fact outside its stage's output contract.
+#[derive(Debug, Error)]
+#[error(
+    "Stage '{stage_name}': effect '{effect_type}' may produce fact '{fact}', which is not a \
+     member of the stage output contract {contract}. Add it to the arrow (unconditional \
+     producer-side containment check)."
+)]
+pub struct EffectFactNotInContract {
+    pub stage_name: String,
+    pub effect_type: String,
+    pub fact: String,
+    pub contract: String,
+}
+
+/// An effect declares two outcome members with the same event type.
+#[derive(Debug, Error)]
+#[error(
+    "Stage '{stage_name}': effect '{effect_type}' declares two outcome members with the same \
+     event type `{event_type}` ('{first_member}' and '{second_member}'). Dispatch is by \
+     event type, so carrier members must have distinct event types."
+)]
+pub struct DuplicateEffectOutcomeFactEventType {
+    pub stage_name: String,
+    pub effect_type: String,
+    pub event_type: String,
+    pub first_member: String,
+    pub second_member: String,
+}
+
 /// Structured error type for failures during flow construction
 #[derive(Debug, Error)]
 pub enum FlowBuildError {
     #[error(transparent)]
-    MiddlewarePlan(#[from] MiddlewarePlanError),
+    MiddlewarePlan(Box<MiddlewarePlanError>),
 
     #[error("hosted ingress '{ingress_key}' is assigned to both stages '{first_stage}' and '{second_stage}'; assign each hosted source binding to one stage")]
     DuplicateHostedIngressBinding {
@@ -134,19 +188,19 @@ pub enum FlowBuildError {
     },
 
     #[error("Topology validation failed: {0}")]
-    TopologyValidationFailed(#[source] TopologyError),
+    TopologyValidationFailed(#[source] Box<TopologyError>),
 
     /// FLOWIP-010: flow-build config resolution failed (required knob
     /// unresolved, scoped entry naming an unknown stage/edge, or a DSL
     /// candidate conflict). The message carries the full `config error at
     /// <path>` diagnostic including the scopes that may supply the knob.
     #[error("{0}")]
-    ConfigResolution(#[source] obzenflow_runtime::runtime_config::ConfigResolveError),
+    ConfigResolution(#[source] Box<ConfigResolveError>),
 
     /// The `[app]` table did not fit the settings type, was extracted twice, or
     /// is non-empty in a build that extracts none; the message names keys, never values.
     #[error("{0}")]
-    ApplicationSettings(#[source] obzenflow_runtime::runtime_config::ApplicationSettingsError),
+    ApplicationSettings(#[source] ApplicationSettingsError),
 
     /// `journal.root` is set, but the flow's journal provider keeps no run
     /// location under it.
@@ -270,27 +324,8 @@ pub enum FlowBuildError {
         middleware: String,
     },
 
-    #[error(
-        "{}",
-        FlowBuildError::fmt_edge_typing_mismatch(
-            upstream_stage,
-            downstream_stage,
-            *role,
-            actual_type,
-            expected_type,
-            kind,
-            suggested_fix,
-        )
-    )]
-    EdgeTypingMismatch {
-        upstream_stage: String,
-        downstream_stage: String,
-        role: EdgeInputRole,
-        expected_type: String,
-        actual_type: String,
-        kind: EdgeTypingMismatchKind,
-        suggested_fix: String,
-    },
+    #[error(transparent)]
+    EdgeTypingMismatch(Box<EdgeTypingMismatch>),
 
     #[error(
         "Stage '{stage_name}' carries no typing metadata. After FLOWIP-114c, every \
@@ -305,30 +340,11 @@ pub enum FlowBuildError {
     )]
     UnspecifiedTypingOnApplicableSlot { stage_name: String, slot: String },
 
-    #[error(
-        "Stage '{stage_name}': effect '{effect_type}' may produce fact '{fact}', which is not a \
-         member of the stage output contract {contract}. Add it to the arrow (FLOWIP-120m \
-         unconditional producer-side containment check)."
-    )]
-    EffectFactNotInContract {
-        stage_name: String,
-        effect_type: String,
-        fact: String,
-        contract: String,
-    },
+    #[error(transparent)]
+    EffectFactNotInContract(Box<EffectFactNotInContract>),
 
-    #[error(
-        "Stage '{stage_name}': effect '{effect_type}' declares two outcome members with the same \
-         event type `{event_type}` ('{first_member}' and '{second_member}'). Dispatch is by \
-         event type, so carrier members must have distinct event types (FLOWIP-120m)."
-    )]
-    DuplicateEffectOutcomeFactEventType {
-        stage_name: String,
-        effect_type: String,
-        event_type: String,
-        first_member: String,
-        second_member: String,
-    },
+    #[error(transparent)]
+    DuplicateEffectOutcomeFactEventType(Box<DuplicateEffectOutcomeFactEventType>),
 
     #[error(
         "Effectful stage '{stage_name}' is downstream of nondeterministic fan-in. \
@@ -413,6 +429,12 @@ impl FlowBuildError {
     }
 }
 
+impl From<MiddlewarePlanError> for FlowBuildError {
+    fn from(error: MiddlewarePlanError) -> Self {
+        Self::MiddlewarePlan(Box::new(error))
+    }
+}
+
 impl From<FlowBuildError> for String {
     fn from(err: FlowBuildError) -> Self {
         err.to_string()
@@ -425,5 +447,16 @@ impl From<obzenflow_runtime::effects::SystemError> for FlowBuildError {
             binding: error.system().to_string(),
             detail: error.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FlowBuildError;
+
+    #[test]
+    fn flow_build_error_stays_under_the_large_error_threshold() {
+        let size = size_of::<FlowBuildError>();
+        assert!(size < 128, "FlowBuildError is {size} bytes");
     }
 }

@@ -45,7 +45,7 @@ impl CleanupGuard {
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
         if self.armed {
-            let _ = xtask(&self.root, &self.token, &["down", "--volumes"], &[]);
+            xtask(&self.root, &self.token, &["down", "--volumes"], &[]);
         }
     }
 }
@@ -81,9 +81,13 @@ impl Drop for StateRestoreGuard {
     fn drop(&mut self) {
         if self.armed {
             if self.original.exists() {
-                let _ = fs::remove_dir_all(&self.original);
+                if let Err(error) = fs::remove_dir_all(&self.original) {
+                    eprintln!("could not remove {}: {error}", self.original.display());
+                }
             }
-            let _ = fs::rename(&self.backup, &self.original);
+            if let Err(error) = fs::rename(&self.backup, &self.original) {
+                eprintln!("could not restore {}: {error}", self.original.display());
+            }
         }
     }
 }

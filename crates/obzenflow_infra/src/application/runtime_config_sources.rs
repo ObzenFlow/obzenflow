@@ -86,7 +86,8 @@ fn decode_stage_sink_handler_env_segment(encoded: &str) -> Result<String, &'stat
     }
 
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_bytes().chunks_exact(2) {
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    for pair in pairs {
         let nibble = |byte| match byte {
             b'0'..=b'9' => byte - b'0',
             b'A'..=b'F' => byte - b'A' + 10,

@@ -337,7 +337,9 @@ async fn cycle_guard_rejects_stateful_emit_per_window_cycle() {
 #[tokio::test]
 async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
     let base = PathBuf::from("target/cycle_guard_bounds");
-    let _ = fs::remove_dir_all(&base);
+    if base.exists() {
+        fs::remove_dir_all(&base)?;
+    }
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = EventCounterSink::<SeedEvent>::new();
@@ -398,7 +400,9 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
 
     let base = PathBuf::from("target/cycle_guard_bounds_data");
-    let _ = fs::remove_dir_all(&base);
+    if base.exists() {
+        fs::remove_dir_all(&base)?;
+    }
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = EventCounterSink::<SeedEvent>::new();

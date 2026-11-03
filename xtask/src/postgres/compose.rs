@@ -162,7 +162,10 @@ impl Compose {
     ) -> Result<()> {
         let output = self.output(root, directory, state, &["up", "-d"])?;
         if !output.status.success() {
-            let _ = self.capture_logs(root, directory, state, &directory.join(LOG_FILE));
+            if let Err(error) = self.capture_logs(root, directory, state, &directory.join(LOG_FILE))
+            {
+                eprintln!("could not capture the PostgreSQL logs: {error}");
+            }
             return Err(error(format!(
                 "PostgreSQL failed to start. project={} image={} requested_port={}; captured logs: {}",
                 state.project,
@@ -427,7 +430,11 @@ impl Compose {
                 }
                 ReadinessDisposition::Retry => thread::sleep(Duration::from_millis(250)),
                 ReadinessDisposition::Failed => {
-                    let _ = self.capture_logs(root, directory, state, &directory.join(LOG_FILE));
+                    if let Err(error) =
+                        self.capture_logs(root, directory, state, &directory.join(LOG_FILE))
+                    {
+                        eprintln!("could not capture the PostgreSQL logs: {error}");
+                    }
                     return Err(error(format!(
                         "PostgreSQL did not become SQL-ready within {}s. project={} image={} requested_port={} last_health={} sql_preflight_attempts={}; captured logs: {}",
                         HEALTH_TIMEOUT.as_secs(),

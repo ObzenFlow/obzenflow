@@ -553,7 +553,9 @@ fn cleanup_setup_failure(
 impl Drop for TestSession {
     fn drop(&mut self) {
         if !self.cleaned {
-            let _ = self.cleanup();
+            if let Err(error) = self.cleanup() {
+                eprintln!("PostgreSQL acceptance cleanup failed: {error}");
+            }
         }
     }
 }

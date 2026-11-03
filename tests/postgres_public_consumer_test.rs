@@ -47,5 +47,5 @@ fn root_feature_exposes_a_sink_macro_compatible_value_binder() {
         .expect("consumer target validates")
         .build()
         .expect("consumer connector builds without I/O");
-    let _descriptor = sink!(ConsumerPayment => postgres);
+    sink!(ConsumerPayment => postgres);
 }

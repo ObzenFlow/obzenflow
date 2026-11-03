@@ -12,7 +12,7 @@ use super::{
 };
 use crate::contracts::ContractChain;
 use crate::control_plane::NoControlPlane;
-use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
+use crate::messaging::upstream_subscription_policy::default_policy_stack;
 use async_trait::async_trait;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::SeqNo;
@@ -502,14 +502,11 @@ where
                 })
                 .collect();
 
-            // Initialize per-reader policy stacks using the upstream stage IDs.
+            // One policy stack per reader.
             self.contract_policies = self
                 .readers
                 .iter()
-                .map(|slot| {
-                    let stack = build_policy_stack_for_upstream(slot.stage_id);
-                    Some(stack)
-                })
+                .map(|_| Some(default_policy_stack()))
                 .collect();
         }
 

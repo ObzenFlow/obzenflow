@@ -4,13 +4,12 @@
 
 //! FSM phases and the owner results which advance them.
 
-use super::PipelineContext;
 use crate::pipeline::termination::ExecutionOutcome;
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
 use crate::stages::common::stage_handle::{StageAck, StageExit, StageFailure};
 use obzenflow_fsm::{EventVariant, StateVariant};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, StateVariant)]
 pub(crate) enum PipelineFsmState {
     Created,
     Registering,
@@ -49,7 +48,7 @@ pub(crate) enum PipelineDeadline {
     Metrics,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EventVariant)]
 pub(crate) enum PipelineFsmEvent {
     Bootstrap,
     RegistrationCompleted,
@@ -86,36 +85,6 @@ pub(crate) enum PipelineFsmEvent {
     ObservationEnded,
 }
 
-impl EventVariant for PipelineFsmEvent {
-    fn variant_name(&self) -> &str {
-        match self {
-            Self::Bootstrap => "Bootstrap",
-            Self::RegistrationCompleted => "RegistrationCompleted",
-            Self::Start => "Start",
-            Self::GracefulStop { .. } => "GracefulStop",
-            Self::Cancel => "Cancel",
-            Self::Abort { .. } => "Abort",
-            Self::ChildAcknowledged(_) => "ChildAcknowledged",
-            Self::ChildFailed(_) => "ChildFailed",
-            Self::ChildExited(_) => "ChildExited",
-            Self::StagesCrossed => "StagesCrossed",
-            Self::MetricsReady(_) => "MetricsReady",
-            Self::MetricsExited(_) => "MetricsExited",
-            Self::ReadyPublished => "ReadyPublished",
-            Self::StartPublished => "StartPublished",
-            Self::RunningPublished => "RunningPublished",
-            Self::TerminalPublished => "TerminalPublished",
-            Self::FinalizationCompleted { .. } => "FinalizationCompleted",
-            Self::GracefulStopExpired => "GracefulStopExpired",
-            Self::StageCleanupExpired => "StageCleanupExpired",
-            Self::MetricsExpired => "MetricsExpired",
-            Self::PhaseSatisfied => "PhaseSatisfied",
-            Self::OperationalFailure { .. } => "OperationalFailure",
-            Self::ObservationEnded => "ObservationEnded",
-        }
-    }
-}
-
 impl From<PipelineControl> for PipelineFsmEvent {
     fn from(control: PipelineControl) -> Self {
         match control {
@@ -139,31 +108,8 @@ impl From<PipelineDeadline> for PipelineFsmEvent {
         }
     }
 }
-impl StateVariant for PipelineFsmState {
-    fn variant_name(&self) -> &str {
-        match self {
-            Self::Created => "Created",
-            Self::Registering => "Registering",
-            Self::InitializingStages => "InitializingStages",
-            Self::StartingConsumers => "StartingConsumers",
-            Self::PublishingReady => "PublishingReady",
-            Self::ReadyForRun => "ReadyForRun",
-            Self::PublishingStart => "PublishingStart",
-            Self::StartingSources => "StartingSources",
-            Self::PublishingRunning => "PublishingRunning",
-            Self::Running => "Running",
-            Self::Draining => "Draining",
-            Self::CancellingChildren => "CancellingChildren",
-            Self::PublishingTerminal => "PublishingTerminal",
-            Self::FinalizingMetrics => "FinalizingMetrics",
-            Self::PublishingFinalMarker => "PublishingFinalMarker",
-            Self::FailingChildren { .. } => "FailingChildren",
-            Self::Finished { .. } => "Finished",
-        }
-    }
-}
 impl PipelineFsmState {
-    pub(crate) fn public_state(&self, _ctx: &PipelineContext) -> PipelineState {
+    pub(crate) fn public_state(&self) -> PipelineState {
         match self {
             Self::Created => PipelineState::Created,
             Self::Registering => PipelineState::Registering,

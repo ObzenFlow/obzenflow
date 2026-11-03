@@ -2,13 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime control-strategy hooks (FLOWIP-115c).
+//! Wake sources for paused supervisors.
 //!
-//! This slice defines the contract for loop-level controls. Live I/O policies
-//! (source/effect/sink delivery) compose as boundary middleware outside this
-//! gate model. Admission/observation remain available for output-commit
-//! backpressure, where there is no single inner future to wrap. The signal hook
-//! lives in [`super::core`] and the completion hook in the source FSMs.
+//! Live I/O policies (source/effect/sink delivery) compose as boundary
+//! middleware. The signal hook lives in [`super::core`] and the completion hook
+//! in the source FSMs.
 
 use std::sync::Arc;
 
@@ -46,9 +44,6 @@ impl CreditWaker {
         self.0.notify_one();
     }
 
-    // Reached only by the supervisor suspension helper. Signal pauses use
-    // deadline wakes; backpressure (115e) consumes credit wakes.
-    #[allow(dead_code)]
     pub(crate) fn inner(&self) -> &Arc<tokio::sync::Notify> {
         &self.0
     }
@@ -66,119 +61,16 @@ impl std::fmt::Debug for CreditWaker {
     }
 }
 
-/// The positions at which the admission hook may be consulted. FLOWIP-115a
-/// keeps live I/O policy composition out of this gate model; the remaining
-/// admission use is output-commit/backpressure, where the supervisor owns the
-/// wait because no single inner future exists to wrap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmissionPosition {
-    /// Before committing a produced output downstream.
-    BeforeOutputCommit,
-}
-
-/// Result of consulting the admission hook at a rejecting position
-/// (`BeforeOutputCommit`). `RejectAttempt` and `SynthesizeFallback` are this
-/// hook's stop.
-#[derive(Debug, Clone)]
-pub enum AdmissionDecision {
-    /// Proceed with the attempt.
-    Continue,
-    /// Suspend; the supervisor owns the wait and re-consults after `wake`.
-    Pause { wake: WakeOn },
-    /// Refuse the attempt outright.
-    RejectAttempt { reason: String },
-    /// Short-circuit with a synthesized result, carried as an opaque marker;
-    /// the consuming seam converts it to its own event shape.
-    SynthesizeFallback { source: Option<String> },
-}
-
-/// How one admitted attempt ended. Handed to every observer that admitted it.
-/// Mirrors the effect boundary's outcome arms without importing the effect
-/// type, preserving the crate onion.
-#[derive(Debug, Clone)]
-pub enum AttemptOutcome {
-    Succeeded,
-    Failed { cause: String },
-    Skipped,
-    Aborted { reason: String },
-}
-
-/// Admission hook. Consulted at an [`AdmissionPosition`] before committing
-/// output under backpressure. Live source/effect/sink-delivery policy uses
-/// boundary middleware instead.
-pub trait AdmissionGate: Send + Sync {
-    /// Decide whether an attempt may proceed at a rejecting position.
-    fn admit(&self, position: AdmissionPosition) -> AdmissionDecision;
-}
-
-/// Attempt-observation hook. Pure observation: it returns nothing and cannot
-/// steer the loop. `observe` is synchronous so it can run from a `Drop` guard;
-/// `settle` is the explicit async path for durable journal work that `Drop`
-/// cannot perform.
-#[async_trait::async_trait]
-pub trait AttemptObserver: Send + Sync {
-    /// Synchronous notification of the terminal outcome.
-    fn observe(&self, _position: AdmissionPosition, _outcome: &AttemptOutcome) {}
-
-    /// Durable observation. Called explicitly before the loop drops the attempt
-    /// guard, or on the way out of a wrapped attempt.
-    async fn settle(
-        &self,
-        _position: AdmissionPosition,
-        _outcome: &AttemptOutcome,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn admission_position_is_copy_and_eq() {
-        let p = AdmissionPosition::BeforeOutputCommit;
-        let q = p; // Copy
-        assert_eq!(p, q);
-    }
-
-    #[test]
-    fn wake_source_is_clonable() {
+    fn cloned_credit_wake_shares_its_notify() {
         let waker = CreditWaker::new();
-        let wake = WakeOn::Notify(waker.clone());
-        // Cloning a credit wake shares the underlying Notify.
-        let _again = wake.clone();
-        waker.notify(); // smoke: producer side does not panic
-        let _deadline = WakeOn::At(std::time::Instant::now());
-        let _recheck = WakeOn::Immediate;
-    }
-
-    struct FixedGate {
-        decision: &'static str,
-    }
-
-    impl AdmissionGate for FixedGate {
-        fn admit(&self, position: AdmissionPosition) -> AdmissionDecision {
-            match self.decision {
-                "continue" => AdmissionDecision::Continue,
-                "reject" => AdmissionDecision::RejectAttempt {
-                    reason: format!("rejected at {position:?}"),
-                },
-                _ => AdmissionDecision::Pause {
-                    wake: WakeOn::Immediate,
-                },
-            }
-        }
-    }
-
-    #[test]
-    fn admission_gate_answers_per_position() {
-        let gate = FixedGate { decision: "reject" };
-        match gate.admit(AdmissionPosition::BeforeOutputCommit) {
-            AdmissionDecision::RejectAttempt { reason } => {
-                assert!(reason.contains("BeforeOutputCommit"))
-            }
-            other => panic!("expected reject, got {other:?}"),
-        }
+        let WakeOn::Notify(cloned) = WakeOn::Notify(waker.clone()).clone() else {
+            panic!("a cloned credit wake stays a credit wake");
+        };
+        assert!(Arc::ptr_eq(waker.inner(), cloned.inner()));
     }
 }

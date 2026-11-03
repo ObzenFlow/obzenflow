@@ -13,7 +13,10 @@
 //! also pins the killed-run tail shape (torn trailing writes are skipped at
 //! the framed-record layer) that the FLOWIP flagged for fixture confirmation.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod count_deliveries;
+    pub use self::count_deliveries::*;
+}
 
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};

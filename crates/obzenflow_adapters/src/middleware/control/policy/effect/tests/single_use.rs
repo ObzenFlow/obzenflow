@@ -488,7 +488,6 @@ async fn effect_resilience_guards_transactional_calls_without_retrying_them() {
         factory.as_ref(),
         &config,
         &control,
-        0,
         EffectSafety::Transactional,
     )
     .expect("breaker-only transactional resilience should materialize");
@@ -529,7 +528,6 @@ async fn transactional_missing_commit_consumes_attempt_without_health_sample() {
         factory.as_ref(),
         &config,
         &control,
-        0,
         EffectSafety::Transactional,
     )
     .expect("transactional resilience should materialize");
@@ -577,7 +575,6 @@ async fn transactional_terminal_group_failure_preserves_physical_success_sample(
         factory.as_ref(),
         &config,
         &control,
-        0,
         EffectSafety::Transactional,
     )
     .expect("transactional resilience should materialize");
@@ -628,7 +625,6 @@ fn effect_resilience_rejects_retry_for_transactional_effects_at_materialization(
         factory.as_ref(),
         &config,
         &control,
-        0,
         EffectSafety::Transactional,
     ) {
         Ok(_) => panic!("transactional effects cannot acquire retry authority"),
@@ -653,7 +649,6 @@ fn effect_resilience_and_standalone_limiter_cannot_share_one_effect_key() {
         resilience.as_ref(),
         &config,
         &control,
-        0,
         EffectSafety::Idempotent,
     )
     .expect("aggregate should claim the effect limiter key");
@@ -661,7 +656,6 @@ fn effect_resilience_and_standalone_limiter_cannot_share_one_effect_key() {
         standalone.as_ref(),
         &config,
         &control,
-        1,
         EffectSafety::Idempotent,
     ) {
         Ok(_) => panic!("a second effect limiter must fail"),

@@ -71,7 +71,7 @@ async fn test_journal_causal_ordering() {
         }),
     );
 
-    let _sink_envelope = journal
+    journal
         .append(
             sink_event,
             AppendOptions::from_record(Some(&transform_envelope)).unwrap(), // Parent relationship
@@ -132,9 +132,9 @@ async fn test_journal_parallel_writers() {
     );
 
     // Append in parallel (in practice these would be concurrent)
-    let _envelope1 = journal.append(event1, Default::default()).await.unwrap();
+    journal.append(event1, Default::default()).await.unwrap();
     let envelope2 = journal.append(event2, Default::default()).await.unwrap();
-    let _envelope3 = journal.append(event3, Default::default()).await.unwrap();
+    journal.append(event3, Default::default()).await.unwrap();
 
     // Worker 2 finishes first and emits result
     let result_event = ChainEventFactory::data_event(
@@ -144,7 +144,7 @@ async fn test_journal_parallel_writers() {
         json!({"worker": 2, "result": "batch_2_processed"}),
     );
 
-    let _result_envelope = journal
+    journal
         .append(
             result_event,
             AppendOptions::from_record(Some(&envelope2)).unwrap(),

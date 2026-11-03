@@ -188,7 +188,7 @@ impl SinkDeliveryPermit for PerSinkDeliveryPermit {
 #[async_trait]
 impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
     fn install_observation_recorder(&self, recorder: Arc<dyn ObservationRecorder>) {
-        let _ = self.recorder.set(recorder);
+        self.recorder.get_or_init(|| recorder);
     }
 
     async fn admit_sink_delivery(&self) -> SinkDeliveryAdmission {

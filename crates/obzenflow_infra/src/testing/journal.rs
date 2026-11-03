@@ -282,8 +282,10 @@ fn rewrite_file<T: JournalEvent>(
             _ => return Err("unexpected uncommitted fixture".into()),
         };
         offset += consumed as u64;
-        let group = frame.group_id().map(str::to_owned);
         let mut records = frame.into_records();
+        let group = records
+            .first()
+            .and_then(|record| record.envelope.provenance.journal.journal_group_id.clone());
         let mut expanded = match rewrite {
             ArchiveRewrite::FrameChecked { keep_frame, .. } => {
                 let expanded = records
@@ -495,13 +497,15 @@ fn audit_file<T: JournalEvent>(
         offset += consumed as u64;
         decode_time += phase.elapsed();
         let phase = std::time::Instant::now();
-        let group = frame.group_id().map(str::to_owned);
+        let records = frame.into_records();
+        let group = records
+            .first()
+            .and_then(|record| record.envelope.provenance.journal.journal_group_id.clone());
         if group.is_some() {
             samples
                 .groups
                 .push((sizes.provenance + sizes.observability + sizes.shared) as f64);
         }
-        let records = frame.into_records();
         let logical: Vec<_> = records
             .iter()
             .map(serde_json::to_value)

@@ -37,7 +37,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 /// The state announces achieved work only after its completion event.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, StateVariant)]
 pub enum MetricsAggregatorState {
     Created,
     Initializing,
@@ -53,26 +53,7 @@ pub enum MetricsAggregatorState {
     Failed { error: String },
     Cancelled { reason: String },
 }
-impl StateVariant for MetricsAggregatorState {
-    fn variant_name(&self) -> &str {
-        match self {
-            Self::Created => "Created",
-            Self::Initializing => "Initializing",
-            Self::Starting => "Starting",
-            Self::Running => "Running",
-            Self::Exporting => "Exporting",
-            Self::DrainingExport => "DrainingExport",
-            Self::Draining => "Draining",
-            Self::Finalizing => "Finalizing",
-            Self::Failing { .. } => "Failing",
-            Self::Cancelling { .. } => "Cancelling",
-            Self::Drained { .. } => "Drained",
-            Self::Failed { .. } => "Failed",
-            Self::Cancelled { .. } => "Cancelled",
-        }
-    }
-}
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EventVariant)]
 pub enum MetricsAggregatorEvent {
     Initialize,
     InitializationCompleted,
@@ -93,24 +74,6 @@ pub enum MetricsAggregatorEvent {
 pub enum MetricsJournalKind {
     Data,
     Error,
-}
-
-impl EventVariant for MetricsAggregatorEvent {
-    fn variant_name(&self) -> &str {
-        match self {
-            Self::Initialize => "Initialize",
-            Self::InitializationCompleted => "InitializationCompleted",
-            Self::StartRunning => "StartRunning",
-            Self::ExportMetrics => "ExportMetrics",
-            Self::ExportCompleted => "ExportCompleted",
-            Self::StartDraining => "StartDraining",
-            Self::FlowTerminal => "FlowTerminal",
-            Self::FinalizationCompleted => "FinalizationCompleted",
-            Self::TerminationSettled => "TerminationSettled",
-            Self::Cancel => "Cancel",
-            Self::Error(_) => "Error",
-        }
-    }
 }
 
 /// Actions performed during transitions

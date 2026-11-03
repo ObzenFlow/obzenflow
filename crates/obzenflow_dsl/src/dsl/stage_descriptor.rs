@@ -94,13 +94,6 @@ fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
 #[doc(hidden)]
 pub const BINDING_DERIVED_NAME_SENTINEL: &str = "__obzenflow_binding_derived_name__";
 
-fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
-    // No built-in observers (FLOWIP-115m Part 2). Runtime instrumentation and
-    // output finalization remain framework-owned; user observers attach only
-    // through the explicit passive lane.
-    StageObserverSet::default()
-}
-
 pub(super) fn middleware_surface_kind(surface: ObserverSurface) -> MiddlewareSurfaceKind {
     match surface {
         ObserverSurface::Handler => MiddlewareSurfaceKind::Handler,
@@ -281,7 +274,7 @@ fn plan_stage_observers(
     observer_factories: Vec<Box<dyn MiddlewareFactory>>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<MiddlewarePlacement> {
-    let mut observers = create_system_observers(config);
+    let mut observers = StageObserverSet::default();
     for factory in observer_factories {
         materialize_logical_observer(
             &mut observers,
@@ -470,7 +463,6 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// ordinary descriptor admitted to the flow. Called only when
     /// `configured_sink_handler_keys` returned `Some`.
     #[doc(hidden)]
-    #[allow(clippy::result_large_err)]
     fn select_configured_sink_handler(
         self: Box<Self>,
         _selected: &str,
@@ -2058,7 +2050,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         // Every product of one authored observer shares its run-local
         // quarantine across shell surfaces and declared effect subjects.
-        let mut effect_observers = create_system_observers(&config);
+        let mut effect_observers = StageObserverSet::default();
         for factory in observer_factories {
             materialize_logical_observer(
                 &mut effect_observers,
@@ -2812,7 +2804,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let mut effect_observers = create_system_observers(&config);
+        let mut effect_observers = StageObserverSet::default();
         for factory in observer_factories {
             materialize_logical_observer(
                 &mut effect_observers,

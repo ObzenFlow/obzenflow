@@ -28,6 +28,7 @@ use obzenflow_core::journal::{
     JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
 };
 use obzenflow_core::FlowId;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use super::reader::MemoryJournalReader;
@@ -345,9 +346,13 @@ impl<T: JournalEvent> MemoryJournalState<T> {
         }
         // A failed optional update leaves the physical records committed. The
         // next lookup resumes from the last completely indexed prefix.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = self.rebuild_observations(new_records);
-        }));
+        match catch_unwind(AssertUnwindSafe(|| self.rebuild_observations(new_records))) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "memory journal observation index fell behind");
+            }
+            Err(_) => tracing::warn!("memory journal observation index panicked"),
+        }
     }
 
     fn rebuild_observations(&mut self, budget: usize) -> Result<(), JournalError> {
@@ -367,7 +372,7 @@ impl<T: JournalEvent> MemoryJournalState<T> {
         &mut self,
         lookup: impl FnOnce(&Self) -> Result<R, JournalError>,
     ) -> Result<ObservationLookup<R>, JournalError> {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = catch_unwind(AssertUnwindSafe(|| {
             self.rebuild_observations(256)?;
             let committed_len = self.events.len() as u64;
             if self.observations.examined_through < committed_len {

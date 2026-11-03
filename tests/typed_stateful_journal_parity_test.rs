@@ -4,7 +4,12 @@
 
 //! FLOWIP-134e journal oracle for plain typed stateful handlers and accumulators.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod journal;
+    mod ordered_journal;
+    pub use self::{discard::*, ordered_journal::*};
+}
 
 use obzenflow::stages::stateful::{self, emit};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;

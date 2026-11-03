@@ -19,8 +19,8 @@ const MAX_SINK_OPERATION_DETAIL_BYTES: usize = 512;
 #[derive(Clone)]
 pub struct SinkOperationError {
     error: HandlerError,
-    destination_error_code: Option<SinkDestinationErrorCode>,
-    operation_subject: Option<SinkOperationSubject>,
+    destination_error_code: Option<Box<SinkDestinationErrorCode>>,
+    operation_subject: Option<Box<SinkOperationSubject>>,
 }
 
 #[derive(Clone, Copy)]
@@ -121,7 +121,7 @@ impl SinkOperationError {
     }
 
     pub fn with_destination_error_code(mut self, code: SinkDestinationErrorCode) -> Self {
-        self.destination_error_code = Some(code);
+        self.destination_error_code = Some(Box::new(code));
         self
     }
 
@@ -132,10 +132,10 @@ impl SinkOperationError {
     /// stage registry. Foreign, current, stale, settled, or multiply-authored
     /// subjects become protocol fatalities before durable journalling.
     pub fn with_deferred_operation_subject(mut self, pending: &PendingSinkInput) -> Self {
-        self.operation_subject = Some(match self.operation_subject {
+        self.operation_subject = Some(Box::new(match self.operation_subject {
             None => SinkOperationSubject::Pending(pending.operation_subject()),
             Some(_) => SinkOperationSubject::InvalidMultiple,
-        });
+        }));
         self
     }
 
@@ -146,7 +146,7 @@ impl SinkOperationError {
     pub(super) fn take_pending_operation_subject(
         &mut self,
     ) -> Result<Option<PendingOperationSubject>, ()> {
-        match self.operation_subject.take() {
+        match self.operation_subject.take().map(|subject| *subject) {
             None => Ok(None),
             Some(SinkOperationSubject::Pending(subject)) => Ok(Some(subject)),
             Some(SinkOperationSubject::Validated(_) | SinkOperationSubject::InvalidMultiple) => {
@@ -157,15 +157,15 @@ impl SinkOperationError {
 
     pub(super) fn set_validated_operation_subject(&mut self, event_id: EventId) {
         debug_assert!(self.operation_subject.is_none());
-        self.operation_subject = Some(SinkOperationSubject::Validated(event_id));
+        self.operation_subject = Some(Box::new(SinkOperationSubject::Validated(event_id)));
     }
 
     /// Return the validated deferred operation subject, if the sealed adapter
     /// accepted one. Connector-authored but not yet validated witnesses remain
     /// opaque and return `None`.
     pub fn operation_subject_event_id(&self) -> Option<EventId> {
-        match self.operation_subject {
-            Some(SinkOperationSubject::Validated(event_id)) => Some(event_id),
+        match self.operation_subject.as_deref() {
+            Some(SinkOperationSubject::Validated(event_id)) => Some(*event_id),
             None
             | Some(SinkOperationSubject::Pending(_))
             | Some(SinkOperationSubject::InvalidMultiple) => None,
@@ -192,7 +192,7 @@ impl SinkOperationError {
     }
 
     pub fn destination_error_code(&self) -> Option<&SinkDestinationErrorCode> {
-        self.destination_error_code.as_ref()
+        self.destination_error_code.as_deref()
     }
 }
 
@@ -336,5 +336,11 @@ mod tests {
         assert!(
             SinkOperationError::try_from(HandlerError::ContractViolation("forged".into())).is_err()
         );
+    }
+
+    #[test]
+    fn sink_operation_error_stays_under_the_large_error_threshold() {
+        let size = size_of::<SinkOperationError>();
+        assert!(size < 128, "SinkOperationError is {size} bytes");
     }
 }

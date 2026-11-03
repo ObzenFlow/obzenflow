@@ -644,12 +644,13 @@ mod tests {
     fn conditional_play_is_inert_for_a_legacy_server_decoder() {
         #[derive(serde::Deserialize)]
         struct LegacyRequest {
-            #[allow(dead_code)]
             action: FlowControlAction,
         }
         let error = serde_json::from_value::<LegacyRequest>(conditional(&binding()))
             .err()
             .unwrap();
         assert!(error.to_string().contains("missing field `action`"));
+        let legacy: LegacyRequest = serde_json::from_value(json!({ "action": "play" })).unwrap();
+        assert!(matches!(legacy.action, FlowControlAction::Play));
     }
 }

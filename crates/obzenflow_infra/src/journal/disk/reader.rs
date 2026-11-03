@@ -13,7 +13,6 @@ use super::identity::CommitmentAdmission;
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::event::journal_record::JournalRecord;
-use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -85,10 +84,6 @@ pub struct DiskJournalReader<T: JournalEvent> {
     /// `read_offset` advances past the physical frame as soon as it is parsed;
     /// these members are then yielded one-by-one without another disk read.
     pending: VecDeque<super::log_record::LogRecord<T>>,
-    pending_group_id: Option<String>,
-    pending_group_size: Option<u32>,
-    pending_group_next_index: u32,
-    yielded_group_member: Option<JournalGroupMember>,
     /// Path to the journal file (for error messages)
     path: PathBuf,
     /// Whether we've reached EOF
@@ -121,7 +116,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         }
         // Validate that the file is readable. Polls lease their buffered handle;
         // cancellation forces a fresh handle at the committed cursor.
-        let _std_file = StdFile::open(&path).map_err(|e| {
+        StdFile::open(&path).map_err(|e| {
             tracing::error!(
                 path = %path.display(),
                 os_error = %e,
@@ -146,10 +141,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             #[cfg(test)]
             frame_read_gate: None,
             pending: VecDeque::new(),
-            pending_group_id: None,
-            pending_group_size: None,
-            pending_group_next_index: 0,
-            yielded_group_member: None,
             path,
             at_end: false,
             read_write_lock,
@@ -172,7 +163,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         if identity.journal_id != journal_id {
             return Err(obzenflow_core::event::CausalError::ConflictingCommitment.into());
         }
-        let _std_file = StdFile::open(&path).map_err(|e| {
+        StdFile::open(&path).map_err(|e| {
             tracing::error!(
                 path = %path.display(),
                 os_error = %e,
@@ -197,10 +188,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             #[cfg(test)]
             frame_read_gate: None,
             pending: VecDeque::new(),
-            pending_group_id: None,
-            pending_group_size: None,
-            pending_group_next_index: 0,
-            yielded_group_member: None,
             path,
             at_end: false,
             read_write_lock,
@@ -354,30 +341,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         reader: &mut B,
         read_guard: RwLockReadGuard<'_, ()>,
     ) -> Result<(Disposition<T>, u64), JournalError> {
-        self.yielded_group_member = None;
         if let Some(record) = self.pending.pop_front() {
-            let group_id = self.pending_group_id.clone();
-            self.yielded_group_member = group_id.as_ref().map(|_| JournalGroupMember {
-                index: self.pending_group_next_index,
-                size: self
-                    .pending_group_size
-                    .expect("pending atomic group has a member count"),
-            });
-            self.pending_group_next_index = self.pending_group_next_index.saturating_add(1);
-            if self.pending.is_empty() {
-                self.pending_group_id = None;
-                self.pending_group_size = None;
-                self.pending_group_next_index = 0;
-            }
             self.position += 1;
             return Ok((
-                Disposition::Yield(match group_id {
-                    Some(group_id) => super::log_record::LogFrame::AtomicGroup {
-                        group_id,
-                        records: vec![record],
-                    },
-                    None => super::log_record::LogFrame::Record(record),
-                }),
+                Disposition::Yield(Box::new(super::log_record::LogFrame::Record(record))),
                 self.read_offset,
             ));
         }
@@ -425,7 +392,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             self.buf = bytes;
             match dispose(classification, termination, self.policy) {
                 Disposition::Yield(frame) => {
-                    let group_id = frame.group_id().map(str::to_string);
                     let records = frame.into_records();
                     // Validate the whole group privately before publishing any
                     // member or advancing either the physical or logical cursor.
@@ -435,17 +401,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                     }
                     self.admission = admission;
                     self.read_offset += consumed as u64;
-                    self.pending_group_id = group_id;
-                    self.pending_group_size = self
-                        .pending_group_id
-                        .as_ref()
-                        .map(|_| u32::try_from(records.len()))
-                        .transpose()
-                        .map_err(|_| JournalError::Implementation {
-                            message: "Atomic journal group exceeds u32 member capacity".to_string(),
-                            source: "atomic journal group is too large".into(),
-                        })?;
-                    self.pending_group_next_index = 0;
                     self.pending.extend(records);
                     let record =
                         self.pending
@@ -454,28 +409,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                                 message: "Committed journal frame contained no records".to_string(),
                                 source: "empty committed journal frame".into(),
                             })?;
-                    let group_id = self.pending_group_id.clone();
-                    self.yielded_group_member = group_id.as_ref().map(|_| JournalGroupMember {
-                        index: self.pending_group_next_index,
-                        size: self
-                            .pending_group_size
-                            .expect("pending atomic group has a member count"),
-                    });
-                    self.pending_group_next_index = self.pending_group_next_index.saturating_add(1);
-                    if self.pending.is_empty() {
-                        self.pending_group_id = None;
-                        self.pending_group_size = None;
-                        self.pending_group_next_index = 0;
-                    }
                     self.position += 1;
                     Ok((
-                        Disposition::Yield(match group_id {
-                            Some(group_id) => super::log_record::LogFrame::AtomicGroup {
-                                group_id,
-                                records: vec![record],
-                            },
-                            None => super::log_record::LogFrame::Record(record),
-                        }),
+                        Disposition::Yield(Box::new(super::log_record::LogFrame::Record(record))),
                         frame_start,
                     ))
                 }
@@ -560,8 +496,6 @@ impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for DiskJ
         }
         match disposition {
             Disposition::Yield(frame) => {
-                let _journal_group_id = frame.group_id().map(str::to_string);
-                let _journal_group_member = self.yielded_group_member.take();
                 let mut records = frame.into_records();
                 let record = records
                     .pop()
@@ -644,6 +578,7 @@ mod tests {
     use crate::journal::disk::log_record::serialize_record;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::payloads::JournalPayload;
+    use obzenflow_core::event::provenance::JournalGroupMember;
     use obzenflow_core::event::JournalRecord;
     use obzenflow_core::{ChainEvent, JournalId, StageId, WriterId};
     use std::io::Write;

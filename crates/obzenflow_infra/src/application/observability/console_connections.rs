@@ -36,7 +36,9 @@ impl ConsoleConnections {
         let stream = TcpStream::from_std(socket)?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closing {
-            let _ = retained.shutdown(Shutdown::Both);
+            if let Err(error) = retained.shutdown(Shutdown::Both) {
+                tracing::debug!(%error, "Console socket shutdown failed");
+            }
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "Console is closing",
@@ -58,7 +60,9 @@ impl ConsoleConnections {
         // install an open socket after this snapshot has been shut down.
         state.closing = true;
         for socket in state.sockets.values() {
-            let _ = socket.shutdown(Shutdown::Both);
+            if let Err(error) = socket.shutdown(Shutdown::Both) {
+                tracing::debug!(%error, "Console socket shutdown failed");
+            }
         }
     }
 

@@ -2,8 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#[path = "../../../tests/replay_testkit/mod.rs"]
-mod replay_testkit;
+#[path = "../../../tests/replay_testkit"]
+mod replay_testkit {
+    mod bootstrap;
+    mod discard;
+    mod manifest;
+    mod reattaching_source;
+    mod run_dir;
+    pub use self::{bootstrap::*, discard::*, manifest::*, reattaching_source::*, run_dir::*};
+}
 
 use anyhow::{anyhow, Result};
 use obzenflow_core::TypedPayload;

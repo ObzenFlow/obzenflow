@@ -50,7 +50,7 @@ async fn test_notify_race_condition() {
     let handle = tokio::spawn(async move {
         let notified3 = signal3_task.notified();
         println!("Task: waiting for signal...");
-        let _ = ready_tx.send(());
+        ready_tx.send(()).unwrap();
         notified3.await;
         println!("Task: received signal!");
     });
@@ -59,5 +59,5 @@ async fn test_notify_race_condition() {
     println!("Main: firing signal");
     signal3.notify_waiters();
 
-    let _ = handle.await;
+    handle.await.unwrap();
 }

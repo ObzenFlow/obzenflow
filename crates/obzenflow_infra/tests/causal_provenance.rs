@@ -95,7 +95,11 @@ async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
         changed_payload.payload = ChainPayload::Fact(serde_json::json!({"changed": true}));
         rejects_unadmitted(&changed_payload);
         let mut borrowed_mutably = receipt.clone();
-        let _ = &mut borrowed_mutably.envelope;
+        let envelope = &mut borrowed_mutably.envelope;
+        assert_eq!(
+            envelope.provenance.event.id,
+            receipt.envelope.provenance.event.id
+        );
         rejects_unadmitted(&borrowed_mutably);
 
         // Revoking one copy cannot invalidate the original receipt or an

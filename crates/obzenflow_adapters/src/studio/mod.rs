@@ -169,7 +169,9 @@ impl StudioProjection {
 
     fn retain_latest_observations(&self, envelope: &RunRecordData) {
         if let Some(packet) = record_observability(envelope) {
-            let _ = self.latest_observations.select_recorded(packet.clone());
+            if let Err(offer) = self.latest_observations.select_recorded(packet.clone()) {
+                tracing::trace!(?offer, "Studio did not retain a recorded observation");
+            }
         }
     }
 
@@ -182,7 +184,9 @@ impl StudioProjection {
                 self.latest_observations.activate_scope(scope);
             }
             for packet in source.snapshot() {
-                let _ = self.latest_observations.select_recorded(packet);
+                if let Err(offer) = self.latest_observations.select_recorded(packet) {
+                    tracing::trace!(?offer, "Studio did not retain a recorded observation");
+                }
             }
         }
         let mut frames: Vec<_> = self

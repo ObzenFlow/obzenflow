@@ -2,7 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod ordered_journal;
+    pub use self::ordered_journal::*;
+}
 
 #[path = "../examples/hn_ai_digest_demo/config.rs"]
 mod config;
@@ -10,8 +14,10 @@ mod config;
 mod decoder;
 #[path = "../examples/hn_ai_digest_demo/domain.rs"]
 mod domain;
-#[path = "test_support/exported_jsonl.rs"]
-mod exported_jsonl;
+mod exported_jsonl {
+    mod omit_observations;
+    pub use self::omit_observations::*;
+}
 #[path = "support/fake_ai.rs"]
 pub mod fake_ai;
 #[path = "../examples/hn_ai_digest_demo/flow.rs"]
@@ -19,8 +25,10 @@ mod hn_demo_flow;
 #[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
 mod mock_server;
 #[cfg(feature = "e2e")]
-#[path = "support/postgres.rs"]
-mod postgres_support;
+mod postgres_support {
+    mod pool;
+    pub use self::pool::*;
+}
 #[path = "../examples/hn_ai_digest_demo/util.rs"]
 mod util;
 
@@ -831,17 +839,13 @@ async fn wait_for_counter(counter: &AtomicUsize, minimum: usize) {
 
 #[test]
 fn hn_witness_uses_materialization_and_the_ai_stage() {
-    let _ = config::DEFAULT_HN_MAX_STORIES;
-    let _ = config::DEFAULT_HN_SOURCE_RATE_LIMIT;
-    let _ = config::HnSettings::into_inputs;
-    let _ = hn_demo_flow::settings_flow_definition;
-    let _ = hn_demo_flow::run_example;
-    let _ = hn_demo_flow::run_demo_blocking;
-    let _ = hn_demo_flow::build_presentation;
-
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let flow_source = std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/flow.rs"))
-        .expect("HN witness flow source is readable");
+    let flow_source = ["flow.rs", "runner.rs"]
+        .map(|file| {
+            std::fs::read_to_string(root.join("examples/hn_ai_digest_demo").join(file))
+                .expect("HN witness flow source is readable")
+        })
+        .concat();
     let app_config_source =
         std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/config.rs"))
             .expect("HN application config source is readable");
@@ -1387,7 +1391,9 @@ async fn recovery_abandonment_fails_the_window_without_start_two() {
         .expect("the live map call reaches the hanging client after Start(1)");
     assert_eq!(hanging.call_count(), 1);
     live_task.abort();
-    let _ = live_task.await;
+    if let Err(error) = live_task.await {
+        assert!(error.is_cancelled(), "{error}");
+    }
 
     let in_doubt_archive = latest_run_dir(&journal_base);
     let in_doubt_map = stage_envelopes(&in_doubt_archive, "recovery_digest__map").await;
@@ -1620,7 +1626,9 @@ async fn resume_completes_groups_interrupted_before_grouping_ended() {
         .await
         .expect("the first three groups commit while their acknowledgements are withheld");
     live_task.abort();
-    let _ = live_task.await;
+    if let Err(error) = live_task.await {
+        assert!(error.is_cancelled(), "{error}");
+    }
 
     let interrupted = latest_run_dir(&journal_base);
     let interrupted_chunk = stage_envelopes(&interrupted, "interrupt_digest__chunk").await;
@@ -1691,7 +1699,9 @@ async fn resume_reproduces_a_map_that_passed_grouping_ended_through() {
         .await
         .expect("the reduce call starts after the map passed grouping-ended through");
     live_task.abort();
-    let _ = live_task.await;
+    if let Err(error) = live_task.await {
+        assert!(error.is_cancelled(), "{error}");
+    }
     assert_eq!(
         live.call_count(),
         6,

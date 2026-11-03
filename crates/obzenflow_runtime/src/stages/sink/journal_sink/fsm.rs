@@ -54,7 +54,7 @@ use std::sync::Arc;
 // ============================================================================
 
 /// FSM states for journal sink stages
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, StateVariant)]
 pub enum JournalSinkState<H> {
     /// Initial state - sink has been created but not initialized
     Created,
@@ -164,30 +164,6 @@ impl<H: Send + Sync> PartialEq for JournalSinkState<H> {
     }
 }
 
-impl<H: Send + Sync + 'static> StateVariant for JournalSinkState<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            JournalSinkState::Created => "Created",
-            Self::Initializing => "Initializing",
-            Self::Starting => "Starting",
-            Self::Finalizing => "Finalizing",
-            Self::DrainingWriter => "DrainingWriter",
-            Self::CheckingContracts => "CheckingContracts",
-            Self::Failing(..) => "Failing",
-            Self::Cancelling(..) => "Cancelling",
-            Self::Cancelled(..) => "Cancelled",
-
-            JournalSinkState::Initialized => "Initialized",
-            JournalSinkState::Running => "Running",
-            JournalSinkState::Flushing => "Flushing", // Unique to sinks!
-            JournalSinkState::Draining => "Draining",
-            JournalSinkState::Drained => "Drained",
-            JournalSinkState::Failed(_) => "Failed",
-            JournalSinkState::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
-    }
-}
-
 impl<H> JournalSinkState<H> {
     pub(crate) fn failure(cause: String) -> Self {
         match cause.as_str() {
@@ -220,6 +196,7 @@ impl<H> JournalSinkState<H> {
 // ============================================================================
 
 /// Events that can trigger journal sink state transitions
+#[derive(EventVariant)]
 pub enum JournalSinkEvent<H> {
     /// Initialize the sink - open connections, create output files, etc.
     Initialize,
@@ -316,28 +293,6 @@ impl<H: Send + Sync + 'static> ExternalControlEvent for JournalSinkEvent<H> {
             | Self::BeginDrain => None,
             Self::_Phantom(_) => unreachable!("PhantomData variant"),
         })
-    }
-}
-
-impl<H: Send + Sync + 'static> EventVariant for JournalSinkEvent<H> {
-    fn variant_name(&self) -> &str {
-        match self {
-            JournalSinkEvent::Initialize => "Initialize",
-            Self::InitializationCompleted => "InitializationCompleted",
-            Self::ActivationCompleted => "ActivationCompleted",
-            Self::FinalizationCompleted => "FinalizationCompleted",
-            Self::TerminationSettled => "TerminationSettled",
-            Self::WriterDrained => "WriterDrained",
-            Self::ContractsAccepted => "ContractsAccepted",
-
-            JournalSinkEvent::Ready => "Ready",
-            JournalSinkEvent::ReceivedEOF => "ReceivedEOF",
-            JournalSinkEvent::BeginFlush => "BeginFlush", // Sink-specific!
-            JournalSinkEvent::FlushComplete => "FlushComplete", // Sink-specific!
-            JournalSinkEvent::BeginDrain => "BeginDrain",
-            JournalSinkEvent::Error(_) => "Error",
-            JournalSinkEvent::_Phantom(_) => unreachable!("PhantomData variant"),
-        }
     }
 }
 

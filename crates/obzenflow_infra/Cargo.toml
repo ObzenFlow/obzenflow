@@ -99,8 +99,8 @@ uuid = { workspace = true }
 anyhow = { workspace = true }
 console-api = "0.9.0"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+[lints]
+workspace = true
 
 # These tests use feature-gated archive fixture helpers.
 [[test]]

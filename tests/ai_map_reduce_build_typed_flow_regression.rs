@@ -597,7 +597,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
     }
     .await;
 
-    let _harness = result.expect("ordinary Rust locals must remain visible to test_flow!");
+    result.expect("ordinary Rust locals must remain visible to test_flow!");
 }
 
 #[tokio::test]

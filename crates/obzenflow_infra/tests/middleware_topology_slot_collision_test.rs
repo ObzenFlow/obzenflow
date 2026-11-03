@@ -217,13 +217,13 @@ async fn duplicate_builtin_controls_are_rejected_before_materialisation() {
     assert_eq!(materialisations.load(Ordering::SeqCst), 0);
     assert!(matches!(
         error.error,
-        FlowBuildError::MiddlewarePlan(MiddlewarePlanError::InvalidAttachment {
-            stage,
-            effect,
-            message,
-        }) if stage == "src" && effect.is_empty()
-            && message.contains("duplicate 'rate_limiter' controls")
-            && message.contains("SourcePoll")
+        FlowBuildError::MiddlewarePlan(plan) if matches!(
+            plan.as_ref(),
+            MiddlewarePlanError::InvalidAttachment { stage, effect, message }
+                if stage == "src" && effect.is_empty()
+                    && message.contains("duplicate 'rate_limiter' controls")
+                    && message.contains("SourcePoll")
+        )
     ));
 }
 
@@ -272,11 +272,11 @@ async fn repeated_observer_labels_are_rejected_before_materialisation() {
     assert_eq!(materialisations.load(Ordering::SeqCst), 0);
     assert!(matches!(
         error.error,
-        FlowBuildError::MiddlewarePlan(MiddlewarePlanError::InvalidAttachment {
-            stage,
-            effect,
-            message,
-        }) if stage == "src" && effect.is_empty()
-            && message.contains("observer label 'same_label' occurs twice at the same attachment site")
+        FlowBuildError::MiddlewarePlan(plan) if matches!(
+            plan.as_ref(),
+            MiddlewarePlanError::InvalidAttachment { stage, effect, message }
+                if stage == "src" && effect.is_empty()
+                    && message.contains("observer label 'same_label' occurs twice at the same attachment site")
+        )
     ));
 }

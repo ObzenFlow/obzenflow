@@ -2,7 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    pub use self::journal::*;
+}
 
 #[path = "../examples/product_catalog_enrichment/support.rs"]
 mod product_catalog_enrichment;

@@ -247,7 +247,7 @@ mod tests {
         let finite_policy =
             RateLimiterSourcePolicy::new(finite.clone(), SourceRateLimitPosition::AfterPoll);
         let mut ctx = SourcePolicyCtx::new(writer);
-        let _ = finite_policy.admit(&mut ctx).await;
+        finite_policy.admit(&mut ctx).await;
         assert_eq!(charged(&finite), 0.0, "AfterPoll admit must not charge");
         finite_policy.after_poll(clean_facts, &mut ctx).await;
         assert_eq!(
@@ -275,7 +275,7 @@ mod tests {
         let infinite_policy =
             RateLimiterSourcePolicy::new(infinite.clone(), SourceRateLimitPosition::PrePoll);
         let mut ctx_inf = SourcePolicyCtx::new(writer);
-        let _ = infinite_policy.admit(&mut ctx_inf).await;
+        infinite_policy.admit(&mut ctx_inf).await;
         assert_eq!(charged(&infinite), 1.0, "PrePoll admit must charge");
         infinite_policy.after_poll(clean_facts, &mut ctx_inf).await;
         assert_eq!(

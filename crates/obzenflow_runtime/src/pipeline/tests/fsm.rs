@@ -34,7 +34,7 @@ fn stop_intent_graceful_sets_deadline() {
     let timeout = Duration::from_secs(3);
     let before = tokio::time::Instant::now();
 
-    let _ = intent.apply_request(FlowStopMode::Graceful { timeout }, None);
+    intent.apply_request(FlowStopMode::Graceful { timeout }, None);
     let after = tokio::time::Instant::now();
 
     assert!(intent.requested);
@@ -84,7 +84,7 @@ async fn graceful_stop_timeout_follows_the_runtime_clock() {
 #[test]
 fn stop_intent_cancel_overrides_graceful() {
     let mut intent = StopIntent::default();
-    let _ = intent.apply_request(
+    intent.apply_request(
         FlowStopMode::Graceful {
             timeout: Duration::from_secs(5),
         },
@@ -92,7 +92,7 @@ fn stop_intent_cancel_overrides_graceful() {
     );
     assert!(intent.deadline.is_some());
 
-    let _ = intent.apply_request(FlowStopMode::Cancel, None);
+    intent.apply_request(FlowStopMode::Cancel, None);
     assert!(matches!(intent.mode, Some(FlowStopMode::Cancel)));
     assert!(intent.deadline.is_none());
 }
@@ -100,7 +100,7 @@ fn stop_intent_cancel_overrides_graceful() {
 #[test]
 fn stop_intent_graceful_is_ignored_after_cancel() {
     let mut intent = StopIntent::default();
-    let _ = intent.apply_request(FlowStopMode::Cancel, None);
+    intent.apply_request(FlowStopMode::Cancel, None);
     let outcome = intent.apply_request(
         FlowStopMode::Graceful {
             timeout: Duration::from_secs(1),
@@ -116,7 +116,7 @@ fn stop_intent_graceful_is_ignored_after_cancel() {
 #[test]
 fn stop_intent_expired_timeout_preserves_deadline() {
     let mut intent = StopIntent::default();
-    let _ = intent.apply_request(
+    intent.apply_request(
         FlowStopMode::Graceful {
             timeout: Duration::ZERO,
         },
@@ -125,7 +125,7 @@ fn stop_intent_expired_timeout_preserves_deadline() {
     assert_eq!(intent.reason.as_deref(), Some("first_reason"));
     let original_deadline = intent.deadline;
 
-    let _ = intent.apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.to_string()));
+    intent.apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.to_string()));
     assert_eq!(intent.reason.as_deref(), Some(STOP_REASON_TIMEOUT));
     assert_eq!(
         intent.deadline, original_deadline,

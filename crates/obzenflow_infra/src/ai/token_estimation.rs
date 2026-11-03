@@ -9,6 +9,9 @@ use obzenflow_core::ai::{
 use std::sync::Arc;
 
 #[cfg(feature = "ai-tiktoken")]
+use super::tiktoken::TiktokenEstimator;
+
+#[cfg(feature = "ai-tiktoken")]
 const TOKENIZER_BACKEND_TIKTOKEN: &str = "tiktoken";
 
 /// Best-available shared estimator for a model.
@@ -34,7 +37,7 @@ pub fn estimator_for_model(model: &str) -> Arc<dyn TokenEstimator> {
 /// selected instead.
 pub fn resolve_estimator_for_model(model: &str) -> ResolvedTokenEstimator {
     #[cfg(feature = "ai-tiktoken")]
-    match super::tiktoken::TiktokenEstimator::for_model(model) {
+    match TiktokenEstimator::for_model(model) {
         Ok(estimator) => ResolvedTokenEstimator::new(
             Arc::new(estimator),
             TokenEstimatorResolutionInfo::tokenizer(model, TOKENIZER_BACKEND_TIKTOKEN),
@@ -81,15 +84,20 @@ pub fn resolve_estimator_for_model(model: &str) -> ResolvedTokenEstimator {
 ///
 /// This is the lower-level escape hatch for callers that explicitly want
 /// unique ownership of the estimator trait object.
+#[cfg(feature = "ai-tiktoken")]
 pub fn boxed_estimator_for_model(model: &str) -> Box<dyn TokenEstimator> {
-    #[cfg(feature = "ai-tiktoken")]
-    if let Ok(t) = super::tiktoken::TiktokenEstimator::for_model(model) {
-        return Box::new(t);
+    match TiktokenEstimator::for_model(model) {
+        Ok(tiktoken) => Box::new(tiktoken),
+        Err(_) => Box::new(HeuristicTokenEstimator::default()),
     }
+}
 
-    #[cfg(not(feature = "ai-tiktoken"))]
-    let _ = model;
-
+/// Best-available boxed estimator for a model.
+///
+/// This is the lower-level escape hatch for callers that explicitly want
+/// unique ownership of the estimator trait object.
+#[cfg(not(feature = "ai-tiktoken"))]
+pub fn boxed_estimator_for_model(_model: &str) -> Box<dyn TokenEstimator> {
     Box::new(HeuristicTokenEstimator::default())
 }
 

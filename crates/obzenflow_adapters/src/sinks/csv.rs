@@ -1033,9 +1033,6 @@ impl CsvSinkInner {
         Ok(report.with_commit_receipts(commit_receipts))
     }
 
-    // The sink protocol owns this by-value error shape. Boxing only this
-    // synchronous helper would make it inconsistent with `SinkWriter`.
-    #[allow(clippy::result_large_err)]
     fn flush_report(
         &mut self,
         probe: &CsvWriterProbe,
@@ -1663,7 +1660,7 @@ mod tests {
             .expect("local configuration is valid");
         assert!(!path.exists(), "build must not touch the destination");
 
-        let _writer = connector
+        connector
             .open(SinkWriterInitContext::new(
                 StageId::new(),
                 "csv".to_string(),

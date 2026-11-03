@@ -180,14 +180,9 @@ impl MiddlewareFactory for RateLimiter {
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
         let declaration = self.declaration();
-        let _attachment_id =
-            validate_attachment_request(&declaration, &request).map_err(|err| {
-                MiddlewareFactoryError::materialization_failed(
-                    self.label(),
-                    &context.config.name,
-                    err,
-                )
-            })?;
+        validate_attachment_request(&declaration, &request).map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        })?;
         context
             .authorize_materialization(MaterializationClaim::RateLimiter, &declaration, &request)
             .map_err(|error| {

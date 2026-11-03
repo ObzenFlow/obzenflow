@@ -21,7 +21,7 @@ use crate::stages::source::supervision::{
     drain_pending_outputs_async, emit_batch_to_pending_outputs, observe_source_boundary_rejection,
     poll_error_backoff, poll_error_summary, record_source_release, record_source_stage_fatal,
     source_error_kind, source_poll_error_record, stage_boundary_control_events,
-    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceExit,
+    stage_source_poll_outputs, terminal_poll_failure, PendingFailure, SourceDrain, SourceExit,
     SourceOpenFailureCommit, SourcePollObservation, SourceRelease,
 };
 use crate::stages::source::{
@@ -386,7 +386,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
             self.exit = Some(exit);
         }
         if self.last_state.as_ref() != Some(state) {
-            let _ = self.state_watcher.update(state.clone());
+            self.state_watcher.update(state.clone());
             self.last_state = Some(state.clone());
         }
     }
@@ -556,7 +556,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
         let ctx = ctx.resources_mut()?;
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
+            self.state_watcher.update(new_state.clone());
             self.last_state = Some(new_state);
         }
 
@@ -677,17 +677,19 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                 let observer_scope = ctx.runtime_execution.stage_scope(self.stage_id);
 
                 if let Some(directive) = drain_pending_outputs_async(
-                    &mut ctx.pending_outputs,
-                    &stage_flow_context,
-                    self.stage_id,
-                    None,
-                    &ctx.data_journal,
-                    &ctx.error_journal,
-                    &ctx.instrumentation,
-                    &ctx.backpressure_writer,
-                    &mut ctx.backpressure_pulse,
-                    &mut ctx.backpressure_stall,
-                    Some(&ctx.output_contract),
+                    SourceDrain {
+                        pending_outputs: &mut ctx.pending_outputs,
+                        stage_flow_context: &stage_flow_context,
+                        stage_id: self.stage_id,
+                        heartbeat_state: None,
+                        data_journal: &ctx.data_journal,
+                        error_journal: &ctx.error_journal,
+                        instrumentation: &ctx.instrumentation,
+                        backpressure_writer: &ctx.backpressure_writer,
+                        backpressure_pulse: &mut ctx.backpressure_pulse,
+                        backpressure_stall: &mut ctx.backpressure_stall,
+                        output_contract: Some(&ctx.output_contract),
+                    },
                     &mut Vec::new(),
                     self.external_events
                         .recv(|event| !FiniteSourceState::defer_external_event(state, event)),
@@ -763,11 +765,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                         .replay_driver
                         .as_mut()
                         .expect("replay_driver is initialized")
-                        .next_replayed_event(
-                            WriterId::from(self.stage_id),
-                            &ctx.stage_name,
-                            flow_context,
-                        )
+                        .next_replayed_event(flow_context)
                         .await;
                     let tick_duration = tick_started_at.elapsed();
 
@@ -978,7 +976,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 source_poll_observation
                                     .observe(
                                         events.as_mut_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
@@ -1004,7 +1001,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 source_poll_observation
                                     .observe(
                                         events.as_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
@@ -1029,10 +1025,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                     && report.control_events.is_empty()
                                 {
                                     source_poll_observation
-                                        .observe_empty(
-                                            poll.poll_duration,
-                                            SourcePollObserverOutcome::Eof,
-                                        )
+                                        .observe_empty(SourcePollObserverOutcome::Eof)
                                         .await;
                                     Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                                 } else {
@@ -1041,7 +1034,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                     source_poll_observation
                                         .observe(
                                             control_events.as_mut_slice(),
-                                            poll.poll_duration,
                                             SourcePollObserverOutcome::Eof,
                                         )
                                         .await;
@@ -1074,7 +1066,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
                                 source_poll_observation
                                     .observe(
                                         events.as_mut_slice(),
-                                        poll.poll_duration,
                                         SourcePollObserverOutcome::Error { kind },
                                     )
                                     .await;

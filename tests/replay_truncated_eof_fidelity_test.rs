@@ -32,7 +32,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-mod replay_testkit;
+mod replay_testkit {
+    mod count_deliveries;
+    mod journal;
+    mod manifest;
+    mod ordered_stage_journal;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{count_deliveries::*, ordered_stage_journal::*, run_dir::*, stage_journal::*};
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Tick {

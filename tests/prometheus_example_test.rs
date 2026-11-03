@@ -19,13 +19,16 @@ use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
-#[allow(dead_code)]
-#[path = "../examples/prometheus_demo/main.rs"]
+#[path = "../examples/prometheus_demo/support.rs"]
 mod prometheus_demo;
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
-#[path = "test_support/exported_jsonl.rs"]
-mod exported_jsonl;
+mod exported_jsonl {
+    mod chain;
+    mod commitment;
+    mod without_observations;
+    pub use self::{chain::*, commitment::*, without_observations::*};
+}
 
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
 #[path = "test_support/prometheus_measurement.rs"]
@@ -1514,7 +1517,9 @@ enabled = {prometheus}
             "Prometheus proof phase: application returned after {:?}; {count} inputs, mode={mode:?}",
             proof_started.elapsed()
         );
-        let _rebound = address.map(|address| std::net::TcpListener::bind(address).unwrap());
+        if let Some(address) = address {
+            std::net::TcpListener::bind(address).unwrap();
+        }
         if collecting {
             assert_final_example_metrics(&model, count);
         } else {
@@ -1972,7 +1977,9 @@ enabled = {prometheus}
             event.record(&mut address);
             if let Some(address) = address.0 {
                 if let Some(sender) = self.0.lock().unwrap().take() {
-                    let _ = sender.send(address);
+                    if sender.send(address).is_err() {
+                        eprintln!("the test stopped waiting for the bound address");
+                    }
                 }
             }
         }
@@ -2036,7 +2043,9 @@ enabled = false
                 // Preserve cleanup if this regression reintroduces an admission panic.
                 if let Some(flow) = flow.as_ref().filter(|_| still_running) {
                     flow.stop_cancel().await.unwrap();
-                    let _ = lifecycle::wait(flow).await;
+                    if let Err(error) = lifecycle::wait(flow).await {
+                        eprintln!("the cancelled flow ended with {error}");
+                    }
                 }
                 assert!(outcome.is_ok(), "CORS admission panicked; materialised supervisor still running: {still_running}");
                 assert!(

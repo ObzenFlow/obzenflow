@@ -349,8 +349,7 @@ impl obzenflow_runtime::stages::sink::InlineSink for GatedDelivery {
         )
         .with_redelivery_safety(obzenflow_runtime::effects::SinkRedeliverySafety::SafeToRepeat)
     }
-    async fn write(&mut self, input: Tick) -> Result<(), SinkWriteFailure> {
-        let _ = input;
+    async fn write(&mut self, _input: Tick) -> Result<(), SinkWriteFailure> {
         self.progress.sink_entered.fetch_add(1, Ordering::Relaxed);
         if let Some(gate) = &self.gate {
             self.progress.blocked.notify_one();

@@ -18,7 +18,10 @@
 //! deleted, against generation zero, because lineage is proven from the
 //! effect-lane namespace in the journals rather than from manifest chains.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    pub use self::discard::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
@@ -232,8 +235,7 @@ impl EffectfulTransformHandler for AuthorizePayment {
             .await;
 
         match outcome {
-            Ok(grant) if order.amount > 500 => {
-                let _ = grant;
+            Ok(_grant) if order.amount > 500 => {
                 fx.emit(OrderCancelled {
                     order_id: order.order_id,
                     origin: "declined".to_string(),

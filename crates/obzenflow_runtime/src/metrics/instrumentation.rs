@@ -508,7 +508,7 @@ impl StageInstrumentation {
         let owner = execution
             .observations()
             .capture_owner(scope, writer, execution.clone());
-        let _ = self.observation_owner.set(owner);
+        self.observation_owner.get_or_init(|| owner);
         execution.observations().register_stage(writer, self);
         self.offer_capture(CaptureReason::Initial);
     }

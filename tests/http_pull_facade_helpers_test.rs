@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[cfg(feature = "http-pull")]
 #[test]
 fn http_pull_config_preloads_default_client_when_feature_enabled() {
-    let _config = obzenflow::stages::sources::http_pull_config()
+    obzenflow::stages::sources::http_pull_config()
         .expect("http_pull_config ok")
         .build()
         .expect("build ok");
@@ -35,7 +35,7 @@ fn http_pull_config_errors_when_feature_disabled() {
 #[cfg(feature = "http-pull")]
 #[test]
 fn http_poll_config_preloads_default_client_when_feature_enabled() {
-    let _config = obzenflow::stages::sources::http_poll_config()
+    obzenflow::stages::sources::http_poll_config()
         .expect("http_poll_config ok")
         .poll_interval(Duration::from_secs(1))
         .build()

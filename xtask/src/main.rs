@@ -464,7 +464,9 @@ fn force_stop_jobs_and_release_ports(root: &Path) -> Result<()> {
 fn stop_started_jobs(states: &[JobState]) {
     for state in states {
         if process_exists(state.pid) {
-            let _ = terminate_process(state.pid);
+            if let Err(error) = terminate_process(state.pid) {
+                eprintln!("could not terminate process {}: {error}", state.pid);
+            }
         }
     }
 }

@@ -65,28 +65,6 @@ fn canonical_stage_status(status: &StageStatus) -> obzenflow_topology::StageStat
     }
 }
 
-/// Flags for optional sections controlled via query params
-#[derive(Debug, Default, Clone, Copy)]
-struct IncludeFlags {
-    middleware: bool,
-    contracts: bool,
-}
-
-fn parse_include_flags(_request: &Request) -> IncludeFlags {
-    // FLOWIP-059 spec change:
-    // The topology endpoint now includes all structural observability
-    // sections (middleware + contracts) by default. The `include`
-    // query parameter is accepted for backwards compatibility but
-    // no longer gates payload sections.
-    //
-    // We still parse the parameter so existing clients that send it
-    // don't break, but we treat the absence/presence as equivalent.
-    IncludeFlags {
-        middleware: true,
-        contracts: true,
-    }
-}
-
 impl TopologyHttpEndpoint {
     pub fn new(
         topology: Arc<obzenflow_topology::Topology>,
@@ -106,9 +84,7 @@ impl TopologyHttpEndpoint {
     /// are not yet baked into the canonical model: per-stage runtime status
     /// from `stages_metadata`, and per-edge contract names from
     /// `contract_attachments`.
-    fn build_response(&self, include: IncludeFlags) -> obzenflow_topology::Topology {
-        let _ = (include.middleware, include.contracts);
-
+    fn build_response(&self) -> obzenflow_topology::Topology {
         let stages: Vec<obzenflow_topology::StageInfo> = self
             .topology
             .stages()
@@ -170,9 +146,8 @@ impl HttpEndpoint for TopologyHttpEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
-        let include = parse_include_flags(&request);
-        let topology_response = self.build_response(include);
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
+        let topology_response = self.build_response();
 
         let json_body = serde_json::to_string(&topology_response)
             .map_err(|e| EndpointError::with_source("Serializing endpoint response", e))?;
@@ -568,7 +543,7 @@ mod tests {
             None,
         );
 
-        let parsed = endpoint.build_response(IncludeFlags::default());
+        let parsed = endpoint.build_response();
 
         let source_a_edge = edge_between(&parsed, source_a, merge)
             .typing
@@ -653,7 +628,7 @@ mod tests {
             None,
         );
 
-        let parsed = endpoint.build_response(IncludeFlags::default());
+        let parsed = endpoint.build_response();
         let edge_typing = edge_between(&parsed, source, transform)
             .typing
             .as_ref()
@@ -751,7 +726,7 @@ mod tests {
             None,
         );
 
-        let parsed = endpoint.build_response(IncludeFlags::default());
+        let parsed = endpoint.build_response();
 
         let catalog_edge = edge_between(&parsed, catalog, join)
             .typing
@@ -854,7 +829,7 @@ mod tests {
             None,
         );
 
-        let parsed = endpoint.build_response(IncludeFlags::default());
+        let parsed = endpoint.build_response();
 
         assert!(edge_between(&parsed, upstream, join).typing.is_none());
     }
@@ -905,7 +880,7 @@ mod tests {
             None,
         );
 
-        let parsed = endpoint.build_response(IncludeFlags::default());
+        let parsed = endpoint.build_response();
         let edge = edge_between(&parsed, from, to);
 
         assert_eq!(edge.kind, EdgeKind::Backward);

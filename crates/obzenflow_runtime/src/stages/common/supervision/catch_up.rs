@@ -25,7 +25,7 @@ pub(crate) enum CatchUpDisposition {
     Refused(StageFatal),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, StateVariant)]
 pub(crate) enum CatchUpState {
     Rebuilding { crossed: ReaderGeneration },
     Announcing { crossed: ReaderGeneration },
@@ -53,19 +53,7 @@ impl CatchUpState {
     }
 }
 
-impl StateVariant for CatchUpState {
-    fn variant_name(&self) -> &str {
-        match self {
-            Self::Rebuilding { .. } => "Rebuilding",
-            Self::Announcing { .. } => "Announcing",
-            Self::Live { .. } => "Live",
-            Self::Refused { .. } => "Refused",
-            Self::Failed { .. } => "Failed",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, EventVariant)]
 pub(crate) enum CatchUpEvent {
     FrontierReached {
         generation: ReaderGeneration,
@@ -84,20 +72,6 @@ pub(crate) enum CatchUpEvent {
         generation: ReaderGeneration,
     },
     HandoffAnnounced,
-}
-
-impl EventVariant for CatchUpEvent {
-    fn variant_name(&self) -> &str {
-        match self {
-            Self::FrontierReached { .. } => "FrontierReached",
-            Self::InputsEnded => "InputsEnded",
-            Self::RecordedCrossingReached { .. } => "RecordedCrossingReached",
-            Self::RecordedActionsExhausted => "RecordedActionsExhausted",
-            Self::UnsettledDelivery { .. } => "UnsettledDelivery",
-            Self::RecordedInputEnded { .. } => "RecordedInputEnded",
-            Self::HandoffAnnounced => "HandoffAnnounced",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

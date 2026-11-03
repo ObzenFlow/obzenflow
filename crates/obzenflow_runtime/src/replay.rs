@@ -13,7 +13,7 @@ use obzenflow_core::journal::archive::ReplayError;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::source::RecordedSourceFrontier;
 pub use obzenflow_core::source::SourceHandoff;
-use obzenflow_core::{ChainEvent, ReaderGeneration, StageId, WriterId};
+use obzenflow_core::{ChainEvent, ReaderGeneration, StageId};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
@@ -202,8 +202,6 @@ impl ReplayDriver {
 
     pub async fn next_replayed_event(
         &mut self,
-        _writer_id: WriterId,
-        _stage_name: &str,
         flow_context: FlowContext,
     ) -> Result<Option<ReplayedEvent>, ReplayError> {
         let mut copies = Vec::new();

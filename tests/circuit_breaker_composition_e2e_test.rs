@@ -21,7 +21,11 @@
 //!     without re-executing effects; source and sink policies remain suppressed,
 //!     while effect-history settlement rows retain their archived identities.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod ordered_journal;
+    pub use self::ordered_journal::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, retry, MiddlewareFactory};

@@ -10,7 +10,7 @@ ObzenFlow's superpowers:
 - Separates effectful operations from deterministic logic for replay-safe integrations 
 - Replay and verify completed flows
 - Trace results through recorded history for auditability and reconstruction
-- Resume interrupted work from a last durable frontier
+- Resume interrupted work from its last committed fact
 - Built-in resilience patterns like circuit breakers and rate limiters 
 - Optionally serve metrics via Prometheus right out of the box 
 

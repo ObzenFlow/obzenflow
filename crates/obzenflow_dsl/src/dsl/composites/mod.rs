@@ -98,8 +98,6 @@ fn downstream_input_hint(
     None
 }
 
-#[allow(clippy::result_large_err)]
-#[allow(clippy::type_complexity)]
 pub fn lower_composites(
     members: HashMap<String, FlowMember>,
     authored: Vec<AuthoredConnection>,

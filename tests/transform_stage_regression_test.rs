@@ -4,7 +4,18 @@
 
 //! Transform stage integration regression tests.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod failures;
+    mod journal;
+    mod manifest;
+    mod ordered_journal;
+    mod run_dir;
+    mod stage_journal;
+    mod stage_writer;
+    pub use self::{
+        failures::*, ordered_journal::*, run_dir::*, stage_journal::*, stage_writer::*,
+    };
+}
 
 use anyhow::Result;
 use async_trait::async_trait;

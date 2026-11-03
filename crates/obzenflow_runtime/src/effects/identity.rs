@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::config::LineagePolicy;
 
 pub(super) fn descriptor_for_effect<E>(
     effect: &E,
@@ -61,7 +62,7 @@ fn hex_digest(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
+        write!(&mut out, "{byte:02x}").expect("writing to a String cannot fail");
     }
     out
 }
@@ -180,16 +181,20 @@ pub fn deterministic_effect_evidence_event_id(
     descriptor_event_id("effect-evidence", &(cursor, descriptor, attempt))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The flow, stage, input and ordinal that fix an output's identity.
+pub struct OutputPosition<'a> {
+    pub recorded_flow_id: &'a str,
+    pub stage_key: &'a str,
+    pub input_seq: StageInputPosition,
+    pub output_ordinal: EffectOutputOrdinal,
+}
+
 pub fn deterministic_typed_output_event<Out>(
     writer_id: WriterId,
     parent: &ChainEvent,
     output: Out,
-    recorded_flow_id: impl AsRef<str>,
-    stage_key: impl AsRef<str>,
-    input_seq: StageInputPosition,
-    output_ordinal: impl Into<EffectOutputOrdinal>,
-    lineage: obzenflow_core::config::LineagePolicy,
+    position: OutputPosition<'_>,
+    lineage: LineagePolicy,
 ) -> Result<ChainEvent, EffectError>
 where
     Out: TypedPayload,
@@ -199,10 +204,10 @@ where
     Ok(stamp_output_event(
         fact.into_derived_event(writer_id, parent, lineage),
         parent,
-        recorded_flow_id,
-        stage_key,
-        input_seq,
-        output_ordinal,
+        position.recorded_flow_id,
+        position.stage_key,
+        position.input_seq,
+        position.output_ordinal,
     ))
 }
 

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::identity::OutputPosition;
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
 use crate::id_conversions::StageIdExt;
@@ -10,6 +11,7 @@ use crate::stages::observer::{
     EffectObserver, EffectObserverContext, EffectObserverOutcome, ObserverBinding, ObserverTarget,
     StageObserverBindings, StageObserverBundle,
 };
+use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::provenance::JournalGroupMember;
@@ -810,14 +812,13 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchBinding
         // catch the effect error. Adapter postflight must still make false
         // success impossible.
         let prebuilt_receipt = fx.complete_empty().map_err(Into::<HandlerError>::into)?;
-        let _caught = fx
-            .perform(ZeroSlotNamedEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-                binding: self.invocation_binding.invocation(),
-            })
-            .await
-            .expect_err("the fixture intentionally mixes construction families");
+        fx.perform(ZeroSlotNamedEffect {
+            value: input.value,
+            calls: self.calls.clone(),
+            binding: self.invocation_binding.invocation(),
+        })
+        .await
+        .expect_err("the fixture intentionally mixes construction families");
 
         match self.settlement {
             AdapterSettlement::Success => Ok(prebuilt_receipt),
@@ -877,14 +878,13 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for FoldThenCatch
         .await
         .map_err(HandlerError::from)?;
         let prebuilt_receipt = fx.complete().map_err(HandlerError::from)?;
-        let _caught = fx
-            .perform(ZeroSlotNamedEffect {
-                value: input.value,
-                calls: self.mismatched_calls.clone(),
-                binding: self.invocation_binding.invocation(),
-            })
-            .await
-            .expect_err("the fixture intentionally mixes construction families");
+        fx.perform(ZeroSlotNamedEffect {
+            value: input.value,
+            calls: self.mismatched_calls.clone(),
+            binding: self.invocation_binding.invocation(),
+        })
+        .await
+        .expect_err("the fixture intentionally mixes construction families");
 
         match self.settlement {
             AdapterSettlement::Success => Ok(prebuilt_receipt),
@@ -1659,11 +1659,13 @@ fn deterministic_typed_output_events_preserve_ordinals() {
         writer_id,
         &parent,
         FirstOutput { value: 1 },
-        "flow-a",
-        "stage-a",
-        StageInputPosition(4),
-        2,
-        obzenflow_core::config::LineagePolicy::default(),
+        OutputPosition {
+            recorded_flow_id: "flow-a",
+            stage_key: "stage-a",
+            input_seq: StageInputPosition(4),
+            output_ordinal: 2.into(),
+        },
+        LineagePolicy::default(),
     )
     .expect("first output event");
     let second = deterministic_typed_output_event(
@@ -1672,11 +1674,13 @@ fn deterministic_typed_output_events_preserve_ordinals() {
         SecondOutput {
             value: "two".to_string(),
         },
-        "flow-a",
-        "stage-a",
-        StageInputPosition(4),
-        3,
-        obzenflow_core::config::LineagePolicy::default(),
+        OutputPosition {
+            recorded_flow_id: "flow-a",
+            stage_key: "stage-a",
+            input_seq: StageInputPosition(4),
+            output_ordinal: 3.into(),
+        },
+        LineagePolicy::default(),
     )
     .expect("second output event");
     let events = [first, second];
@@ -1869,7 +1873,7 @@ fn invocation_context_with_mode(
         stage_key: "effect_stage".to_string(),
         writer_id: WriterId::from(stage_id),
         input_seq: StageInputPosition(1),
-        lineage: obzenflow_core::config::LineagePolicy::default(),
+        lineage: LineagePolicy::default(),
         stage_logic_version: "test-v1".to_string(),
         data_journal: journal,
         flow_context: None,
@@ -6346,7 +6350,8 @@ async fn capture_refuses_a_changed_label_whatever_the_handler_does() {
         parent_envelope(WriterId::from(stage_id)),
         None,
     ));
-    let _: u64 = live.capture("side_value", 7).await.expect("capture");
+    let captured: u64 = live.capture("side_value", 7).await.expect("capture");
+    assert_eq!(captured, 7);
     let records = effect_records(&journal);
     let history = Arc::new(
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
@@ -6429,15 +6434,14 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for CatchRefusal
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let prebuilt_receipt = fx.complete_empty().map_err(Into::<HandlerError>::into)?;
-        let _caught = fx
-            .perform(CountingEffect {
-                binding: bound(),
-                value: input.value,
-                label: self.label,
-                calls: self.calls.clone(),
-            })
-            .await
-            .expect_err("the fixture's recording refuses this effect");
+        fx.perform(CountingEffect {
+            binding: bound(),
+            value: input.value,
+            label: self.label,
+            calls: self.calls.clone(),
+        })
+        .await
+        .expect_err("the fixture's recording refuses this effect");
 
         match self.settlement {
             AdapterSettlement::Success => Ok(prebuilt_receipt),
@@ -7833,7 +7837,9 @@ impl EffectBoundary for TwoPreparedCallsBoundary {
         _event: &ChainEvent,
         mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
-        let _ = operation.prepare().execute().await;
+        if let Err(error) = operation.prepare().execute().await {
+            eprintln!("the first prepared call failed: {error}");
+        }
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Executed(operation.prepare().execute().await),
             control_events: Vec::new(),
@@ -7946,7 +7952,7 @@ impl EffectBoundary for ExecuteThenRefuseBoundary {
         event: &ChainEvent,
         mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
-        let _ = operation.execute().await;
+        assert!(operation.execute().await.is_err(), "the effect fails");
         AbortingBoundary
             .around_repeatable_effect(identity, event, operation)
             .await
@@ -8156,7 +8162,7 @@ impl EffectBoundary for ExecutedThenForeignAbortBoundary {
         event: &ChainEvent,
         operation: SingleUseEffectOperation,
     ) -> SingleUseEffectBoundaryReport {
-        let _supplied_execution = operation.execute().await;
+        operation.execute().await;
         SingleUseEffectOperation::new(|| async { Ok(Vec::new()) }).abort(
             EffectAbortReason {
                 cause: EffectFailureCause {
@@ -8800,7 +8806,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
             stage_key: "effect_stage".to_string(),
             writer_id,
             input_seq: StageInputPosition(1),
-            lineage: obzenflow_core::config::LineagePolicy::default(),
+            lineage: LineagePolicy::default(),
             stage_logic_version: "test-v1".to_string(),
             data_journal: journal,
             flow_context: None,

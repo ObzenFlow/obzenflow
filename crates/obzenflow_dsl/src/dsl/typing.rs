@@ -2067,11 +2067,12 @@ fn selected_or_single_output_for_fan_in(
 ///
 /// Every declared effect's fact set must be contained in the stage's arrow
 /// contract. This check runs before live I/O.
-#[allow(clippy::result_large_err)]
 pub fn validate_effect_fact_containment(
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
 ) -> Result<(), crate::dsl::error::FlowBuildError> {
-    use crate::dsl::error::FlowBuildError;
+    use crate::dsl::error::{
+        DuplicateEffectOutcomeFactEventType, EffectFactNotInContract, FlowBuildError,
+    };
 
     for (name, descriptor) in descriptors {
         // Sinks have no output contract for effect facts to be members of;
@@ -2107,21 +2108,25 @@ pub fn validate_effect_fact_containment(
                 if let Some(first_member) = members_by_event_type
                     .insert(fact.event_type.to_string(), fact.display_name.clone())
                 {
-                    return Err(FlowBuildError::DuplicateEffectOutcomeFactEventType {
-                        stage_name: name.clone(),
-                        effect_type: declaration.effect_type().to_string(),
-                        event_type: fact.event_type.to_string(),
-                        first_member,
-                        second_member: fact.display_name.clone(),
-                    });
+                    return Err(FlowBuildError::DuplicateEffectOutcomeFactEventType(
+                        Box::new(DuplicateEffectOutcomeFactEventType {
+                            stage_name: name.clone(),
+                            effect_type: declaration.effect_type().to_string(),
+                            event_type: fact.event_type.to_string(),
+                            first_member,
+                            second_member: fact.display_name.clone(),
+                        }),
+                    ));
                 }
                 if !contract_type_ids.contains(&fact.type_id) {
-                    return Err(FlowBuildError::EffectFactNotInContract {
-                        stage_name: name.clone(),
-                        effect_type: declaration.effect_type().to_string(),
-                        fact: fact.display_name.clone(),
-                        contract: output_contract_display(metadata),
-                    });
+                    return Err(FlowBuildError::EffectFactNotInContract(Box::new(
+                        EffectFactNotInContract {
+                            stage_name: name.clone(),
+                            effect_type: declaration.effect_type().to_string(),
+                            fact: fact.display_name.clone(),
+                            contract: output_contract_display(metadata),
+                        },
+                    )));
                 }
             }
         }
@@ -2139,7 +2144,6 @@ pub fn validate_effect_fact_containment(
 /// - Transform / Stateful: `input_type`, `output_type`
 /// - Sink: `input_type`
 /// - Join: `reference_type`, `stream_type`, `output_type`
-#[allow(clippy::result_large_err)]
 pub fn validate_stage_typing_metadata(
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
 ) -> Result<(), crate::dsl::error::FlowBuildError> {

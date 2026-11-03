@@ -442,7 +442,7 @@ impl TypedJoinHandler for TerminalOrderJoin {
             .lock()
             .expect("terminal calls lock")
             .push("hook".to_string());
-        let _selected = references.select(&0);
+        references.select(&0);
         vec![TerminalStep {
             step: "hook".to_string(),
         }]
@@ -457,7 +457,7 @@ impl TypedJoinHandler for TerminalOrderJoin {
             .lock()
             .expect("terminal calls lock")
             .push("drain".to_string());
-        let _selected = references.select(&0);
+        references.select(&0);
         vec![TerminalStep {
             step: "drain".to_string(),
         }]

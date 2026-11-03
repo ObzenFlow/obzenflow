@@ -199,7 +199,7 @@ type SourceAdmitGuard = Option<Box<dyn SourceAdmissionGuard>>;
 
 impl SourceBoundary for PerSourcePolicyBoundary {
     fn install_observation_recorder(&self, recorder: Arc<dyn ObservationRecorder>) {
-        let _ = self.recorder.set(recorder);
+        self.recorder.get_or_init(|| recorder);
     }
 
     fn around_poll<'a>(&'a self, execute: SourcePollExecution<'a>) -> SourceBoundaryFuture<'a> {

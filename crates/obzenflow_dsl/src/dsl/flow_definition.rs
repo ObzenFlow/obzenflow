@@ -159,7 +159,7 @@ mod tests {
     use std::ptr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     use obzenflow_runtime::run_context::FlowBuildContext;
     use obzenflow_runtime::runtime_config::{
@@ -168,12 +168,6 @@ mod tests {
 
     use super::{FlowBuildFailure, FlowDefinition};
     use crate::dsl::FlowBuildError;
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
 
     #[test]
     fn materialize_factory_stays_cold_until_the_build_future_is_polled() {
@@ -192,8 +186,7 @@ mod tests {
         let mut build = flow.build(FlowBuildContext::for_tests());
         assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
 
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let result = Future::poll(build.as_mut(), &mut context);
 
         assert!(matches!(result, Poll::Ready(Err(_))));
@@ -400,5 +393,11 @@ mod tests {
             FlowBuildError::BindingConfiguration { binding, detail }
                 if binding == "chat" && detail == "missing model"
         ));
+    }
+
+    #[test]
+    fn flow_build_failure_stays_under_the_large_error_threshold() {
+        let size = size_of::<FlowBuildFailure>();
+        assert!(size < 128, "FlowBuildFailure is {size} bytes");
     }
 }

@@ -301,9 +301,7 @@ pub fn diff(base: &[ResolvedValueDoc], effective: &[ResolvedValueDoc]) -> Vec<Co
 mod tests {
     use super::*;
     use crate::runtime_config::candidates::ScopedCandidate;
-    use crate::runtime_config::schema::{
-        EdgeEndpoint, EnvBinding, KnobRole, KnobTarget, KnobType, Mutability,
-    };
+    use crate::runtime_config::schema::{EnvBinding, KnobRole, KnobTarget, KnobType, Mutability};
 
     #[test]
     fn builtin_defaults_view_reports_default_source() {
@@ -405,7 +403,6 @@ mod tests {
             Some(ConfigSubject::Effect { effect_type })
         );
         assert!(effect_doc.resolved_for.is_some());
-        let _ = EdgeEndpoint::Upstream; // silence unused import in cfg(test)
     }
 
     #[test]

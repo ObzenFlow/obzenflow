@@ -11,7 +11,20 @@
 //! delivered-order projections from the event-sourced journals; raw journal
 //! bytes legitimately differ across runs until FLOWIP-120o.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod delivered_order;
+    mod journal;
+    mod manifest;
+    mod ordered_stage_journal;
+    mod run_dir;
+    mod same_delivered_order;
+    mod stage_journal;
+    mod telemetry_rows;
+    pub use self::{
+        delivered_order::*, ordered_stage_journal::*, run_dir::*, same_delivered_order::*,
+        telemetry_rows::*,
+    };
+}
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
@@ -450,13 +463,12 @@ fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
     })
 }
 
-async fn run_live(journal_base: &PathBuf, flow: FlowDefinition) {
+async fn run_live(flow: FlowDefinition) {
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(flow)
         .await
         .expect("live flow should complete");
-    let _ = journal_base;
 }
 
 async fn run_replay(archive: &std::path::Path, flow: FlowDefinition) {
@@ -478,10 +490,10 @@ async fn fan_in_delivery_order_identical_across_live_replay_and_replay_of_replay
     let journal_base = temp.path().join("journals");
 
     let live_calls = Arc::new(AtomicUsize::new(0));
-    run_live(
-        &journal_base,
-        build_two_channel_flow(journal_base.clone(), live_calls.clone()),
-    )
+    run_live(build_two_channel_flow(
+        journal_base.clone(),
+        live_calls.clone(),
+    ))
     .await;
     assert_eq!(live_calls.load(Ordering::SeqCst), 7);
     let live_run = replay_testkit::latest_run_dir(&journal_base);
@@ -569,11 +581,7 @@ async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
-    run_live(
-        &journal_base,
-        build_two_channel_stateful_flow(journal_base.clone()),
-    )
-    .await;
+    run_live(build_two_channel_stateful_flow(journal_base.clone())).await;
     let live_run = replay_testkit::latest_run_dir(&journal_base);
 
     run_replay(
@@ -619,18 +627,20 @@ async fn two_live_runs_with_different_arrival_timing_produce_identical_merged_or
     let journal_base = temp.path().join("journals");
 
     let first_calls = Arc::new(AtomicUsize::new(0));
-    run_live(
-        &journal_base,
-        build_skip_level_flow_with_delay(journal_base.clone(), first_calls.clone(), 0),
-    )
+    run_live(build_skip_level_flow_with_delay(
+        journal_base.clone(),
+        first_calls.clone(),
+        0,
+    ))
     .await;
     let first_run = replay_testkit::latest_run_dir(&journal_base);
 
     let second_calls = Arc::new(AtomicUsize::new(0));
-    run_live(
-        &journal_base,
-        build_skip_level_flow_with_delay(journal_base.clone(), second_calls.clone(), 25),
-    )
+    run_live(build_skip_level_flow_with_delay(
+        journal_base.clone(),
+        second_calls.clone(),
+        25,
+    ))
     .await;
     let second_run = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(first_run, second_run);
@@ -652,11 +662,7 @@ async fn skip_level_fan_in_delivers_causal_ancestors_first() {
     let journal_base = temp.path().join("journals");
 
     let calls = Arc::new(AtomicUsize::new(0));
-    run_live(
-        &journal_base,
-        build_skip_level_flow(journal_base.clone(), calls.clone()),
-    )
-    .await;
+    run_live(build_skip_level_flow(journal_base.clone(), calls.clone())).await;
     let run_dir = replay_testkit::latest_run_dir(&journal_base);
 
     let projection =
@@ -742,10 +748,11 @@ async fn fan_in_replay_unaffected_by_mid_stream_reader_telemetry() {
     // 4 events x 250ms ≈ 1s of live runtime, comfortably past the ~500ms
     // contract tick, so tap's subscription emits progress mid-stream.
     let live_calls = Arc::new(AtomicUsize::new(0));
-    run_live(
-        &journal_base,
-        build_skip_level_flow_with_delay(journal_base.clone(), live_calls.clone(), 250),
-    )
+    run_live(build_skip_level_flow_with_delay(
+        journal_base.clone(),
+        live_calls.clone(),
+        250,
+    ))
     .await;
     let live_run = replay_testkit::latest_run_dir(&journal_base);
 

@@ -358,7 +358,9 @@ where
     }
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let _ = self.try_accumulate(state, event);
+        if let Err(error) = self.try_accumulate(state, event) {
+            tracing::error!(%error, "typed stateful handler dropped an event it could not accumulate");
+        }
     }
 
     fn try_accumulate(

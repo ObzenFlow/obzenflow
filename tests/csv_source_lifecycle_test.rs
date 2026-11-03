@@ -5,9 +5,11 @@
 //! FLOWIP-122e: the shipped application's ordinary entry point can replay after
 //! losing both original inputs. All fixtures and archives belong to this test.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    pub use self::journal::*;
+}
 
-#[allow(dead_code)]
 #[path = "../examples/csv_demo_support_sla/support.rs"]
 mod example;
 

@@ -979,19 +979,10 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
                     tolerate_torn_tail: false,
                 },
             ) {
-                Disposition::Yield(frame) => {
-                    let journal_group_id = frame.group_id().map(str::to_string);
-                    let records = frame.into_records();
-                    let _group_size = journal_group_id.as_ref().map(|_| {
-                        u32::try_from(records.len())
-                            .expect("a materialised journal frame fits in addressable memory")
-                    });
-                    Ok(records
-                        .into_iter()
-                        .enumerate()
-                        .find(|(_, record)| record.id().as_ulid() == ulid)
-                        .map(|(_index, record)| record))
-                }
+                Disposition::Yield(frame) => Ok(frame
+                    .into_records()
+                    .into_iter()
+                    .find(|record| record.id().as_ulid() == ulid)),
                 Disposition::EndOfCommittedRecords | Disposition::Skip => Ok(None),
                 Disposition::Corrupt(problem) => Err(JournalError::Implementation {
                     message: format!(
@@ -1105,13 +1096,7 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
                 },
             ) {
                 Disposition::Yield(frame) => {
-                    let journal_group_id = frame.group_id().map(str::to_string);
-                    let records = frame.into_records();
-                    let _group_size = journal_group_id.as_ref().map(|_| {
-                        u32::try_from(records.len())
-                            .expect("a materialised journal frame fits in addressable memory")
-                    });
-                    for (_index, record) in records.into_iter().enumerate().rev() {
+                    for record in frame.into_records().into_iter().rev() {
                         if results.len() >= count {
                             break;
                         }
@@ -1586,7 +1571,7 @@ mod tests {
         );
 
         // Cleanup
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1642,7 +1627,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reopened.read_all_unordered().await.unwrap().len(), 3);
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1692,7 +1677,7 @@ mod tests {
             drop(reopened);
         }
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1755,7 +1740,7 @@ mod tests {
         );
 
         // Cleanup
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1806,7 +1791,7 @@ mod tests {
         assert_eq!(writer_ids.len(), 5);
 
         // Cleanup
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1867,7 +1852,7 @@ mod tests {
         let expected: Vec<u64> = (1..=task_count as u64).collect();
         assert_eq!(writer_seqs, expected);
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1937,7 +1922,7 @@ mod tests {
             "writer clock must continue after reopen, not reset"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -1978,7 +1963,7 @@ mod tests {
             "mid-file corruption must fail loud"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2031,7 +2016,7 @@ mod tests {
         writer.await.unwrap();
         assert_eq!(seen, N);
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2105,7 +2090,7 @@ mod tests {
             assert_eq!(reader.position(), 1);
         }
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2147,7 +2132,7 @@ mod tests {
             "a truncated indexed record must fail loud, not return None"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2236,7 +2221,7 @@ mod tests {
             "from_position past a mid-file corrupt record must fail loud"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2280,7 +2265,7 @@ mod tests {
             "a torn tail must not be counted as a committed position"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
     #[derive(Clone, Copy)]
@@ -2481,6 +2466,6 @@ mod tests {
             "a poisoned journal must reject further appends"
         );
 
-        std::fs::remove_dir_all(&test_dir).ok();
+        std::fs::remove_dir_all(&test_dir).unwrap();
     }
 }

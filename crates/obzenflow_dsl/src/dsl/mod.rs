@@ -216,5 +216,8 @@ pub mod typing;
 mod tests;
 
 // Re-export all public items
-pub use error::{FlowBuildError, MiddlewarePlanError, StageCreationError, StageCreationResult};
+pub use error::{
+    DuplicateEffectOutcomeFactEventType, EdgeTypingMismatch, EffectFactNotInContract,
+    FlowBuildError, MiddlewarePlanError, StageCreationError, StageCreationResult,
+};
 pub use flow_definition::{FlowBuildFailure, FlowDefinition};

@@ -586,13 +586,12 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
                 cause,
                 advertised_writer_seq,
                 ..
-            }) if contract_name.as_str() == TransportContract::NAME => {
-                if *status == ContractResultStatusLabel::Pending
-                    && cause.is_none()
-                    && advertised_writer_seq.is_none()
-                {
-                    seen_transport_healthy_pre_eof = true;
-                }
+            }) if contract_name.as_str() == TransportContract::NAME
+                && *status == ContractResultStatusLabel::Pending
+                && cause.is_none()
+                && advertised_writer_seq.is_none() =>
+            {
+                seen_transport_healthy_pre_eof = true;
             }
             _ => {}
         }

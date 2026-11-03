@@ -333,8 +333,6 @@ impl PostgresTable {
         format!("INSERT INTO {} {body}", self.quoted_target())
     }
 
-    // Keep server-authority failures in the sink protocol's typed error.
-    #[allow(clippy::result_large_err)]
     fn validate_server_limit(&self, limit: i32) -> SinkOperationResult<()> {
         let limit = usize::try_from(limit).unwrap_or_default();
         if limit == 0 || self.schema.len() > limit || self.table.len() > limit {
@@ -451,7 +449,6 @@ pub trait PostgresBind: Clone + Send + Sync + 'static {
 pub struct PostgresSink<B> {
     connection: PostgresConnection,
     destination: PostgresTable,
-    _insert_body: String,
     statement: String,
     binder: B,
     batch_size: usize,
@@ -606,7 +603,6 @@ where
         Ok(PostgresSink {
             connection,
             destination,
-            _insert_body: insert_body,
             statement,
             binder: self.binder,
             batch_size: self.batch_size,
@@ -965,13 +961,11 @@ impl WriterProbe {
         }
     }
 
+    #[cfg(feature = "test-support")]
     fn record_authority_session(&self, backend_pid: i32) {
-        #[cfg(feature = "test-support")]
         if let Some(probe) = &self.probe {
             probe.record_authority_session(self.writer, backend_pid);
         }
-        #[cfg(not(feature = "test-support"))]
-        let _ = backend_pid;
     }
 
     fn record_authority_rejection(&self) {
@@ -1103,16 +1097,21 @@ impl PostgresSessionPool {
                     authority.mark_unverified();
                     probe.record_authority_hook();
                     let verdict = async {
-                        let (max_identifier_length, backend_pid): (i32, i32) = sqlx::query_as(
-                            "SELECT current_setting('max_identifier_length')::integer, \
-                                 pg_backend_pid()",
+                        let max_identifier_length: i32 = sqlx::query_scalar(
+                            "SELECT current_setting('max_identifier_length')::integer",
                         )
                         .fetch_one(&mut *connection)
                         .await
                         .map_err(operation_error)?;
-                        probe.record_authority_session(backend_pid);
                         #[cfg(feature = "test-support")]
-                        probe.delay(testing::PostgresDelayPoint::Authority).await;
+                        {
+                            let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                                .fetch_one(&mut *connection)
+                                .await
+                                .map_err(operation_error)?;
+                            probe.record_authority_session(backend_pid);
+                            probe.delay(testing::PostgresDelayPoint::Authority).await;
+                        }
                         if probe.fault_authority_query() {
                             return Err(operation_error(sqlx::Error::Protocol(
                                 "injected PostgreSQL authority-query failure".into(),
@@ -1314,12 +1313,12 @@ enum TransactionFailure {
     Acquire(SinkOperationError),
     Execute {
         subject: TransactionInputSubject,
-        operation: SinkOperationError,
-        rollback: Option<SinkOperationError>,
+        operation: Box<SinkOperationError>,
+        rollback: Option<Box<SinkOperationError>>,
     },
     PreCommit {
-        operation: SinkOperationError,
-        rollback: Option<SinkOperationError>,
+        operation: Box<SinkOperationError>,
+        rollback: Option<Box<SinkOperationError>>,
     },
     Commit(SinkOperationError),
     PostCommit(SinkOperationError),
@@ -1341,15 +1340,17 @@ impl TransactionFailure {
                 rollback,
             } => Self::Execute {
                 subject,
-                operation: destination_operation_error(destination, operation),
-                rollback: rollback.map(|error| destination_operation_error(destination, error)),
+                operation: Box::new(destination_operation_error(destination, *operation)),
+                rollback: rollback
+                    .map(|error| Box::new(destination_operation_error(destination, *error))),
             },
             Self::PreCommit {
                 operation,
                 rollback,
             } => Self::PreCommit {
-                operation: destination_operation_error(destination, operation),
-                rollback: rollback.map(|error| destination_operation_error(destination, error)),
+                operation: Box::new(destination_operation_error(destination, *operation)),
+                rollback: rollback
+                    .map(|error| Box::new(destination_operation_error(destination, *error))),
             },
             Self::Commit(error) => Self::Commit(destination_operation_error(destination, error)),
             Self::PostCommit(error) => {
@@ -1504,8 +1505,8 @@ where
                 .err();
             return Err(TransactionFailure::Execute {
                 subject,
-                operation,
-                rollback,
+                operation: Box::new(operation),
+                rollback: rollback.map(Box::new),
             });
         }
         probe.record_execute();
@@ -1534,8 +1535,8 @@ where
             .err();
         return Err(TransactionFailure::Execute {
             subject,
-            operation,
-            rollback,
+            operation: Box::new(operation),
+            rollback: rollback.map(Box::new),
         });
     }
 
@@ -1561,8 +1562,8 @@ where
             .await
             .err();
         return Err(TransactionFailure::PreCommit {
-            operation,
-            rollback,
+            operation: Box::new(operation),
+            rollback: rollback.map(Box::new),
         });
     }
 
@@ -1627,7 +1628,7 @@ fn map_write_failure<T>(
             Some(row) => SinkWriteFailure::poisoned_by_deferred(
                 &row.pending,
                 SinkWritePhase::Execute,
-                operation,
+                *operation,
             ),
             None => SinkWriteFailure::poisoned(
                 SinkWritePhase::Execute,
@@ -1640,7 +1641,7 @@ fn map_write_failure<T>(
             subject: TransactionInputSubject::Current,
             operation,
             rollback: None,
-        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Execute, operation),
+        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Execute, *operation),
         TransactionFailure::Execute {
             subject: TransactionInputSubject::Deferred(index),
             rollback: Some(rollback),
@@ -1649,7 +1650,7 @@ fn map_write_failure<T>(
             Some(row) => SinkWriteFailure::poisoned_by_deferred(
                 &row.pending,
                 SinkWritePhase::Commit,
-                rollback,
+                *rollback,
             ),
             None => SinkWriteFailure::poisoned(
                 SinkWritePhase::Commit,
@@ -1662,15 +1663,15 @@ fn map_write_failure<T>(
             subject: TransactionInputSubject::Current,
             rollback: Some(rollback),
             ..
-        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, rollback),
+        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, *rollback),
         TransactionFailure::PreCommit {
             operation,
             rollback: None,
-        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Commit, operation),
+        } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Commit, *operation),
         TransactionFailure::PreCommit {
             rollback: Some(rollback),
             ..
-        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, rollback),
+        } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, *rollback),
         TransactionFailure::Commit(error) => {
             SinkWriteFailure::poisoned(SinkWritePhase::Commit, error)
         }
@@ -1702,7 +1703,7 @@ fn map_lifecycle_failure<T>(
             subject: TransactionInputSubject::Current,
             operation,
             rollback: None,
-        } => operation,
+        } => *operation,
         TransactionFailure::Execute {
             subject: TransactionInputSubject::Deferred(index),
             rollback: Some(rollback),
@@ -1717,15 +1718,15 @@ fn map_lifecycle_failure<T>(
             subject: TransactionInputSubject::Current,
             rollback: Some(rollback),
             ..
-        } => rollback,
+        } => *rollback,
         TransactionFailure::PreCommit {
             operation,
             rollback: None,
-        } => operation,
+        } => *operation,
         TransactionFailure::PreCommit {
             rollback: Some(rollback),
             ..
-        } => rollback,
+        } => *rollback,
     }
 }
 
@@ -2271,10 +2272,6 @@ mod tests {
         assert_eq!(
             sink.statement,
             "INSERT INTO \"Public\".\"Items\" (value) VALUES ('a;b') ON CONFLICT DO NOTHING"
-        );
-        assert_eq!(
-            sink._insert_body,
-            "(value) VALUES ('a;b') ON CONFLICT DO NOTHING"
         );
         assert_eq!(
             sink.describe().destination_name(),

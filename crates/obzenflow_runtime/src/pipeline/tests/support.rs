@@ -381,10 +381,10 @@ impl StageHandle for TestPipelineStageHandle {
                 .expect("start gate lock poisoned")
                 .take()
             {
-                let _ = entered.send(());
+                entered.send(()).unwrap();
             }
             if let Some(release) = gate.release.lock().await.take() {
-                let _ = release.await;
+                release.await.unwrap();
             }
         }
         assert!(

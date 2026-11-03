@@ -408,8 +408,7 @@ impl EffectfulTransformHandler for CollidingTransform {
         _input: ContainmentInput,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let _ = fx
-            .call(CollidingRequest)
+        fx.call(CollidingRequest)
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
         Ok(fx.complete()?)

@@ -27,8 +27,6 @@ use tokio::time::Instant;
 /// Both reader-selection policies consume journals through exactly this step,
 /// so a read-side rule (baseline clearing, transport filtering, EOF/drain
 /// classification) can never drift between them.
-// Transfer the inline journal head without allocating for every delivery.
-#[allow(clippy::large_enum_variant)]
 enum ReadStep<T: JournalEvent> {
     /// A deliverable transport head, classified at read time.
     Head { head: HeldHead<T>, is_data: bool },
@@ -144,7 +142,7 @@ where
         };
         Ok(ReadStep::Head {
             head: HeldHead {
-                envelope,
+                envelope: Box::new(envelope),
                 is_authored_eof,
                 is_drain,
                 catch_up,
@@ -418,7 +416,7 @@ where
             let slot = &self.readers[reader_index];
             (slot.stage_id, slot.stage_key.clone())
         };
-        if let Some(record) = (&envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>()
+        if let Some(record) = (&*envelope as &dyn Any).downcast_ref::<JournalRecord<ChainPayload>>()
         {
             if matches!(
                 record.envelope.provenance.event.processing.status,
@@ -486,7 +484,7 @@ where
         let original_chain_event = (&original_authored as &dyn Any).downcast_ref::<ChainEvent>();
 
         let normalized_contract_event =
-            self.normalized_eof_for_contracts(reader_index, stage_id, original_chain_event, is_eof);
+            self.normalized_eof_for_contracts(stage_id, original_chain_event, is_eof);
         let contract_chain_event = normalized_contract_event.as_ref().or(original_chain_event);
 
         self.bump_selected_data_counters(reader_index, stage_id, original_chain_event);
@@ -574,7 +572,6 @@ where
     /// writer count rather than the upstream's raw count.
     fn normalized_eof_for_contracts(
         &self,
-        _reader_index: usize,
         stage_id: StageId,
         original: Option<&ChainEvent>,
         is_eof: bool,

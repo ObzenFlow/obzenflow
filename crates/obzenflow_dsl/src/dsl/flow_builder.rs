@@ -9,15 +9,19 @@
 
 use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::topology::LoweredFlow;
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::factory::FlowJournalFactory;
+#[cfg(feature = "test-support")]
+use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::JournalConfig;
-use obzenflow_core::journal::{Journal, JournalError};
-use obzenflow_core::{FlowId, StageId};
+use obzenflow_core::journal::JournalError;
+use obzenflow_core::FlowId;
+#[cfg(feature = "test-support")]
+use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_runtime::effects::{EffectPortRegistry, EffectRegistrationCollectionError};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "test-support")]
 use std::sync::Arc;
 
 type ConfiguredSinkResolution = (HashMap<String, Box<dyn StageDescriptor>>, HashSet<String>);
@@ -37,7 +41,6 @@ fn describe_handler_keys(keys: &[&str]) -> String {
     }
 }
 
-#[allow(clippy::result_large_err)]
 fn resolve_configured_sink_descriptors(
     stages: HashMap<String, Box<dyn StageDescriptor>>,
     runtime_config: &obzenflow_runtime::runtime_config::ResolvedRuntimeConfig,
@@ -58,7 +61,7 @@ fn resolve_configured_sink_descriptors(
                 obzenflow_runtime::runtime_config::SINK_HANDLER_KEY,
                 obzenflow_core::StageKey::from(stage_name.as_str()),
             )
-            .map_err(FlowBuildError::ConfigResolution)?
+            .map_err(|error| FlowBuildError::ConfigResolution(Box::new(error)))?
             .ok_or_else(|| FlowBuildError::MissingSinkSelection {
                 stage_name: stage_name.clone(),
                 expected,
@@ -77,7 +80,6 @@ fn resolve_configured_sink_descriptors(
 
 /// Validate shared hosted ownership before any factory, connector, or journal
 /// can materialize. The final write-once fill remains the race-safety guard.
-#[allow(clippy::result_large_err)]
 fn validate_hosted_ingress_bindings<'a>(
     bindings: impl IntoIterator<
         Item = (
@@ -116,7 +118,7 @@ fn validate_hosted_ingress_bindings<'a>(
 #[doc(hidden)]
 pub struct FlowBuildOutput {
     handle: FlowHandle,
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    #[cfg(feature = "test-support")]
     stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 }
 
@@ -128,7 +130,6 @@ impl FlowBuildOutput {
 
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
-    #[allow(clippy::result_large_err)]
     pub fn into_test_harness(
         self,
     ) -> Result<obzenflow_runtime::testing::FlowTestHarness, crate::FlowBuildFailure> {
@@ -147,7 +148,6 @@ impl FlowBuildOutput {
 
 /// Materialise one already-lowered flow without any flow-scope middleware lane.
 #[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
 pub async fn build_flow<J, P>(
     flow_name: &'static str,
     journal_factory_provider: P,
@@ -164,6 +164,8 @@ where
         artifacts: lowering_artifacts,
         join_catalogs,
     } = lowered;
+    use crate::dsl::attachment_plan;
+    use crate::dsl::error::{EdgeTypingMismatch, EdgeTypingMismatchKind};
     use crate::dsl::FlowBuildError;
     use crate::prelude::*;
     use obzenflow_topology::{DirectedEdge, StageInfo as TopologyStageInfo};
@@ -224,7 +226,7 @@ where
         }))?;
 
         for descriptor in stages.values_mut() {
-            descriptor.prepare_middleware().map_err(FlowBuildError::MiddlewarePlan)?;
+            descriptor.prepare_middleware().map_err(FlowBuildError::from)?;
         }
 
         // Build topology - Two-pass approach for join stages:
@@ -332,7 +334,7 @@ where
 
         let topology = Arc::new(
             obzenflow_topology::Topology::new(topology_stages.clone(), topology_edges.clone())
-                .map_err(FlowBuildError::TopologyValidationFailed)?,
+                .map_err(|error| FlowBuildError::TopologyValidationFailed(Box::new(error)))?,
         );
 
         // FLOWIP-114c PR D: stage-level metadata check first (None metadata,
@@ -393,18 +395,18 @@ where
                             })
                     });
             let suggested_fix = match first.kind {
-                crate::dsl::error::EdgeTypingMismatchKind::SingleEdge => {
+                EdgeTypingMismatchKind::SingleEdge => {
                     "Align the upstream and downstream types, or insert an alignment transform. \
                      See FLOWIP-114c \"How to handle heterogeneous fan-in\"."
                         .to_string()
                 }
-                crate::dsl::error::EdgeTypingMismatchKind::HeterogeneousFanIn { .. } => {
+                EdgeTypingMismatchKind::HeterogeneousFanIn { .. } => {
                     "Insert per-branch alignment transforms so the fan-in is homogeneous on a \
                      common envelope type, or use a join for two-input typed fan-in. See \
                      FLOWIP-114c \"How to handle heterogeneous fan-in\"."
                         .to_string()
                 }
-                crate::dsl::error::EdgeTypingMismatchKind::DeclaredFeedPayloadMissing => {
+                EdgeTypingMismatchKind::DeclaredFeedPayloadMissing => {
                     "Add the payload type to the member's output contract, or remove it from \
                      the composite's internal feed declaration (FLOWIP-128a D3)."
                         .to_string()
@@ -414,15 +416,17 @@ where
                 Some(prefix) => format!("{prefix}{suggested_fix}"),
                 None => suggested_fix,
             };
-            return Err(crate::dsl::error::FlowBuildError::EdgeTypingMismatch {
-                upstream_stage: first.upstream_stage,
-                downstream_stage: first.downstream_stage,
-                role: first.input_role,
-                expected_type: first.expected_type,
-                actual_type: first.upstream_type,
-                kind: first.kind,
-                suggested_fix,
-            });
+            return Err(FlowBuildError::EdgeTypingMismatch(
+                Box::new(EdgeTypingMismatch {
+                    upstream_stage: first.upstream_stage,
+                    downstream_stage: first.downstream_stage,
+                    role: first.input_role,
+                    expected_type: first.expected_type,
+                    actual_type: first.upstream_type,
+                    kind: first.kind,
+                    suggested_fix,
+                }),
+            ));
         }
 
         let then_live_plan =
@@ -598,7 +602,7 @@ where
                     __config_owner.insert(member.as_str(), spec.binding.as_str());
                 }
             }
-            for (_name, descriptor) in descriptors.iter() {
+            for descriptor in descriptors.values() {
                 let config_stage = __config_owner
                     .get(descriptor.name())
                     .copied()
@@ -704,7 +708,7 @@ where
                     &__runtime_config,
                     __resolution_ctx,
                 )
-                .map_err(FlowBuildError::ConfigResolution)?
+                .map_err(|error| FlowBuildError::ConfigResolution(Box::new(error)))?
                 .with_app_settings(__app_settings.clone()),
             )
         };
@@ -928,7 +932,7 @@ where
         );
         topology
             .validate_composite_boundaries()
-            .map_err(FlowBuildError::TopologyValidationFailed)?;
+            .map_err(|error| FlowBuildError::TopologyValidationFailed(Box::new(error)))?;
 
         // FLOWIP-115v: validate the complete frozen plan before any factory,
         // connector, effect port, or journal can materialise.
@@ -941,7 +945,7 @@ where
                 effective_config: __flow_effective.clone(),
                 cycle_guard: None,
             };
-            descriptor.validate_middleware_configuration(&config).map_err(FlowBuildError::MiddlewarePlan)?;
+            descriptor.validate_middleware_configuration(&config).map_err(FlowBuildError::from)?;
         }
 
         // FLOWIP-133e: validate every authored declaration before atomically
@@ -1634,7 +1638,7 @@ where
                     resources.upstream_stages.insert(0, ref_stage_id);
                 }
 
-                middleware_stacks.insert(*id, crate::dsl::attachment_plan::topology(descriptor.as_ref(), &config).map_err(FlowBuildError::MiddlewarePlan)?);
+                middleware_stacks.insert(*id, attachment_plan::topology(descriptor.as_ref(), &config).map_err(FlowBuildError::from)?);
 
                 // Cycle protection is configured via StageConfig for transforms.
                 let handle = descriptor
@@ -1698,7 +1702,7 @@ where
 
             let annotated =
                 obzenflow_topology::Topology::new_unvalidated(annotated_stages, annotated_edges)
-                    .map_err(FlowBuildError::TopologyValidationFailed)?
+                    .map_err(|error| FlowBuildError::TopologyValidationFailed(Box::new(error)))?
                     .with_flow_name(flow_name)
                     .with_api_version("0.6")
                     .with_subgraphs(subgraphs.clone())
@@ -1706,25 +1710,12 @@ where
                     .derive_edge_typings();
             annotated
                 .validate_composite_boundaries()
-                .map_err(FlowBuildError::TopologyValidationFailed)?;
+                .map_err(|error| FlowBuildError::TopologyValidationFailed(Box::new(error)))?;
             Arc::new(annotated)
         };
 
         // Create flow handle using builder pattern
         use crate::prelude::PipelineBuilder;
-
-        // FLOWIP-114b: stage_typing_map, join_metadata_map,
-        // subgraph_membership_map, subgraphs, and middleware_stacks have
-        // already been folded into the canonical `topology` above as
-        // `StageInfo`/`Topology` annotations, so PipelineBuilder no longer
-        // needs to thread them through.
-        let _ = (
-            &stage_typing_map,
-            &join_metadata_map,
-            &subgraph_membership_map,
-            &subgraphs,
-            &middleware_stacks,
-        );
 
         let builder = PipelineBuilder::new(
                 topology.clone(),
@@ -1763,10 +1754,10 @@ where
             .await
             .map_err(|e| FlowBuildError::PipelineBuildFailed(format!("{:?}", e)))?;
 
-        let stage_data_journals = stage_resources_set.stage_journals;
         Ok(FlowBuildOutput {
             handle,
-            stage_data_journals,
+            #[cfg(feature = "test-support")]
+            stage_data_journals: stage_resources_set.stage_journals,
         })
         }
         .await;

@@ -949,7 +949,7 @@ pub async fn metrics_manual_export_uses_the_live_control_receiver(
     control.send(Event::ExportMetrics).await.unwrap();
     until(|| exports.0.lock().unwrap().len() == 2).await;
     task.abort();
-    let _ = task.wait_for_completion().await;
+    assert!(task.wait_for_completion().await.is_err());
 }
 
 pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(

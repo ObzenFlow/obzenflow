@@ -84,7 +84,7 @@ impl<E: crate::supervised_base::with_external_events::ExternalControlEvent + Sen
     }
 }
 
-use crate::backpressure::BackpressureWriter;
+use crate::backpressure::{BackpressureWriter, StallEpisode};
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
@@ -93,7 +93,8 @@ use crate::stages::common::handlers::source::traits::SourceError;
 use crate::stages::common::handlers::source::SourceContinuation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
-    drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
+    drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome, DrainRequest,
+    PendingOutput,
 };
 use crate::stages::common::supervision::catch_up::{
     CatchUpDisposition, CatchUpEvent, CatchUpHandle,
@@ -756,12 +757,7 @@ impl<'a> SourcePollObservation<'a> {
         self.observers.has_source_poll() && !self.scope.is_deterministic_replay()
     }
 
-    pub(crate) async fn observe(
-        &self,
-        outputs: &[ChainEvent],
-        _poll_duration: Duration,
-        outcome: SourcePollObserverOutcome,
-    ) {
+    pub(crate) async fn observe(&self, outputs: &[ChainEvent], outcome: SourcePollObserverOutcome) {
         if !self.is_enabled() {
             return;
         }
@@ -770,12 +766,8 @@ impl<'a> SourcePollObservation<'a> {
         run_source_poll_observers(self.observers, self.scope, &observer_ctx, outputs);
     }
 
-    pub(crate) async fn observe_empty(
-        &self,
-        poll_duration: Duration,
-        outcome: SourcePollObserverOutcome,
-    ) {
-        self.observe(&[], poll_duration, outcome).await;
+    pub(crate) async fn observe_empty(&self, outcome: SourcePollObserverOutcome) {
+        self.observe(&[], outcome).await;
     }
 }
 
@@ -791,13 +783,9 @@ pub(crate) async fn observe_source_boundary_rejection(
         policy: policy.map(str::to_string),
     };
     if control_events.is_empty() {
-        observation
-            .observe_empty(Duration::from_nanos(0), outcome)
-            .await;
+        observation.observe_empty(outcome).await;
     } else {
-        observation
-            .observe(control_events, Duration::from_nanos(0), outcome)
-            .await;
+        observation.observe(control_events, outcome).await;
     }
 }
 
@@ -851,22 +839,34 @@ pub(crate) fn stage_boundary_control_events(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn drain_pending_outputs_sync(
-    pending_outputs: &mut VecDeque<
-        crate::stages::common::supervision::backpressure_drain::PendingOutput,
-    >,
-    stage_flow_context: &FlowContext,
-    stage_id: StageId,
-    heartbeat_state: Option<Arc<HeartbeatState>>,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    error_journal: &Arc<dyn Journal<ChainEvent>>,
-    instrumentation: &Arc<StageInstrumentation>,
-    backpressure_writer: &BackpressureWriter,
-    backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut crate::backpressure::StallEpisode,
-    output_contract: Option<&StageOutputContract>,
-) -> Result<bool, BoxError> {
+pub(crate) struct SourceDrain<'a> {
+    pub pending_outputs: &'a mut VecDeque<PendingOutput>,
+    pub stage_flow_context: &'a FlowContext,
+    pub stage_id: StageId,
+    pub heartbeat_state: Option<&'a Arc<HeartbeatState>>,
+    pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    pub error_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    pub instrumentation: &'a Arc<StageInstrumentation>,
+    pub backpressure_writer: &'a BackpressureWriter,
+    pub backpressure_pulse: &'a mut BackpressureActivityPulse,
+    pub backpressure_stall: &'a mut StallEpisode,
+    pub output_contract: Option<&'a StageOutputContract>,
+}
+
+pub(crate) async fn drain_pending_outputs_sync(drain: SourceDrain<'_>) -> Result<bool, BoxError> {
+    let SourceDrain {
+        pending_outputs,
+        stage_flow_context,
+        stage_id,
+        heartbeat_state,
+        data_journal,
+        error_journal,
+        instrumentation,
+        backpressure_writer,
+        backpressure_pulse,
+        backpressure_stall,
+        output_contract,
+    } = drain;
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
             pending.event.processing.status,
@@ -887,20 +887,20 @@ pub(crate) async fn drain_pending_outputs_sync(
             continue;
         }
 
-        match drain_one_pending(
+        match drain_one_pending(DrainRequest {
             pending,
-            stage_flow_context,
+            flow_context: stage_flow_context,
             stage_id,
-            heartbeat_state.clone(),
+            heartbeat_state,
             data_journal,
-            None,
+            pending_parent: None,
             instrumentation,
             backpressure_writer,
-            backpressure_pulse,
-            backpressure_stall,
+            backpressure_pulse: &mut *backpressure_pulse,
+            backpressure_stall: &mut *backpressure_stall,
             output_contract,
-            pending_outputs,
-        )
+            pending_outputs: &mut *pending_outputs,
+        })
         .await?
         {
             DrainOutcome::Committed { .. } => {}
@@ -911,21 +911,8 @@ pub(crate) async fn drain_pending_outputs_sync(
     Ok(false)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_pending_outputs_async<E>(
-    pending_outputs: &mut VecDeque<
-        crate::stages::common::supervision::backpressure_drain::PendingOutput,
-    >,
-    stage_flow_context: &FlowContext,
-    stage_id: StageId,
-    heartbeat_state: Option<Arc<HeartbeatState>>,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    error_journal: &Arc<dyn Journal<ChainEvent>>,
-    instrumentation: &Arc<StageInstrumentation>,
-    backpressure_writer: &BackpressureWriter,
-    backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut crate::backpressure::StallEpisode,
-    output_contract: Option<&StageOutputContract>,
+    drain: SourceDrain<'_>,
     committed: &mut Vec<EventId>,
     receive_control: impl std::future::Future<Output = Option<E>> + Send,
     on_channel_closed: impl FnOnce() -> E,
@@ -933,6 +920,19 @@ pub(crate) async fn drain_pending_outputs_async<E>(
 where
     E: Send,
 {
+    let SourceDrain {
+        pending_outputs,
+        stage_flow_context,
+        stage_id,
+        heartbeat_state,
+        data_journal,
+        error_journal,
+        instrumentation,
+        backpressure_writer,
+        backpressure_pulse,
+        backpressure_stall,
+        output_contract,
+    } = drain;
     let mut on_channel_closed = Some(on_channel_closed);
 
     while let Some(pending) = pending_outputs.pop_front() {
@@ -956,20 +956,20 @@ where
         }
 
         let event_id = pending.event.id;
-        match drain_one_pending_resolve(
+        match drain_one_pending_resolve(DrainRequest {
             pending,
-            stage_flow_context,
+            flow_context: stage_flow_context,
             stage_id,
-            heartbeat_state.clone(),
+            heartbeat_state,
             data_journal,
-            None,
+            pending_parent: None,
             instrumentation,
             backpressure_writer,
-            backpressure_pulse,
-            backpressure_stall,
+            backpressure_pulse: &mut *backpressure_pulse,
+            backpressure_stall: &mut *backpressure_stall,
             output_contract,
-            pending_outputs,
-        )
+            pending_outputs: &mut *pending_outputs,
+        })
         .await?
         {
             DrainAttempt::Committed { .. } => committed.push(event_id),
@@ -997,17 +997,11 @@ where
                         Some(bound),
                     ) => wait_started.elapsed(),
                 };
-                // The chunk elapsed (the external-event arm returns early
-                // above, so this only runs on a real wait): record the wait
-                // and feed the blocked pulse through the same append/mirror
-                // path the sync drain uses, so async-source pulses are not
-                // silently dropped.
+                // The external-event arm returns early above, so this only
+                // runs on a real wait.
                 backpressure_writer.record_wait(waited);
                 crate::stages::common::supervision::backpressure_drain::emit_blocked_pulse(
-                    stage_id,
-                    stage_flow_context,
                     waited,
-                    data_journal,
                     instrumentation,
                     backpressure_writer,
                     backpressure_pulse,
@@ -1461,11 +1455,10 @@ mod tests {
         // Arrange: a writer with credit=0 so drain_one_pending_resolve returns BackedOff.
         let mut builder = TopologyBuilder::new();
         let s_top = builder.add_stage(Some("s".to_string()));
-        let d_top = builder.add_stage(Some("d".to_string()));
+        builder.add_stage(Some("d".to_string()));
         let topology = builder.build_unchecked().expect("topology");
 
         let s = StageId::from_topology_id(s_top);
-        let _d = StageId::from_topology_id(d_top);
 
         let plan = BackpressurePlan::disabled().with_stage_enforced(
             s,
@@ -1504,7 +1497,7 @@ mod tests {
         );
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_stall = crate::backpressure::StallEpisode::default();
+        let mut backpressure_stall = StallEpisode::default();
 
         let (sender, mut receiver, _watcher) = ChannelBuilder::<TestEvent, ()>::new()
             .with_event_buffer(1)
@@ -1513,17 +1506,19 @@ mod tests {
         // Act: start draining (will back off), then deliver external event during the sleep.
         let drain_task = tokio::spawn(async move {
             drain_pending_outputs_async(
-                &mut pending_outputs,
-                &stage_flow_context,
-                s,
-                None,
-                &data_journal,
-                &error_journal,
-                &instrumentation,
-                &writer,
-                &mut backpressure_pulse,
-                &mut backpressure_stall,
-                None,
+                SourceDrain {
+                    pending_outputs: &mut pending_outputs,
+                    stage_flow_context: &stage_flow_context,
+                    stage_id: s,
+                    heartbeat_state: None,
+                    data_journal: &data_journal,
+                    error_journal: &error_journal,
+                    instrumentation: &instrumentation,
+                    backpressure_writer: &writer,
+                    backpressure_pulse: &mut backpressure_pulse,
+                    backpressure_stall: &mut backpressure_stall,
+                    output_contract: None,
+                },
                 &mut Vec::new(),
                 receiver.recv(),
                 || TestEvent::ChannelClosed,
@@ -1588,7 +1583,7 @@ mod tests {
         };
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_stall = crate::backpressure::StallEpisode::default();
+        let mut backpressure_stall = StallEpisode::default();
 
         // Keep the sender alive and never send: recv() pends, so the biased
         // select always resolves through the credit wait, which auto-advances
@@ -1615,17 +1610,19 @@ mod tests {
         // one-second window elapses the pulse is appended.
         for _ in 0..6 {
             let directive = drain_pending_outputs_async(
-                &mut pending_outputs,
-                &stage_flow_context,
-                s,
-                None,
-                &data_journal,
-                &error_journal,
-                &instrumentation,
-                &writer,
-                &mut backpressure_pulse,
-                &mut backpressure_stall,
-                None,
+                SourceDrain {
+                    pending_outputs: &mut pending_outputs,
+                    stage_flow_context: &stage_flow_context,
+                    stage_id: s,
+                    heartbeat_state: None,
+                    data_journal: &data_journal,
+                    error_journal: &error_journal,
+                    instrumentation: &instrumentation,
+                    backpressure_writer: &writer,
+                    backpressure_pulse: &mut backpressure_pulse,
+                    backpressure_stall: &mut backpressure_stall,
+                    output_contract: None,
+                },
                 &mut Vec::new(),
                 receiver.recv(),
                 || TestEvent::ChannelClosed,

@@ -400,9 +400,10 @@ async fn fatal_poll_path_attempts_cleanup_once_without_authoring_data() -> Resul
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
-    let _completion = tokio::time::timeout(Duration::from_secs(10), handle.run())
+    let completion = tokio::time::timeout(Duration::from_secs(10), handle.run())
         .await
         .expect("fatal flow terminates without hanging");
+    assert!(completion.is_err(), "{completion:?}");
     assert_eq!(next_calls.load(Ordering::Relaxed), 0);
     assert_eq!(drain_calls.load(Ordering::Relaxed), 1);
     assert!(events

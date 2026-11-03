@@ -13,7 +13,7 @@ use obzenflow_fsm::StateVariant;
 use super::BoxError;
 use crate::messaging::{DeliveredRecord, PollResult, UpstreamSubscription};
 use crate::stages::common::supervision::backpressure_drain::{
-    drain_one_pending, DrainOutcome, PendingOutput,
+    drain_one_pending, DrainOutcome, DrainRequest, PendingOutput,
 };
 use crate::stages::common::supervision::control_resolution::await_signal_gate;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
@@ -46,22 +46,20 @@ pub(super) async fn flush_pending_outputs(ctx: &mut MergeResources) -> Result<Fl
     let flow_context = ctx.flow_context();
     let mut data_outputs = 0;
     while let Some(pending) = row.outputs.pop_front() {
-        match drain_one_pending(
+        match drain_one_pending(DrainRequest {
             pending,
-            &flow_context,
-            ctx.stage_id,
-            ctx.heartbeat
-                .as_ref()
-                .map(|heartbeat| heartbeat.state.clone()),
-            &ctx.data_journal,
-            Some(&row.parent),
-            &ctx.instrumentation,
-            &ctx.backpressure_writer,
-            &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_stall,
-            Some(&ctx.output_contract),
-            &mut row.outputs,
-        )
+            flow_context: &flow_context,
+            stage_id: ctx.stage_id,
+            heartbeat_state: ctx.heartbeat.as_ref().map(|heartbeat| &heartbeat.state),
+            data_journal: &ctx.data_journal,
+            pending_parent: Some(&row.parent),
+            instrumentation: &ctx.instrumentation,
+            backpressure_writer: &ctx.backpressure_writer,
+            backpressure_pulse: &mut ctx.backpressure_pulse,
+            backpressure_stall: &mut ctx.backpressure_stall,
+            output_contract: Some(&ctx.output_contract),
+            pending_outputs: &mut row.outputs,
+        })
         .await?
         {
             DrainOutcome::Committed { was_data } => {

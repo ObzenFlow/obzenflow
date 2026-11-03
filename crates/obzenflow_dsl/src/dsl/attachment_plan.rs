@@ -641,9 +641,7 @@ pub(super) fn topology(
             attachment.authored_site,
         )?;
     }
-    result
-        .attachments
-        .sort_by(|left, right| left.key.cmp(&right.key));
+    result.attachments.sort_by_key(|attachment| attachment.key);
     MiddlewareInfo::try_new(result.attachments).map_err(|error| {
         MiddlewarePlanError::invalid(
             &config.name,

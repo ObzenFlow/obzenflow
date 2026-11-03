@@ -7,7 +7,7 @@ use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{
-    drain_one_pending, DrainOutcome, PendingOutput,
+    drain_one_pending, DrainOutcome, DrainRequest, PendingOutput,
 };
 use crate::stages::common::supervision::error_routing::{error_row_in_scope, processing_failed};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -117,15 +117,8 @@ pub(super) async fn dispatch_enriching<
                         heartbeat.state.record_data_read(source_id, event_id);
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-                    common::observe_join_input(
-                        ctx,
-                        scope,
-                        &event,
-                        delivery_snapshot.as_ref(),
-                        None,
-                        Some(&envelope),
-                    )
-                    .await?;
+                    common::observe_join_input(ctx, scope, delivery_snapshot.as_ref(), None)
+                        .await?;
 
                     let merged_parent = envelope.clone();
 
@@ -174,11 +167,9 @@ pub(super) async fn dispatch_enriching<
                             common::observe_join_outputs(
                                 ctx,
                                 scope,
-                                Some(&event),
                                 delivery_snapshot.as_ref(),
                                 None,
                                 events.as_mut_slice(),
-                                Some(&merged_parent),
                             )
                             .await?;
                             if let Some(kind) = framework_eof {
@@ -230,11 +221,9 @@ pub(super) async fn dispatch_enriching<
                             common::observe_join_outputs(
                                 ctx,
                                 scope,
-                                Some(&event),
                                 delivery_snapshot.as_ref(),
                                 None,
                                 std::slice::from_mut(&mut error_event),
-                                Some(&merged_parent),
                             )
                             .await?;
 
@@ -376,20 +365,20 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         .collect();
 
     while let Some(event) = outputs.pop_front() {
-        match drain_one_pending(
-            event,
-            &flow_context,
-            ctx.stage_id,
-            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-            &ctx.data_journal,
+        match drain_one_pending(DrainRequest {
+            pending: event,
+            flow_context: &flow_context,
+            stage_id: ctx.stage_id,
+            heartbeat_state: ctx.heartbeat.as_ref().map(|h| &h.state),
+            data_journal: &ctx.data_journal,
             pending_parent,
-            &ctx.instrumentation,
-            &ctx.backpressure_writer,
-            &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_stall,
-            Some(&ctx.output_contract),
-            &mut outputs,
-        )
+            instrumentation: &ctx.instrumentation,
+            backpressure_writer: &ctx.backpressure_writer,
+            backpressure_pulse: &mut ctx.backpressure_pulse,
+            backpressure_stall: &mut ctx.backpressure_stall,
+            output_contract: Some(&ctx.output_contract),
+            pending_outputs: &mut outputs,
+        })
         .await?
         {
             DrainOutcome::Committed { was_data } => {

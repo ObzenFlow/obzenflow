@@ -54,5 +54,5 @@ ring = { workspace = true }
 tokio-test = { workspace = true }
 ulid = { workspace = true }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+[lints]
+workspace = true

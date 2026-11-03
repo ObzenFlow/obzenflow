@@ -105,7 +105,7 @@ pub(super) fn bench(
         let receipts = rt.block_on(fixture.append(&journal));
         fixture.check(&receipts);
         drop(journal);
-        let directory = fixture.seed._directory.path();
+        let directory = fixture.seed.directory.path();
         let expected = directory.join("expected.json");
         std::fs::write(&expected, serde_json::to_vec(&receipts).unwrap()).unwrap();
         let request_path = directory.join("request.json");
@@ -148,7 +148,7 @@ pub(super) fn bench(
             || {
                 let (fixture, request, executable) = &*prepared;
                 let response =
-                    tempfile::NamedTempFile::new_in(fixture.seed._directory.path()).unwrap();
+                    tempfile::NamedTempFile::new_in(fixture.seed.directory.path()).unwrap();
                 let pid = rt.block_on(async {
                     let mut child = Command::new(executable)
                         .arg(CHILD_ARG)

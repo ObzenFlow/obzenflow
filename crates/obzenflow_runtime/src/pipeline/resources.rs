@@ -50,7 +50,7 @@ impl Default for PipelineResources {
 
 impl PipelineResources {
     pub(super) fn retain_failure(&self, error: BoxError) {
-        let _ = self.failure.set(SharedError::from(error));
+        self.failure.get_or_init(|| SharedError::from(error));
     }
 }
 

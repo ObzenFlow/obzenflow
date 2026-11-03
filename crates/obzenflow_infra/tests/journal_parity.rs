@@ -78,7 +78,7 @@ async fn test_journal_parity() {
             .unwrap();
 
         // Event 3: From different writer, no parent
-        let _envelope3 = journal
+        journal
             .append(event3.clone(), Default::default())
             .await
             .unwrap();
@@ -300,11 +300,11 @@ async fn test_read_causally_after_matches_slice_across_event_authors() {
             .append(event_a.clone(), Default::default())
             .await
             .unwrap();
-        let _env_b = journal
+        journal
             .append(event_b.clone(), Default::default())
             .await
             .unwrap();
-        let _env_c = journal
+        journal
             .append(
                 event_c.clone(),
                 AppendOptions::from_record(Some(&env_a)).unwrap(),

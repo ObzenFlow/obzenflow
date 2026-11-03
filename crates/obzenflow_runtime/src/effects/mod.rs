@@ -157,7 +157,8 @@ pub use typed::{
 use commit::{
     append_domain_effect_success_facts, append_effect_record, build_domain_effect_success_facts,
     build_effect_attempt_started_event, build_effect_record_event,
-    build_effect_recovery_abandoned_event, EffectCommitHandleParams, PreparedEffectOutcome,
+    build_effect_recovery_abandoned_event, EffectCommitHandleParams, EffectFactAuthoring,
+    PreparedEffectOutcome,
 };
 use identity::{
     descriptor_for_effect, descriptor_hash, deterministic_effect_evidence_event_id,

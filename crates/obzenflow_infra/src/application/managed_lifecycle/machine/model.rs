@@ -67,6 +67,10 @@ pub(in super::super) enum Outcome {
 #[derive(Clone, Debug, EventVariant)]
 pub(in super::super) enum Event {
     Failure(FailureOrigin),
+    #[cfg_attr(
+        not(any(test, feature = "warp-server")),
+        expect(dead_code, reason = "only the web host constructs this event")
+    )]
     HostBound(StartupMode),
     Standalone,
     PreparationFailed,
@@ -79,13 +83,29 @@ pub(in super::super) enum Event {
     PublicationObserved,
     StandaloneReturned,
     MetricsStopped,
-    HostClosed { at: TokioInstant },
-    HostAbsent { at: TokioInstant },
-    HeartbeatJoined { at: TokioInstant },
+    #[cfg_attr(
+        not(any(test, feature = "warp-server")),
+        expect(dead_code, reason = "only the web host constructs this event")
+    )]
+    HostClosed {
+        at: TokioInstant,
+    },
+    HostAbsent {
+        at: TokioInstant,
+    },
+    HeartbeatJoined {
+        at: TokioInstant,
+    },
     DeregistrationExpired,
-    MetricsFlushed { at: TokioInstant },
-    FlushExpired { at: TokioInstant },
-    LeftoverHeartbeatJoined { at: TokioInstant },
+    MetricsFlushed {
+        at: TokioInstant,
+    },
+    FlushExpired {
+        at: TokioInstant,
+    },
+    LeftoverHeartbeatJoined {
+        at: TokioInstant,
+    },
     TasksJoined,
     JoinBudgetExpired,
 }

@@ -149,8 +149,8 @@ impl ContractPolicy for TransportStrictPolicy {
     }
 }
 
-/// Helper to build the default policy stack for an upstream stage.
-pub fn build_policy_stack_for_upstream(_upstream_stage: StageId) -> ContractPolicyStack {
+/// The policy stack every upstream reader starts with.
+pub fn default_policy_stack() -> ContractPolicyStack {
     ContractPolicyStack::new(vec![Box::new(TransportStrictPolicy)])
 }
 

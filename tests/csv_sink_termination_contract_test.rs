@@ -36,7 +36,13 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod manifest;
+    mod run_dir;
+    mod stage_journal;
+    pub use self::{run_dir::*, stage_journal::*};
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CsvRecord {

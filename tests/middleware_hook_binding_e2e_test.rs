@@ -10,8 +10,10 @@
 //! strict replay of the same archive.
 
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-#[path = "test_support/exported_jsonl.rs"]
-mod exported_jsonl;
+mod exported_jsonl {
+    mod chain;
+    pub use self::chain::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{

@@ -193,7 +193,7 @@ mod tests {
                 ));
                 let mut pipeline_state = ctx.pipeline_state;
                 let task = tokio::spawn(async move {
-                    let _ = pipeline_state.changed().await;
+                    pipeline_state.changed().await.unwrap();
                 });
                 Ok(WebSurfaceWiring::new(vec![task]))
             },
@@ -210,6 +210,9 @@ mod tests {
         .unwrap();
         assert_eq!(wired.tasks.len(), 1);
 
-        let _ = tx.send(PipelineState::Running);
+        assert!(
+            tx.send(PipelineState::Running).is_ok(),
+            "the wired task watches the pipeline state"
+        );
     }
 }

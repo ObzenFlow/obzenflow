@@ -73,11 +73,7 @@ fn output_contract_summary(output_contract: &StageOutputContract) -> String {
         .join(", ")
 }
 
-fn event_is_authored_by_stage(
-    event: &ChainEvent,
-    flow_context: &FlowContext,
-    _scope: MiddlewareExecutionScope,
-) -> bool {
+fn event_is_authored_by_stage(event: &ChainEvent, flow_context: &FlowContext) -> bool {
     // Sources have no upstream data journal from which they can forward a
     // foreign Data row. Until the source witness pass installs the runtime
     // writer before handler dispatch, raw source handlers may still construct
@@ -833,7 +829,7 @@ impl OutputCommitter<'_> {
         snapshot.project_emission(event);
         if self
             .flow_context
-            .is_none_or(|context| event_is_authored_by_stage(event, context, self.observer_scope))
+            .is_none_or(|context| event_is_authored_by_stage(event, context))
         {
             let descriptor = event.descriptor();
             if let Some(count) = snapshot
@@ -874,11 +870,7 @@ impl OutputCommitter<'_> {
         if let Some(instrumentation) = self.instrumentation {
             if options.count_output && written.consumes_data_credit() {
                 let authored_here = self.flow_context.is_none_or(|flow_context| {
-                    event_is_authored_by_stage(
-                        &written.authored(),
-                        flow_context,
-                        self.observer_scope,
-                    )
+                    event_is_authored_by_stage(&written.authored(), flow_context)
                 });
                 if authored_here {
                     instrumentation.record_output_event(&written.authored());

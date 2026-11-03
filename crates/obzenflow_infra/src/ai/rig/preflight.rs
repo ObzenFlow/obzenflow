@@ -5,7 +5,6 @@
 use obzenflow_core::ai::AiClientError;
 use reqwest::StatusCode;
 use serde::Deserialize;
-use serde_json::Value;
 use std::sync::OnceLock;
 use std::time::Duration;
 use url::Url;
@@ -259,7 +258,6 @@ pub(crate) async fn preflight_openai_models(
         Ok(v) => v,
         Err(_) => {
             // If the response isn't a `{\"data\":[...]}` list, we still know the endpoint is reachable+authorized.
-            let _maybe_json: Result<Value, _> = serde_json::from_slice(&body);
             return Ok(());
         }
     };

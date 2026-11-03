@@ -101,8 +101,3 @@ pub fn run_example() -> Result<()> {
 
     Ok(())
 }
-
-#[cfg(test)]
-pub fn run_example_in_tests() -> Result<()> {
-    Ok(())
-}

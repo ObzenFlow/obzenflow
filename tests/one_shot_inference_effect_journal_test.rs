@@ -2,7 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod replay_testkit;
+mod replay_testkit {
+    mod journal;
+    mod ordered_journal;
+    pub use self::ordered_journal::*;
+}
 
 #[path = "support/fake_ai.rs"]
 pub mod fake_ai;
@@ -1352,7 +1356,9 @@ async fn cancelling_an_active_inference_leaves_only_committed_physical_debt() {
         .await
         .expect("the inference reaches its hanging provider after Start(1)");
     run_task.abort();
-    let _ = run_task.await;
+    if let Err(error) = run_task.await {
+        assert!(error.is_cancelled(), "{error}");
+    }
 
     assert_eq!(models.call_count(), 1);
     let events = stage_events(&latest_run_dir(&journal_base), "brief").await;
@@ -1441,8 +1447,12 @@ async fn resume_after_a_durable_reply_reinterprets_without_another_chat_call() {
     let (cut_archive, reply_id) = match observed {
         Ok(observed) => observed,
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(kill_error) = child.kill() {
+                eprintln!("could not kill the reply-cut child: {kill_error}");
+            }
+            if let Err(wait_error) = child.wait() {
+                eprintln!("could not reap the reply-cut child: {wait_error}");
+            }
             panic!("reply-cut child did not commit its durable reply: {error}");
         }
     };

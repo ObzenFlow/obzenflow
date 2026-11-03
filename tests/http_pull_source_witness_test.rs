@@ -6,7 +6,12 @@
 //! fatal decode abandons the scan, so the source fails without EOF and its
 //! committed diagnostic is the lifecycle failure's cause.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    mod journal;
+    mod run_dir;
+    pub use self::{discard::*, journal::*, run_dir::*};
+}
 
 use async_trait::async_trait;
 use obzenflow_adapters::sources::{

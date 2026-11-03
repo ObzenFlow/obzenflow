@@ -15,9 +15,8 @@ pub(crate) enum FrameTermination {
     Incomplete,
 }
 
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum ParseOutcome<R: JournalEvent> {
-    Complete(LogFrame<R>),
+    Complete(Box<LogFrame<R>>),
     Incomplete(ParseProblem),
     Corrupt(ParseProblem),
 }
@@ -46,9 +45,8 @@ pub(crate) enum ReadPolicy {
     SealedScan { tolerate_torn_tail: bool },
 }
 
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum Disposition<R: JournalEvent> {
-    Yield(LogFrame<R>),
+    Yield(Box<LogFrame<R>>),
     Skip,
     EndOfCommittedRecords,
     Corrupt(ParseProblem),
@@ -74,7 +72,7 @@ pub(crate) fn classify_frame<R: JournalEvent>(
         }
     };
     match decoder.decode::<R>(body, offset) {
-        Ok(record) => ParseOutcome::Complete(record),
+        Ok(record) => ParseOutcome::Complete(Box::new(record)),
         Err(error) => ParseOutcome::Corrupt(ParseProblem::Invalid(error.to_string())),
     }
 }

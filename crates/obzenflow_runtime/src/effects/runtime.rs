@@ -10,6 +10,7 @@ use crate::stages::common::supervision::catch_up::{CatchUpDisposition, CatchUpEv
 use obzenflow_core::event::payloads::effect_payload::{
     CAPTURE_EFFECT_TYPE, SETTLEMENT_EFFECT_TYPE,
 };
+use obzenflow_core::MiddlewareExecutionScope;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
 /// `perform` records from its own state rather than boundary-returned events.
@@ -801,7 +802,7 @@ impl EffectsCore {
             self.ctx.flow_id,
             self.ctx.stage_id,
             &self.ctx.stage_key,
-            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            MiddlewareExecutionScope::LiveEffectBoundary,
             effect_type,
             outcome,
         );
@@ -1011,7 +1012,7 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
         crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
@@ -1340,7 +1341,8 @@ impl EffectsCore {
                     );
                     Ok(output)
                 }
-                Err((err, observation)) => {
+                Err(failure) => {
+                    let (err, observation) = *failure;
                     self.append_failed_record(
                         cursor,
                         descriptor_hash,
@@ -1515,16 +1517,16 @@ impl EffectsCore {
     async fn execute_into_success<E>(
         effect: E,
         effect_ctx: &mut EffectContext,
-    ) -> Result<(E::Outcome, PreparedEffectSuccess), (EffectError, EffectObservation)>
+    ) -> Result<(E::Outcome, PreparedEffectSuccess), Box<(EffectError, EffectObservation)>>
     where
         E: Effect,
     {
         let output = effect
             .execute(effect_ctx)
             .await
-            .map_err(|error| (error, EffectObservation::returned_failure()))?;
+            .map_err(|error| Box::new((error, EffectObservation::returned_failure())))?;
         let success = E::OutcomeSemantics::prepare_success(&output)
-            .map_err(|error| (error, EffectObservation::OutcomePreparationFailed {}))?;
+            .map_err(|error| Box::new((error, EffectObservation::OutcomePreparationFailed {})))?;
         Ok((output, success))
     }
 
@@ -1604,8 +1606,7 @@ impl EffectsCore {
                         heartbeat_state: heartbeat_state.as_ref(),
                         output_contract: None,
                         backpressure_writer: Some(&backpressure_writer),
-                        observer_scope:
-                            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                        observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
                     };
                     crate::supervised_base::publication::with_snapshot(
                         causal,
@@ -1785,7 +1786,7 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
         if let Err(error) = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
@@ -1862,15 +1863,17 @@ impl EffectsCore {
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut committed_events = build_domain_effect_success_facts(
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            cursor.clone(),
-            descriptor_hash,
-            descriptor,
+            EffectFactAuthoring {
+                writer_id: self.ctx.writer_id,
+                parent: &self.ctx.parent,
+                lineage: self.ctx.lineage,
+                cursor: cursor.clone(),
+                descriptor_hash,
+                descriptor,
+            },
             facts,
             output_ordinal,
             Some(EffectFactOrigin::Effect),
-            self.ctx.lineage,
         )?;
         for event in &mut committed_events {
             let provenance = event.effect_provenance.as_mut().ok_or_else(|| {
@@ -1919,7 +1922,7 @@ impl EffectsCore {
                 &cursor,
                 attempt,
                 preterminal,
-                obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                MiddlewareExecutionScope::LiveEffectBoundary,
                 RowLineage::Live,
             )
             .await?;
@@ -2914,15 +2917,17 @@ impl EffectsCore {
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut events = build_domain_effect_success_facts(
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            cursor,
-            descriptor_hash,
-            descriptor,
+            EffectFactAuthoring {
+                writer_id: self.ctx.writer_id,
+                parent: &self.ctx.parent,
+                lineage: self.ctx.lineage,
+                cursor,
+                descriptor_hash,
+                descriptor,
+            },
             facts,
             output_ordinal,
             origin,
-            self.ctx.lineage,
         )?;
         for event in &mut events {
             self.stamp_idempotency_key(event);
@@ -2931,12 +2936,15 @@ impl EffectsCore {
         let committed_events = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
             append_domain_effect_success_facts(
-                &self.ctx.data_journal,
-                self.ctx.flow_context.as_ref(),
-                self.ctx.instrumentation.as_ref(),
-                self.ctx.heartbeat_state.as_ref(),
-                Some(&self.ctx.output_contract),
-                &self.ctx.backpressure_writer,
+                &OutputCommitter {
+                    data_journal: &self.ctx.data_journal,
+                    flow_context: self.ctx.flow_context.as_ref(),
+                    instrumentation: self.ctx.instrumentation.as_ref(),
+                    heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+                    output_contract: Some(&self.ctx.output_contract),
+                    backpressure_writer: Some(&self.ctx.backpressure_writer),
+                    observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
+                },
                 &self.ctx.parent,
                 events,
             ),
@@ -2968,15 +2976,17 @@ impl EffectsCore {
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
         let mut committed_events = build_domain_effect_success_facts(
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            cursor.clone(),
-            descriptor_hash,
-            descriptor,
+            EffectFactAuthoring {
+                writer_id: self.ctx.writer_id,
+                parent: &self.ctx.parent,
+                lineage: self.ctx.lineage,
+                cursor: cursor.clone(),
+                descriptor_hash,
+                descriptor,
+            },
             facts,
             output_ordinal,
             origin,
-            self.ctx.lineage,
         )?;
         for event in &mut committed_events {
             self.stamp_idempotency_key(event);
@@ -3027,7 +3037,7 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            observer_scope: MiddlewareExecutionScope::LiveEffectBoundary,
         };
         if let Err(error) = crate::supervised_base::publication::with_snapshot(
             self.causal.clone(),
@@ -3136,7 +3146,7 @@ impl EffectsCore {
                     cursor,
                     started.attempt,
                     control_events.to_vec(),
-                    obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+                    MiddlewareExecutionScope::StrictReplayHandler,
                     RowLineage::Reproduced(Some(history)),
                 )
                 .await?;
@@ -3190,15 +3200,17 @@ impl EffectsCore {
                 self.ensure_routed_fanout_capacity(routed_fact_count)?;
                 let output_ordinal = self.reserve_output_ordinals(facts.len())?;
                 let mut events = build_domain_effect_success_facts(
-                    self.ctx.writer_id,
-                    &self.ctx.parent,
-                    cursor.clone(),
-                    descriptor_hash,
-                    descriptor.clone(),
+                    EffectFactAuthoring {
+                        writer_id: self.ctx.writer_id,
+                        parent: &self.ctx.parent,
+                        lineage: self.ctx.lineage,
+                        cursor: cursor.clone(),
+                        descriptor_hash,
+                        descriptor: descriptor.clone(),
+                    },
                     facts,
                     output_ordinal,
                     recorded_origin.or(Some(EffectFactOrigin::Effect)),
-                    self.ctx.lineage,
                 )?;
                 for event in &mut events {
                     event

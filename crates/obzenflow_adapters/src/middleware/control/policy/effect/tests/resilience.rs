@@ -289,7 +289,6 @@ fn materialized_resilience_with_snapshot(
         factory.as_ref(),
         &config,
         &control,
-        0,
         EffectSafety::Idempotent,
     )
     .expect("resilience aggregate should materialize for an idempotent effect");
@@ -429,7 +428,7 @@ fn exact_configuration_cannot_create_omitted_retry_or_limiter_components() {
             test_effective_config_for_factories_with_snapshot(&[factory.as_ref()], &snapshot)
                 .expect_err("an exact subject cannot attach a structurally omitted component");
         assert!(matches!(
-            *error,
+            error,
             obzenflow_runtime::runtime_config::ConfigResolveError::UnattachedEffectSubject {
                 key_path: rejected,
                 ..
@@ -619,7 +618,7 @@ async fn file_configuration_can_switch_rate_based_breaker_to_consecutive() {
     let boundary = boundary_with_chain(vec![attachment]);
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let _ = boundary
+    boundary
         .around_repeatable_effect(
             &identity_at(103),
             &data_event(),

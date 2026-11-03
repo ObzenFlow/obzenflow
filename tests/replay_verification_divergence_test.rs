@@ -13,7 +13,10 @@
 //! share no replay lineage, so identity is excluded and the comparison runs
 //! under the positional projection.
 
-mod replay_testkit;
+mod replay_testkit {
+    mod discard;
+    pub use self::discard::*;
+}
 
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;

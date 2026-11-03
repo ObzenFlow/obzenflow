@@ -4,12 +4,6 @@
 
 mod support;
 
-#[cfg(test)]
-fn main() -> anyhow::Result<()> {
-    support::flow::run_example_in_tests()
-}
-
-#[cfg(not(test))]
 fn main() -> anyhow::Result<()> {
     support::flow::run_example()
 }

@@ -6,9 +6,11 @@
 
 use async_trait::async_trait;
 use obzenflow::stages::sources;
+use obzenflow_adapters::middleware::MiddlewareAttachmentValidationError;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, FlowDefinition};
+use obzenflow_dsl::dsl::MiddlewarePlanError;
+use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
@@ -215,10 +217,7 @@ async fn invalid_later_stage_plan_prevents_all_middleware_and_connector_material
         .map(|_| ())
         .expect_err("the complete plan must reject an invalid later breaker");
     assert!(
-        matches!(
-            failure.error,
-            obzenflow_dsl::FlowBuildError::MiddlewarePlan(_)
-        ),
+        matches!(failure.error, FlowBuildError::MiddlewarePlan(_)),
         "{failure}"
     );
     assert!(failure.to_string().contains("invalid"), "{failure}");
@@ -261,14 +260,18 @@ async fn empty_observer_labels_fail_before_any_materialisation_or_connector_io()
             .await
             .map(|_| ())
             .expect_err("empty labels must fail preflight");
-        assert!(matches!(&failure.error,
-            obzenflow_dsl::FlowBuildError::MiddlewarePlan(
-                obzenflow_dsl::dsl::MiddlewarePlanError::InvalidBinding {
-                    source: obzenflow_adapters::middleware::MiddlewareAttachmentValidationError::EmptyLabel,
-                    ..
-                }
-            )
-        ), "{failure}");
+        assert!(
+            matches!(&failure.error,
+                FlowBuildError::MiddlewarePlan(plan) if matches!(
+                    plan.as_ref(),
+                    MiddlewarePlanError::InvalidBinding {
+                        source: MiddlewareAttachmentValidationError::EmptyLabel,
+                        ..
+                    }
+                )
+            ),
+            "{failure}"
+        );
         assert_eq!(materialisations.load(Ordering::SeqCst), 0);
         assert_eq!(opens.load(Ordering::SeqCst), 0);
         assert!(failure.run.is_none());
@@ -338,7 +341,7 @@ async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
         if prefilled {
             assert!(
                 matches!(&failure.error,
-                    obzenflow_dsl::FlowBuildError::HostedIngressAlreadyBound {
+                    FlowBuildError::HostedIngressAlreadyBound {
                         ingress_key, stage_name, bound_stage
                     } if ingress_key == "orders" && stage_name == "left" && bound_stage == "previous"
                 ),
@@ -351,7 +354,7 @@ async fn hosted_slot_ownership_fails_before_materialisation_or_connector_io() {
         } else {
             assert!(
                 matches!(&failure.error,
-                    obzenflow_dsl::FlowBuildError::DuplicateHostedIngressBinding {
+                    FlowBuildError::DuplicateHostedIngressBinding {
                         ingress_key, first_stage, second_stage
                     } if ingress_key == "orders" && first_stage == "left" && second_stage == "right"
                 ),
